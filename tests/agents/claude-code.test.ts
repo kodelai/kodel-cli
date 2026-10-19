@@ -2,11 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { LocalPipelineHost } from "../../packages/local/src";
 import {
   type AgentTurn,
   describeCalls,
   ENABLED,
+  humanHost,
+  journalEvents,
   KODEL_TOOL,
   MAIN_TS,
   makeSandbox,
@@ -20,21 +21,10 @@ afterEach(() => {
   for (const s of sandboxes.splice(0)) s.cleanup();
 });
 
-const humanHost = (sandbox: Sandbox) =>
-  new LocalPipelineHost({ root: sandbox.dir, integrityDir: sandbox.stateDir, heartbeatMs: 0 });
-
 async function onlyRun(sandbox: Sandbox) {
   const runs = await humanHost(sandbox).runSummaries();
   expect(runs.length).toBe(1);
   return runs[0]?.meta.runId as string;
-}
-
-function journalEvents(sandbox: Sandbox, runId: string): string[] {
-  const text = readFileSync(join(sandbox.dir, ".kodel", "runs", runId, "journal.jsonl"), "utf8");
-  return text
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => (JSON.parse(line) as { event: string }).event);
 }
 
 const names = (turn: AgentTurn) => turn.calls.map((c) => c.name);

@@ -127,6 +127,15 @@ export class LocalPipelineHost implements PipelineHost {
     return { status: reused ? "reused" : terminal ? "terminal" : "started", run: known };
   }
 
+  /**
+   * Stop all work this process is running (commands and checks), without reporting anything: the
+   * state on disk says the work was interrupted, and a later session starts it again. Called when
+   * the server goes away, so no command is left running with nobody to report to.
+   */
+  stop(): void {
+    for (const run of this.runs.values()) run.stop();
+  }
+
   /** Every run on disk, oldest first, with its state when it can be read. */
   async runSummaries(): Promise<{ meta: RunMeta; state: RunState | undefined }[]> {
     const metas = await this.store.listRuns();

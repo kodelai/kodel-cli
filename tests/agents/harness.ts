@@ -9,6 +9,8 @@ import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { LocalPipelineHost } from "../../packages/local/src";
+import type { Fixture } from "./pipelines";
 
 export const ENABLED = process.env.KODEL_AGENT_TESTS === "1";
 export const MODEL = process.env.KODEL_AGENT_MODEL ?? "sonnet";
@@ -82,8 +84,15 @@ export const MINI_PIPELINE = [
 
 /** A git repository with a pipeline, the driver text, and (optionally) our real deny rules. */
 export function makeSandbox(
-  options: { withProjectSettings?: boolean; withDriverText?: boolean } = {},
+  options: {
+    withProjectSettings?: boolean;
+    withDriverText?: boolean;
+    /** The pipeline (and files) to run on; the `mini` pipeline when left out. */
+    fixture?: Fixture;
+  } = {},
 ): Sandbox {
+  const fixture = options.fixture ?? { pipeline: MINI_PIPELINE };
+  const pipelineName = /^name:\s*(\S+)/m.exec(fixture.pipeline)?.[1] ?? "pipeline";
   const dir = mkdtempSync(join(tmpdir(), "kodel-agent-"));
   const stateDir = mkdtempSync(join(tmpdir(), "kodel-agent-state-"));
   const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
@@ -91,7 +100,10 @@ export function makeSandbox(
   git("config", "user.email", "t@example.com");
   git("config", "user.name", "T");
   mkdirSync(join(dir, ".kodel", "pipelines"), { recursive: true });
-  writeFileSync(join(dir, ".kodel", "pipelines", "mini.yaml"), MINI_PIPELINE);
+  writeFileSync(join(dir, ".kodel", "pipelines", `${pipelineName}.yaml`), fixture.pipeline);
+  for (const [path, content] of Object.entries(fixture.files ?? {})) {
+    writeFileSync(join(dir, path), content);
+  }
   const driver = options.withDriverText === false ? "" : shippedDriverSection();
   writeFileSync(join(dir, "CLAUDE.md"), `# Test repository\n\n${driver}`);
   writeFileSync(join(dir, ".gitignore"), ".kodel/runs\n");
@@ -277,3 +289,25 @@ export function describeCalls(turn: AgentTurn): string {
 }
 
 export const KODEL_TOOL = (name: string) => `mcp__kodel__${name}`;
+
+/** The person's side: a host on the same repository and the same trusted-hash directory as the agent's server. */
+export function humanHost(sandbox: Sandbox): LocalPipelineHost {
+  return new LocalPipelineHost({
+    root: sandbox.dir,
+    integrityDir: sandbox.stateDir,
+    heartbeatMs: 0,
+  });
+}
+
+/** The names of the journal records of a run, in order. */
+export function journalEvents(sandbox: Sandbox, runId: string): string[] {
+  const text = readFileSync(join(sandbox.dir, ".kodel", "runs", runId, "journal.jsonl"), "utf8");
+  return text
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => (JSON.parse(line) as { event: string }).event);
+}
+
+/** The agent's calls to one kodel tool, in order. */
+export const callsTo = (turn: AgentTurn, tool: string): ToolCall[] =>
+  turn.calls.filter((c) => c.name === KODEL_TOOL(tool));

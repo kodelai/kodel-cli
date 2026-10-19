@@ -250,4 +250,60 @@ describe("mcp over stdio", () => {
     expect(body).toMatchObject({ ok: true, next: { node: { slug: "write" } } });
     await client.close();
   });
+
+  // The agent's session ends while a command of the pipeline is still going. The server must not
+  // leave that command running with nobody to report to: the next session starts it again.
+  test.skipIf(process.platform === "win32")(
+    "when the agent goes away, the command the server was running is stopped",
+    async () => {
+      const marker = `kodel-orphan-check-${Date.now()}`;
+      await writeFile(
+        join(dir, ".kodel", "pipelines", "longcmd.yaml"),
+        [
+          "name: longcmd",
+          "nodes:",
+          "  - slug: wait",
+          "    kind: command",
+          `    command: node -e "setTimeout(() => {}, 60000)" ${marker}`,
+          "  - slug: after",
+          "    kind: command",
+          `    command: node -e "process.exit(0)"`,
+          "edges:",
+          "  - { from: wait, to: after }",
+          "  - { from: wait, to: after, when: failed }",
+          "  - { from: after, to: wait, when: failed }",
+          "",
+        ].join("\n"),
+      );
+      const transport = new StdioClientTransport({
+        command: process.execPath,
+        args: [join(import.meta.dir, "../src/main.ts"), "--root", dir, "mcp"],
+        env: { ...(process.env as Record<string, string>) },
+        stderr: "pipe",
+      });
+      const client = new Client({ name: "agent", version: "0.0.0" });
+      await client.connect(transport);
+      const started = await client.callTool({
+        name: "pipeline_start",
+        arguments: { task: "t", pipeline: "longcmd" },
+      });
+      const running = () =>
+        execFileSync("ps", ["-ax", "-o", "command="], { encoding: "utf8" }).includes(marker);
+      try {
+        expect(running(), `the command never started: ${JSON.stringify(started.content)}`).toBe(
+          true,
+        );
+        await client.close();
+        await new Promise((resolve) => setTimeout(resolve, 3_500));
+        expect(running(), "the command was left running after the server exited").toBe(false);
+      } finally {
+        try {
+          execFileSync("pkill", ["-f", marker]);
+        } catch {
+          // none left, which is the point
+        }
+      }
+    },
+    20_000,
+  );
 });
