@@ -2,6 +2,7 @@
  * The local state store: one directory per run under `<root>/runs/`.
  *
  *   meta.json       what the run is (pipeline, task, spec hash)
+ *   spec.yaml       the pipeline the run started with, checked against the state's spec hash
  *   state.json      the run state, replaced atomically
  *   journal.jsonl   append-only records, redacted on the way in
  *   snapshots.json  working-tree snapshots by key (for `diff` baselines)
@@ -11,9 +12,11 @@
  * Redaction lives here, in the only code that writes the journal and the reports, so no caller can
  * forget it.
  */
-import { mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { mkdir, open, readdir, readFile, rename, rm, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import {
+  isRunId,
   type JournalRecord,
   KodelError,
   RECORD_VERSION,
@@ -57,6 +60,9 @@ const processIsAlive = (pid: number): boolean => {
   }
 };
 
+/** A lock file that stays empty this long was left by a process that died while creating it. */
+const UNFINISHED_LOCK_MS = 5_000;
+
 const isMissing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
 
 export class FileStore {
@@ -77,6 +83,7 @@ export class FileStore {
   }
 
   runDir(runId: string): string {
+    if (!isRunId(runId)) throw new KodelError("UNKNOWN_RUN", `"${runId}" is not a run id`);
     return join(this.options.root, "runs", runId);
   }
 
@@ -88,7 +95,10 @@ export class FileStore {
   private async writeAtomic(path: string, content: string): Promise<void> {
     this.writes += 1;
     const tmp = `${path}.tmp-${this.pid}-${this.writes}`;
-    const handle = await open(tmp, "w");
+    // The name is predictable, so something planted there (a link to another file) is removed
+    // first and the file is created exclusively; a write never follows a link out of the folder.
+    await rm(tmp, { force: true });
+    const handle = await open(tmp, "wx");
     try {
       await handle.writeFile(content);
       await handle.sync();
@@ -131,6 +141,7 @@ export class FileStore {
     }
     const metas: RunMeta[] = [];
     for (const name of names) {
+      if (!isRunId(name)) continue;
       const meta = await this.readMeta(name);
       if (meta) metas.push(meta);
     }
@@ -154,15 +165,18 @@ export class FileStore {
   }
 
   /** Keep the pipeline a run started with, so editing the file later does not change a run in flight. */
-  async writeSpec(runId: string, spec: unknown): Promise<void> {
-    await this.writeAtomic(
-      join(this.runDir(runId), "spec.json"),
-      `${JSON.stringify(spec, null, 2)}\n`,
-    );
+  async writeSpec(runId: string, source: string): Promise<void> {
+    await this.writeAtomic(join(this.runDir(runId), "spec.yaml"), source);
   }
 
-  async readSpec(runId: string): Promise<unknown | undefined> {
-    return this.readJson<unknown>(join(this.runDir(runId), "spec.json"));
+  /** The pipeline source a run started with. It is parsed and checked again by whoever uses it. */
+  async readSpec(runId: string): Promise<string | undefined> {
+    try {
+      return await readFile(join(this.runDir(runId), "spec.yaml"), "utf8");
+    } catch (error) {
+      if (isMissing(error)) return undefined;
+      throw error;
+    }
   }
 
   /** The newest run of this pipeline and task that has not finished. */
@@ -215,11 +229,20 @@ export class FileStore {
     return { state, hash: sha256(text) };
   }
 
-  /** Replace the state; returns the hash of what was written. */
-  async writeState(runId: string, state: RunState): Promise<string> {
+  /**
+   * Replace the state; returns the hash of what was written. `beforeWrite` gets the hash first, so
+   * the caller can record it as expected before the file changes.
+   */
+  async writeState(
+    runId: string,
+    state: RunState,
+    beforeWrite?: (hash: string) => Promise<void>,
+  ): Promise<string> {
     const text = `${JSON.stringify(state, null, 2)}\n`;
+    const hash = sha256(text);
+    await beforeWrite?.(hash);
     await this.writeAtomic(join(this.runDir(runId), "state.json"), text);
-    return sha256(text);
+    return hash;
   }
 
   // seal: a finished run's state and journal, hashed once so a later change shows
@@ -233,7 +256,8 @@ export class FileStore {
     }
   }
 
-  async writeSeal(runId: string, now: number): Promise<void> {
+  /** Returns the hash of the seal file, which the caller keeps outside the repository. */
+  async writeSeal(runId: string, now: number): Promise<string> {
     const dir = this.runDir(runId);
     const seal = {
       v: 1,
@@ -241,14 +265,31 @@ export class FileStore {
       journal: await this.fileHash(join(dir, "journal.jsonl")),
       sealedAt: now,
     };
-    await this.writeAtomic(join(dir, "seal.json"), `${JSON.stringify(seal, null, 2)}\n`);
+    const text = `${JSON.stringify(seal, null, 2)}\n`;
+    await this.writeAtomic(join(dir, "seal.json"), text);
+    return sha256(text);
   }
 
-  /** `sealed`: untouched since it finished. `modified`: changed after the seal. `unsealed`: no seal. */
-  async checkSeal(runId: string): Promise<"sealed" | "modified" | "unsealed"> {
+  /**
+   * `sealed`: untouched since it finished. `modified`: changed after the seal. `unsealed`: no seal.
+   * With `trusted` (the seal's hash kept outside the repository) a rewritten seal shows too.
+   */
+  async checkSeal(runId: string, trusted?: string): Promise<"sealed" | "modified" | "unsealed"> {
     const dir = this.runDir(runId);
-    const seal = await this.readJson<{ state: string; journal: string }>(join(dir, "seal.json"));
-    if (!seal) return "unsealed";
+    let text: string;
+    try {
+      text = await readFile(join(dir, "seal.json"), "utf8");
+    } catch (error) {
+      if (isMissing(error)) return trusted === undefined ? "unsealed" : "modified";
+      throw error;
+    }
+    if (trusted !== undefined && sha256(text) !== trusted) return "modified";
+    let seal: { state: string; journal: string };
+    try {
+      seal = JSON.parse(text) as { state: string; journal: string };
+    } catch {
+      return "modified";
+    }
     const same =
       seal.state === (await this.fileHash(join(dir, "state.json"))) &&
       seal.journal === (await this.fileHash(join(dir, "journal.jsonl")));
@@ -269,7 +310,7 @@ export class FileStore {
     }
   }
 
-  /** All complete records; a torn last line left by a crash is ignored. */
+  /** All complete records; a torn last line left by a crash is ignored, a bad line elsewhere is not. */
   async readJournal(runId: string): Promise<JournalRecord[]> {
     let text: string;
     try {
@@ -278,13 +319,17 @@ export class FileStore {
       if (isMissing(error)) return [];
       throw error;
     }
+    const lines = text.split("\n").filter((line) => line.trim());
     const records: JournalRecord[] = [];
-    for (const line of text.split("\n")) {
-      if (!line.trim()) continue;
+    for (const [i, line] of lines.entries()) {
       try {
         records.push(JSON.parse(line) as JournalRecord);
       } catch {
-        // only the last line can be torn; anything after it would be a different problem
+        if (i === lines.length - 1) break;
+        throw new KodelError(
+          "STATE_MODIFIED_EXTERNALLY",
+          `the journal of run ${runId} has a damaged record at line ${i + 1}; it was changed outside kodel`,
+        );
       }
     }
     return records;
@@ -340,37 +385,107 @@ export class FileStore {
    * processes the lock file decides, and a lock whose holder died is taken over.
    */
   async withLock<T>(runId: string, fn: () => Promise<T>): Promise<T> {
-    const previous = this.held.get(runId) ?? Promise.resolve();
-    const run = previous.catch(() => undefined).then(() => this.lockedRun(runId, fn));
-    this.held.set(runId, run);
+    return this.queued(runId, join(this.runDir(runId), "lock"), fn);
+  }
+
+  /** Held while a run is looked for and created, so two starts of one task cannot make two runs. */
+  async withStartLock<T>(fn: () => Promise<T>): Promise<T> {
+    return this.queued("start", join(this.options.root, "start.lock"), fn);
+  }
+
+  private queued<T>(key: string, lockPath: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.held.get(key) ?? Promise.resolve();
+    const run = previous.catch(() => undefined).then(() => this.lockedRun(key, lockPath, fn));
+    this.held.set(key, run);
     return run;
   }
 
-  private async lockedRun<T>(runId: string, fn: () => Promise<T>): Promise<T> {
-    const lockPath = join(this.runDir(runId), "lock");
+  /** Remove a run that could not be started, so no half-made run is left behind. */
+  async removeRun(runId: string): Promise<void> {
+    await rm(this.runDir(runId), { recursive: true, force: true });
+  }
+
+  /**
+   * Whether the holder is gone: its process is dead, it has held the lock for too long, the lock
+   * claims to be from the future, or the file was never filled in (the holder died between creating
+   * it and writing it, which shows as an old, empty file).
+   */
+  private async lockAbandoned(lockPath: string): Promise<boolean> {
+    const now = Date.now();
+    let text: string;
+    try {
+      text = await readFile(lockPath, "utf8");
+    } catch (error) {
+      if (isMissing(error)) return false; // released meanwhile; the next try takes it
+      throw error;
+    }
+    let holder: { pid: number; since: number } | undefined;
+    try {
+      holder = JSON.parse(text) as { pid: number; since: number };
+    } catch {
+      holder = undefined;
+    }
+    if (typeof holder?.pid !== "number" || typeof holder.since !== "number") {
+      const modified = await stat(lockPath).then(
+        (s) => s.mtimeMs,
+        () => now,
+      );
+      return now - modified > UNFINISHED_LOCK_MS;
+    }
+    return (
+      !this.isAlive(holder.pid) ||
+      now - holder.since > this.staleLockMs ||
+      holder.since > now + this.staleLockMs
+    );
+  }
+
+  /**
+   * Remove an abandoned lock. Only one waiter at a time gets to do it (a second lock file guards the
+   * removal), and it looks again once it is in, so a lock that someone took in the meantime stays.
+   */
+  private async takeOverAbandoned(lockPath: string): Promise<boolean> {
+    if (!(await this.lockAbandoned(lockPath))) return false;
+    const guardPath = `${lockPath}.takeover`;
+    let guard: Awaited<ReturnType<typeof open>>;
+    try {
+      guard = await open(guardPath, "wx");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const modified = await stat(guardPath).then(
+        (s) => s.mtimeMs,
+        () => Date.now(),
+      );
+      if (Date.now() - modified > UNFINISHED_LOCK_MS) await rm(guardPath, { force: true });
+      return false;
+    }
+    try {
+      await guard.close();
+      if (!(await this.lockAbandoned(lockPath))) return false;
+      await rm(lockPath, { force: true });
+      return true;
+    } finally {
+      await rm(guardPath, { force: true });
+    }
+  }
+
+  private async lockedRun<T>(name: string, lockPath: string, fn: () => Promise<T>): Promise<T> {
     const deadline = Date.now() + this.lockTimeoutMs;
-    await mkdir(this.runDir(runId), { recursive: true });
+    const token = randomUUID();
+    await mkdir(dirname(lockPath), { recursive: true });
     for (;;) {
       try {
         const handle = await open(lockPath, "wx");
-        await handle.writeFile(JSON.stringify({ pid: this.pid, since: Date.now() }));
-        await handle.close();
+        try {
+          await handle.writeFile(JSON.stringify({ pid: this.pid, since: Date.now(), token }));
+        } finally {
+          await handle.close();
+        }
         break;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        const holder = await this.readJson<{ pid: number; since: number }>(lockPath).catch(
-          () => undefined,
-        );
-        const abandoned =
-          holder === undefined
-            ? false
-            : !this.isAlive(holder.pid) || Date.now() - holder.since > this.staleLockMs;
-        if (abandoned) {
-          await rm(lockPath, { force: true });
-          continue;
-        }
+        if (await this.takeOverAbandoned(lockPath)) continue;
         if (Date.now() > deadline) {
-          throw new Error(`timed out waiting for the lock on run ${runId}`);
+          throw new KodelError("STATE_LOCKED", `timed out waiting for the lock on ${name}`);
         }
         await sleep(20);
       }
@@ -378,7 +493,9 @@ export class FileStore {
     try {
       return await fn();
     } finally {
-      await rm(lockPath, { force: true });
+      // Not ours any more if someone took it over after it went stale; leave theirs alone.
+      const holder = await this.readJson<{ token?: string }>(lockPath).catch(() => undefined);
+      if (holder?.token === token) await rm(lockPath, { force: true });
     }
   }
 }

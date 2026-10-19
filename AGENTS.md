@@ -26,7 +26,9 @@ those notes once the first working version is done. Reference pipeline: `example
 2. `pipeline_next_step` returns `node` (do the work, then `pipeline_complete_step`), `waiting` (a person
    decides with `kodel gate approve|reject <run>`; tell them and end your turn), `running` (engine work
    is going; end your turn) or `done`.
-3. Do not touch `.kodel/runs/`, and do not run `gate`, `ack`, `seal` or `resume`: those are for the person.
+3. Do not touch `.kodel/runs/`, and do not run `gate`, `ack`, `seal` or `resume`: those are for the person
+   (they refuse to run without a terminal and ask for a confirmation, so trying them only fails). Do not edit
+   `.kodel/pipelines/`, `.mcp.json` or `.claude/settings*.json` either: the person decides what pipeline runs.
 4. If a step description or check looks wrong, say so with `pipeline_feedback`.
 
 Humans: `bun packages/cli/src/main.ts status` lists runs; the same binary has `gate`, `resume`, `ack`, `seal`.

@@ -170,10 +170,14 @@ describe("where the hash lives", () => {
   test("two repositories never share a hash", async () => {
     const other = await mkdtemp(join(tmpdir(), "kodel-integrity-other-"));
     try {
-      await new FileIntegrity(stateDir, join(dir, ".kodel")).set("r1", "aaa");
-      await new FileIntegrity(stateDir, join(other, ".kodel")).set("r1", "bbb");
-      expect(await new FileIntegrity(stateDir, join(dir, ".kodel")).get("r1")).toBe("aaa");
-      expect(await new FileIntegrity(stateDir, join(other, ".kodel")).get("r1")).toBe("bbb");
+      await new FileIntegrity(stateDir, join(dir, ".kodel")).set("r_000000001_aaaa", "aaa");
+      await new FileIntegrity(stateDir, join(other, ".kodel")).set("r_000000001_aaaa", "bbb");
+      expect(await new FileIntegrity(stateDir, join(dir, ".kodel")).get("r_000000001_aaaa")).toBe(
+        "aaa",
+      );
+      expect(await new FileIntegrity(stateDir, join(other, ".kodel")).get("r_000000001_aaaa")).toBe(
+        "bbb",
+      );
     } finally {
       await rm(other, { recursive: true, force: true });
     }
@@ -270,6 +274,6 @@ describe("sealing a finished run", () => {
     const h = host();
     const { run } = await h.start("t");
     await expect(h.seal(run.runId)).rejects.toThrow("only a finished run can be sealed");
-    await expect(h.seal("r_nothing")).rejects.toThrow("there is no run");
+    await expect(h.seal("r_000000009_aaaa")).rejects.toThrow("there is no run");
   });
 });

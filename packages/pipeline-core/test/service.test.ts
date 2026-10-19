@@ -62,7 +62,12 @@ class FakeHost implements PipelineHost {
       return { status: "reused", run: active };
     }
     if (active && !input.restart) return { status: "terminal", run: active };
-    const run = new FakeRun(this, spec, input.task, `run-${++this.count}`);
+    const run = new FakeRun(
+      this,
+      spec,
+      input.task,
+      `r_${String(++this.count).padStart(9, "0")}_aaaa`,
+    );
     this.runs.set(run.runId, run);
     await run.send({ type: "start", runId: run.runId, task: input.task, specHash: "h" });
     return { status: "started", run };
@@ -463,6 +468,39 @@ describe("invokeTool", () => {
       attempt: 0,
     });
     expect(worse).toMatchObject({ code: "INVALID_ARGUMENTS" });
+  });
+
+  test("a run id that is not a run id is refused before it can name a path", async () => {
+    const { svc } = service();
+    for (const run_id of [
+      "../../docs/x",
+      "..",
+      "r_1",
+      "R_000000001_aaaa",
+      "r_000000001_aaaa/../x",
+    ]) {
+      expect(await invokeTool(svc, "pipeline_next_step", { run_id })).toMatchObject({
+        ok: false,
+        code: "INVALID_ARGUMENTS",
+      });
+    }
+  });
+
+  test("text from the agent has a size limit", async () => {
+    const { svc } = service();
+    expect(await invokeTool(svc, "pipeline_start", { task: "x".repeat(4_001) })).toMatchObject({
+      code: "INVALID_ARGUMENTS",
+    });
+    const started = await invokeTool(svc, "pipeline_start", { task: "x".repeat(4_000) });
+    expect(started.ok).toBe(true);
+    const run_id = asOk(started).run_id;
+    expect(
+      await invokeTool(svc, "pipeline_feedback", {
+        run_id,
+        category: "other",
+        message: "x".repeat(4_001),
+      }),
+    ).toMatchObject({ code: "INVALID_ARGUMENTS" });
   });
 
   test("anything the agent adds on its own, like a status or an exit code, is ignored", async () => {

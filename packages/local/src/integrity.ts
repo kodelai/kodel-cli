@@ -5,14 +5,28 @@
  * does not stop an agent with full shell access that goes looking for this directory.
  */
 import { createHash } from "node:crypto";
-import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { KodelError } from "@kodel-ai/pipeline-core";
 
+/**
+ * The names are run ids, or a run id plus `.seal` for the seal file's hash. A hash is first
+ * *staged* (the run's file is about to change to it), then *committed* once the file is written, so
+ * a crash in between leaves either value acceptable instead of looking like tampering.
+ */
 export interface IntegrityStore {
-  get(runId: string): Promise<string | undefined>;
-  set(runId: string, hash: string): Promise<void>;
+  /** The committed hash. */
+  get(name: string): Promise<string | undefined>;
+  /** Commit: this is the hash now, and nothing else is accepted. */
+  set(name: string, hash: string): Promise<void>;
+  /** The file is about to become `hash`; until `set`, the old hash and this one are both accepted. */
+  stage(name: string, hash: string): Promise<void>;
+  /** `undefined` when nothing is known about the name yet. */
+  trusts(name: string, hash: string): Promise<boolean | undefined>;
 }
+
+const NAME_PATTERN = /^r_[0-9a-z]{9}_[0-9a-z]{4}(?:\.seal)?$/;
 
 export const sha256 = (data: string | Uint8Array): string =>
   createHash("sha256").update(data).digest("hex");
@@ -59,35 +73,79 @@ export class FileIntegrity implements IntegrityStore {
     this.key = stableRealpath(storeRoot).then((path) => sha256(path).slice(0, 16));
   }
 
-  private async path(runId: string): Promise<string> {
-    return join(this.dir, await this.key, `${runId}.sha256`);
+  private async path(name: string): Promise<string> {
+    if (!NAME_PATTERN.test(name)) {
+      throw new KodelError("UNKNOWN_RUN", `"${name}" is not a run id`);
+    }
+    return join(this.dir, await this.key, `${name}.sha256`);
   }
 
-  async get(runId: string): Promise<string | undefined> {
+  /** The committed hash, and the staged one if a change is in flight. */
+  private async read(name: string): Promise<{ committed: string; staged?: string } | undefined> {
+    let text: string;
     try {
-      return (await readFile(await this.path(runId), "utf8")).trim() || undefined;
+      text = await readFile(await this.path(name), "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw error;
     }
+    const [committed, staged] = text.split("\n").map((line) => line.trim());
+    if (!committed) return undefined;
+    return staged ? { committed, staged } : { committed };
   }
 
-  async set(runId: string, hash: string): Promise<void> {
-    const path = await this.path(runId);
+  /** Written whole or not at all, so a crash cannot leave a half-written hash that reads as tampering. */
+  private async write(name: string, committed: string, staged?: string): Promise<void> {
+    const path = await this.path(name);
     await mkdir(join(this.dir, await this.key), { recursive: true });
-    await writeFile(path, `${hash}\n`);
+    const tmp = `${path}.tmp-${process.pid}`;
+    await rm(tmp, { force: true });
+    await writeFile(tmp, `${committed}\n${staged ?? ""}\n`, { flag: "wx" });
+    await rename(tmp, path);
+  }
+
+  async get(name: string): Promise<string | undefined> {
+    return (await this.read(name))?.committed;
+  }
+
+  async set(name: string, hash: string): Promise<void> {
+    await this.write(name, hash);
+  }
+
+  async stage(name: string, hash: string): Promise<void> {
+    const current = await this.read(name);
+    await this.write(name, current?.committed ?? hash, hash);
+  }
+
+  async trusts(name: string, hash: string): Promise<boolean | undefined> {
+    const current = await this.read(name);
+    if (!current) return undefined;
+    return hash === current.committed || hash === current.staged;
   }
 }
 
 /** For tests and for hosts that do not want the check. */
 export class MemoryIntegrity implements IntegrityStore {
   readonly hashes = new Map<string, string>();
+  readonly staged = new Map<string, string>();
 
-  async get(runId: string): Promise<string | undefined> {
-    return this.hashes.get(runId);
+  async get(name: string): Promise<string | undefined> {
+    return this.hashes.get(name);
   }
 
-  async set(runId: string, hash: string): Promise<void> {
-    this.hashes.set(runId, hash);
+  async set(name: string, hash: string): Promise<void> {
+    this.hashes.set(name, hash);
+    this.staged.delete(name);
+  }
+
+  async stage(name: string, hash: string): Promise<void> {
+    if (!this.hashes.has(name)) this.hashes.set(name, hash);
+    this.staged.set(name, hash);
+  }
+
+  async trusts(name: string, hash: string): Promise<boolean | undefined> {
+    const committed = this.hashes.get(name);
+    if (committed === undefined) return undefined;
+    return hash === committed || hash === this.staged.get(name);
   }
 }

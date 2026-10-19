@@ -5,6 +5,7 @@
  * tools. Anything extra in a call (a made-up `status`, say) is ignored, never trusted.
  */
 import { z } from "zod";
+import { RUN_ID_PATTERN } from "../run-id";
 import type { PipelineService, ToolResult } from "../service";
 
 /** Bump when a tool is renamed or its arguments change; a snapshot test pins the surface. */
@@ -21,8 +22,18 @@ export interface ToolDescriptor {
   run(service: PipelineService, input: Record<string, unknown>): Promise<ToolResult>;
 }
 
-const runId = z.string().min(1).describe("The id returned by pipeline_start.");
-const nodeSlug = z.string().min(1).describe("The slug of the node, as in the step you were given.");
+/** Free text from the agent is bounded: everything is scanned for secrets and kept in the history. */
+const LIMITS = { name: 200, task: 4_000, text: 4_000 } as const;
+
+const runId = z
+  .string()
+  .regex(RUN_ID_PATTERN, "not a run id")
+  .describe("The id returned by pipeline_start.");
+const nodeSlug = z
+  .string()
+  .min(1)
+  .max(LIMITS.name)
+  .describe("The slug of the node, as in the step you were given.");
 const attempt = z
   .number()
   .int()
@@ -44,7 +55,7 @@ export const TOOLS: ToolDescriptor[] = [
     name: "pipeline_resolve",
     title: "Read a pipeline",
     description: "Read the full definition of a pipeline: its nodes, checks and edges.",
-    shape: { pipeline: z.string().min(1) },
+    shape: { pipeline: z.string().min(1).max(LIMITS.name) },
     readOnly: true,
     idempotent: true,
     run: (service, input) => service.resolve(input as { pipeline: string }),
@@ -54,7 +65,10 @@ export const TOOLS: ToolDescriptor[] = [
     title: "Plan a run",
     description:
       "Show what a run of a pipeline would do for a task, step by step, without starting anything.",
-    shape: { pipeline: z.string().min(1), task: z.string().min(1) },
+    shape: {
+      pipeline: z.string().min(1).max(LIMITS.name),
+      task: z.string().min(1).max(LIMITS.task),
+    },
     readOnly: true,
     idempotent: true,
     run: (service, input) => service.plan(input as { pipeline: string; task: string }),
@@ -68,10 +82,15 @@ export const TOOLS: ToolDescriptor[] = [
       "its end: tell the user, and pass restart: true only if they want to run it again. Work through the " +
       "run by following each answer; never choose steps yourself.",
     shape: {
-      task: z.string().min(1).describe("What the user wants done, in their own words."),
+      task: z
+        .string()
+        .min(1)
+        .max(LIMITS.task)
+        .describe("What the user wants done, in their own words."),
       pipeline: z
         .string()
         .min(1)
+        .max(LIMITS.name)
         .optional()
         .describe("Omit it if the project has only one pipeline."),
       restart: z.boolean().optional(),
@@ -109,12 +128,16 @@ export const TOOLS: ToolDescriptor[] = [
         .describe('"complete" only if you looked at everything. "Not checked" is not "clean".'),
       incomplete_reason: z
         .string()
+        .max(2_000)
         .optional()
         .describe("Required unless completeness is complete."),
       rows: z
         .array(z.record(z.unknown()))
         .describe("One object per finding, with the columns the step asked for."),
-      metrics: z.record(z.number()).optional(),
+      metrics: z
+        .record(z.string().regex(/^[A-Za-z0-9_.-]{1,64}$/), z.number())
+        .optional()
+        .describe("Counts by short name, such as files_checked."),
     },
     readOnly: false,
     idempotent: true,
@@ -132,7 +155,11 @@ export const TOOLS: ToolDescriptor[] = [
       run_id: runId,
       node_slug: nodeSlug,
       attempt,
-      summary: z.string().optional().describe("What you did, in a sentence or two."),
+      summary: z
+        .string()
+        .max(LIMITS.text)
+        .optional()
+        .describe("What you did, in a sentence or two."),
     },
     readOnly: false,
     idempotent: true,
@@ -151,8 +178,12 @@ export const TOOLS: ToolDescriptor[] = [
       node_slug: nodeSlug.optional(),
       attempt: attempt.optional(),
       category: z.enum(["unclear_prompt", "wrong_check", "missing_step", "tool_problem", "other"]),
-      message: z.string().min(1).describe("What is wrong, with enough detail to act on."),
-      suggestion: z.string().optional().describe("How you would change it."),
+      message: z
+        .string()
+        .min(1)
+        .max(LIMITS.text)
+        .describe("What is wrong, with enough detail to act on."),
+      suggestion: z.string().max(LIMITS.text).optional().describe("How you would change it."),
     },
     readOnly: false,
     idempotent: false,

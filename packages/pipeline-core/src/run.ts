@@ -39,6 +39,8 @@ export interface Feedback {
   /** Where the failure came from: `command`, `human` or `check:<kind>`. */
   source: string;
   reason: string;
+  /** The node that failed, when the failure was handed to a different node along an edge. */
+  from?: string;
 }
 
 export interface NodeRun {
@@ -250,7 +252,10 @@ class Machine {
       );
     }
     if (!phases.includes(visit.phase)) {
-      if (visit.phase === "checks" && phases.includes("agent")) throw new Repeat();
+      // The agent, or the engine's own command, already reported and the checks are running.
+      if (visit.phase === "checks" && (phases.includes("agent") || phases.includes("engine"))) {
+        throw new Repeat();
+      }
       throw fail(
         "NODE_NOT_RUNNING",
         `node "${slug}" is not waiting for that (it is in the ${visit.phase} phase)`,
@@ -401,13 +406,13 @@ class Machine {
   private route(node: NodeSpec, label: string, failure: boolean) {
     const edge = this.spec.edges.find((e) => e.from === node.slug && e.when === label);
     if (edge) {
-      const feedback = failure ? this.run(node.slug).lastFailure : undefined;
+      const own = failure ? this.run(node.slug).lastFailure : undefined;
       this.proceed({
         from: node.slug,
         label,
         to: edge.to,
         rework: false,
-        ...(feedback ? { feedback } : {}),
+        ...(own ? { feedback: { ...own, from: node.slug } } : {}),
       });
       return;
     }

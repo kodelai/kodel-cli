@@ -181,11 +181,18 @@ describe("an agent driving a run through MCP, with the real adapters", () => {
   });
 
   test("a pipeline can be found by its file name, and an unknown run id is refused", async () => {
-    const { call, close } = await connect();
+    const { call, client, close } = await connect();
     expect((await call("pipeline_resolve", { pipeline: "demo" })).body.spec.name).toBe("demo");
-    expect((await call("pipeline_next_step", { run_id: "run_nope" })).body).toMatchObject({
+    expect((await call("pipeline_next_step", { run_id: "r_000000009_aaaa" })).body).toMatchObject({
       code: "UNKNOWN_RUN",
     });
+    // An id that is not an id never reaches a path.
+    const traversal = await client.callTool({
+      name: "pipeline_next_step",
+      arguments: { run_id: "../../docs/x" },
+    });
+    expect(traversal.isError).toBe(true);
+    expect(JSON.stringify(traversal.content)).toContain("run_id");
     await close();
   });
 });

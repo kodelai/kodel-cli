@@ -33,6 +33,44 @@ describe("validateReport", () => {
     expect(validateReport(report([]), params).ok).toBe(true);
   });
 
+  test("names every object has (constructor, toString) are not columns", () => {
+    for (const key of ["constructor", "toString", "hasOwnProperty"]) {
+      const sneaky = JSON.parse(
+        `{"severity":"minor","location":"a.ts:1","description":"x","${key}":"y"}`,
+      );
+      expect(invalid(report([sneaky])).code).toBe("INVALID_RESULT_ROWS");
+    }
+  });
+
+  test("a __proto__ key is dropped on the way in and pollutes nothing", () => {
+    const sneaky = JSON.parse(
+      '{"severity":"minor","location":"a.ts:1","description":"x","__proto__":{"polluted":true}}',
+    );
+    const result = validateReport(report([sneaky]), params);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(Object.hasOwn(result.report.rows[0] as object, "__proto__")).toBe(false);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  test("a column that is only inherited counts as missing", () => {
+    const params2 = { columns: { toString: "text" } };
+    expect(invalid(report([{}]), params2).code).toBe("MISSING_REQUIRED_VALUE");
+  });
+
+  test("metric names are short labels, not free text", () => {
+    expect(validateReport(report([], { metrics: { files_checked: 3 } }), params).ok).toBe(true);
+    expect(invalid(report([], { metrics: { "has a space": 1 } })).code).toBe("INVALID_RESULT_ROWS");
+    expect(invalid(report([], { metrics: { [`k${"x".repeat(80)}`]: 1 } })).code).toBe(
+      "INVALID_RESULT_ROWS",
+    );
+  });
+
+  test("a very long reason for an incomplete report is refused", () => {
+    expect(
+      invalid(report([], { completeness: "partial", incomplete_reason: "x".repeat(2_001) })).code,
+    ).toBe("INVALID_RESULT_ROWS");
+  });
+
   test("rejects a report that is not an object of the right shape", () => {
     expect(invalid("nope").code).toBe("INVALID_RESULT_ROWS");
     expect(invalid({ completeness: "complete" }).code).toBe("INVALID_RESULT_ROWS");

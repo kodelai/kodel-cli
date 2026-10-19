@@ -6,6 +6,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  isRunId,
   KodelError,
   type PipelineHost,
   type PipelineInfo,
@@ -15,7 +16,7 @@ import {
   type RunState,
   type StartOutcome,
 } from "@kodel-ai/pipeline-core";
-import { type HostOptions, LocalHost, type LocalRun } from "./host";
+import { type HostOptions, hashSpec, LocalHost, type LocalRun } from "./host";
 import { FileStore, type RunMeta } from "./store";
 
 export interface LocalPipelineHostOptions extends HostOptions {
@@ -26,6 +27,7 @@ export interface LocalPipelineHostOptions extends HostOptions {
 interface Loaded {
   file: string;
   spec: PipelineSpec;
+  source: string;
 }
 
 const isPipelineFile = (name: string) => name.endsWith(".yaml") || name.endsWith(".yml");
@@ -59,7 +61,8 @@ export class LocalPipelineHost implements PipelineHost {
     const problems: PipelineProblem[] = [];
     for (const file of files) {
       try {
-        const spec = parsePipeline(await readFile(join(this.dir, file), "utf8"));
+        const source = await readFile(join(this.dir, file), "utf8");
+        const spec = parsePipeline(source);
         const clash = loaded.find((l) => l.spec.name === spec.name);
         if (clash) {
           problems.push({
@@ -67,7 +70,7 @@ export class LocalPipelineHost implements PipelineHost {
             message: `the name "${spec.name}" is already used by ${clash.file}`,
           });
         } else {
-          loaded.push({ file, spec });
+          loaded.push({ file, spec, source });
         }
       } catch (error) {
         if (!(error instanceof KodelError)) throw error;
@@ -90,29 +93,36 @@ export class LocalPipelineHost implements PipelineHost {
   }
 
   /** By the name in the file, or by the file's name without its extension. */
-  async resolve(name: string): Promise<PipelineSpec | undefined> {
+  private async find(name: string): Promise<Loaded | undefined> {
     const { loaded } = await this.load();
-    return (loaded.find((l) => l.spec.name === name) ?? loaded.find((l) => stemOf(l.file) === name))
-      ?.spec;
+    return loaded.find((l) => l.spec.name === name) ?? loaded.find((l) => stemOf(l.file) === name);
   }
 
-  private hostFor(spec: PipelineSpec): LocalHost {
-    const key = JSON.stringify(spec);
+  async resolve(name: string): Promise<PipelineSpec | undefined> {
+    return (await this.find(name))?.spec;
+  }
+
+  private hostFor(spec: PipelineSpec, source: string | undefined): LocalHost {
+    const key = hashSpec(spec);
     let host = this.hosts.get(key);
     if (!host) {
-      host = new LocalHost(spec, this.options);
+      host = new LocalHost(spec, { ...this.options, ...(source === undefined ? {} : { source }) });
       this.hosts.set(key, host);
     }
     return host;
   }
 
   async start(input: { pipeline: string; task: string; restart: boolean }): Promise<StartOutcome> {
-    const spec = await this.resolve(input.pipeline);
-    if (!spec) throw new KodelError("UNKNOWN_PIPELINE", `there is no pipeline "${input.pipeline}"`);
-    const { run, reused, terminal } = await this.hostFor(spec).start(input.task, {
-      restart: input.restart,
-    });
-    const known = this.runs.get(run.runId) ?? run;
+    const found = await this.find(input.pipeline);
+    if (!found)
+      throw new KodelError("UNKNOWN_PIPELINE", `there is no pipeline "${input.pipeline}"`);
+    const { run, reused, terminal } = await this.hostFor(found.spec, found.source).start(
+      input.task,
+      { restart: input.restart },
+    );
+    // An existing run goes on with the pipeline it started with, which may no longer be the file's.
+    const known = reused || terminal ? await this.open(run.runId) : run;
+    if (!known) throw new KodelError("UNKNOWN_RUN", `there is no run "${run.runId}"`);
     this.runs.set(run.runId, known);
     return { status: reused ? "reused" : terminal ? "terminal" : "started", run: known };
   }
@@ -128,28 +138,54 @@ export class LocalPipelineHost implements PipelineHost {
     );
   }
 
-  private async specFor(runId: string): Promise<PipelineSpec | undefined> {
+  /**
+   * The pipeline a run started with: the copy kept with the run, read and checked again, and held
+   * against the spec hash in the run's state (which is itself protected). A copy that was edited, or
+   * a pipeline file that changed under a run that kept no copy, is refused rather than obeyed.
+   */
+  private async specFor(
+    runId: string,
+  ): Promise<{ spec: PipelineSpec; source: string | undefined } | undefined> {
+    if (!isRunId(runId)) return undefined;
     const meta = await this.store.readMeta(runId);
     if (!meta) return undefined;
-    // The copy the run started with; a run from before copies were kept falls back to the file.
+    const state = await this.store.readState(runId);
+    if (!state) return undefined;
     const kept = await this.store.readSpec(runId);
-    return kept ? (kept as PipelineSpec) : this.resolve(meta.pipeline);
+    let found: { spec: PipelineSpec; source: string | undefined } | undefined;
+    if (kept !== undefined) {
+      try {
+        found = { spec: parsePipeline(kept), source: kept };
+      } catch (error) {
+        if (!(error instanceof KodelError)) throw error;
+      }
+    } else {
+      found = await this.find(meta.pipeline);
+    }
+    if (!found || hashSpec(found.spec) !== state.specHash) {
+      throw new KodelError(
+        "STATE_MODIFIED_EXTERNALLY",
+        `the pipeline of run ${runId} is not the one it started with (its copy was changed, or the pipeline file was edited and no copy was kept); restore it before going on`,
+      );
+    }
+    return found;
   }
 
   async open(runId: string): Promise<LocalRun | undefined> {
+    // Checked on every call, not only the first: the copy can be edited while the server runs.
+    const found = await this.specFor(runId);
+    if (!found) return undefined;
     const cached = this.runs.get(runId);
     if (cached) return cached;
-    const spec = await this.specFor(runId);
-    if (!spec) return undefined;
-    const run = this.hostFor(spec).open(runId);
+    const run = this.hostFor(found.spec, found.source).open(runId);
     this.runs.set(runId, run);
     return run;
   }
 
   /** Accept the files of a finished run after a deliberate change (`kodel seal`). */
   async seal(runId: string): Promise<void> {
-    const spec = await this.specFor(runId);
-    if (!spec) throw new KodelError("UNKNOWN_RUN", `there is no run "${runId}"`);
-    await this.hostFor(spec).seal(runId);
+    const run = await this.open(runId);
+    if (!run) throw new KodelError("UNKNOWN_RUN", `there is no run "${runId}"`);
+    await run.seal();
   }
 }

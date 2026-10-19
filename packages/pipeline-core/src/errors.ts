@@ -19,6 +19,7 @@ export const ERROR_CODES = [
   "UNSUPPORTED_FORMAT",
   "UNKNOWN_RUN",
   "INVALID_ARGUMENTS",
+  "STATE_LOCKED",
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalPipelineHost } from "@kodel-ai/local";
@@ -44,9 +44,16 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-async function cli(...args: string[]) {
+interface Person {
+  interactive?: boolean;
+  answer?: boolean;
+}
+
+/** Run a command as a person at a terminal who says yes, unless told otherwise. */
+async function cliAs(person: Person, ...args: string[]) {
   let out = "";
   let err = "";
+  const asked: string[] = [];
   const code = await runCli(args, {
     cwd: dir,
     out: (t) => {
@@ -55,9 +62,16 @@ async function cli(...args: string[]) {
     err: (t) => {
       err += t;
     },
+    interactive: person.interactive ?? true,
+    confirm: async (question) => {
+      asked.push(question);
+      return person.answer ?? true;
+    },
   });
-  return { code, out, err };
+  return { code, out, err, asked };
 }
+
+const cli = (...args: string[]) => cliAs({}, ...args);
 
 /** A run waiting at the human step, made the way an agent would. */
 async function runAtGate() {
@@ -141,6 +155,81 @@ describe("ack, seal and resume", () => {
     const id = await runAtGate();
     expect((await cli("seal", id)).code).toBe(1);
     expect((await cli("resume", id)).code).toBe(1);
+  });
+});
+
+describe("only a person can decide", () => {
+  test("without a terminal none of the decision commands runs, and nothing changes", async () => {
+    const id = await runAtGate();
+    const script = { interactive: false };
+    for (const args of [
+      ["gate", "approve", id],
+      ["gate", "reject", id, "--reason", "no"],
+      ["resume", id],
+      ["ack", id],
+      ["seal", id],
+    ]) {
+      const result = await cliAs(script, ...args);
+      expect(result.code).toBe(1);
+      expect(result.err).toContain("for a person at a terminal");
+      expect(result.asked).toEqual([]);
+    }
+    expect((await cli("status", id)).out).toContain("waiting:   approve (gate)");
+  });
+
+  test("a person who does not confirm changes nothing", async () => {
+    const id = await runAtGate();
+    const result = await cliAs({ answer: false }, "gate", "approve", id);
+    expect(result).toMatchObject({ code: 1 });
+    expect(result.err).toContain("not confirmed");
+    expect((await cli("status", id)).out).toContain("waiting:   approve (gate)");
+  });
+
+  test("the question names what changed since the run stopped at the gate", async () => {
+    const id = await runAtGate();
+    await writeFile(join(dir, "sneaked.txt"), "added after the checks\n");
+    const result = await cliAs({}, "gate", "approve", id);
+    expect(result.asked[0]).toContain("1 file(s) changed since the run stopped here");
+    expect(result.asked[0]).toContain("sneaked.txt");
+  });
+
+  test("with nothing changed the question is plain", async () => {
+    const id = await runAtGate();
+    const result = await cliAs({}, "gate", "approve", id);
+    expect(result.asked[0]).toBe(`Approve "approve" of run ${id}?`);
+  });
+});
+
+describe("what status shows and does", () => {
+  test("control characters in an agent's text cannot move the cursor or fake a line", async () => {
+    const host = new LocalPipelineHost({ root: dir, heartbeatMs: 0 });
+    const { run } = await host.start({
+      pipeline: "demo",
+      task: "x\u001b[2J\u001b[1;1Hstatus: completed",
+      restart: false,
+    });
+    const list = await cli("status");
+    const one = await cli("status", run.runId);
+    for (const text of [list.out, one.out]) {
+      expect(text).not.toContain("\u001b");
+      expect(text.split("\n").filter(Boolean).length).toBeLessThanOrEqual(6);
+    }
+  });
+
+  test("looking at a run writes nothing", async () => {
+    const id = await runAtGate();
+    const dirOfRun = join(dir, ".kodel", "runs", id);
+    const before = [
+      await readFile(join(dirOfRun, "state.json"), "utf8"),
+      await readFile(join(dirOfRun, "journal.jsonl"), "utf8"),
+    ];
+    await cli("status", id);
+    await cli("status");
+    const after = [
+      await readFile(join(dirOfRun, "state.json"), "utf8"),
+      await readFile(join(dirOfRun, "journal.jsonl"), "utf8"),
+    ];
+    expect(after).toEqual(before);
   });
 });
 

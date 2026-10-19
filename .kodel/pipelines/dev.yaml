@@ -35,7 +35,6 @@ nodes:
       Follow the conventions in AGENTS.md (English only, no `any`, Biome style).
     checks:
       - { kind: diff, paths: ["packages/**", "scripts/**", "examples/**", "skills/**", "adapters/**"], max_lines: 800 }
-      - { kind: diff, paths: [".kodel/runs/**"], mode: unchanged }
 
   - slug: verify
     kind: command

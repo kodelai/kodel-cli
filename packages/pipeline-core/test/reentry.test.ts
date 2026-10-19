@@ -40,6 +40,48 @@ const feedbackOf = (state: RunState) => {
   return "node" in step ? step.node.reentry_feedback : undefined;
 };
 
+describe("a result delivered twice", () => {
+  const checked = parsePipeline(
+    [
+      "name: c",
+      "nodes:",
+      "  - slug: build",
+      "    kind: command",
+      "    command: make",
+      "    checks:",
+      "      - { kind: command, command: make check }",
+      "  - slug: fix",
+      "    kind: agent",
+      "    prompt: fix it",
+      "edges:",
+      "  - { from: build, to: fix, when: failed }",
+      "  - { from: fix, to: build }",
+      "",
+    ].join("\n"),
+  );
+
+  test("the second copy of work_finished, once the checks are running, is a repeat and not an error", () => {
+    const step = (state: RunState | undefined, event: RunEvent) => {
+      const result = decide(checked, state, event, 0);
+      if (!result.ok) throw result.error;
+      return result;
+    };
+    let state = step(undefined, { type: "start", runId: "r", task: "t", specHash: "h" }).state;
+    const done: RunEvent = {
+      type: "work_finished",
+      node: "build",
+      attempt: 1,
+      passed: true,
+      reason: "",
+    };
+    state = step(state, done).state;
+    expect(state.active[0]?.phase).toBe("checks");
+    const again = step(state, done);
+    expect(again.noop).toBe(true);
+    expect(again.state).toEqual(state);
+  });
+});
+
 describe("a node entered again by a route is told why", () => {
   test("a person's rejection reaches the node the edge leads to", () => {
     const state = apply(atGate(), {
@@ -48,7 +90,7 @@ describe("a node entered again by a route is told why", () => {
       decision: "rejected",
       reason: "split it up",
     });
-    expect(feedbackOf(state)).toBe("A person sent this back: split it up");
+    expect(feedbackOf(state)).toBe('A person sent this back at "approve": split it up');
   });
 
   test("a red build reaches the node it routes back to", () => {
@@ -60,6 +102,7 @@ describe("a node entered again by a route is told why", () => {
       passed: false,
       reason: "exit 2: missing semicolon",
     });
+    expect(feedbackOf(state)).toContain('"build" failed');
     expect(feedbackOf(state)).toContain("missing semicolon");
   });
 

@@ -8,6 +8,7 @@
  */
 import { createHash } from "node:crypto";
 import {
+  type ChangeSet,
   type CheckVerdict,
   type Decision,
   decide,
@@ -82,12 +83,28 @@ export interface HostOptions {
   integrity?: IntegrityStore;
   /** The directory for those files; defaults to `defaultIntegrityDir()`. */
   integrityDir?: string;
+  /** The YAML the pipeline was read from; a copy is kept with each run so the run is pinned to it. */
+  source?: string;
+}
+
+export const DEFAULT_COMMAND_TIMEOUT_S = 3_600;
+
+/** The text fields an event carries from outside; the rest is structure and is left alone. */
+const FREE_TEXT_FIELDS = ["reason", "summary", "message", "suggestion", "note"] as const;
+
+function redactEvent(event: RunEvent, rules: RedactRule[]): RunEvent {
+  const copy = { ...event } as Record<string, unknown>;
+  for (const field of FREE_TEXT_FIELDS) {
+    const value = copy[field];
+    if (typeof value === "string") copy[field] = redactText(value, rules);
+  }
+  return copy as unknown as RunEvent;
 }
 
 const REASON_TAIL = 2_000;
 const lastChars = (text: string, n: number) => (text.length > n ? `...${text.slice(-n)}` : text);
 
-function hashSpec(spec: PipelineSpec): string {
+export function hashSpec(spec: PipelineSpec): string {
   return createHash("sha256").update(JSON.stringify(spec)).digest("hex").slice(0, 16);
 }
 
@@ -140,34 +157,44 @@ export class LocalHost {
         `this pipeline has a diff check, which needs a git repository, and ${this.options.root} is not inside one`,
       );
     }
-    const redactedTask = redactText(task, this.rules);
-    const existing = await this.store.findActive(this.spec.name, redactedTask);
-    if (existing) {
-      return { run: new LocalRun(this, existing.meta.runId), reused: true, terminal: false };
-    }
-    if (options.restart !== true) {
-      const latest = await this.store.findLatest(this.spec.name, redactedTask);
-      if (latest) {
-        return { run: new LocalRun(this, latest.meta.runId), reused: false, terminal: true };
+    // Spaces at the ends or doubled are not a different task; otherwise a changed space would
+    // slip past the run that is waiting for a person.
+    const redactedTask = redactText(task.trim().replace(/\s+/g, " "), this.rules);
+    return this.store.withStartLock(async () => {
+      const existing = await this.store.findActive(this.spec.name, redactedTask);
+      if (existing) {
+        return { run: new LocalRun(this, existing.meta.runId), reused: true, terminal: false };
       }
-    }
+      if (options.restart !== true) {
+        const latest = await this.store.findLatest(this.spec.name, redactedTask);
+        if (latest) {
+          return { run: new LocalRun(this, latest.meta.runId), reused: false, terminal: true };
+        }
+      }
 
-    const now = this.clock();
-    const runId = newRunId(now);
-    const specHash = hashSpec(this.spec);
-    await this.store.createRun({
-      v: 1,
-      runId,
-      pipeline: this.spec.name,
-      task: redactedTask,
-      specHash,
-      createdAt: now,
+      const now = this.clock();
+      const runId = newRunId(now);
+      const specHash = hashSpec(this.spec);
+      await this.store.createRun({
+        v: 1,
+        runId,
+        pipeline: this.spec.name,
+        task: redactedTask,
+        specHash,
+        createdAt: now,
+      });
+      try {
+        if (this.options.source !== undefined)
+          await this.store.writeSpec(runId, this.options.source);
+        const run = new LocalRun(this, runId);
+        const result = await run.apply({ type: "start", runId, task: redactedTask, specHash });
+        if (!result.ok) throw result.error;
+        return { run, reused: false, terminal: false };
+      } catch (error) {
+        await this.store.removeRun(runId).catch(() => undefined);
+        throw error;
+      }
     });
-    await this.store.writeSpec(runId, this.spec);
-    const run = new LocalRun(this, runId);
-    const result = await run.apply({ type: "start", runId, task: redactedTask, specHash });
-    if (!result.ok) throw result.error;
-    return { run, reused: false, terminal: false };
   }
 
   /** A handle on a run that is already on disk (after a restart, or from another process). */
@@ -222,8 +249,10 @@ export class LocalRun {
     return step;
   }
 
-  private applyLocked(event: RunEvent, trust: boolean): Promise<Decision> {
-    const { store, spec, engine, clock, integrity } = this.host;
+  private applyLocked(incoming: RunEvent, trust: boolean): Promise<Decision> {
+    const { store, spec, engine, clock, integrity, rules } = this.host;
+    // Whatever text came with the event (a reason, a message) reaches state and journal redacted.
+    const event = redactEvent(incoming, rules);
     return store.withLock(this.runId, async () => {
       let state: RunState | undefined;
       if (event.type !== "start") {
@@ -238,11 +267,11 @@ export class LocalRun {
         }
         state = raw?.state;
         if (raw && !trust) {
-          const trusted = await integrity.get(this.runId);
+          const trusted = await integrity.trusts(this.runId, raw.hash);
           if (trusted === undefined) {
             // First time this machine sees the run (a fresh clone, say): take it as it is.
             await integrity.set(this.runId, raw.hash);
-          } else if (trusted !== raw.hash) {
+          } else if (!trusted) {
             const error = new KodelError(
               "STATE_MODIFIED_EXTERNALLY",
               `the state of run ${this.runId} was changed outside kodel; look at what changed, then accept it with "kodel ack ${this.runId}"`,
@@ -257,11 +286,18 @@ export class LocalRun {
       const changed =
         event.type !== "tick" || decision.journal.length > 0 || decision.effects.length > 0;
       if (changed) {
-        const hash = await store.writeState(this.runId, decision.state);
+        // The expected hash is recorded before the file changes and confirmed after, so a crash
+        // between the two leaves a state that is still accepted, not one that looks tampered with.
+        const hash = await store.writeState(this.runId, decision.state, (next) =>
+          integrity.stage(this.runId, next),
+        );
         await integrity.set(this.runId, hash);
         await store.appendJournal(this.runId, decision.journal);
         const finished = ["completed", "failed", "canceled"].includes(decision.state.status);
-        if (finished) await store.writeSeal(this.runId, clock());
+        if (finished) {
+          const sealHash = await store.writeSeal(this.runId, clock());
+          await integrity.set(`${this.runId}.seal`, sealHash);
+        }
       }
       for (const effect of decision.effects) await this.dispatch(effect);
       return decision;
@@ -272,9 +308,50 @@ export class LocalRun {
   async integrityStatus(): Promise<"ok" | "modified" | "unknown"> {
     const raw = await this.host.store.readStateRaw(this.runId).catch(() => undefined);
     if (!raw) return "modified";
-    const trusted = await this.host.integrity.get(this.runId);
+    const trusted = await this.host.integrity.trusts(this.runId, raw.hash);
     if (trusted === undefined) return "unknown";
-    return trusted === raw.hash ? "ok" : "modified";
+    return trusted ? "ok" : "modified";
+  }
+
+  /**
+   * Whether a finished run is as it was when it finished, judged against the seal hash kept outside
+   * the repository. `open`: the run has not finished, so there is no seal yet.
+   */
+  async sealStatus(): Promise<"sealed" | "modified" | "unsealed" | "open"> {
+    const state = await this.state();
+    if (state.status === "running" || state.status === "paused") return "open";
+    const trusted = await this.host.integrity.get(`${this.runId}.seal`);
+    return this.host.store.checkSeal(this.runId, trusted);
+  }
+
+  /**
+   * What to do next, read-only: nothing is written and no work is restarted, so it is safe for a
+   * command that only looks (`kodel status`).
+   */
+  async inspect(): Promise<NextStep> {
+    return nextStep(
+      this.host.spec,
+      await this.state(),
+      this.host.clock(),
+      this.host.engine.registry ?? defaultRegistry(),
+    );
+  }
+
+  /**
+   * What changed in the files since the run reached this human step: a person approving should know
+   * if the agent kept working after the checks passed. `undefined` when there is no baseline.
+   */
+  async changesSinceGate(node: string): Promise<ChangeSet | undefined> {
+    const visit = (await this.state()).active.find((v) => v.node === node && v.phase === "human");
+    if (!visit) return undefined;
+    const tree = (await this.host.store.readSnapshots(this.runId))[`gate:${node}:${visit.attempt}`];
+    if (!tree) return undefined;
+    return this.host.snapshotter.changesSince(tree);
+  }
+
+  /** Accept the files of this finished run after a deliberate change, and seal them again. */
+  seal(): Promise<void> {
+    return this.host.seal(this.runId);
   }
 
   /** A human accepts the files as they are now; this is journaled as a manual edit. */
@@ -296,8 +373,20 @@ export class LocalRun {
       case "run_check":
         this.spawn(effect);
         return;
+      case "await_human": {
+        // Where the files stood when the person was asked, so approving can show what changed since.
+        if (await this.host.snapshotter.isRepo()) {
+          const tree = await this.host.snapshotter.snapshot();
+          await this.host.store.writeSnapshot(
+            this.runId,
+            `gate:${effect.node}:${effect.attempt}`,
+            tree,
+          );
+        }
+        return;
+      }
       default:
-        return; // need_agent and await_human wait for a person or an agent
+        return; // need_agent waits for the agent
     }
   }
 
@@ -327,32 +416,38 @@ export class LocalRun {
 
     const job = (async () => {
       try {
-        const event =
-          effect.type === "run_command"
-            ? await this.runNodeCommand(effect, controller.signal)
-            : await this.runCheck(effect, controller.signal);
-        if (!controller.signal.aborted) await this.apply(event);
-      } catch (error) {
-        if (controller.signal.aborted) return;
-        const reason = `the host could not finish this: ${error instanceof Error ? error.message : String(error)}`;
-        await this.apply(
-          effect.type === "run_command"
-            ? {
-                type: "work_finished",
-                node: effect.node,
-                attempt: effect.attempt,
-                passed: false,
-                reason,
-              }
-            : {
-                type: "check_finished",
-                node: effect.node,
-                attempt: effect.attempt,
-                index: effect.index,
-                passed: false,
-                reason,
-              },
-        ).catch(() => undefined);
+        let event: RunEvent;
+        try {
+          event =
+            effect.type === "run_command"
+              ? await this.runNodeCommand(effect, controller.signal)
+              : await this.runCheck(effect, controller.signal);
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          const reason = `the host could not finish this: ${error instanceof Error ? error.message : String(error)}`;
+          event =
+            effect.type === "run_command"
+              ? {
+                  type: "work_finished",
+                  node: effect.node,
+                  attempt: effect.attempt,
+                  passed: false,
+                  reason,
+                }
+              : {
+                  type: "check_finished",
+                  node: effect.node,
+                  attempt: effect.attempt,
+                  index: effect.index,
+                  passed: false,
+                  reason,
+                };
+        }
+        if (!controller.signal.aborted) await this.applyWithRetry(event);
+      } catch {
+        // The result could not be saved (a lock that stayed taken, a full disk). That is the
+        // store's failure, not the node's, so the node is not marked failed: without a heartbeat
+        // the work looks stale and the next tick runs it again.
       } finally {
         if (beat) clearInterval(beat);
         this.tasks.delete(key);
@@ -362,13 +457,27 @@ export class LocalRun {
     void job.finally(() => this.pending.delete(job));
   }
 
+  /** Save a result, trying again a few times: the usual cause is another process holding the lock. */
+  private async applyWithRetry(event: RunEvent): Promise<void> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.apply(event);
+        return;
+      } catch (error) {
+        if (attempt >= 3) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
+      }
+    }
+  }
+
   private commandOptions(signal: AbortSignal, timeout: number | undefined): CommandOptions {
     const { options, rules, maxTailBytes } = this.host;
     return {
       cwd: options.root,
       signal,
       redact: (text) => redactText(text, rules),
-      ...(timeout === undefined ? {} : { timeoutMs: timeout * 1000 }),
+      // A command with no limit of its own gets a long one: it may never hang the run for good.
+      timeoutMs: (timeout ?? DEFAULT_COMMAND_TIMEOUT_S) * 1000,
       ...(maxTailBytes === undefined ? {} : { maxTailBytes }),
     };
   }
@@ -388,7 +497,11 @@ export class LocalRun {
         restart: effect.restart,
       },
     );
-    const verdict = commandVerdict(result, effect.expect, effect.timeout);
+    const verdict = commandVerdict(
+      result,
+      effect.expect,
+      effect.timeout ?? DEFAULT_COMMAND_TIMEOUT_S,
+    );
     return {
       type: "work_finished",
       node: effect.node,
@@ -463,6 +576,12 @@ export class LocalRun {
   async nextStep(): Promise<NextStep> {
     const tick = await this.apply({ type: "tick" });
     if (!tick.ok && tick.error.code === "STATE_MODIFIED_EXTERNALLY") throw tick.error;
+    if ((await this.sealStatus()) === "modified") {
+      throw new KodelError(
+        "STATE_MODIFIED_EXTERNALLY",
+        `run ${this.runId} finished and was changed afterwards; look at what changed, then accept it with "kodel seal ${this.runId}"`,
+      );
+    }
     const state = await this.state();
     return nextStep(
       this.host.spec,
@@ -498,8 +617,11 @@ export class LocalRun {
     return this.apply({ type: "resume" });
   }
 
-  cancel() {
-    return this.apply({ type: "cancel" });
+  async cancel() {
+    const decision = await this.apply({ type: "cancel" });
+    // The run is over, so a command still going in this process has nothing left to report to.
+    if (decision.ok) this.stop();
+    return decision;
   }
 
   feedback(input: {
@@ -573,14 +695,14 @@ function builtinCheckRunners(host: LocalHost): Record<string, CheckRunner> {
 
     async command(effect, context) {
       const command = String(effect.params.command);
-      const timeout = effect.params.timeout as number | undefined;
+      const timeout = (effect.params.timeout as number | undefined) ?? DEFAULT_COMMAND_TIMEOUT_S;
       const result = await host.runner(
         command,
         {
           cwd: host.options.root,
           signal: context.signal,
           redact: (text) => redactText(text, host.rules),
-          ...(timeout === undefined ? {} : { timeoutMs: timeout * 1000 }),
+          timeoutMs: timeout * 1000,
           ...(host.maxTailBytes === undefined ? {} : { maxTailBytes: host.maxTailBytes }),
         },
         {

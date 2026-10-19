@@ -26,9 +26,10 @@ export interface ReportProblem {
 const reportSchema = z
   .object({
     completeness: z.enum(["complete", "partial", "not_run", "tool_error"]),
-    incomplete_reason: z.string().optional(),
+    incomplete_reason: z.string().max(2_000).optional(),
     rows: z.array(z.record(z.unknown())),
-    metrics: z.record(z.number()).optional(),
+    // Metric names are labels, never free text, so no secret can hide in a key.
+    metrics: z.record(z.string().regex(/^[A-Za-z0-9_.-]{1,64}$/), z.number()).optional(),
   })
   .strict();
 
@@ -103,7 +104,7 @@ export function validateReport(
       };
     }
     for (const key of Object.keys(row)) {
-      if (!(key in columns)) {
+      if (!Object.hasOwn(columns, key)) {
         return {
           ok: false,
           code: "INVALID_RESULT_ROWS",
@@ -112,7 +113,7 @@ export function validateReport(
       }
     }
     for (const [column, type] of Object.entries(columns)) {
-      if (!(column in row)) {
+      if (!Object.hasOwn(row, column)) {
         return {
           ok: false,
           code: "MISSING_REQUIRED_VALUE",

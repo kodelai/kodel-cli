@@ -44,7 +44,8 @@ export const BUILTIN_RULES: RedactRule[] = [
   { name: "jwt", pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g },
   {
     name: "url-password",
-    pattern: /\b([a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:)([^\s@/]+)(@)/gi,
+    // Every part is bounded: an open-ended scheme made a long run of letters and dashes quadratic.
+    pattern: /\b([a-z][a-z0-9+.-]{0,31}:\/\/[^\s:@/]{1,256}:)([^\s@/]{1,512})(@)/gi,
     replace: (_m, head: string, _secret: string, at: string) =>
       `${head}${tag("url-password")}${at}`,
   },
@@ -57,8 +58,9 @@ export const BUILTIN_RULES: RedactRule[] = [
     name: "assignment",
     // A name that contains a secret word (DB_PASSWORD, api-key, githubToken), then : or =, then a
     // value of six or more characters that is not a plain number (max_tokens=100000 is not secret).
+    // The name parts are bounded: an open-ended prefix made a long run of name characters quadratic.
     pattern:
-      /([A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|auth(?:orization)?)[A-Za-z0-9_.-]*["']?\s*[:=]\s*["']?)(?!\d+(?:[\s"',;&]|$))([^\s"',;&]{6,})/gi,
+      /([A-Za-z0-9_.-]{0,64}(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|auth(?:orization)?)[A-Za-z0-9_.-]{0,64}["']?\s*[:=]\s*["']?)(?!\d+(?:[\s"',;&]|$))([^\s"',;&]{6,})/gi,
     replace: (match, head: string, value: string) =>
       value.startsWith("[REDACTED:") || /^(?:bearer|basic|token)$/i.test(value)
         ? match

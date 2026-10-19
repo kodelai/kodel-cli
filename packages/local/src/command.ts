@@ -31,6 +31,7 @@ export interface CommandResult {
 
 export const DEFAULT_MAX_TAIL_BYTES = 16 * 1024;
 const KILL_GRACE_MS = 2_000;
+const PIPE_GRACE_MS = 2_000;
 
 function killTree(pid: number | undefined) {
   if (pid === undefined) return;
@@ -68,10 +69,13 @@ export function runCommand(command: string, options: CommandOptions): Promise<Co
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
+    let exitTimer: ReturnType<typeof setTimeout> | undefined;
+
     const finish = (exit: number) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (exitTimer) clearTimeout(exitTimer);
       options.signal?.removeEventListener("abort", onAbort);
       let tail = Buffer.concat(chunks).toString("utf8").replace(/^�+/, "");
       if (truncated) tail = `[earlier output omitted]\n${tail}`;
@@ -132,9 +136,17 @@ export function runCommand(command: string, options: CommandOptions): Promise<Co
       chunks = [Buffer.from(`could not start the command: ${error.message}`)];
       finish(127);
     });
-    child.on("close", (code, signal) => {
-      if (code !== null) finish(code);
-      else finish(128 + (signal ? (constants.signals[signal] ?? 1) : 1));
+    const exitCode = (code: number | null, signal: NodeJS.Signals | null) =>
+      code !== null ? code : 128 + (signal ? (constants.signals[signal] ?? 1) : 1);
+    child.on("close", (code, signal) => finish(exitCode(code, signal)));
+    // A grandchild that left the process group can hold the output pipes open for ever, and then
+    // `close` never comes. The command is over when its shell has exited, plus a moment to read the end.
+    child.on("exit", (code, signal) => {
+      exitTimer = setTimeout(() => {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        finish(exitCode(code, signal));
+      }, PIPE_GRACE_MS);
     });
   });
 }

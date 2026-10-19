@@ -5,18 +5,20 @@
     "deny": [
       "Edit(.kodel/runs/**)",
       "Write(.kodel/runs/**)",
-      "Bash(kodel gate:*)",
-      "Bash(kodel ack:*)",
-      "Bash(kodel seal:*)",
-      "Bash(kodel resume:*)",
-      "Bash(bun packages/cli/src/main.ts gate:*)",
-      "Bash(bun packages/cli/src/main.ts ack:*)",
-      "Bash(bun packages/cli/src/main.ts seal:*)",
-      "Bash(bun packages/cli/src/main.ts resume:*)",
-      "Bash(node packages/cli/dist/kodel.js gate:*)",
-      "Bash(node packages/cli/dist/kodel.js ack:*)",
-      "Bash(node packages/cli/dist/kodel.js seal:*)",
-      "Bash(node packages/cli/dist/kodel.js resume:*)"
+      "Edit(.kodel/pipelines/**)",
+      "Write(.kodel/pipelines/**)",
+      "Edit(.mcp.json)",
+      "Write(.mcp.json)",
+      "Edit(.claude/settings*.json)",
+      "Write(.claude/settings*.json)",
+      "Bash(*kodel* gate*)",
+      "Bash(*kodel* ack *)",
+      "Bash(*kodel* seal *)",
+      "Bash(*kodel* resume *)",
+      "Bash(*main.ts* gate*)",
+      "Bash(*main.ts* ack *)",
+      "Bash(*main.ts* seal *)",
+      "Bash(*main.ts* resume *)"
     ]
   }
 }

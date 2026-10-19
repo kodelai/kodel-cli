@@ -9,7 +9,7 @@ import {
   parsePipeline,
   type RunState,
 } from "@kodel-ai/pipeline-core";
-import { LocalHost, type LocalRun } from "../src";
+import { GitSnapshotter, LocalHost, type LocalRun } from "../src";
 
 let dir: string;
 beforeEach(async () => {
@@ -210,13 +210,52 @@ describe("starting and finding runs", () => {
     expect(again.run.runId).not.toBe(first.run.runId);
   });
 
-  test("the pipeline a run started with is kept next to it", async () => {
-    const { run } = await host(COMMANDS).start("t");
-    const kept = (await readFile(
-      join(dir, ".kodel", "runs", run.runId, "spec.json"),
-      "utf8",
-    )) as string;
-    expect(JSON.parse(kept)).toMatchObject({ name: "cmds" });
+  test("the pipeline source a run started with is kept next to it", async () => {
+    const { run } = await host(COMMANDS, { source: "name: cmds # as written\n" }).start("t");
+    const kept = await readFile(join(dir, ".kodel", "runs", run.runId, "spec.yaml"), "utf8");
+    expect(kept).toBe("name: cmds # as written\n");
+  });
+
+  test("the same task with other spacing is the same task", async () => {
+    const h = host(COMMANDS);
+    const first = await h.start("add  a limit");
+    const second = await h.start(" add a limit ");
+    expect(second.run.runId).toBe(first.run.runId);
+    expect((await first.run.state()).task).toBe("add a limit");
+  });
+
+  test("two starts at once make one run", async () => {
+    const h = host(COMMANDS);
+    const [a, b] = await Promise.all([h.start("t"), h.start("t")]);
+    expect(b.run.runId).toBe(a.run.runId);
+    expect((await h.store.listRuns()).length).toBe(1);
+  });
+
+  test("a run that could not be started leaves nothing behind", async () => {
+    class BrokenGit extends GitSnapshotter {
+      override async isRepo() {
+        return true;
+      }
+      override async snapshot(): Promise<string> {
+        throw new Error("git is broken");
+      }
+    }
+    const snapshotter = new BrokenGit(dir);
+    const spec = parsePipeline(
+      [
+        "name: snap",
+        "nodes:",
+        "  - slug: a",
+        "    kind: agent",
+        "    prompt: x",
+        "    checks:",
+        '      - { kind: diff, paths: ["x"] }',
+        "",
+      ].join("\n"),
+    );
+    const h = new LocalHost(spec, { root: dir, heartbeatMs: 0, snapshotter });
+    await expect(h.start("t")).rejects.toThrow("git is broken");
+    expect((await h.store.listRuns()).length).toBe(0);
   });
 
   test("waitForRest returns when the work is done, or when the time is up", async () => {

@@ -94,6 +94,21 @@ describe("redactText: assignments, URLs and headers", () => {
   });
 });
 
+describe("redactText: stays fast on hostile input", () => {
+  // Text from the agent is scanned in the server's own process; a quadratic rule froze it.
+  test("a long run of name characters is scanned in linear time", () => {
+    for (const text of ["a".repeat(200_000), "a-".repeat(100_000), `${"token".repeat(40_000)} x`]) {
+      const started = performance.now();
+      redactText(text);
+      expect(performance.now() - started).toBeLessThan(1_500);
+    }
+  });
+
+  test("a secret after a long name is still found", () => {
+    expect(redactText(`${"x".repeat(50)}_password=hunter22abc`)).toContain("[REDACTED:assignment]");
+  });
+});
+
 describe("redactText: leaves ordinary text alone", () => {
   const harmless = [
     "Error: cannot find module './limit' in packages/pipeline-core/src/limit.ts:42",
