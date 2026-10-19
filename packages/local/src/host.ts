@@ -652,11 +652,14 @@ export class LocalRun {
       attempt: effect.attempt,
       passed: verdict.passed,
       reason: verdict.reason,
+      exit: result.exit,
+      duration_ms: result.durationMs,
     };
   }
 
   private async runCheck(effect: RunCheckEffect, signal: AbortSignal): Promise<RunEvent> {
     const runner = this.host.checkRunners[effect.kind];
+    const started = Date.now();
     const verdict: CheckVerdict = runner
       ? await runner(effect, {
           runId: this.runId,
@@ -672,6 +675,8 @@ export class LocalRun {
       index: effect.index,
       passed: verdict.passed,
       reason: verdict.reason,
+      ...(verdict.exit === undefined ? {} : { exit: verdict.exit }),
+      duration_ms: Date.now() - started,
     };
   }
 
@@ -816,14 +821,47 @@ export class LocalRun {
     return this.apply(deadOwners.length > 0 ? { type: "tick", deadOwners } : { type: "tick" });
   }
 
-  completeStep(node: string, attempt: number, summary?: string, outcome?: string) {
-    return this.apply({
+  async completeStep(node: string, attempt: number, summary?: string, outcome?: string) {
+    const decision = await this.apply({
       type: "agent_completed",
       node,
       attempt,
       ...(summary === undefined ? {} : { summary }),
       ...(outcome === undefined ? {} : { outcome }),
     });
+    if (!decision.ok) {
+      await this.recordRefusal("complete_step", node, attempt, decision.error);
+    }
+    return decision;
+  }
+
+  /**
+   * Journal that a call of the agent was refused, so that what was tried can be looked at later. It
+   * is left out when the files are not as kodel left them (writing would fail again, or paper over
+   * it), when the lock cannot be had, and for a run that has finished (its seal must stay true); and
+   * a failure to write it down never replaces the refusal itself.
+   */
+  private async recordRefusal(
+    about: string,
+    node: string | undefined,
+    attempt: number | undefined,
+    error: { code: string; message: string },
+  ): Promise<void> {
+    if (error.code === "STATE_MODIFIED_EXTERNALLY" || error.code === "STATE_LOCKED") return;
+    try {
+      const state = await this.state();
+      if (state.status !== "running" && state.status !== "paused") return;
+      await this.apply({
+        type: "call_refused",
+        about,
+        ...(node === undefined ? {} : { node }),
+        ...(attempt === undefined ? {} : { attempt }),
+        code: error.code,
+        message: error.message,
+      });
+    } catch {
+      // nothing more to do about it
+    }
   }
 
   decideHuman(node: string, decision: "approved" | "rejected", reason?: string) {
@@ -846,18 +884,27 @@ export class LocalRun {
     return decision;
   }
 
-  feedback(input: {
+  async feedback(input: {
     node?: string;
     attempt?: number;
     category: string;
     message: string;
     suggestion?: string;
   }) {
-    return this.apply({ type: "feedback", ...input });
+    const decision = await this.apply({ type: "feedback", ...input });
+    if (!decision.ok)
+      await this.recordRefusal("feedback", input.node, input.attempt, decision.error);
+    return decision;
   }
 
   /** Check a result report the agent sent and keep it for the node's `result` check. */
   async reportResult(node: string, attempt: number, raw: unknown): Promise<StepResult> {
+    const result = await this.acceptReport(node, attempt, raw);
+    if (!result.ok) await this.recordRefusal("report_result", node, attempt, result);
+    return result;
+  }
+
+  private async acceptReport(node: string, attempt: number, raw: unknown): Promise<StepResult> {
     const { spec, engine, store } = this.host;
     const registry = engine.registry ?? defaultRegistry();
     const nodeSpec = spec.nodes.find((n) => n.slug === node);
@@ -884,6 +931,13 @@ export class LocalRun {
     const valid = validateReport(raw, renderDeep(check.params, { task: state.task }));
     if (!valid.ok) return { ok: false, code: valid.code, message: valid.message };
     await store.writeReport(this.runId, node, attempt, valid.report);
+    await this.apply({
+      type: "report_accepted",
+      node,
+      attempt,
+      completeness: valid.report.completeness,
+      rows: valid.report.rows.length,
+    });
     return { ok: true };
   }
 }
@@ -895,10 +949,17 @@ function commandVerdict(
 ): CheckVerdict {
   const tail = result.tail.trim() ? `\n${lastChars(result.tail.trim(), REASON_TAIL)}` : "";
   if (result.timedOut)
-    return { passed: false, reason: `timed out after ${timeout ?? "?"} s${tail}` };
-  if (result.aborted) return { passed: false, reason: `the command was stopped${tail}` };
+    return {
+      passed: false,
+      reason: `timed out after ${timeout ?? "?"} s${tail}`,
+      exit: result.exit,
+    };
+  if (result.aborted)
+    return { passed: false, reason: `the command was stopped${tail}`, exit: result.exit };
   const verdict = evaluateCommand(result.exit, { expect });
-  return verdict.passed ? verdict : { ...verdict, reason: `${verdict.reason}${tail}` };
+  return verdict.passed
+    ? { ...verdict, exit: result.exit }
+    : { ...verdict, reason: `${verdict.reason}${tail}`, exit: result.exit };
 }
 
 function builtinCheckRunners(host: LocalHost): Record<string, CheckRunner> {

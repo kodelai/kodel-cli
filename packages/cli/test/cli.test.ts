@@ -257,6 +257,24 @@ describe("report", () => {
     expect(out).toContain("1 extra attempt(s)");
   });
 
+  test("it shows what the agent said it did, and which of its calls the engine refused", async () => {
+    const host = new LocalPipelineHost({ root: dir, heartbeatMs: 0 });
+    const { run } = await host.start({ pipeline: "demo", task: "t", restart: false });
+    const mine = (await host.open(run.runId)) as NonNullable<Awaited<ReturnType<typeof host.open>>>;
+    await mine.completeStep("write", 9); // not the attempt it is on: refused
+    await mine.completeStep("write", 1, "made the file and ran the tests");
+    await mine.waitForRest(10_000);
+    const text = (await cli("report", run.runId)).out;
+    expect(text).toContain("1 call(s) refused");
+    expect(text).toContain("what the agent said it did:");
+    expect(text).toContain("write #1: made the file and ran the tests");
+    expect(text).toContain("calls the engine refused:");
+    expect(text).toContain("complete_step write: ATTEMPT_MISMATCH");
+    const json = JSON.parse((await cli("report", run.runId, "--json")).out);
+    expect(json.refused).toBe(1);
+    expect(json.nodes[0].attempts[0].summary).toBe("made the file and ran the tests");
+  });
+
   test("no runs, or an unknown one, is an error and not a crash", async () => {
     expect(await cli("report")).toMatchObject({ code: 1, err: "kodel: there are no runs yet\n" });
     expect((await cli("report", "r_000000009_aaaa")).code).toBe(1);

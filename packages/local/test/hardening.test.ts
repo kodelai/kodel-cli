@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { parsePipeline } from "@kodel-ai/pipeline-core";
+import { MAX_LOGGED_REFUSALS, parsePipeline } from "@kodel-ai/pipeline-core";
 import {
   capChanges,
   engineEnv,
@@ -770,13 +770,146 @@ describe("finishing a step with another outcome, on the real adapters", () => {
     expect((await run.state()).active.map((v) => v.node)).toEqual(["plan"]);
   });
 
-  test("an outcome the step does not have is refused and nothing is written for it", async () => {
+  test("an outcome the step does not have is refused, and the run goes nowhere because of it", async () => {
     await writeFile(join(dir, "check-plan.js"), "process.exit(0);\n");
     const { run } = await new LocalHost(spec, options()).start("t");
-    const before = await readFile(join(runDir(run.runId), "state.json"), "utf8");
+    const before = await run.state();
     const refused = await run.completeStep("plan", 1, undefined, "skip_it_all");
     expect(refused.ok).toBe(false);
-    expect(await readFile(join(runDir(run.runId), "state.json"), "utf8")).toBe(before);
+    const after = await run.state();
+    // what the run is doing is exactly as it was; only the refusal was written down
+    expect(after.active).toEqual(before.active);
+    expect(after.status).toBe(before.status);
+    expect(after.nodes).toEqual(before.nodes);
+    expect(after.refusals).toBe(1);
+  });
+});
+
+describe("what the journal keeps, on the real adapters", () => {
+  const journalOf = (runId: string) =>
+    new FileStore({ root: join(dir, ".kodel") }).readJournal(runId);
+  const named = async (runId: string, event: string) =>
+    (await journalOf(runId)).filter((r) => r.event === event);
+
+  const spec = parsePipeline(
+    [
+      "name: j",
+      "nodes:",
+      "  - slug: plan",
+      "    kind: agent",
+      "    prompt: plan it",
+      "    checks:",
+      "      - { kind: command, command: node check.js }",
+      "  - slug: build",
+      "    kind: command",
+      `    command: node -e "process.exit(0)"`,
+      "  - slug: audit",
+      "    kind: agent",
+      "    prompt: audit it",
+      "    checks:",
+      "      - kind: result",
+      "        columns:",
+      "          severity: { enum: [major, minor] }",
+      "          location: location",
+      "          description: text",
+      "        fail_when: { severity: [major] }",
+      "edges:",
+      "  - { from: plan, to: build }",
+      "  - { from: plan, to: build, when: failed }",
+      "  - { from: build, to: audit }",
+      "  - { from: build, to: plan, when: failed }",
+      "",
+    ].join("\n"),
+  );
+  const start = async (check = "process.exit(0);") => {
+    await writeFile(join(dir, "check.js"), `${check}\n`);
+    return (await new LocalHost(spec, { root: dir, heartbeatMs: 0 }).start("t")).run;
+  };
+
+  test("what the agent said goes in with secrets taken out, then the check and the command with their exit codes and times", async () => {
+    const key = ["AKIA", "IOSFODNN7EXAMPLE"].join("");
+    const run = await start();
+    await run.completeStep("plan", 1, `done; the key I used was ${key}`);
+    await run.settle();
+    const said = (await named(run.runId, "agent_completed"))[0];
+    expect(said).toMatchObject({ node: "plan", attempt: 1, outcome: "passed" });
+    expect(String(said?.summary)).toContain("done; the key I used was");
+    expect(String(said?.summary)).not.toContain(key);
+    const check = (await named(run.runId, "check_finished"))[0];
+    expect(check).toMatchObject({ node: "plan", kind: "command", passed: true, exit: 0 });
+    expect(typeof check?.duration_ms).toBe("number");
+    const command = (await named(run.runId, "command_finished"))[0];
+    expect(command).toMatchObject({ node: "build", passed: true, exit: 0 });
+    expect(typeof command?.duration_ms).toBe("number");
+  });
+
+  test("a failing check says what it exited with and what it printed", async () => {
+    const run = await start("console.log('nope, not like this'); process.exit(3);");
+    await run.completeStep("plan", 1);
+    await run.settle();
+    const check = (await named(run.runId, "check_finished"))[0];
+    expect(check).toMatchObject({ passed: false, exit: 3 });
+    expect(String(check?.reason)).toContain("nope, not like this");
+    const report = await run.report();
+    expect(report.nodes.find((n) => n.node === "plan")?.attempts[0]?.checks).toMatchObject([
+      { kind: "command", passed: false, exit: 3 },
+    ]);
+  });
+
+  test("an accepted report of findings is journaled", async () => {
+    const run = await start();
+    await run.completeStep("plan", 1);
+    await run.settle();
+    const sent = await run.reportResult("audit", 1, {
+      completeness: "complete",
+      rows: [{ severity: "minor", location: "a.ts:1", description: "nit" }],
+    });
+    expect(sent.ok).toBe(true);
+    expect(await named(run.runId, "report_accepted")).toMatchObject([
+      { node: "audit", attempt: 1, completeness: "complete", rows: 1 },
+    ]);
+  });
+
+  test("calls that were refused are journaled with what was tried and the code", async () => {
+    const run = await start();
+    await run.completeStep("plan", 9); // a attempt that is not the one it is on
+    await run.reportResult("plan", 1, { completeness: "complete", rows: [] }); // a node with no report
+    await run.feedback({ node: "ghost", category: "other", message: "hm" });
+    const refused = await named(run.runId, "call_refused");
+    expect(refused.map((r) => [r.about, r.code])).toEqual([
+      ["complete_step", "ATTEMPT_MISMATCH"],
+      ["report_result", "PIPELINE_INVALID"],
+      ["feedback", "UNKNOWN_NODE"],
+    ]);
+    expect((await run.report()).refused).toBe(3);
+  });
+
+  test("a run that is over is not written to by a refusal, so its seal stays true", async () => {
+    const run = await start();
+    await run.cancel();
+    expect(await run.sealStatus()).toBe("sealed");
+    const refused = await run.completeStep("plan", 1);
+    expect(refused.ok).toBe(false);
+    expect(await named(run.runId, "call_refused")).toEqual([]);
+    expect(await run.sealStatus()).toBe("sealed");
+  });
+
+  test("when the files were changed behind kodel's back the refusal says so and writes nothing", async () => {
+    const run = await start();
+    const file = join(runDir(run.runId), "state.json");
+    await writeFile(file, (await readFile(file, "utf8")).replace('"task": "t"', '"task": "u"'));
+    const refused = await run.completeStep("plan", 1);
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error.code).toBe("STATE_MODIFIED_EXTERNALLY");
+    expect(await named(run.runId, "call_refused")).toEqual([]);
+  });
+
+  test("a stream of refused calls leaves a journal of bounded size", async () => {
+    const run = await start();
+    for (let i = 0; i < MAX_LOGGED_REFUSALS + 5; i++) await run.completeStep("plan", 100 + i);
+    expect(await named(run.runId, "call_refused")).toHaveLength(MAX_LOGGED_REFUSALS);
+    expect((await run.state()).refusals).toBe(MAX_LOGGED_REFUSALS);
+    expect((await run.report()).refused).toBe(MAX_LOGGED_REFUSALS);
   });
 });
 

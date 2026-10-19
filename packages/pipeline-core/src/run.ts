@@ -120,7 +120,12 @@ export interface RunState {
   nextVisitId: number;
   /** Sequence number of the last journal record. */
   seq: number;
+  /** How many refused calls were journaled; there is a limit (`MAX_LOGGED_REFUSALS`). */
+  refusals?: number;
 }
+
+/** How many refused calls a run journals: enough to see what was tried, too few to be a way to fill the disk. */
+export const MAX_LOGGED_REFUSALS = 100;
 
 // ── events in, effects out ──────────────────────────────────────────────────
 
@@ -135,7 +140,16 @@ export type RunEvent =
       outcome?: string;
     }
   /** The engine work of a node (its own command) finished. The host judged the exit code. */
-  | { type: "work_finished"; node: string; attempt: number; passed: boolean; reason: string }
+  | {
+      type: "work_finished";
+      node: string;
+      attempt: number;
+      passed: boolean;
+      reason: string;
+      /** What the command exited with and how long it ran, for the journal. */
+      exit?: number;
+      duration_ms?: number;
+    }
   | {
       type: "check_finished";
       node: string;
@@ -143,6 +157,28 @@ export type RunEvent =
       index: number;
       passed: boolean;
       reason: string;
+      exit?: number;
+      duration_ms?: number;
+    }
+  /** The host accepted the agent's report of findings. Journaled; it changes nothing else. */
+  | {
+      type: "report_accepted";
+      node: string;
+      attempt: number;
+      completeness: string;
+      rows: number;
+    }
+  /**
+   * A call of the agent was refused (the engine said no). Journaled, up to a limit, so that what was
+   * tried can be looked at afterwards; it changes nothing else.
+   */
+  | {
+      type: "call_refused";
+      about: string;
+      node?: string;
+      attempt?: number;
+      code: string;
+      message: string;
     }
   | { type: "human_decided"; node: string; decision: "approved" | "rejected"; reason?: string }
   | { type: "heartbeat"; node: string; attempt: number; owner?: string }
@@ -504,6 +540,31 @@ class Machine {
       });
       return;
     }
+    if (event.type === "report_accepted") {
+      this.node(event.node);
+      this.log("report_accepted", {
+        node: event.node,
+        attempt: event.attempt,
+        completeness: event.completeness,
+        rows: event.rows,
+      });
+      return;
+    }
+    if (event.type === "call_refused") {
+      // Only the first few are kept: an agent that keeps making refused calls must not be able to
+      // grow the journal without end.
+      const so_far = this.s.refusals ?? 0;
+      if (so_far >= MAX_LOGGED_REFUSALS) throw new Repeat();
+      this.s.refusals = so_far + 1;
+      this.log("call_refused", {
+        about: event.about.slice(0, 40),
+        node: event.node?.slice(0, 100) ?? null,
+        attempt: event.attempt ?? null,
+        code: event.code.slice(0, 40),
+        message: event.message.slice(0, 300),
+      });
+      return;
+    }
     if (event.type === "cancel") {
       if (this.s.status === "running" || this.s.status === "paused") this.end("canceled");
       else throw new Repeat();
@@ -549,12 +610,26 @@ class Machine {
           }
           visit.declared = event.outcome;
         }
+        this.log("agent_completed", {
+          node: event.node,
+          attempt: event.attempt,
+          outcome: visit.declared ?? "passed",
+          summary: event.summary ?? null,
+        });
         this.afterWork(visit);
         return;
       }
       case "work_finished": {
         const visit = this.visitFor(event.node, event.attempt, ["engine"]);
         const node = this.node(event.node);
+        this.log("command_finished", {
+          node: event.node,
+          attempt: event.attempt,
+          passed: event.passed,
+          ...(event.exit === undefined ? {} : { exit: event.exit }),
+          ...(event.duration_ms === undefined ? {} : { duration_ms: event.duration_ms }),
+          ...(event.passed ? {} : { reason: event.reason }),
+        });
         if (event.passed) this.afterWork(visit);
         else this.finish(visit, node.on_fail, { source: "command", reason: event.reason });
         return;
@@ -564,6 +639,16 @@ class Machine {
         if (event.index !== visit.checkIndex) throw new Repeat();
         const check = this.node(event.node).checks[event.index];
         if (!check) throw new Repeat();
+        this.log("check_finished", {
+          node: event.node,
+          attempt: event.attempt,
+          index: event.index,
+          kind: check.kind,
+          passed: event.passed,
+          ...(event.exit === undefined ? {} : { exit: event.exit }),
+          ...(event.duration_ms === undefined ? {} : { duration_ms: event.duration_ms }),
+          ...(event.passed ? {} : { reason: event.reason }),
+        });
         if (event.passed) {
           visit.checkIndex += 1;
           this.emitCheck(visit, false);

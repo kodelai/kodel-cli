@@ -34,7 +34,8 @@ export function formatReport(
   );
   lines.push(
     `redone: ${report.extra_attempts} extra attempt(s); ${report.restarts} restart(s), ` +
-      `${report.pauses} pause(s), ${report.feedback} note(s) from the agent`,
+      `${report.pauses} pause(s), ${report.feedback} note(s) from the agent, ` +
+      `${report.refused} call(s) refused`,
   );
   lines.push("");
   const width = Math.max(4, ...report.nodes.map((n) => plain(n.node).length));
@@ -56,6 +57,27 @@ export function formatReport(
   );
   if (failures.length > 0) {
     lines.push("", "what did not pass:", ...failures.map((f) => f.slice(0, 300)));
+  }
+  const said = report.nodes.flatMap((node) =>
+    node.attempts
+      .filter((a) => a.summary)
+      .map((a) => `  ${plain(node.node)} #${a.attempt}: ${plain(a.summary ?? "")}`),
+  );
+  if (said.length > 0) {
+    lines.push("", "what the agent said it did:", ...said.map((s) => s.slice(0, 300)));
+  }
+  if (report.refusals.length > 0) {
+    const shown = report.refusals.slice(0, 10).map((r) => {
+      const where = r.node ? ` ${plain(r.node)}` : "";
+      return `  ${plain(r.about)}${where}: ${plain(r.code)}: ${plain(r.message)}`.slice(0, 300);
+    });
+    const more = report.refused - shown.length;
+    lines.push(
+      "",
+      "calls the engine refused:",
+      ...shown,
+      ...(more > 0 ? [`  and ${more} more`] : []),
+    );
   }
   return `${lines.join("\n")}\n`;
 }

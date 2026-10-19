@@ -23,6 +23,8 @@ const report: RunReport = {
   pauses: 0,
   feedback: 2,
   extra_attempts: 1,
+  refused: 0,
+  refusals: [],
   nodes: [
     {
       node: "impl",

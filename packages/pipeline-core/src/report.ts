@@ -12,6 +12,14 @@ export interface AttemptReport {
   seconds: number;
   /** For an attempt that failed: where the failure came from and why. */
   failure?: { source: string; reason: string };
+  /** What the agent said it had done when it completed the step. */
+  summary?: string;
+  /** The node's own command, when it has one. */
+  command?: { passed: boolean; exit?: number; ms?: number };
+  /** The checks that ran, in order. */
+  checks?: { index: number; kind: string; passed: boolean; exit?: number; ms?: number }[];
+  /** Reports of findings the agent sent that were accepted. */
+  reports?: { completeness: string; rows: number }[];
 }
 
 export interface NodeReport {
@@ -36,6 +44,10 @@ export interface RunReport {
   restarts: number;
   pauses: number;
   feedback: number;
+  /** Calls of the agent the engine refused (journaled up to a limit). */
+  refused: number;
+  /** The refusals that were journaled, in order: what was tried, and why it was not allowed. */
+  refusals: { about: string; node?: string; code: string; message: string }[];
   /** Attempts beyond the first, over all nodes: how much rework there was. */
   extra_attempts: number;
 }
@@ -60,6 +72,10 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
     }
     return found;
   };
+
+  const refusals: RunReport["refusals"] = [];
+  const attemptOf = (name: string, attempt: number) =>
+    nodes.get(name)?.attempts.find((a) => a.attempt === attempt);
 
   for (const record of journal) {
     const name = typeof record.node === "string" ? record.node : undefined;
@@ -89,6 +105,59 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
             }
           }
         }
+        break;
+      case "agent_completed": {
+        const found = name && attempt !== undefined ? attemptOf(name, attempt) : undefined;
+        if (found && typeof record.summary === "string") found.summary = record.summary;
+        break;
+      }
+      case "command_finished": {
+        const found = name && attempt !== undefined ? attemptOf(name, attempt) : undefined;
+        if (found) {
+          found.command = {
+            passed: record.passed === true,
+            ...(typeof record.exit === "number" ? { exit: record.exit } : {}),
+            ...(typeof record.duration_ms === "number" ? { ms: record.duration_ms } : {}),
+          };
+        }
+        break;
+      }
+      case "check_finished": {
+        const found = name && attempt !== undefined ? attemptOf(name, attempt) : undefined;
+        if (found && typeof record.index === "number") {
+          found.checks = [
+            ...(found.checks ?? []),
+            {
+              index: record.index,
+              kind: typeof record.kind === "string" ? record.kind : "unknown",
+              passed: record.passed === true,
+              ...(typeof record.exit === "number" ? { exit: record.exit } : {}),
+              ...(typeof record.duration_ms === "number" ? { ms: record.duration_ms } : {}),
+            },
+          ];
+        }
+        break;
+      }
+      case "report_accepted": {
+        const found = name && attempt !== undefined ? attemptOf(name, attempt) : undefined;
+        if (found) {
+          found.reports = [
+            ...(found.reports ?? []),
+            {
+              completeness: typeof record.completeness === "string" ? record.completeness : "?",
+              rows: typeof record.rows === "number" ? record.rows : 0,
+            },
+          ];
+        }
+        break;
+      }
+      case "call_refused":
+        refusals.push({
+          about: typeof record.about === "string" ? record.about : "?",
+          ...(name ? { node: name } : {}),
+          code: typeof record.code === "string" ? record.code : "?",
+          message: typeof record.message === "string" ? record.message : "",
+        });
         break;
       case "node_restarted":
         restarts += 1;
@@ -127,6 +196,9 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
     restarts,
     pauses,
     feedback,
+    // the number counted by the engine can be higher than the list: only the first are journaled
+    refused: Math.max(state.refusals ?? 0, refusals.length),
+    refusals,
     extra_attempts: all.reduce((total, n) => total + Math.max(0, n.attempts.length - 1), 0),
   };
 }

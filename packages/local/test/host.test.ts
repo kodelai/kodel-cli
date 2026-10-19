@@ -67,8 +67,10 @@ describe("running real commands", () => {
     expect(events).toEqual([
       "run_started",
       "node_entered",
+      "command_finished",
       "node_finished",
       "node_entered",
+      "command_finished",
       "node_finished",
       "run_finished",
     ]);

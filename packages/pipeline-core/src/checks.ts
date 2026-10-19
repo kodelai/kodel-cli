@@ -14,6 +14,8 @@ export interface CheckVerdict {
   /** A sentence the agent or the human can act on. Empty when the check passed. */
   reason: string;
   code?: ErrorCode;
+  /** For a check that ran a command: what it exited with, kept in the journal. */
+  exit?: number;
 }
 
 const pass = (): CheckVerdict => ({ passed: true, reason: "" });
