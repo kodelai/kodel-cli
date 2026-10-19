@@ -2,6 +2,8 @@ node_modules
 dist
 .DS_Store
 /.claude/worktrees
+# Results of repeated real-agent runs.
+/tests/agents/.stats
 # Run history of the pipelines we run on this repository.
 /.kodel/runs
 # Local Russian working notes (product notes, decision log, contract, architecture, plan); not part of the repository.

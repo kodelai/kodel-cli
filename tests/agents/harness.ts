@@ -104,7 +104,8 @@ export function makeSandbox(
   for (const [path, content] of Object.entries(fixture.files ?? {})) {
     writeFileSync(join(dir, path), content);
   }
-  const driver = options.withDriverText === false ? "" : shippedDriverSection();
+  // By default the project says nothing about pipelines: the rules come from the server itself.
+  const driver = options.withDriverText === true ? shippedDriverSection() : "";
   writeFileSync(join(dir, "CLAUDE.md"), `# Test repository\n\n${driver}`);
   writeFileSync(join(dir, ".gitignore"), ".kodel/runs\n");
   if (options.withProjectSettings) {

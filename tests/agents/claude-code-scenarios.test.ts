@@ -13,7 +13,7 @@ import {
   type Sandbox,
   TURN_TIMEOUT_MS,
 } from "./harness";
-import { AUDIT, REVIEWED, SECRET, SLOW, STUBBORN } from "./pipelines";
+import { AUDIT, INDEPENDENT, REVIEWED, SECRET, SLOW, STUBBORN } from "./pipelines";
 
 const sandboxes: Sandbox[] = [];
 afterEach(() => {
@@ -138,34 +138,31 @@ describe("Claude Code on a real kodel server: harder paths", () => {
   );
 
   scenario(
-    "an engine command longer than a tool call waits does not make the agent hammer the server",
+    "a command that takes longer than a tool call is waited for with wait_s, not with a shell or a loop",
     async () => {
       const sandbox = makeSandbox({ fixture: SLOW });
       sandboxes.push(sandbox);
+      // No shell: the only way to wait is the server's own wait_s.
       const turn = await runAgentTurn({
         sandbox,
         prompt: "Use the slow pipeline to create hello.txt.",
-        allowedTools: TOOLS,
+        allowedTools: TOOLS.filter((t) => t !== "Bash"),
       });
       const why = explain(turn);
 
-      const completes = callsTo(turn, "pipeline_complete_step");
-      expect(completes[0]?.output, why).toContain('"advanced": true');
-      // The 25 s command outlasts the 20 s wait, so the agent was told the engine is still working.
-      const sawRunning = turn.calls.some(
-        (c) => c.name.startsWith("mcp__kodel__") && c.output.includes('"running"'),
+      expect(callsTo(turn, "pipeline_complete_step")[0]?.output, why).toContain('"advanced": true');
+      // The 25 s command outlasts the 20 s a completion waits, and the step said how long it takes.
+      const waits = callsTo(turn, "pipeline_next_step").filter(
+        (c) => typeof c.input.wait_s === "number" && c.input.wait_s > 0,
       );
+      expect(waits.length, `the agent never used wait_s${why}`).toBeGreaterThanOrEqual(1);
+      // It waited, rather than asking again and again, and it was there when the work finished.
+      expect(callsTo(turn, "pipeline_next_step").length, why).toBeLessThanOrEqual(5);
       const runId = await onlyRun(sandbox);
       const state = await (await humanHost(sandbox).open(runId))?.state();
-      expect(sawRunning || state?.status === "completed", `no sign of the long command${why}`).toBe(
-        true,
+      expect(state?.status, `the agent stopped before the command finished${why}`).toBe(
+        "completed",
       );
-      // It may check again a few times, but not in a tight loop.
-      expect(callsTo(turn, "pipeline_next_step").length, why).toBeLessThanOrEqual(8);
-      expect(turn.calls.length, why).toBeLessThan(25);
-      if (turn.calls.some((c) => c.output.includes('"done": true'))) {
-        expect(state?.status, `it was told "done" too early${why}`).toBe("completed");
-      }
     },
     TURN_TIMEOUT_MS,
   );
@@ -197,6 +194,30 @@ describe("Claude Code on a real kodel server: harder paths", () => {
       expect(stored.length, why).toBeGreaterThanOrEqual(1);
     },
     TURN_TIMEOUT_MS,
+  );
+
+  scenario(
+    "a step that asks for a fresh context is handed to a subagent, whose findings are reported as they are",
+    async () => {
+      const sandbox = makeSandbox({ fixture: INDEPENDENT });
+      sandboxes.push(sandbox);
+      const turn = await runAgentTurn({
+        sandbox,
+        prompt: "Use the independent pipeline to review the notes in this repository.",
+        allowedTools: [...TOOLS, "Task", "Agent"],
+      });
+      const why = explain(turn);
+
+      const subagent = turn.calls.findIndex((c) => c.name === "Task" || c.name === "Agent");
+      const report = turn.calls.findIndex((c) => c.name === "mcp__kodel__pipeline_report_result");
+      expect(subagent, `no subagent was used${why}`).toBeGreaterThanOrEqual(0);
+      expect(report, `no report was sent${why}`).toBeGreaterThanOrEqual(0);
+      expect(subagent, `the report came before the subagent${why}`).toBeLessThan(report);
+      const runId = await onlyRun(sandbox);
+      const state = await (await humanHost(sandbox).open(runId))?.state();
+      expect(state?.status, why).toBe("completed");
+    },
+    TURN_TIMEOUT_MS * 2,
   );
 
   scenario(

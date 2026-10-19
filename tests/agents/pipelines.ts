@@ -95,6 +95,7 @@ export const SLOW: Fixture = {
     "  - slug: wait",
     "    kind: command",
     "    command: node slow.js",
+    "    expected_duration: 25",
     "edges:",
     "  - { from: write, to: wait }",
     "  - { from: wait, to: write, when: failed }",
@@ -102,6 +103,31 @@ export const SLOW: Fixture = {
   ].join("\n"),
   files: {
     "slow.js": "setTimeout(() => console.log('done'), 25000);\n",
+  },
+};
+
+/** A node that has to hand in a report of findings, made by someone who has not seen the work. */
+export const INDEPENDENT: Fixture = {
+  pipeline: [
+    "name: independent",
+    "nodes:",
+    "  - slug: audit",
+    "    kind: agent",
+    "    fresh_context: true",
+    "    prompt: |",
+    "      Task: {{task}}",
+    "      Read notes.txt. Every line that starts with BUG( is one finding. Report each of them.",
+    "    checks:",
+    "      - kind: result",
+    "        columns:",
+    "          severity: { enum: [major, minor] }",
+    "          location: location",
+    "          description: text",
+    "        fail_when: { severity: [major] }",
+    "",
+  ].join("\n"),
+  files: {
+    "notes.txt": ["BUG(minor): the title has a typo", "all else is fine", ""].join("\n"),
   },
 };
 

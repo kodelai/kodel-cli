@@ -14,6 +14,7 @@
     "format": "biome format --write .",
     "test": "bun test",
     "test:agents": "KODEL_AGENT_TESTS=1 bun test tests/agents --timeout 900000",
+    "test:agents:stats": "bun tests/agents/run-stats.ts",
     "build": "bun run --cwd packages/cli build",
     "check:artifact": "node scripts/check-artifact.mjs"
   },

@@ -33,7 +33,9 @@ Scenarios (`claude-code.test.ts`, `claude-code-scenarios.test.ts`; the pipelines
 - a failed check is explained by the engine, and the agent fixes the work and goes on;
 - a person's rejection, with its reason, reaches the agent that redoes the work;
 - a check that cannot pass pauses the run, and the agent stops instead of looping;
-- an engine command longer than a tool call waits does not make the agent hammer the server;
+- a command that takes longer than a tool call is waited for with `wait_s`, not with a shell or a loop;
+- a step that asks for a fresh context is handed to a subagent;
+- the person at a gate is told what the engine found changed, and how to decide;
 - a node that wants a report gets one in the shape it asked for;
 - a task that already ran to its end is not silently run again.
 
@@ -42,3 +44,20 @@ repository (as committed, dependencies installed) with a person at both gates; i
 minutes. `KODEL_AGENT_KEEP=1` keeps the clone for inspection. The agent under test gets no
 `KODEL_AGENT_*` variable, so the repository's own `bun test` that the pipeline runs inside the clone
 cannot start these scenarios again.
+
+By default the sandbox says nothing about pipelines in its `CLAUDE.md`: the rules reach the agent from
+the server's own instructions, which is what these scenarios check.
+
+## How reliable is a scenario?
+
+One green run says little about an agent. To see how often each scenario passes, on one or more
+models:
+
+```bash
+bun run test:agents:stats -- --models sonnet,opus --repeat 3
+```
+
+It prints the pass rate and the mean time of each scenario per model (the least reliable first) and
+writes the results as JSON to `tests/agents/.stats/`. `--min-rate R` makes it exit with 1 when a
+scenario passes less often than `R` (default 1). `.github/workflows/agents-nightly.yml` runs it every
+night with an `ANTHROPIC_API_KEY` secret (without the secret it does nothing) and keeps the results.

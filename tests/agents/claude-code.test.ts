@@ -75,6 +75,19 @@ describe("Claude Code driving a real kodel server", () => {
       expect(readFileSync(join(sandbox.dir, "hello.txt"), "utf8").trim()).toBe("hello");
       expect(await run?.integrityStatus()).toBe("ok");
 
+      // At the gate the engine gave the agent its own list of what changed, and told it to pass
+      // that on; what the agent wrote to the person has to name the change and the way to decide.
+      const atGate = first.calls.find(
+        (c) => c.name.startsWith("mcp__kodel__") && c.output.includes('"tell_the_person"'),
+      );
+      expect(atGate, `the agent was never told to write to the person${why}`).toBeDefined();
+      expect(atGate?.output).toContain('"changes"');
+      expect(atGate?.output).toContain("hello.txt");
+      expect(first.finalText, `the person was not told what changed${why}`).toContain("hello.txt");
+      expect(first.finalText, `the person was not told how to decide${why}`).toMatch(
+        /gate (approve|reject)/,
+      );
+
       // The person approves, as only a person can.
       await run?.decideHuman("approve", "approved");
       await run?.waitForRest(60_000);
