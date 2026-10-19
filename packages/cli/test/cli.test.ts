@@ -97,6 +97,29 @@ describe("status", () => {
     expect(one.out).toContain("integrity: ok");
   });
 
+  test("--json lists the runs as an array of objects", async () => {
+    const id = await runAtGate();
+    const result = await cli("status", "--json");
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.out)).toEqual([
+      { runId: id, pipeline: "demo", status: "running", task: "t" },
+    ]);
+  });
+
+  test("--json is for the list: with a run id the text of that run is printed", async () => {
+    const id = await runAtGate();
+    const result = await cli("status", id, "--json");
+    expect(result.code).toBe(0);
+    expect(result.out).toContain(`run:       ${id}`);
+    expect(() => JSON.parse(result.out)).toThrow();
+  });
+
+  test("--json with no runs is an empty array", async () => {
+    const result = await cli("status", "--json");
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.out)).toEqual([]);
+  });
+
   test("an unknown run is an error, not a crash", async () => {
     expect(await cli("status", "nope")).toMatchObject({
       code: 1,

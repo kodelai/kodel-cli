@@ -96,10 +96,21 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
   program
     .command("status [run]")
     .description("List the runs, or show one")
-    .action(async (runId?: string) => {
+    .option("--json", "print the run list as JSON")
+    .action(async (runId: string | undefined, opts: { json?: boolean }) => {
       const h = host();
       if (!runId) {
         const runs = await h.runSummaries();
+        if (opts.json) {
+          const list = runs.map(({ meta, state }) => ({
+            runId: meta.runId,
+            pipeline: meta.pipeline,
+            status: state?.status ?? "unreadable",
+            task: meta.task,
+          }));
+          env.out(`${JSON.stringify(list, null, 2)}\n`);
+          return;
+        }
         if (runs.length === 0) env.out("no runs yet\n");
         for (const { meta, state } of runs) {
           env.out(
