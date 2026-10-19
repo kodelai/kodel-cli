@@ -20,9 +20,6 @@ afterEach(() => {
 
 const scenario = ENABLED ? test : test.skip;
 
-/** The engine runs commands for minutes; this is how a headless agent waits for them. */
-const WAIT_HINT =
-  "When a step is running in the engine, wait with `sleep 20` and ask again, instead of ending your turn.";
 const TURN_MS = 15 * 60_000;
 const TOOLS = ["mcp__kodel", "Read", "Write", "Edit", "Glob", "Grep", "Bash"];
 
@@ -55,7 +52,7 @@ describe("the repository's own pipeline, on a real agent", () => {
         sandbox,
         timeoutMs: TURN_MS,
         allowedTools: TOOLS,
-        prompt: `Run the dev pipeline for this task: ${TASK}\n${WAIT_HINT}`,
+        prompt: `Run the dev pipeline for this task: ${TASK}`,
       });
       const runs = await host.runSummaries();
       expect(runs.length, `no run was started${explain(first)}`).toBe(1);
@@ -78,7 +75,7 @@ describe("the repository's own pipeline, on a real agent", () => {
         timeoutMs: TURN_MS,
         allowedTools: TOOLS,
         resume: first.sessionId,
-        prompt: `The plan is approved. Continue the pipeline. ${WAIT_HINT}`,
+        prompt: "The plan is approved. Continue the pipeline.",
       });
       now = await standing(sandbox, runId);
       const detail = `${explain(first)}\n--- second turn ---${explain(second)}`;
@@ -113,6 +110,33 @@ describe("the repository's own pipeline, on a real agent", () => {
       expect(
         readFileSync(join(sandbox.dir, ".kodel", "runs", runId, "journal.jsonl"), "utf8"),
       ).toContain("gate_decided");
+
+      // The report says where the time went: the commands were the engine's, the gates a person's.
+      const report = await (await humanHost(sandbox).open(runId))?.report();
+      expect(report?.nodes.map((n) => n.node)).toEqual([
+        "plan",
+        "plan-approval",
+        "impl",
+        "verify",
+        "test",
+        "build",
+        "review",
+        "final-approval",
+      ]);
+      expect(report?.nodes.filter((n) => n.gate).map((n) => n.node)).toEqual([
+        "plan-approval",
+        "final-approval",
+      ]);
+      expect(report?.work_s ?? 0).toBeGreaterThan(0);
+      // The agent was not left guessing how long the engine's commands take: it was told.
+      const asked = [
+        ...callsTo(second, "pipeline_next_step"),
+        ...callsTo(second, "pipeline_complete_step"),
+      ];
+      expect(
+        asked.some((c) => c.output.includes('"expected_s"')),
+        `the expected durations never reached the agent${detail}`,
+      ).toBe(true);
     },
     4 * TURN_MS,
   );
