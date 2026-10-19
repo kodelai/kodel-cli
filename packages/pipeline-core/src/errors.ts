@@ -1,6 +1,6 @@
 /**
- * Typed errors with stable string codes. The codes are part of the tool contract
- * (docs/contract.md, section 7): never rename one without a format bump.
+ * Typed errors with stable string codes. The codes are part of the tool contract (its error
+ * codes section): never rename one without a format bump.
  */
 export const ERROR_CODES = [
   "UNKNOWN_PIPELINE",
@@ -31,18 +31,20 @@ export interface ToolError {
 
 export class KodelError extends Error {
   readonly code: ErrorCode;
+  readonly issues: unknown[] | undefined;
 
-  constructor(code: ErrorCode, message: string) {
+  constructor(code: ErrorCode, message: string, issues?: unknown[]) {
     super(message);
     this.name = "KodelError";
     this.code = code;
+    this.issues = issues;
   }
 
   override toString(): string {
     return `${this.code}: ${this.message}`;
   }
 
-  toToolError(issues?: unknown[]): ToolError {
+  toToolError(issues: unknown[] | undefined = this.issues): ToolError {
     return issues === undefined
       ? { ok: false, code: this.code, message: this.message }
       : { ok: false, code: this.code, message: this.message, issues };

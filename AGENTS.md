@@ -10,17 +10,19 @@ agent (fail-closed), keeps a run history in the repository, and analyzes that hi
 propose improvements to the pipeline. It is built so that a server backend (Kodel Server)
 can later sit behind the same contract.
 
-Documents: `prd/etude.md` (product requirements) and `prd/open-questions.md` (decision log and
-backlog) are Russian working notes; `docs/contract.md` (MCP contract) and `docs/mvp-plan.md` are
-the English specifications. Reference pipeline: `examples/pipelines/feature.yaml`.
+Documents: until the first working version exists, the specifications are Russian working notes
+(product notes, decision log, MCP contract, architecture, MVP plan) kept locally in the git-ignored
+`notes/` folder; they are not part of the repository. Comments and issues refer to decisions by id
+(`T-12`, `T-37`, ...) from the decision log. English documentation in `docs/` will be written from
+those notes once the first working version is done. Reference pipeline: `examples/pipelines/feature.yaml`.
 
 ## Language
 
 - **All code comments, doc comments, documentation, commit messages, PR descriptions, error
   messages, log messages and identifiers are written in English.** No exceptions for new work.
 - Conversation with the user may be in the user's language; files are not.
-- `prd/` holds Russian working notes (product requirements, decision log). Specifications and
-  user-facing documentation live in `docs/` and are written in English.
+- Everything that is committed is in English. The local, git-ignored `notes/` folder holds the
+  Russian working notes and must not be committed.
 
 ## Layout
 
@@ -33,7 +35,7 @@ Bun workspace (TypeScript, ESM). Runtime target: Node >= 22.19; Bun is the devel
 - `adapters/`: per-agent pieces (MCP config writers, deny rules, driver prompts). `skills/`: agent-facing skills.
 - `tests/e2e`, `tests/agents`: end-to-end and real-agent scenarios. `fixtures/formats/`: golden fixtures per format version.
 
-Boundaries between the core, the CLI and Kodel Server: `docs/architecture.md`. The engine is meant to be shared with Kodel Server: the server implements the same adapter interfaces
+The engine is meant to be shared with Kodel Server: the server implements the same adapter interfaces
 (state store on Postgres, runners as executors) and registers its own node and check kinds.
 
 ## Principles
@@ -49,7 +51,7 @@ Boundaries between the core, the CLI and Kodel Server: `docs/architecture.md`. T
 
 ## Decisions and tests
 
-Every decision recorded in `prd/open-questions.md` has a test plan and a refutation criterion.
+Every decision recorded in the decision log (local notes, referred to by id) has a test plan and a refutation criterion.
 A decision is implemented only when its tests exist and pass. Test names carry the decision id
 (for example `t12_format_cascade_defaults_to_v1`). If a test shows a decision does not hold,
 revisit the decision instead of bending the test.
@@ -58,7 +60,7 @@ revisit the decision instead of bending the test.
 
 - TypeScript in strict mode (`noUncheckedIndexedAccess`), ESM only, no `any`. Validate external input with `zod` (v3, aligned with Kodel Server). Biome formats and lints.
 - The shipped artifact must run on plain Node, not only under Bun: CI runs `scripts/check-artifact.mjs` against the built file.
-- Errors: `KodelError` with a stable string code (see `docs/contract.md`); tools return `{ok:false, code, message}` rather than throwing.
+- Errors: `KodelError` with a stable string code (see the error codes in the MCP contract); tools return `{ok:false, code, message}` rather than throwing.
 - Keep dependencies minimal and justify each new one in the PR description. Licenses must be compatible with Apache-2.0.
 - Keep comments rare and about *why*, not *what*. Match the style of the surrounding code.
 

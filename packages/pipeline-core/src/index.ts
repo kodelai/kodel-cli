@@ -4,3 +4,5 @@
  */
 export * from "./errors";
 export * from "./format";
+export * from "./pipeline";
+export * from "./registry";

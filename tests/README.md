@@ -5,4 +5,4 @@
 - `agents/`: scenarios on real agents, run nightly and before releases; assert on run state, not on text.
 - `../fixtures/formats/`: golden fixtures per format version.
 
-Every decision in `prd/open-questions.md` has a test plan; test names carry the decision id (e.g. `t12_...`).
+Every decision in the decision log has a test plan; test names carry the decision id (e.g. `t12_...`).

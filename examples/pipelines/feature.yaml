@@ -1,6 +1,6 @@
 # Reference pipeline `feature` (draft syntax, not yet implemented).
 # Example for THIS repository (TypeScript, Bun); the commands are project-specific and would be
-# produced per project by the `design` skill. Full model: docs/contract.md, section 3.
+# produced per project by the `design` skill. Full model: the MCP contract, section 3.
 #
 # Model:
 #   * A node has a `kind` that says what it does:
@@ -50,7 +50,7 @@ nodes:
     checks:
       # `since` defaults to `node`: after a rejection at manual-test only the new iteration counts
       - { kind: diff, paths: ["packages/**", "tests/**"], max_lines: 800 }
-      - { kind: diff, paths: [".kodel/runs/**", "prd/**"], mode: unchanged }
+      - { kind: diff, paths: [".kodel/runs/**", "docs/**"], mode: unchanged }
 
   - slug: build
     kind: command

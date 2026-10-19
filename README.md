@@ -2,8 +2,8 @@
 
 Spec-driven pipelines for solo developers, running inside the coding agent you already use.
 
-> Status: early design. Nothing here is released yet; see `prd/` for the current drafts
-> (product requirements, decisions, and the MCP tool contract).
+> Status: early development. Nothing here is released yet, and the documentation will be
+> written once the first working version exists.
 
 ## Idea
 

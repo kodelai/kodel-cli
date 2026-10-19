@@ -10,7 +10,7 @@ describe("error codes", () => {
   });
 
   test("list matches the contract (14 codes)", () => {
-    // A new code must be added to docs/contract.md section 7 and to this count.
+    // A new code must be added to the contract (error codes section) and to this count.
     expect(ERROR_CODES.length).toBe(14);
   });
 
