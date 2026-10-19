@@ -14,7 +14,6 @@ import {
   defaultRegistry,
   type Effect,
   type EngineOptions,
-  type ErrorCode,
   evaluateCommand,
   evaluateDiff,
   evaluateResult,
@@ -27,6 +26,7 @@ import {
   type RunState,
   redactText,
   renderDeep,
+  type StepResult,
   validateReport,
 } from "@kodel-ai/pipeline-core";
 import { type CommandOptions, type CommandResult, runCommand } from "./command";
@@ -84,8 +84,6 @@ export interface HostOptions {
   integrityDir?: string;
 }
 
-export type StepResult = { ok: true } | { ok: false; code: ErrorCode; message: string };
-
 const REASON_TAIL = 2_000;
 const lastChars = (text: string, n: number) => (text.length > n ? `...${text.slice(-n)}` : text);
 
@@ -125,8 +123,14 @@ export class LocalHost {
     this.checkRunners = { ...builtinCheckRunners(this), ...options.checkRunners };
   }
 
-  /** The active run for this task, or a new one. */
-  async start(task: string): Promise<{ run: LocalRun; reused: boolean }> {
+  /**
+   * The active run for this task, or a new one. If the task already ran to its end, that run comes
+   * back with `terminal: true` and nothing new starts, unless `restart` says the user wants another.
+   */
+  async start(
+    task: string,
+    options: { restart?: boolean } = {},
+  ): Promise<{ run: LocalRun; reused: boolean; terminal: boolean }> {
     const registry = this.engine.registry ?? defaultRegistry();
     const needsGit = this.spec.nodes.some((n) =>
       n.checks.some((c) => registry.check(c.kind)?.baseline?.(c.params)),
@@ -138,7 +142,15 @@ export class LocalHost {
     }
     const redactedTask = redactText(task, this.rules);
     const existing = await this.store.findActive(this.spec.name, redactedTask);
-    if (existing) return { run: new LocalRun(this, existing.meta.runId), reused: true };
+    if (existing) {
+      return { run: new LocalRun(this, existing.meta.runId), reused: true, terminal: false };
+    }
+    if (options.restart !== true) {
+      const latest = await this.store.findLatest(this.spec.name, redactedTask);
+      if (latest) {
+        return { run: new LocalRun(this, latest.meta.runId), reused: false, terminal: true };
+      }
+    }
 
     const now = this.clock();
     const runId = newRunId(now);
@@ -151,10 +163,11 @@ export class LocalHost {
       specHash,
       createdAt: now,
     });
+    await this.store.writeSpec(runId, this.spec);
     const run = new LocalRun(this, runId);
     const result = await run.apply({ type: "start", runId, task: redactedTask, specHash });
     if (!result.ok) throw result.error;
-    return { run, reused: false };
+    return { run, reused: false, terminal: false };
   }
 
   /** A handle on a run that is already on disk (after a restart, or from another process). */
@@ -422,6 +435,20 @@ export class LocalRun {
         if (this.pending.size <= parked()) return;
       }
       await Promise.race([...this.pending]);
+    }
+  }
+
+  /** Wait for the work running in this process to come to rest, but no longer than `ms`. */
+  async waitForRest(ms: number): Promise<void> {
+    if (ms <= 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+    });
+    try {
+      await Promise.race([this.settle(), timeout]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 

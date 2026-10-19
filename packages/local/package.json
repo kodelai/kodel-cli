@@ -8,5 +8,8 @@
   },
   "dependencies": {
     "@kodel-ai/pipeline-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.31.0"
   }
 }

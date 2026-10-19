@@ -203,8 +203,27 @@ describe("starting and finding runs", () => {
     expect(second.run.runId).toBe(first.run.runId);
     await first.run.decideHuman("ask", "approved");
     const third = await h.start("same task");
-    expect(third.reused).toBe(false);
-    expect(third.run.runId).not.toBe(first.run.runId);
+    expect(third).toMatchObject({ reused: false, terminal: true });
+    expect(third.run.runId).toBe(first.run.runId);
+    const again = await h.start("same task", { restart: true });
+    expect(again).toMatchObject({ reused: false, terminal: false });
+    expect(again.run.runId).not.toBe(first.run.runId);
+  });
+
+  test("the pipeline a run started with is kept next to it", async () => {
+    const { run } = await host(COMMANDS).start("t");
+    const kept = (await readFile(
+      join(dir, ".kodel", "runs", run.runId, "spec.json"),
+      "utf8",
+    )) as string;
+    expect(JSON.parse(kept)).toMatchObject({ name: "cmds" });
+  });
+
+  test("waitForRest returns when the work is done, or when the time is up", async () => {
+    const { run } = await host(COMMANDS).start("t");
+    await run.waitForRest(10_000);
+    expect((await run.state()).status).toBe("completed");
+    await run.waitForRest(0);
   });
 
   test("a different task gets its own run", async () => {

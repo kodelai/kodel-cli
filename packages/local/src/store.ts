@@ -137,6 +137,34 @@ export class FileStore {
     return metas.sort((a, b) => a.createdAt - b.createdAt || a.runId.localeCompare(b.runId));
   }
 
+  /** The newest run of this pipeline and task, finished or not. */
+  async findLatest(
+    pipeline: string,
+    task: string,
+  ): Promise<{ meta: RunMeta; state: RunState } | undefined> {
+    const redactedTask = this.redact(task);
+    const candidates = (await this.listRuns()).filter(
+      (m) => m.pipeline === pipeline && m.task === redactedTask,
+    );
+    for (const meta of candidates.reverse()) {
+      const state = await this.readState(meta.runId);
+      if (state) return { meta, state };
+    }
+    return undefined;
+  }
+
+  /** Keep the pipeline a run started with, so editing the file later does not change a run in flight. */
+  async writeSpec(runId: string, spec: unknown): Promise<void> {
+    await this.writeAtomic(
+      join(this.runDir(runId), "spec.json"),
+      `${JSON.stringify(spec, null, 2)}\n`,
+    );
+  }
+
+  async readSpec(runId: string): Promise<unknown | undefined> {
+    return this.readJson<unknown>(join(this.runDir(runId), "spec.json"));
+  }
+
   /** The newest run of this pipeline and task that has not finished. */
   async findActive(
     pipeline: string,

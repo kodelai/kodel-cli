@@ -12,4 +12,5 @@ export * from "./registry";
 export * from "./render";
 export * from "./result";
 export * from "./run";
+export * from "./service";
 export * from "./slug";
