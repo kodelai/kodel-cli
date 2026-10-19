@@ -201,6 +201,13 @@ function checkPlaceholders(c: Collector, text: string, path: Path) {
     const name = m[1] ?? "";
     if (!(PLACEHOLDERS as readonly string[]).includes(name)) {
       c.add(path, `unknown placeholder "{{${name}}}" (available: ${PLACEHOLDERS.join(", ")})`);
+    } else if (name === "task" && path[path.length - 1] === "command") {
+      // The task text is free input; substituted into a shell command it would be an injection.
+      c.add(
+        path,
+        '"{{task}}" is not allowed in a command: the task text is free input and would be ' +
+          'injected into the shell; use "{{task.slug}}" instead',
+      );
     }
   }
   if (stripped.replace(PLACEHOLDER, "").includes("{{")) {

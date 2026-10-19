@@ -245,6 +245,27 @@ describe("placeholders", () => {
   test("an unclosed placeholder is rejected", () => {
     expectIssue(VALID.replace("{{task}}", "{{task"), "unclosed placeholder", 5);
   });
+
+  test("{{task}} is not allowed in a node command (shell injection)", () => {
+    expectIssue(
+      VALID.replace("command: make", "command: echo {{task}}"),
+      '"{{task}}" is not allowed in a command',
+      8,
+    );
+  });
+
+  test("{{task}} is not allowed in a check command either", () => {
+    const text = VALID.replace(
+      "    prompt: do {{task}}\n",
+      "    prompt: do {{task}}\n    checks:\n      - { kind: command, command: 'echo {{task}}' }\n",
+    );
+    expectIssue(text, '"{{task}}" is not allowed in a command');
+  });
+
+  test("{{task.slug}} is fine in a command, and {{task}} is fine in a prompt", () => {
+    const text = VALID.replace("command: make", "command: make plan SLUG={{task.slug}}");
+    expect(validatePipeline(text).ok).toBe(true);
+  });
 });
 
 describe("diff check", () => {
