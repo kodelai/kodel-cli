@@ -106,7 +106,8 @@ const topSchema = z
       .strict()
       .optional(),
     nodes: z.array(z.unknown()).min(1),
-    edges: z.array(z.unknown()).optional(),
+    // `edges:` with nothing under it reads as null; that means no edges.
+    edges: z.array(z.unknown()).nullish(),
   })
   .strict();
 
@@ -269,7 +270,8 @@ export function validatePipeline(text: string, options: ParseOptions = {}): Pars
     c.fromZod(top.error, []);
     return failure(c);
   }
-  const { name, description, defaults, nodes: rawNodes, edges: rawEdges = [] } = top.data;
+  const { name, description, defaults, nodes: rawNodes } = top.data;
+  const rawEdges = top.data.edges ?? [];
 
   let format = 1;
   try {

@@ -44,6 +44,7 @@
       "name": "@kodel-ai/testkit",
       "version": "0.0.0",
       "dependencies": {
+        "@kodel-ai/local": "workspace:*",
         "@kodel-ai/pipeline-core": "workspace:*",
       },
     },

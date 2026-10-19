@@ -226,6 +226,13 @@ describe("top level", () => {
   test("at least one node is required", () => {
     expectIssue(doc("name: x", "nodes: []"), "nodes");
   });
+
+  test("an empty edges key, or none at all, means no edges", () => {
+    const single = ["name: x", "nodes:", "  - slug: a", "    kind: agent", "    prompt: p"];
+    expect(parsePipeline(doc(...single, "edges:")).edges).toEqual([]);
+    expect(parsePipeline(doc(...single, "edges: []")).edges).toEqual([]);
+    expect(parsePipeline(doc(...single)).edges).toEqual([]);
+  });
 });
 
 describe("graph rules", () => {

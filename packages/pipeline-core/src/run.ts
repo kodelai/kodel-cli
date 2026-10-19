@@ -124,6 +124,15 @@ export type RunEvent =
     }
   | { type: "human_decided"; node: string; decision: "approved" | "rejected"; reason?: string }
   | { type: "heartbeat"; node: string; attempt: number }
+  /** The agent noticed a problem in a step description. Journaled; it never changes the run. */
+  | {
+      type: "feedback";
+      node?: string;
+      attempt?: number;
+      category: string;
+      message: string;
+      suggestion?: string;
+    }
   | { type: "tick" }
   | { type: "resume" }
   | { type: "cancel" };
@@ -440,6 +449,17 @@ class Machine {
 
   apply(event: RunEvent) {
     if (event.type === "start") return this.start(event);
+    if (event.type === "feedback") {
+      if (event.node !== undefined) this.node(event.node);
+      this.log("feedback_reported", {
+        node: event.node ?? null,
+        attempt: event.attempt ?? null,
+        category: event.category,
+        message: event.message,
+        suggestion: event.suggestion ?? null,
+      });
+      return;
+    }
     if (event.type === "cancel") {
       if (this.s.status === "running" || this.s.status === "paused") this.end("canceled");
       else throw new Repeat();
