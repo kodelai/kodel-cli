@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -23,10 +24,15 @@ const scenario = ENABLED ? test : test.skip;
 const TURN_MS = 15 * 60_000;
 const TOOLS = ["mcp__kodel", "Read", "Write", "Edit", "Glob", "Grep", "Bash"];
 
+/**
+ * A change with real work in it (source and a test), whose result can be tried afterwards. It must
+ * be something the repository does not have yet: a task already done gives the plan nothing to
+ * change, and then the step that has to change files cannot pass.
+ */
 const TASK =
-  "Add the unit test file packages/pipeline-core/test/run-id.test.ts for isRunId and RUN_ID_PATTERN " +
-  "(src/run-id.ts): it accepts the ids that newRunId in packages/local makes, and rejects path " +
-  "traversal, wrong case, wrong length and trailing junk.";
+  "Add a --json option to `kodel status` when it lists the runs (no run id given): print the " +
+  "runs as a JSON array of objects with runId, pipeline, status and task, instead of the lines of " +
+  "text. Cover it with a test in packages/cli/test/cli.test.ts.";
 
 const explain = (turn: AgentTurn) => `\n${describeCalls(turn)}\n${turn.finalText}`;
 
@@ -82,9 +88,30 @@ describe("the repository's own pipeline, on a real agent", () => {
       expect(now.at, `not at the final gate (${now.trail}, ${now.state?.status})${detail}`).toEqual(
         ["final-approval:human"],
       );
-      expect(existsSync(join(sandbox.dir, "packages/pipeline-core/test/run-id.test.ts"))).toBe(
-        true,
-      );
+      // The change is there, in the source and in the test the task named...
+      const changed = execFileSync("git", ["status", "--short"], {
+        cwd: sandbox.dir,
+        encoding: "utf8",
+      });
+      expect(changed, `no source change${detail}`).toContain("packages/cli/src/");
+      expect(changed, `no test change${detail}`).toContain("packages/cli/test/cli.test.ts");
+      // ...and it works: the option the task asked for prints the runs as JSON.
+      const listed = JSON.parse(
+        execFileSync(
+          "bun",
+          ["packages/cli/src/main.ts", "--root", sandbox.dir, "status", "--json"],
+          {
+            cwd: sandbox.dir,
+            encoding: "utf8",
+            env: { ...process.env, KODEL_STATE_DIR: sandbox.stateDir },
+          },
+        ),
+      ) as { runId: string; pipeline: string; status: string; task: string }[];
+      expect(
+        listed.map((r) => r.runId),
+        detail,
+      ).toEqual([runId]);
+      expect(listed[0]).toMatchObject({ pipeline: "dev", status: "running" });
       // The engine ran the repository's real commands, and they passed before the review started.
       for (const node of ["verify", "test", "build", "review"]) {
         expect(now.state?.nodes[node]?.status, `${node} did not pass${detail}`).toBe("passed");
