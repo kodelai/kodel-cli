@@ -500,6 +500,27 @@ function validateGraph(c: Collector, nodes: NodeSpec[], edges: EdgeSpec[], regis
     }
   });
 
+  // Every other way a node may end well (an agent's `outcomes`) must lead somewhere, and cannot also
+  // be a way to fail: an outcome nobody follows would end the run by accident.
+  nodes.forEach((node, i) => {
+    const handler = registry.node(node.kind);
+    if (!handler) return;
+    const { success, failure } = handler.labels(node);
+    for (const label of success.slice(1)) {
+      if (failure.includes(label)) {
+        c.add(
+          ["nodes", i, "slug"],
+          `node "${node.slug}": "${label}" is both an outcome and a way to fail`,
+        );
+      } else if (!edges.some((e) => e.from === node.slug && e.when === label)) {
+        c.add(
+          ["nodes", i, "slug"],
+          `node "${node.slug}" can finish with "${label}" but has no outgoing edge for it`,
+        );
+      }
+    }
+  });
+
   // Everything must be reachable from the first node.
   const entry = nodes[0];
   if (!entry) return;

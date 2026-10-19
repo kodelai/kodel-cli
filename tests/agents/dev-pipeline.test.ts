@@ -167,4 +167,51 @@ describe("the repository's own pipeline, on a real agent", () => {
     },
     4 * TURN_MS,
   );
+
+  scenario(
+    "a task that is already done ends at a person's confirmation, and no code is touched",
+    async () => {
+      const sandbox = makeCloneSandbox();
+      sandboxes.push(sandbox);
+      const host = humanHost(sandbox);
+
+      // The repository already has this file and its tests, so there is nothing to do.
+      const first = await runAgentTurn({
+        sandbox,
+        timeoutMs: TURN_MS,
+        allowedTools: TOOLS,
+        prompt:
+          "Run the dev pipeline for this task: add the unit test file " +
+          "packages/pipeline-core/test/run-id.test.ts for isRunId and RUN_ID_PATTERN (src/run-id.ts).",
+      });
+      const why = explain(first);
+      const runId = (await host.runSummaries())[0]?.meta.runId as string;
+      const now = await standing(sandbox, runId);
+
+      // The agent said so with the step's other outcome, rather than inventing work...
+      const completes = callsTo(first, "pipeline_complete_step");
+      expect(
+        completes.some((c) => c.input.outcome === "nothing_to_change"),
+        `the agent never used the outcome${why}`,
+      ).toBe(true);
+      // ...so the run stands at the person's confirmation, never at the implementation.
+      expect(now.at, `${now.trail}${why}`).toEqual(["confirm-nothing-to-do:human"]);
+      expect(now.state?.nodes.impl, why).toBeUndefined();
+      // and nothing in the code was changed, only the plan that says why.
+      const changed = execFileSync("git", ["status", "--short"], {
+        cwd: sandbox.dir,
+        encoding: "utf8",
+      });
+      expect(
+        changed.split("\n").filter((l) => l.trim() && !l.includes("docs/plans/")),
+        why,
+      ).toEqual([]);
+
+      // The person confirms; the run ends.
+      const run = await host.open(runId);
+      expect((await run?.decideHuman("confirm-nothing-to-do", "approved"))?.ok).toBe(true);
+      expect((await run?.state())?.status).toBe("completed");
+    },
+    2 * TURN_MS,
+  );
 });

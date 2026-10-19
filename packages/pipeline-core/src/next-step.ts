@@ -22,6 +22,11 @@ export type NextStep =
         result_spec?: Record<string, unknown>;
         /** How to do the step (as opposed to what to do), when the node asks for something special. */
         execution?: { instruction: string };
+        /**
+         * Other ways this step may end, besides the usual one. Say which when you complete the
+         * step (`outcome`); the checks still decide, and the prompt says when to use each.
+         */
+        outcomes?: string[];
       };
     }
   | {
@@ -139,6 +144,8 @@ export function nextStep(
     if (resultSpec) out.result_spec = resultSpec;
     const how = handler?.instruction?.(spec_.params);
     if (how) out.execution = { instruction: how };
+    const others = handler?.labels(spec_).success.slice(1) ?? [];
+    if (others.length > 0) out.outcomes = others;
     return { node: out };
   }
 

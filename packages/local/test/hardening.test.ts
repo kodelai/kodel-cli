@@ -576,6 +576,78 @@ describe("the environment of the commands the engine runs", () => {
   });
 });
 
+describe("finishing a step with another outcome, on the real adapters", () => {
+  const spec = parsePipeline(
+    [
+      "name: plan",
+      "nodes:",
+      "  - slug: plan",
+      "    kind: agent",
+      "    prompt: plan it",
+      "    outcomes: [nothing_to_change]",
+      "    checks:",
+      `      - { kind: command, command: node check-plan.js }`,
+      "  - slug: impl",
+      "    kind: agent",
+      "    prompt: do it",
+      "  - slug: confirm",
+      "    kind: human",
+      "    prompt: ok to stop here?",
+      "edges:",
+      "  - { from: plan, to: impl }",
+      "  - { from: plan, to: confirm, when: nothing_to_change }",
+      "  - { from: confirm, to: plan, when: rejected }",
+      "",
+    ].join("\n"),
+  );
+  const options = () => ({ root: dir, heartbeatMs: 0 });
+
+  test("the engine's check runs first, then the outcome decides the way, and it survives a restart", async () => {
+    await writeFile(join(dir, "check-plan.js"), "process.exit(0);\n");
+    const first = await new LocalHost(spec, options()).start("t");
+    await first.run.completeStep("plan", 1, "nothing to do", "nothing_to_change");
+    await first.run.settle();
+
+    // a new process picks the run up from the files and finds it waiting for the person
+    const run = new LocalHost(spec, options()).open(first.run.runId);
+    const step = await run.nextStep();
+    expect(step).toMatchObject({ waiting: { reason: "gate", node_slug: "confirm" } });
+    const finished = (await new FileStore({ root: join(dir, ".kodel") }).readJournal(run.runId))
+      .filter((r) => r.event === "node_finished" && r.node === "plan")
+      .map((r) => r.outcome);
+    expect(finished).toEqual(["nothing_to_change"]);
+    expect((await run.report()).nodes.find((n) => n.node === "plan")?.attempts[0]?.outcome).toBe(
+      "nothing_to_change",
+    );
+
+    expect((await run.decideHuman("confirm", "approved")).ok).toBe(true);
+    expect((await run.state()).status).toBe("completed");
+  });
+
+  test("when the engine's check fails, the claim does not stand and the step is done again", async () => {
+    await writeFile(
+      join(dir, "check-plan.js"),
+      "console.log('the plan is empty'); process.exit(1);\n",
+    );
+    const { run } = await new LocalHost(spec, options()).start("t");
+    await run.completeStep("plan", 1, undefined, "nothing_to_change");
+    await run.settle();
+    const step = await run.nextStep();
+    expect(step).toMatchObject({ node: { slug: "plan", attempt: 2 } });
+    expect(JSON.stringify(step)).toContain("the plan is empty");
+    expect((await run.state()).active.map((v) => v.node)).toEqual(["plan"]);
+  });
+
+  test("an outcome the step does not have is refused and nothing is written for it", async () => {
+    await writeFile(join(dir, "check-plan.js"), "process.exit(0);\n");
+    const { run } = await new LocalHost(spec, options()).start("t");
+    const before = await readFile(join(runDir(run.runId), "state.json"), "utf8");
+    const refused = await run.completeStep("plan", 1, undefined, "skip_it_all");
+    expect(refused.ok).toBe(false);
+    expect(await readFile(join(runDir(run.runId), "state.json"), "utf8")).toBe(before);
+  });
+});
+
 describe("a write never follows a planted link", () => {
   test("a link at the temporary name is replaced, and the file it pointed at is untouched", async () => {
     const store = new FileStore({ root: join(dir, ".kodel"), pid: 4242 });

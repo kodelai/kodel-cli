@@ -20,6 +20,7 @@ export const ERROR_CODES = [
   "UNKNOWN_RUN",
   "INVALID_ARGUMENTS",
   "STATE_LOCKED",
+  "UNKNOWN_OUTCOME",
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];

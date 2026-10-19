@@ -702,12 +702,13 @@ export class LocalRun {
     return this.apply(deadOwners.length > 0 ? { type: "tick", deadOwners } : { type: "tick" });
   }
 
-  completeStep(node: string, attempt: number, summary?: string) {
+  completeStep(node: string, attempt: number, summary?: string, outcome?: string) {
     return this.apply({
       type: "agent_completed",
       node,
       attempt,
       ...(summary === undefined ? {} : { summary }),
+      ...(outcome === undefined ? {} : { outcome }),
     });
   }
 

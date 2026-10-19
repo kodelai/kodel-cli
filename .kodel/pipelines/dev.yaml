@@ -11,11 +11,16 @@ defaults:
 nodes:
   - slug: plan
     kind: agent
+    # Another way for the step to end: the task needs no change. A person has to confirm that.
+    outcomes: [nothing_to_change]
     prompt: |
       Task: {{task}}
       Read AGENTS.md first. Explore the repository and write an implementation plan to
       docs/plans/{{task.slug}}.md: goal, affected files, steps, test strategy, risks.
       Do not change any other file.
+      If, after looking, the task needs no change (it is already done, or already true), write the
+      plan file saying so and why, with the evidence, and complete the step with the outcome
+      nothing_to_change instead of the usual one. Do not use it to skip work that is needed.
     checks:
       - kind: diff
         paths: ["docs/plans/{{task.slug}}.md"]
@@ -25,6 +30,13 @@ nodes:
   - slug: plan-approval
     kind: human
     prompt: "Review the plan. Approve to start implementation, or reject with a reason."
+    files: ["docs/plans/{{task.slug}}.md"]
+
+  - slug: confirm-nothing-to-do
+    kind: human
+    prompt: |
+      The plan says the task needs no change. Read it and check the evidence. Approve to end the
+      run, or reject with what was missed, and the plan is made again.
     files: ["docs/plans/{{task.slug}}.md"]
 
   - slug: impl
@@ -76,6 +88,8 @@ nodes:
 
 edges:
   - { from: plan,           to: plan-approval }
+  - { from: plan,           to: confirm-nothing-to-do, when: nothing_to_change }
+  - { from: confirm-nothing-to-do, to: plan,  when: rejected }
   - { from: plan-approval,  to: impl,         when: approved }
   - { from: plan-approval,  to: plan,         when: rejected }
   - { from: impl,           to: verify }

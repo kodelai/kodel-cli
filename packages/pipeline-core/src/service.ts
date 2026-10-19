@@ -41,7 +41,12 @@ export interface RunHandle {
   state(): Promise<RunState>;
   /** What to do next. Throws `KodelError` (for example when the state was tampered with). */
   nextStep(): Promise<NextStep>;
-  completeStep(node: string, attempt: number, summary?: string): Promise<Decision>;
+  completeStep(
+    node: string,
+    attempt: number,
+    summary?: string,
+    outcome?: string,
+  ): Promise<Decision>;
   reportResult(node: string, attempt: number, raw: unknown): Promise<StepResult>;
   feedback(input: FeedbackInput): Promise<Decision>;
   /** Wait until the engine's work has come to rest, but no longer than `ms`. */
@@ -235,10 +240,16 @@ export class PipelineService {
     node_slug: string;
     attempt: number;
     summary?: string;
+    outcome?: string;
   }): Promise<ToolResult> {
     return guarded(async () => {
       const run = await this.run(input.run_id);
-      const decision = await run.completeStep(input.node_slug, input.attempt, input.summary);
+      const decision = await run.completeStep(
+        input.node_slug,
+        input.attempt,
+        input.summary,
+        input.outcome,
+      );
       if (!decision.ok)
         return failure(decision.error.code, decision.error.message, decision.error.issues);
       await run.waitForRest(this.budget);

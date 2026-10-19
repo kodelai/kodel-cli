@@ -16,6 +16,8 @@ export interface NodeInfo {
   kind: string;
   on_fail: string;
   checks: CheckInfo[];
+  /** The kind-specific parameters, for kinds whose labels depend on them (`outcomes`). */
+  params?: Record<string, unknown>;
 }
 
 export interface Labels {
@@ -108,13 +110,37 @@ export const FRESH_CONTEXT_INSTRUCTION =
   "step's prompt and the repository, not your earlier reasoning, so it is an independent look. " +
   "Take what it finds as it is and send that; do not change it to agree with your own work.";
 
+/** A label an agent may finish a step with, besides `passed`. */
+const outcomeLabel = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9_-]{0,62}$/, "an outcome is lowercase letters, digits, - and _")
+  .refine((label) => label !== "passed", "passed is always there; do not list it");
+
+/** The extra outcomes an agent node lists (`outcomes:`), in the order they were written. */
+export const agentOutcomes = (params: Record<string, unknown> | undefined): string[] => {
+  const listed = params?.outcomes;
+  return Array.isArray(listed) ? listed.filter((l): l is string => typeof l === "string") : [];
+};
+
 const agentNode: NodeHandler = {
   kind: "agent",
-  shape: { prompt: nonEmpty, fresh_context: z.boolean().optional() },
+  shape: {
+    prompt: nonEmpty,
+    fresh_context: z.boolean().optional(),
+    // Other ways the step may end well, such as "nothing needs changing". The agent says which one
+    // when it completes the step; the node's checks still decide, and each needs an edge.
+    outcomes: z
+      .array(outcomeLabel)
+      .refine((all) => new Set(all).size === all.length, "an outcome is listed twice")
+      .optional(),
+  },
   allowsChecks: true,
   requiresRoutes: false,
   automaticFailures: true,
-  labels: (node) => ({ success: ["passed"], failure: node.checks.map((c) => c.on_fail) }),
+  labels: (node) => ({
+    success: ["passed", ...agentOutcomes(node.params)],
+    failure: node.checks.map((c) => c.on_fail),
+  }),
   begin: (params, render) => ({ needs: "agent", prompt: render(String(params.prompt)) }),
   instruction: (params) => (params.fresh_context === true ? FRESH_CONTEXT_INSTRUCTION : undefined),
 };

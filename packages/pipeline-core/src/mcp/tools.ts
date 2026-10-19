@@ -179,7 +179,9 @@ export const TOOLS: ToolDescriptor[] = [
     description:
       "Say you have finished the node you were given. The engine then runs the node's checks and decides; " +
       "your word is not the verdict. The answer says whether the run advanced, the outcome, and what to do " +
-      "next. If a check failed you get the reason and the same node again to fix.",
+      "next. If a check failed you get the reason and the same node again to fix. If the step lists other " +
+      "`outcomes`, you may pass `outcome` to finish with one of them (the step's prompt says when); the checks " +
+      "still apply, and anything else is refused.",
     shape: {
       run_id: runId,
       node_slug: nodeSlug,
@@ -189,6 +191,11 @@ export const TOOLS: ToolDescriptor[] = [
         .max(LIMITS.text)
         .optional()
         .describe("What you did, in a sentence or two."),
+      outcome: z
+        .string()
+        .max(64)
+        .optional()
+        .describe("One of the step's `outcomes`, when the prompt says to finish it that way."),
     },
     readOnly: false,
     idempotent: true,

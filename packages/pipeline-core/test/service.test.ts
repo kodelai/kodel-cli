@@ -152,12 +152,13 @@ class FakeRun implements RunHandle {
     return projectNextStep(this.spec, this.state_ as RunState, 0);
   }
 
-  completeStep(node: string, attempt: number, summary?: string) {
+  completeStep(node: string, attempt: number, summary?: string, outcome?: string) {
     return this.send({
       type: "agent_completed",
       node,
       attempt,
       ...(summary === undefined ? {} : { summary }),
+      ...(outcome === undefined ? {} : { outcome }),
     });
   }
 
@@ -410,6 +411,89 @@ describe("driving a run", () => {
   });
 });
 
+describe("finishing a step with one of its other outcomes", () => {
+  const withOutcome = parsePipeline(
+    [
+      "name: plan",
+      "nodes:",
+      "  - slug: plan",
+      "    kind: agent",
+      "    prompt: plan it",
+      "    outcomes: [nothing_to_change]",
+      "  - slug: impl",
+      "    kind: agent",
+      "    prompt: do it",
+      "  - slug: confirm",
+      "    kind: human",
+      "    prompt: ok to stop?",
+      "edges:",
+      "  - { from: plan, to: impl }",
+      "  - { from: plan, to: confirm, when: nothing_to_change }",
+      "  - { from: confirm, to: plan, when: rejected }",
+      "",
+    ].join("\n"),
+  );
+
+  test("the step lists its outcomes, and completing with one goes where that outcome leads", async () => {
+    const { svc } = service([withOutcome]);
+    const started = asOk(await svc.start({ task: "t" }));
+    expect(started.next).toMatchObject({ node: { slug: "plan", outcomes: ["nothing_to_change"] } });
+    const done = asOk(
+      await svc.completeStep({
+        run_id: started.run_id as string,
+        node_slug: "plan",
+        attempt: 1,
+        outcome: "nothing_to_change",
+      }),
+    );
+    expect(done).toMatchObject({
+      advanced: true,
+      outcome: "nothing_to_change",
+      next: { waiting: { reason: "gate", node_slug: "confirm" } },
+    });
+  });
+
+  test("without an outcome the same step goes on to the work", async () => {
+    const { svc } = service([withOutcome]);
+    const started = asOk(await svc.start({ task: "t" }));
+    const done = asOk(
+      await svc.completeStep({ run_id: started.run_id as string, node_slug: "plan", attempt: 1 }),
+    );
+    expect(done).toMatchObject({ outcome: "passed", next: { node: { slug: "impl" } } });
+  });
+
+  test("an outcome the step does not have is refused, with the ones it has", async () => {
+    const { svc } = service([withOutcome]);
+    const started = asOk(await svc.start({ task: "t" }));
+    const refused = await svc.completeStep({
+      run_id: started.run_id as string,
+      node_slug: "plan",
+      attempt: 1,
+      outcome: "skip_it_all",
+    });
+    expect(refused).toMatchObject({ ok: false, code: "UNKNOWN_OUTCOME" });
+    if (!refused.ok) expect(refused.message).toContain("nothing_to_change");
+    // and the step is still there to be done
+    expect(asOk(await svc.nextStep({ run_id: started.run_id as string }))).toMatchObject({
+      node: { slug: "plan" },
+    });
+  });
+
+  test("the tool takes a short label and refuses anything longer", async () => {
+    const { svc } = service([withOutcome]);
+    const started = asOk(await svc.start({ task: "t" }));
+    const run_id = started.run_id as string;
+    expect(
+      await invokeTool(svc, "pipeline_complete_step", {
+        run_id,
+        node_slug: "plan",
+        attempt: 1,
+        outcome: "x".repeat(65),
+      }),
+    ).toMatchObject({ ok: false, code: "INVALID_ARGUMENTS" });
+  });
+});
+
 describe("waiting for the engine's work", () => {
   const slowSpec = parsePipeline(
     [
@@ -524,7 +608,7 @@ describe("the tool surface", () => {
         "rows",
         "metrics",
       ],
-      pipeline_complete_step: ["run_id", "node_slug", "attempt", "summary"],
+      pipeline_complete_step: ["run_id", "node_slug", "attempt", "summary", "outcome"],
       pipeline_feedback: ["run_id", "node_slug", "attempt", "category", "message", "suggestion"],
     });
   });

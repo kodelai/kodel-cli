@@ -72,6 +72,11 @@ export interface Visit {
   heartbeatAt?: number;
   /** Who is running the engine work (a process id, as the host names it); see `tick`. */
   owner?: string;
+  /**
+   * The outcome the agent said the step ends with, when it is not the usual one. It is only a claim:
+   * it is used as the label once the node's checks have all passed, and not before.
+   */
+  declared?: string;
   restarts: number;
   /** Engine work that was restarted too often; waits for `resume`. */
   suspended?: boolean;
@@ -117,7 +122,14 @@ export interface RunState {
 
 export type RunEvent =
   | { type: "start"; runId: string; task: string; specHash: string }
-  | { type: "agent_completed"; node: string; attempt: number; summary?: string }
+  | {
+      type: "agent_completed";
+      node: string;
+      attempt: number;
+      summary?: string;
+      /** One of the node's other outcomes (`outcomes:`), instead of the usual `passed`. */
+      outcome?: string;
+    }
   /** The engine work of a node (its own command) finished. The host judged the exit code. */
   | { type: "work_finished"; node: string; attempt: number; passed: boolean; reason: string }
   | {
@@ -356,7 +368,7 @@ class Machine {
     const node = this.node(visit.node);
     const check = node.checks[visit.checkIndex];
     if (!check) {
-      this.finish(visit, "passed", undefined);
+      this.finish(visit, visit.declared ?? "passed", undefined);
       return;
     }
     const params = renderDeep(check.params, { task: this.s.task });
@@ -503,6 +515,19 @@ class Machine {
     switch (event.type) {
       case "agent_completed": {
         const visit = this.visitFor(event.node, event.attempt, ["agent"]);
+        const node = this.node(event.node);
+        if (event.outcome !== undefined && event.outcome !== "passed") {
+          const others = this.handler(node).labels(node).success.slice(1);
+          if (!others.includes(event.outcome)) {
+            throw fail(
+              "UNKNOWN_OUTCOME",
+              others.length === 0
+                ? `node "${node.slug}" has no outcome "${event.outcome}" (it only finishes the usual way)`
+                : `node "${node.slug}" has no outcome "${event.outcome}" (it may finish with: ${others.join(", ")})`,
+            );
+          }
+          visit.declared = event.outcome;
+        }
         this.afterWork(visit);
         return;
       }
