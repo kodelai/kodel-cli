@@ -36,3 +36,9 @@ Scenarios (`claude-code.test.ts`, `claude-code-scenarios.test.ts`; the pipelines
 - an engine command longer than a tool call waits does not make the agent hammer the server;
 - a node that wants a report gets one in the shape it asked for;
 - a task that already ran to its end is not silently run again.
+
+`dev-pipeline.test.ts` runs the repository's own `.kodel/pipelines/dev.yaml` on a clone of the
+repository (as committed, dependencies installed) with a person at both gates; it takes a few
+minutes. `KODEL_AGENT_KEEP=1` keeps the clone for inspection. The agent under test gets no
+`KODEL_AGENT_*` variable, so the repository's own `bun test` that the pipeline runs inside the clone
+cannot start these scenarios again.

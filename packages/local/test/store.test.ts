@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { compileRules, type JournalRecord, type RunState } from "@kodel-ai/pipeline-core";
+import { compileRules, isRunId, type JournalRecord, type RunState } from "@kodel-ai/pipeline-core";
 import { FileStore, newRunId, type RunMeta } from "../src";
 
 let dir: string;
@@ -320,5 +320,20 @@ describe("newRunId", () => {
     const b = newRunId(2_000, () => 0.5);
     expect(a).toMatch(/^r_[0-9a-z]+_[0-9a-z]{4}$/);
     expect(a < b).toBe(true);
+  });
+
+  // The shape check lives in pipeline-core and its own test rebuilds the id by hand; this one keeps
+  // the two from drifting apart.
+  test("every id it makes is accepted by isRunId, at the ends of its range too", () => {
+    for (const [now, random] of [
+      [0, 0],
+      [1_000, 0.5],
+      [Date.now(), 0.999999],
+      [36 ** 9 - 1, 0],
+    ] as const) {
+      const id = newRunId(now, () => random);
+      expect(isRunId(id), id).toBe(true);
+    }
+    expect(isRunId(newRunId())).toBe(true);
   });
 });
