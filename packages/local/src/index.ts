@@ -2,4 +2,5 @@
 export * from "./command";
 export * from "./git";
 export * from "./host";
+export * from "./integrity";
 export * from "./store";

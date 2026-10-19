@@ -18,6 +18,7 @@ import {
   evaluateCommand,
   evaluateDiff,
   evaluateResult,
+  KodelError,
   type NextStep,
   nextStep,
   type PipelineSpec,
@@ -30,6 +31,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { type CommandOptions, type CommandResult, runCommand } from "./command";
 import { GitSnapshotter } from "./git";
+import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integrity";
 import { FileStore, newRunId } from "./store";
 
 export interface CommandContext {
@@ -76,6 +78,10 @@ export interface HostOptions {
   /** How often running engine work sends a heartbeat; 0 turns the timer off (tests). */
   heartbeatMs?: number;
   maxTailBytes?: number;
+  /** Where the trusted hash of a run's state is kept; by default a file outside the repository. */
+  integrity?: IntegrityStore;
+  /** The directory for those files; defaults to `defaultIntegrityDir()`. */
+  integrityDir?: string;
 }
 
 export type StepResult = { ok: true } | { ok: false; code: ErrorCode; message: string };
@@ -97,16 +103,18 @@ export class LocalHost {
   readonly checkRunners: Record<string, CheckRunner>;
   readonly heartbeatMs: number;
   readonly maxTailBytes: number | undefined;
+  readonly integrity: IntegrityStore;
 
   constructor(
     readonly spec: PipelineSpec,
     readonly options: HostOptions,
   ) {
     this.rules = options.rules ?? [];
-    this.store = new FileStore({
-      root: options.storeRoot ?? `${options.root}/.kodel`,
-      rules: this.rules,
-    });
+    const storeRoot = options.storeRoot ?? `${options.root}/.kodel`;
+    this.store = new FileStore({ root: storeRoot, rules: this.rules });
+    this.integrity =
+      options.integrity ??
+      new FileIntegrity(options.integrityDir ?? defaultIntegrityDir(), storeRoot);
     this.snapshotter = options.snapshotter ?? new GitSnapshotter(options.root);
     this.clock = options.clock ?? Date.now;
     this.engine = options.engine ?? {};
@@ -153,6 +161,20 @@ export class LocalHost {
   open(runId: string): LocalRun {
     return new LocalRun(this, runId);
   }
+
+  /**
+   * Accept the current files of a finished run after a deliberate change: the change is journaled
+   * as a manual edit and the seal is made again.
+   */
+  async seal(runId: string): Promise<void> {
+    const state = await this.store.readState(runId);
+    if (!state) throw new Error(`there is no run ${runId}`);
+    if (state.status === "running" || state.status === "paused") {
+      throw new Error(`run ${runId} is still ${state.status}; only a finished run can be sealed`);
+    }
+    const result = await this.open(runId).acknowledge("sealed after a manual change");
+    if (!result.ok) throw result.error;
+  }
 }
 
 export class LocalRun {
@@ -174,29 +196,80 @@ export class LocalRun {
     return state;
   }
 
-  /** Apply one event under the run's lock, save the result and start the work it asks for. */
-  apply(event: RunEvent): Promise<Decision> {
-    const step = this.queue.catch(() => undefined).then(() => this.applyLocked(event));
+  /**
+   * Apply one event under the run's lock, save the result and start the work it asks for.
+   * If the state file is not what kodel last wrote, nothing is applied (`STATE_MODIFIED_EXTERNALLY`);
+   * `trust` skips that check and is only for a human accepting the change.
+   */
+  apply(event: RunEvent, options: { trust?: boolean } = {}): Promise<Decision> {
+    const step = this.queue
+      .catch(() => undefined)
+      .then(() => this.applyLocked(event, options.trust === true));
     this.queue = step;
     return step;
   }
 
-  private applyLocked(event: RunEvent): Promise<Decision> {
-    const { store, spec, engine, clock } = this.host;
+  private applyLocked(event: RunEvent, trust: boolean): Promise<Decision> {
+    const { store, spec, engine, clock, integrity } = this.host;
     return store.withLock(this.runId, async () => {
-      const state = event.type === "start" ? undefined : await store.readState(this.runId);
+      let state: RunState | undefined;
+      if (event.type !== "start") {
+        let raw: Awaited<ReturnType<typeof store.readStateRaw>>;
+        try {
+          raw = await store.readStateRaw(this.runId);
+        } catch (error) {
+          if (error instanceof KodelError && error.code === "STATE_MODIFIED_EXTERNALLY") {
+            return { ok: false, error } satisfies Decision;
+          }
+          throw error;
+        }
+        state = raw?.state;
+        if (raw && !trust) {
+          const trusted = await integrity.get(this.runId);
+          if (trusted === undefined) {
+            // First time this machine sees the run (a fresh clone, say): take it as it is.
+            await integrity.set(this.runId, raw.hash);
+          } else if (trusted !== raw.hash) {
+            const error = new KodelError(
+              "STATE_MODIFIED_EXTERNALLY",
+              `the state of run ${this.runId} was changed outside kodel; look at what changed, then accept it with "kodel ack ${this.runId}"`,
+            );
+            return { ok: false, error } satisfies Decision;
+          }
+        }
+      }
       const decision = decide(spec, state, event, clock(), engine);
       if (!decision.ok || decision.noop) return decision;
       // A tick that found nothing to do changes nothing, so it writes nothing.
       const changed =
         event.type !== "tick" || decision.journal.length > 0 || decision.effects.length > 0;
       if (changed) {
-        await store.writeState(this.runId, decision.state);
+        const hash = await store.writeState(this.runId, decision.state);
+        await integrity.set(this.runId, hash);
         await store.appendJournal(this.runId, decision.journal);
+        const finished = ["completed", "failed", "canceled"].includes(decision.state.status);
+        if (finished) await store.writeSeal(this.runId, clock());
       }
       for (const effect of decision.effects) await this.dispatch(effect);
       return decision;
     });
+  }
+
+  /** Whether the state file is what kodel last wrote. `unknown`: kodel has not seen this run yet. */
+  async integrityStatus(): Promise<"ok" | "modified" | "unknown"> {
+    const raw = await this.host.store.readStateRaw(this.runId).catch(() => undefined);
+    if (!raw) return "modified";
+    const trusted = await this.host.integrity.get(this.runId);
+    if (trusted === undefined) return "unknown";
+    return trusted === raw.hash ? "ok" : "modified";
+  }
+
+  /** A human accepts the files as they are now; this is journaled as a manual edit. */
+  acknowledge(note?: string): Promise<Decision> {
+    return this.apply(
+      { type: "acknowledge", ...(note === undefined ? {} : { note }) },
+      { trust: true },
+    );
   }
 
   private async dispatch(effect: Effect): Promise<void> {
@@ -359,8 +432,10 @@ export class LocalRun {
 
   // what callers do
 
+  /** What the agent should do next. Throws `STATE_MODIFIED_EXTERNALLY` if the files were tampered with. */
   async nextStep(): Promise<NextStep> {
-    await this.apply({ type: "tick" });
+    const tick = await this.apply({ type: "tick" });
+    if (!tick.ok && tick.error.code === "STATE_MODIFIED_EXTERNALLY") throw tick.error;
     const state = await this.state();
     return nextStep(
       this.host.spec,

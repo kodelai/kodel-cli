@@ -22,6 +22,7 @@ import {
   type RunState,
   redactDeep,
 } from "@kodel-ai/pipeline-core";
+import { sha256 } from "./integrity";
 
 export interface RunMeta {
   v: 1;
@@ -156,21 +157,74 @@ export class FileStore {
   // state
 
   async readState(runId: string): Promise<RunState | undefined> {
-    const state = await this.readJson<RunState>(join(this.runDir(runId), "state.json"));
-    if (state && state.v > RECORD_VERSION) {
+    return (await this.readStateRaw(runId))?.state;
+  }
+
+  /** The state and the hash of the exact bytes it was read from. */
+  async readStateRaw(runId: string): Promise<{ state: RunState; hash: string } | undefined> {
+    let text: string;
+    try {
+      text = await readFile(join(this.runDir(runId), "state.json"), "utf8");
+    } catch (error) {
+      if (isMissing(error)) return undefined;
+      throw error;
+    }
+    let state: RunState;
+    try {
+      state = JSON.parse(text) as RunState;
+    } catch {
+      throw new KodelError(
+        "STATE_MODIFIED_EXTERNALLY",
+        `the state of run ${runId} is not valid JSON; it was changed outside kodel`,
+      );
+    }
+    if (state.v > RECORD_VERSION) {
       throw new KodelError(
         "UNSUPPORTED_FORMAT",
         `run ${runId} was written by a newer kodel (state format ${state.v}); upgrade kodel`,
       );
     }
-    return state;
+    return { state, hash: sha256(text) };
   }
 
-  async writeState(runId: string, state: RunState): Promise<void> {
-    await this.writeAtomic(
-      join(this.runDir(runId), "state.json"),
-      `${JSON.stringify(state, null, 2)}\n`,
-    );
+  /** Replace the state; returns the hash of what was written. */
+  async writeState(runId: string, state: RunState): Promise<string> {
+    const text = `${JSON.stringify(state, null, 2)}\n`;
+    await this.writeAtomic(join(this.runDir(runId), "state.json"), text);
+    return sha256(text);
+  }
+
+  // seal: a finished run's state and journal, hashed once so a later change shows
+
+  private async fileHash(path: string): Promise<string> {
+    try {
+      return sha256(await readFile(path));
+    } catch (error) {
+      if (isMissing(error)) return sha256("");
+      throw error;
+    }
+  }
+
+  async writeSeal(runId: string, now: number): Promise<void> {
+    const dir = this.runDir(runId);
+    const seal = {
+      v: 1,
+      state: await this.fileHash(join(dir, "state.json")),
+      journal: await this.fileHash(join(dir, "journal.jsonl")),
+      sealedAt: now,
+    };
+    await this.writeAtomic(join(dir, "seal.json"), `${JSON.stringify(seal, null, 2)}\n`);
+  }
+
+  /** `sealed`: untouched since it finished. `modified`: changed after the seal. `unsealed`: no seal. */
+  async checkSeal(runId: string): Promise<"sealed" | "modified" | "unsealed"> {
+    const dir = this.runDir(runId);
+    const seal = await this.readJson<{ state: string; journal: string }>(join(dir, "seal.json"));
+    if (!seal) return "unsealed";
+    const same =
+      seal.state === (await this.fileHash(join(dir, "state.json"))) &&
+      seal.journal === (await this.fileHash(join(dir, "journal.jsonl")));
+    return same ? "sealed" : "modified";
   }
 
   // journal

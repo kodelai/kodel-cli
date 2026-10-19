@@ -133,6 +133,8 @@ export type RunEvent =
       message: string;
       suggestion?: string;
     }
+  /** A human accepted a change made to the run's files outside kodel. Journaled; changes nothing else. */
+  | { type: "acknowledge"; note?: string }
   | { type: "tick" }
   | { type: "resume" }
   | { type: "cancel" };
@@ -449,6 +451,10 @@ class Machine {
 
   apply(event: RunEvent) {
     if (event.type === "start") return this.start(event);
+    if (event.type === "acknowledge") {
+      this.log("manual_edit", { note: event.note ?? null });
+      return;
+    }
     if (event.type === "feedback") {
       if (event.node !== undefined) this.node(event.node);
       this.log("feedback_reported", {
