@@ -96,7 +96,10 @@ export function nextStep(
     };
     if (spec_.name !== undefined) out.name = spec_.name;
     if (failure) {
-      out.reentry_feedback = `The previous attempt failed (${failure.source}): ${failure.reason}`;
+      out.reentry_feedback =
+        failure.source === "human"
+          ? `A person sent this back: ${failure.reason}`
+          : `The previous attempt failed (${failure.source}): ${failure.reason}`;
     }
     if (resultSpec) out.result_spec = resultSpec;
     return { node: out };

@@ -1,9 +1,8 @@
-import { Command } from "commander";
-import pkg from "../package.json" with { type: "json" };
+import { runCli } from "./cli";
 
-const program = new Command();
-program
-  .name("kodel")
-  .description("Spec-driven pipelines inside your coding agent")
-  .version(pkg.version);
-program.parse();
+const code = await runCli(process.argv.slice(2), {
+  cwd: process.cwd(),
+  out: (text) => process.stdout.write(text),
+  err: (text) => process.stderr.write(text),
+});
+process.exit(code);

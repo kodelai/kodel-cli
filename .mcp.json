@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "kodel": {
+      "command": "bun",
+      "args": ["packages/cli/src/main.ts", "mcp"]
+    }
+  }
+}

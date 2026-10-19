@@ -79,6 +79,8 @@ export interface BlockedRoute {
   label: string;
   to: string;
   rework: boolean;
+  /** Why the node before failed, handed to the node this route enters (a rejection, a red build). */
+  feedback?: Feedback;
 }
 
 export interface Pause {
@@ -259,10 +261,11 @@ class Machine {
 
   // entering nodes
 
-  private enter(slug: string, rework: boolean) {
+  private enter(slug: string, rework: boolean, feedback?: Feedback) {
     const node = this.node(slug);
     const run = this.run(slug);
     run.attempt += 1;
+    if (feedback) run.lastFailure = feedback;
     if (!rework) {
       run.visitId = this.s.nextVisitId++;
       this.s.trail.push(slug);
@@ -398,7 +401,14 @@ class Machine {
   private route(node: NodeSpec, label: string, failure: boolean) {
     const edge = this.spec.edges.find((e) => e.from === node.slug && e.when === label);
     if (edge) {
-      this.proceed({ from: node.slug, label, to: edge.to, rework: false });
+      const feedback = failure ? this.run(node.slug).lastFailure : undefined;
+      this.proceed({
+        from: node.slug,
+        label,
+        to: edge.to,
+        rework: false,
+        ...(feedback ? { feedback } : {}),
+      });
       return;
     }
     if (!failure) {
@@ -431,7 +441,7 @@ class Machine {
       this.pause({ reason: "total", node: route.to, blocked: route });
       return;
     }
-    this.enter(route.to, route.rework);
+    this.enter(route.to, route.rework, route.feedback);
   }
 
   private pause(pause: Pause) {

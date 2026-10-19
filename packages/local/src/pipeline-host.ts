@@ -12,10 +12,11 @@ import {
   type PipelineProblem,
   type PipelineSpec,
   parsePipeline,
+  type RunState,
   type StartOutcome,
 } from "@kodel-ai/pipeline-core";
 import { type HostOptions, LocalHost, type LocalRun } from "./host";
-import { FileStore } from "./store";
+import { FileStore, type RunMeta } from "./store";
 
 export interface LocalPipelineHostOptions extends HostOptions {
   /** Where the pipeline files are; defaults to `<root>/.kodel/pipelines`. */
@@ -116,17 +117,39 @@ export class LocalPipelineHost implements PipelineHost {
     return { status: reused ? "reused" : terminal ? "terminal" : "started", run: known };
   }
 
-  async open(runId: string): Promise<LocalRun | undefined> {
-    const cached = this.runs.get(runId);
-    if (cached) return cached;
+  /** Every run on disk, oldest first, with its state when it can be read. */
+  async runSummaries(): Promise<{ meta: RunMeta; state: RunState | undefined }[]> {
+    const metas = await this.store.listRuns();
+    return Promise.all(
+      metas.map(async (meta) => ({
+        meta,
+        state: await this.store.readState(meta.runId).catch(() => undefined),
+      })),
+    );
+  }
+
+  private async specFor(runId: string): Promise<PipelineSpec | undefined> {
     const meta = await this.store.readMeta(runId);
     if (!meta) return undefined;
     // The copy the run started with; a run from before copies were kept falls back to the file.
     const kept = await this.store.readSpec(runId);
-    const spec = kept ? (kept as PipelineSpec) : await this.resolve(meta.pipeline);
+    return kept ? (kept as PipelineSpec) : this.resolve(meta.pipeline);
+  }
+
+  async open(runId: string): Promise<LocalRun | undefined> {
+    const cached = this.runs.get(runId);
+    if (cached) return cached;
+    const spec = await this.specFor(runId);
     if (!spec) return undefined;
     const run = this.hostFor(spec).open(runId);
     this.runs.set(runId, run);
     return run;
+  }
+
+  /** Accept the files of a finished run after a deliberate change (`kodel seal`). */
+  async seal(runId: string): Promise<void> {
+    const spec = await this.specFor(runId);
+    if (!spec) throw new KodelError("UNKNOWN_RUN", `there is no run "${runId}"`);
+    await this.hostFor(spec).seal(runId);
   }
 }

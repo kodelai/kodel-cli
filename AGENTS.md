@@ -16,6 +16,21 @@ Documents: until the first working version exists, the specifications are Russia
 (`T-12`, `T-37`, ...) from the decision log. English documentation in `docs/` will be written from
 those notes once the first working version is done. Reference pipeline: `examples/pipelines/feature.yaml`.
 
+## Running a pipeline on this repository
+
+`.mcp.json` starts the `kodel` MCP server from source (`bun packages/cli/src/main.ts mcp`), and
+`.kodel/pipelines/dev.yaml` is the pipeline. When the user asks for a change "through the pipeline":
+
+1. Call `pipeline_start` with the task, then follow each answer. Never choose steps yourself and
+   never skip one: the engine, not you, decides whether a step is done.
+2. `pipeline_next_step` returns `node` (do the work, then `pipeline_complete_step`), `waiting` (a person
+   decides with `kodel gate approve|reject <run>`; tell them and end your turn), `running` (engine work
+   is going; end your turn) or `done`.
+3. Do not touch `.kodel/runs/`, and do not run `gate`, `ack`, `seal` or `resume`: those are for the person.
+4. If a step description or check looks wrong, say so with `pipeline_feedback`.
+
+Humans: `bun packages/cli/src/main.ts status` lists runs; the same binary has `gate`, `resume`, `ack`, `seal`.
+
 ## Language
 
 - **All code comments, doc comments, documentation, commit messages, PR descriptions, error
