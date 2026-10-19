@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { parsePipeline } from "@kodel-ai/pipeline-core";
 import {
@@ -11,6 +11,8 @@ import {
   type LocalRun,
   MemoryIntegrity,
   newRunId,
+  processIsAlive,
+  processOwnerId,
   runCommand,
   sha256,
 } from "../src";
@@ -335,6 +337,150 @@ describe("two starts and stray locks", () => {
     });
     await taker;
     expect(await Bun.file(lock).exists()).toBe(false);
+  });
+});
+
+async function until(condition: () => Promise<boolean>, ms = 5_000) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (await condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("timed out waiting for a condition");
+}
+
+const slowCommand = (seconds: number) =>
+  parsePipeline(
+    [
+      "name: slow",
+      "nodes:",
+      "  - slug: first",
+      "    kind: command",
+      `    command: node -e "setTimeout(() => {}, ${seconds * 1000})"`,
+      "  - slug: second",
+      "    kind: command",
+      `    command: node -e "process.exit(0)"`,
+      "edges:",
+      "  - { from: first, to: second }",
+      "  - { from: first, to: second, when: failed }",
+      "  - { from: second, to: first, when: failed }",
+      "",
+    ].join("\n"),
+  );
+
+describe("engine work whose process is gone", () => {
+  async function abandonedRun(seconds = 30) {
+    const spec = slowCommand(seconds);
+    const first = new LocalHost(spec, { root: dir, heartbeatMs: 0, ownerId: "here:1" });
+    const { run } = await first.start("t");
+    // the owner is written with the first heartbeat, right after the work starts
+    await until(async () => (await run.state()).active[0]?.owner === "here:1");
+    run.stop(); // the process died: nothing is reported, nothing is running any more
+    return { spec, runId: run.runId };
+  }
+
+  const journal = async (runId: string) =>
+    new FileStore({ root: join(dir, ".kodel") }).readJournal(runId);
+
+  test("a later session starts it again at once, because the owner is known to be dead", async () => {
+    const { spec, runId } = await abandonedRun();
+    const second = new LocalHost(spec, {
+      root: dir,
+      heartbeatMs: 0,
+      ownerId: "here:2",
+      isOwnerAlive: (owner) => owner !== "here:1",
+    });
+    const run = second.open(runId);
+    await run.nextStep();
+    const restarted = (await journal(runId)).filter((r) => r.event === "node_restarted");
+    expect(restarted.length).toBe(1);
+    expect(JSON.stringify(restarted[0])).toContain("is gone");
+    expect(run.activeWork().length).toBe(1);
+    run.stop();
+  });
+
+  test("while the owner is alive, or unknown, it is left alone until the heartbeat goes stale", async () => {
+    const { spec, runId } = await abandonedRun();
+    const second = new LocalHost(spec, {
+      root: dir,
+      heartbeatMs: 0,
+      ownerId: "here:2",
+      isOwnerAlive: () => true,
+    });
+    const run = second.open(runId);
+    await run.nextStep();
+    expect((await journal(runId)).filter((r) => r.event === "node_restarted")).toEqual([]);
+    expect(run.activeWork()).toEqual([]);
+  });
+
+  test("an owner on another machine is never judged dead from here", async () => {
+    expect(processIsAlive("some-other-machine:99999999")).toBe(true);
+    expect(processIsAlive(processOwnerId())).toBe(true);
+    expect(processIsAlive(`${hostname()}:99999999`)).toBe(false);
+    expect(processIsAlive("not an owner id")).toBe(true);
+  });
+
+  test("waiting for work that another process runs follows it on disk until it is done", async () => {
+    const spec = slowCommand(1);
+    const owner = new LocalHost(spec, { root: dir, heartbeatMs: 0, ownerId: "here:1" });
+    const { run: ownersRun } = await owner.start("t");
+    const watcher = new LocalHost(spec, { root: dir, heartbeatMs: 0, ownerId: "here:2" });
+    const watching = watcher.open(ownersRun.runId);
+    const started = Date.now();
+    await watching.waitForRest(15_000);
+    const waited = Date.now() - started;
+    expect((await watching.state()).status).toBe("completed");
+    expect(waited).toBeGreaterThan(500);
+    expect(waited).toBeLessThan(8_000);
+  });
+
+  test("and it gives up at the time it was given, with the work still going", async () => {
+    const spec = slowCommand(20);
+    const owner = new LocalHost(spec, { root: dir, heartbeatMs: 0, ownerId: "here:1" });
+    const { run } = await owner.start("t");
+    const watching = new LocalHost(spec, { root: dir, heartbeatMs: 0, ownerId: "here:2" }).open(
+      run.runId,
+    );
+    const started = Date.now();
+    await watching.waitForRest(700);
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect((await watching.state()).status).toBe("running");
+    run.stop();
+  });
+});
+
+describe("what a person is shown at a gate", () => {
+  async function atGate(files: Record<string, string> = {}) {
+    const h = host();
+    const run = await startRun(h);
+    for (const [name, content] of Object.entries(files)) await writeFile(join(dir, name), content);
+    await run.completeStep("write", 1);
+    await run.waitForRest(30_000);
+    const step = await run.nextStep();
+    if (!("waiting" in step)) throw new Error(`expected a gate, got ${JSON.stringify(step)}`);
+    return step.waiting;
+  }
+
+  test("the engine's own list of what changed since the run began, with the lines", async () => {
+    const waiting = await atGate({ "feature.txt": "one\ntwo\nthree\n", "other.txt": "x\n" });
+    expect(waiting.reason).toBe("gate");
+    expect(waiting.changes).toEqual({ "feature.txt": 3, "other.txt": 1 });
+    expect(waiting.tell_the_person).toContain("changes");
+  });
+
+  test("a run that changed nothing has no list, rather than an empty one", async () => {
+    const waiting = await atGate();
+    expect(waiting.changes).toBeUndefined();
+  });
+
+  test("the list is the engine's, from the files, not something the agent can word differently", async () => {
+    const waiting = await atGate({ "a.txt": "1\n" });
+    await writeFile(join(dir, "b.txt"), "2\n3\n"); // changed after the gate was reached
+    const run = await host().open((await host().runSummaries())[0]?.meta.runId as string);
+    const again = await run?.nextStep();
+    if (!again || !("waiting" in again)) throw new Error("expected a gate");
+    expect(waiting.changes).toEqual({ "a.txt": 1 });
+    expect(again.waiting.changes).toEqual({ "a.txt": 1, "b.txt": 2 });
   });
 });
 

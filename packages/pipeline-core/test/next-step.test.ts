@@ -117,7 +117,7 @@ describe("next_step shapes", () => {
   test("a human node: a waiting gate with the files and how to decide", () => {
     const run = drive(auto);
     const step = nextStep(feature, run.state, 5_000);
-    expect(step).toEqual({
+    expect(step).toMatchObject({
       waiting: {
         reason: "gate",
         node_slug: "plan-approval",
@@ -126,6 +126,17 @@ describe("next_step shapes", () => {
         how_to_decide: { cli: 'kodel gate approve|reject r7 --reason "..."' },
       },
     });
+  });
+
+  test("a gate tells the agent what to write to the person before it ends its turn", () => {
+    const step = nextStep(feature, drive(auto).state, 5_000);
+    if (!("waiting" in step)) throw new Error("expected waiting");
+    const text = step.waiting.tell_the_person;
+    for (const part of ["what they are asked to decide", "summary", "changes", "how to decide"]) {
+      expect(text, part).toContain(part);
+    }
+    expect(text).toContain("do not run that command");
+    expect(text).toContain("end your turn");
   });
 
   test("engine work in progress: a running answer that says there is nothing to do", () => {
@@ -179,5 +190,133 @@ describe("next_step shapes", () => {
     const keys = Object.keys(nextStep(feature, run.state, 0));
     expect(["node", "waiting", "running", "done"]).toContain(keys[0] ?? "");
     expect(keys).toHaveLength(1);
+  });
+});
+
+const timedYaml = (options: { expected?: number; timeout?: number }): string =>
+  [
+    "name: timed",
+    "nodes:",
+    "  - slug: build",
+    "    kind: command",
+    "    command: make",
+    ...(options.expected ? [`    expected_duration: ${options.expected}`] : []),
+    ...(options.timeout ? [`    timeout: ${options.timeout}`] : []),
+    "  - slug: after",
+    "    kind: command",
+    "    command: echo ok",
+    "edges:",
+    "  - { from: build, to: after }",
+    "  - { from: build, to: after, when: failed }",
+    "  - { from: after, to: build, when: failed }",
+    "",
+  ].join("\n");
+
+describe("what a step says about time and about how to do it", () => {
+  const timed = parsePipeline(
+    [
+      "name: timed",
+      "nodes:",
+      "  - slug: build",
+      "    kind: command",
+      "    command: make",
+      "    expected_duration: 90",
+      "    timeout: 600",
+      "  - slug: review",
+      "    kind: agent",
+      "    prompt: look at it",
+      "    fresh_context: true",
+      "edges:",
+      "  - { from: build, to: review }",
+      "  - { from: build, to: review, when: failed }",
+      "",
+    ].join("\n"),
+  );
+
+  function startedAt(spec: typeof timed, ...events: RunEvent[]) {
+    let state: RunState | undefined;
+    const all: RunEvent[] = [{ type: "start", runId: "r1", task: "t", specHash: "h" }, ...events];
+    for (const event of all) {
+      const result = decide(spec, state, event, 1_000);
+      if (!result.ok) throw result.error;
+      state = result.state;
+    }
+    return state as RunState;
+  }
+
+  test("engine work with an expected duration says how long is left and how to wait", () => {
+    const step = nextStep(timed, startedAt(timed), 1_000 + 50_000);
+    if (!("running" in step)) throw new Error("expected running");
+    expect(step.running.active[0]).toMatchObject({
+      node_slug: "build",
+      elapsed_s: 50,
+      expected_s: 90,
+      remaining_s: 40,
+    });
+    expect(step.running.hint).toContain("40 more seconds");
+    expect(step.running.hint).toContain("wait_s: 43");
+  });
+
+  test("work that is late says so, and does not promise an end", () => {
+    const step = nextStep(timed, startedAt(timed), 1_000 + 200_000);
+    if (!("running" in step)) throw new Error("expected running");
+    expect(step.running.active[0]?.remaining_s).toBe(0);
+    expect(step.running.hint).toContain("longer than expected");
+  });
+
+  test("a long wait is capped at a minute", () => {
+    const long = parsePipeline(timedYaml({ expected: 900, timeout: 1200 }));
+    const step = nextStep(long, startedAt(long), 1_000);
+    if (!("running" in step)) throw new Error("expected running");
+    expect(step.running.hint).toContain("wait_s: 60");
+  });
+
+  test("without an expected duration the agent is only told that it can wait", () => {
+    const plain = parsePipeline(timedYaml({}));
+    const step = nextStep(plain, startedAt(plain), 1_000);
+    if (!("running" in step)) throw new Error("expected running");
+    expect(step.running.active[0]).not.toHaveProperty("expected_s");
+    expect(step.running.hint).toContain("wait_s (up to 60)");
+  });
+
+  test("an agent node that asks for a fresh context says how to do the step", () => {
+    const state = startedAt(timed, {
+      type: "work_finished",
+      node: "build",
+      attempt: 1,
+      passed: true,
+      reason: "",
+    });
+    const step = nextStep(timed, state, 1_000);
+    if (!("node" in step)) throw new Error("expected a node");
+    expect(step.node.slug).toBe("review");
+    expect(step.node.execution?.instruction).toContain("fresh context");
+    expect(step.node.execution?.instruction).toContain("subagent");
+  });
+
+  test("an ordinary agent node has no such instruction", () => {
+    const step = nextStep(feature, startedAt(feature), 1_000);
+    if (!("node" in step)) throw new Error("expected a node");
+    expect(step.node.execution).toBeUndefined();
+  });
+
+  test("a paused run tells the agent to stop and pass the command on", () => {
+    const run = drive(
+      (e) =>
+        e.type === "run_command" && e.node === "build"
+          ? {
+              type: "work_finished",
+              node: e.node,
+              attempt: e.attempt,
+              passed: false,
+              reason: "exit code 1",
+            }
+          : auto(e),
+      [approve("plan-approval")],
+    );
+    const step = nextStep(feature, run.state, 5_000);
+    if (!("waiting" in step)) throw new Error("expected waiting");
+    expect(step.waiting.tell_the_person).toContain("paused");
+    expect(step.waiting.tell_the_person).toContain("do not run that command");
   });
 });

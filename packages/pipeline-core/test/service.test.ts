@@ -22,7 +22,13 @@ import {
   type StepResult,
   validateReport,
 } from "../src";
-import { CONTRACT_VERSION, invokeTool, registerPipelineTools, TOOLS } from "../src/mcp";
+import {
+  CONTRACT_VERSION,
+  invokeTool,
+  registerPipelineTools,
+  SERVER_INSTRUCTIONS,
+  TOOLS,
+} from "../src/mcp";
 
 const feature = parsePipeline(
   readFileSync(new URL("../../../examples/pipelines/feature.yaml", import.meta.url), "utf8"),
@@ -35,6 +41,10 @@ const other = parsePipeline(
 class FakeHost implements PipelineHost {
   readonly runs = new Map<string, FakeRun>();
   failChecksOnAttempt1 = false;
+  /** Leave the engine's commands unanswered, so the run stays in the `running` shape. */
+  holdCommands = false;
+  /** The waits the service asked for, in milliseconds. */
+  readonly waited: number[] = [];
   private count = 0;
 
   constructor(private readonly specs: PipelineSpec[]) {}
@@ -115,6 +125,7 @@ class FakeRun implements RunHandle {
 
   private answer(effect: Effect): RunEvent | undefined {
     if (effect.type === "run_command") {
+      if (this.host.holdCommands) return undefined;
       return {
         type: "work_finished",
         node: effect.node,
@@ -165,7 +176,9 @@ class FakeRun implements RunHandle {
     return this.send({ type: "feedback", ...input });
   }
 
-  async waitForRest(): Promise<void> {}
+  async waitForRest(ms: number): Promise<void> {
+    this.host.waited.push(ms);
+  }
 }
 
 const service = (specs: PipelineSpec[] = [feature]) => {
@@ -397,6 +410,77 @@ describe("driving a run", () => {
   });
 });
 
+describe("waiting for the engine's work", () => {
+  const slowSpec = parsePipeline(
+    [
+      "name: slow",
+      "nodes:",
+      "  - slug: build",
+      "    kind: command",
+      "    command: make",
+      "    expected_duration: 90",
+      "  - slug: after",
+      "    kind: command",
+      "    command: echo ok",
+      "edges:",
+      "  - { from: build, to: after }",
+      "  - { from: build, to: after, when: failed }",
+      "  - { from: after, to: build, when: failed }",
+      "",
+    ].join("\n"),
+  );
+
+  async function running() {
+    const { host, svc } = service([slowSpec]);
+    host.holdCommands = true;
+    const started = asOk(await svc.start({ task: "t" }));
+    expect(started.next).toMatchObject({ running: { active: [{ expected_s: 90 }] } });
+    return { host, svc, runId: started.run_id as string };
+  }
+
+  test("without wait_s the answer comes at once, with a hint that says how long to wait", async () => {
+    const { host, svc, runId } = await running();
+    const step = asOk(await svc.nextStep({ run_id: runId }));
+    expect(host.waited).toEqual([]);
+    expect(JSON.stringify(step)).toContain("wait_s");
+  });
+
+  test("with wait_s the service waits that long for the work, then answers again", async () => {
+    const { host, svc, runId } = await running();
+    host.waited.length = 0;
+    await svc.nextStep({ run_id: runId, wait_s: 25 });
+    expect(host.waited).toEqual([25_000]);
+  });
+
+  test("a wait is never longer than a minute, whatever was asked", async () => {
+    const { host, svc, runId } = await running();
+    host.waited.length = 0;
+    await svc.nextStep({ run_id: runId, wait_s: 5_000 });
+    expect(host.waited).toEqual([60_000]);
+  });
+
+  test("nothing is waited for when there is nothing to wait for", async () => {
+    const { host, svc } = service();
+    const started = asOk(await svc.start({ task: "t" })); // waiting on the agent, not running
+    host.waited.length = 0;
+    await svc.nextStep({ run_id: started.run_id as string, wait_s: 30 });
+    expect(host.waited).toEqual([]);
+  });
+
+  test("the tool takes whole seconds from 0 to 60 and refuses anything else", async () => {
+    const { svc, runId } = await running();
+    for (const wait_s of [-1, 61, 1.5, "30"]) {
+      expect(await invokeTool(svc, "pipeline_next_step", { run_id: runId, wait_s })).toMatchObject({
+        ok: false,
+        code: "INVALID_ARGUMENTS",
+      });
+    }
+    expect((await invokeTool(svc, "pipeline_next_step", { run_id: runId, wait_s: 60 })).ok).toBe(
+      true,
+    );
+  });
+});
+
 describe("the tool surface", () => {
   test("these tools exist, in this order, and the surface is versioned", () => {
     expect(CONTRACT_VERSION).toBe(1);
@@ -412,6 +496,17 @@ describe("the tool surface", () => {
     ]);
   });
 
+  test("the instructions the server gives on connecting name only tools that exist", () => {
+    const named = [...new Set(SERVER_INSTRUCTIONS.match(/pipeline_[a-z_]+/g) ?? [])];
+    expect(named.length).toBeGreaterThan(3);
+    const tools = TOOLS.map((t) => t.name);
+    for (const name of named) expect(tools, name).toContain(name);
+    // and the rules that matter most are there
+    for (const rule of ["Never pick, reorder or skip", "cannot approve", ".kodel/runs"]) {
+      expect(SERVER_INSTRUCTIONS, rule).toContain(rule);
+    }
+  });
+
   test("the arguments of each tool are pinned", () => {
     const shapes = Object.fromEntries(TOOLS.map((t) => [t.name, Object.keys(t.shape)]));
     expect(shapes).toEqual({
@@ -419,7 +514,7 @@ describe("the tool surface", () => {
       pipeline_resolve: ["pipeline"],
       pipeline_plan: ["pipeline", "task"],
       pipeline_start: ["task", "pipeline", "restart"],
-      pipeline_next_step: ["run_id"],
+      pipeline_next_step: ["run_id", "wait_s"],
       pipeline_report_result: [
         "run_id",
         "node_slug",

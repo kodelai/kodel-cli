@@ -245,6 +245,11 @@ describe("mcp over stdio", () => {
     await client.connect(transport);
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name)).toContain("pipeline_start");
+    // The rules of working with a pipeline come with the server, not from a file in the project.
+    const instructions = client.getInstructions() ?? "";
+    for (const part of ["pipeline_start", "tell_the_person", "wait_s", "pipeline_feedback"]) {
+      expect(instructions, part).toContain(part);
+    }
     const started = await client.callTool({ name: "pipeline_start", arguments: { task: "t" } });
     const body = JSON.parse(((started.content as { text: string }[])[0] as { text: string }).text);
     expect(body).toMatchObject({ ok: true, next: { node: { slug: "write" } } });

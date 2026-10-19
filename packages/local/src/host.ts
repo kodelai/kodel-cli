@@ -7,6 +7,7 @@
  * work without a heartbeat and restarts it; the state on disk is all that is needed for that.
  */
 import { createHash } from "node:crypto";
+import { hostname } from "node:os";
 import {
   type ChangeSet,
   type CheckVerdict,
@@ -85,6 +86,30 @@ export interface HostOptions {
   integrityDir?: string;
   /** The YAML the pipeline was read from; a copy is kept with each run so the run is pinned to it. */
   source?: string;
+  /** How this process is named as the owner of engine work; `<host>:<pid>` by default. */
+  ownerId?: string;
+  /** Whether an owner is still alive. Tests replace it; by default a process id on this machine is looked up. */
+  isOwnerAlive?: (owner: string) => boolean;
+}
+
+/** `<host>:<pid>` of this process. */
+export const processOwnerId = (): string => `${hostname()}:${process.pid}`;
+
+/**
+ * Whether the process behind an owner id is alive. Only an owner on this machine can be judged;
+ * for any other the answer is "alive" and the heartbeat timeout decides.
+ */
+export function processIsAlive(owner: string): boolean {
+  const split = owner.lastIndexOf(":");
+  if (split < 0 || owner.slice(0, split) !== hostname()) return true;
+  const pid = Number(owner.slice(split + 1));
+  if (!Number.isInteger(pid) || pid <= 0) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
 }
 
 export const DEFAULT_COMMAND_TIMEOUT_S = 3_600;
@@ -119,6 +144,8 @@ export class LocalHost {
   readonly heartbeatMs: number;
   readonly maxTailBytes: number | undefined;
   readonly integrity: IntegrityStore;
+  readonly ownerId: string;
+  readonly isOwnerAlive: (owner: string) => boolean;
 
   constructor(
     readonly spec: PipelineSpec,
@@ -137,6 +164,8 @@ export class LocalHost {
     this.heartbeatMs =
       options.heartbeatMs ?? Math.max(1_000, (options.engine?.staleMs ?? 30_000) / 3);
     this.maxTailBytes = options.maxTailBytes;
+    this.ownerId = options.ownerId ?? processOwnerId();
+    this.isOwnerAlive = options.isOwnerAlive ?? processIsAlive;
     this.checkRunners = { ...builtinCheckRunners(this), ...options.checkRunners };
   }
 
@@ -186,6 +215,10 @@ export class LocalHost {
       try {
         if (this.options.source !== undefined)
           await this.store.writeSpec(runId, this.options.source);
+        // Where the files stood when the run began, so a person at a gate can be shown what changed.
+        if (await this.snapshotter.isRepo()) {
+          await this.store.writeSnapshot(runId, "run", await this.snapshotter.snapshot());
+        }
         const run = new LocalRun(this, runId);
         const result = await run.apply({ type: "start", runId, task: redactedTask, specHash });
         if (!result.ok) throw result.error;
@@ -401,18 +434,22 @@ export class LocalRun {
         : `${effect.node}#${effect.attempt}#command`;
     if (this.tasks.has(key)) return;
     const controller = new AbortController();
+    const heartbeat = () =>
+      this.apply({
+        type: "heartbeat",
+        node: effect.node,
+        attempt: effect.attempt,
+        owner: this.host.ownerId,
+      }).catch(() => undefined);
     const beat =
       this.host.heartbeatMs > 0
-        ? setInterval(() => {
-            void this.apply({
-              type: "heartbeat",
-              node: effect.node,
-              attempt: effect.attempt,
-            }).catch(() => undefined);
-          }, this.host.heartbeatMs)
+        ? setInterval(() => void heartbeat(), this.host.heartbeatMs)
         : undefined;
     beat?.unref();
     this.tasks.set(key, { controller, node: effect.node, attempt: effect.attempt });
+    // Say who is running it right away: if this process goes, the next session sees at once that
+    // the owner is gone and starts the work again, without waiting for the heartbeat to go stale.
+    void heartbeat();
 
     const job = (async () => {
       try {
@@ -551,9 +588,14 @@ export class LocalRun {
     }
   }
 
-  /** Wait for the work running in this process to come to rest, but no longer than `ms`. */
+  /**
+   * Wait for the engine's work on this run to come to rest, but no longer than `ms`: the work this
+   * process runs, and also work another process owns (a session still going), which is watched in
+   * the state on disk.
+   */
   async waitForRest(ms: number): Promise<void> {
     if (ms <= 0) return;
+    const deadline = Date.now() + ms;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<void>((resolve) => {
       timer = setTimeout(resolve, ms);
@@ -563,6 +605,14 @@ export class LocalRun {
     } finally {
       clearTimeout(timer);
     }
+    while (Date.now() < deadline && (await this.engineBusy())) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(300, deadline - Date.now())));
+    }
+  }
+
+  private async engineBusy(): Promise<boolean> {
+    const state = await this.state().catch(() => undefined);
+    return state?.active.some((v) => v.phase === "engine" || v.phase === "checks") ?? false;
   }
 
   /** Stop all work in this process without reporting anything, as if the process had died. */
@@ -574,7 +624,7 @@ export class LocalRun {
 
   /** What the agent should do next. Throws `STATE_MODIFIED_EXTERNALLY` if the files were tampered with. */
   async nextStep(): Promise<NextStep> {
-    const tick = await this.apply({ type: "tick" });
+    const tick = await this.tick();
     if (!tick.ok && tick.error.code === "STATE_MODIFIED_EXTERNALLY") throw tick.error;
     if ((await this.sealStatus()) === "modified") {
       throw new KodelError(
@@ -583,16 +633,39 @@ export class LocalRun {
       );
     }
     const state = await this.state();
-    return nextStep(
+    const step = nextStep(
       this.host.spec,
       state,
       this.host.clock(),
       this.host.engine.registry ?? defaultRegistry(),
     );
+    if ("waiting" in step && step.waiting.reason === "gate") {
+      const changes = await this.changesSinceStart();
+      if (changes && Object.keys(changes).length > 0) step.waiting.changes = changes;
+    }
+    return step;
   }
 
-  tick() {
-    return this.apply({ type: "tick" });
+  /** Files changed since the run started, with the lines changed; `undefined` without a git baseline. */
+  async changesSinceStart(): Promise<ChangeSet | undefined> {
+    const tree = (await this.host.store.readSnapshots(this.runId)).run;
+    if (!tree) return undefined;
+    return this.host.snapshotter.changesSince(tree).catch(() => undefined);
+  }
+
+  /** Owners of engine work that are gone (their process is dead), so their work can restart at once. */
+  private async deadOwners(): Promise<string[]> {
+    const state = await this.state().catch(() => undefined);
+    const owners = new Set<string>();
+    for (const visit of state?.active ?? []) {
+      if (visit.owner !== undefined && visit.owner !== this.host.ownerId) owners.add(visit.owner);
+    }
+    return [...owners].filter((owner) => !this.host.isOwnerAlive(owner));
+  }
+
+  async tick() {
+    const deadOwners = await this.deadOwners();
+    return this.apply(deadOwners.length > 0 ? { type: "tick", deadOwners } : { type: "tick" });
   }
 
   completeStep(node: string, attempt: number, summary?: string) {

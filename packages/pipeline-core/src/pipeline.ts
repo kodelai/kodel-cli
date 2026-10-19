@@ -32,6 +32,11 @@ export interface NodeSpec {
   kind: string;
   timeout?: number;
   /**
+   * How long the node usually takes, in seconds. The agent is told, so it knows how long to wait
+   * for engine work instead of guessing. It is a hint, never a limit (`timeout` is the limit).
+   */
+  expected_duration?: number;
+  /**
    * Failed attempts in a row before the run pauses. Counts automatic failures only (a human
    * rejection is not one) and starts over when the node passes.
    */
@@ -83,6 +88,7 @@ const GENERIC_NODE_FIELDS = new Set([
   "name",
   "kind",
   "timeout",
+  "expected_duration",
   "max_consecutive_failures",
   "max_attempts",
   "on_fail",
@@ -118,6 +124,7 @@ const commonNodeShape = {
   name: nonEmpty.optional(),
   kind: nonEmpty,
   timeout: positiveInt.optional(),
+  expected_duration: positiveInt.optional(),
   max_consecutive_failures: positiveInt.optional(),
   max_attempts: positiveInt.optional(),
 };
@@ -394,8 +401,17 @@ export function validatePipeline(text: string, options: ParseOptions = {}): Pars
       params,
     };
     const timeout = (data.timeout as number | undefined) ?? defaults?.timeout;
+    const expected = data.expected_duration as number | undefined;
+    if (expected !== undefined && timeout !== undefined && expected > timeout) {
+      c.add(
+        [...base, "expected_duration"],
+        `expected_duration (${expected} s) must not exceed the timeout (${timeout} s)`,
+        [...base, "expected_duration"],
+      );
+    }
     if (data.name !== undefined) node.name = data.name as string;
     if (timeout !== undefined) node.timeout = timeout;
+    if (expected !== undefined) node.expected_duration = expected;
     nodes.push(node);
   });
 

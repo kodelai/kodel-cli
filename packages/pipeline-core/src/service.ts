@@ -5,7 +5,7 @@
  * every host answers an agent the same way.
  */
 import { type ErrorCode, KodelError } from "./errors";
-import type { NextStep } from "./next-step";
+import { MAX_WAIT_S, type NextStep } from "./next-step";
 import type { PipelineSpec } from "./pipeline";
 import { defaultRegistry, type Registry } from "./registry";
 import { renderTemplate } from "./render";
@@ -197,11 +197,20 @@ export class PipelineService {
     });
   }
 
-  nextStep(input: { run_id: string }): Promise<ToolResult> {
-    return guarded(async () => ({
-      ok: true,
-      ...(await (await this.run(input.run_id)).nextStep()),
-    }));
+  /**
+   * What to do next. With `wait_s`, and engine work going, it waits (up to `MAX_WAIT_S`) for that
+   * work to finish before answering, so the agent does not have to guess how long to wait.
+   */
+  nextStep(input: { run_id: string; wait_s?: number }): Promise<ToolResult> {
+    return guarded(async () => {
+      const run = await this.run(input.run_id);
+      let step = await run.nextStep();
+      if (input.wait_s !== undefined && input.wait_s > 0 && "running" in step) {
+        await run.waitForRest(Math.min(input.wait_s, MAX_WAIT_S) * 1000);
+        step = await run.nextStep();
+      }
+      return { ok: true, ...step };
+    });
   }
 
   reportResult(input: {

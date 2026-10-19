@@ -70,6 +70,8 @@ export interface Visit {
   checkIndex: number;
   /** Last sign of life of the process running engine work. */
   heartbeatAt?: number;
+  /** Who is running the engine work (a process id, as the host names it); see `tick`. */
+  owner?: string;
   restarts: number;
   /** Engine work that was restarted too often; waits for `resume`. */
   suspended?: boolean;
@@ -127,7 +129,7 @@ export type RunEvent =
       reason: string;
     }
   | { type: "human_decided"; node: string; decision: "approved" | "rejected"; reason?: string }
-  | { type: "heartbeat"; node: string; attempt: number }
+  | { type: "heartbeat"; node: string; attempt: number; owner?: string }
   /** The agent noticed a problem in a step description. Journaled; it never changes the run. */
   | {
       type: "feedback";
@@ -139,7 +141,11 @@ export type RunEvent =
     }
   /** A human accepted a change made to the run's files outside kodel. Journaled; changes nothing else. */
   | { type: "acknowledge"; note?: string }
-  | { type: "tick" }
+  /**
+   * Look for engine work that was interrupted. `deadOwners` are the owners (see `Visit.owner`) the
+   * host knows to be gone, so their work restarts at once instead of after `staleMs`.
+   */
+  | { type: "tick"; deadOwners?: string[] }
   | { type: "resume" }
   | { type: "cancel" };
 
@@ -543,16 +549,19 @@ class Machine {
         const visit = this.s.active.find(
           (v) => v.node === event.node && v.attempt === event.attempt,
         );
-        if (visit && (visit.phase === "engine" || visit.phase === "checks"))
+        if (visit && (visit.phase === "engine" || visit.phase === "checks")) {
           visit.heartbeatAt = this.now;
-        else throw new Repeat();
+          if (event.owner !== undefined) visit.owner = event.owner;
+        } else throw new Repeat();
         return;
       }
       case "tick": {
+        const dead = new Set(event.deadOwners ?? []);
         for (const visit of [...this.s.active]) {
           const engineWork = visit.phase === "engine" || visit.phase === "checks";
           if (!engineWork || visit.suspended || visit.heartbeatAt === undefined) continue;
-          if (this.now - visit.heartbeatAt >= this.staleMs) this.restart(visit);
+          const gone = visit.owner !== undefined && dead.has(visit.owner);
+          if (gone || this.now - visit.heartbeatAt >= this.staleMs) this.restart(visit, gone);
         }
         return;
       }
@@ -579,7 +588,7 @@ class Machine {
     this.enter(this.spec.entry, false);
   }
 
-  private restart(visit: Visit) {
+  private restart(visit: Visit, ownerGone = false) {
     visit.restarts += 1;
     if (visit.restarts > this.maxRestarts) {
       visit.suspended = true;
@@ -587,11 +596,14 @@ class Machine {
       return;
     }
     visit.heartbeatAt = this.now;
+    delete visit.owner;
     this.log("node_restarted", {
       node: visit.node,
       attempt: visit.attempt,
       restarts: visit.restarts,
-      reason: "the process running it stopped answering",
+      reason: ownerGone
+        ? "the process running it is gone"
+        : "the process running it stopped answering",
     });
     this.reissue(visit);
   }

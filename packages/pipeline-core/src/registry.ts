@@ -44,6 +44,8 @@ export interface NodeHandler {
   labels(node: NodeInfo): Labels;
   /** How the node starts: who does the work and with what instructions. */
   begin(params: Record<string, unknown>, render: (text: string) => string): Begin;
+  /** Extra guidance on *how* the agent does this node (not what), shown with the step. */
+  instruction?(params: Record<string, unknown>): string | undefined;
 }
 
 export type Baseline = "run" | "node" | "attempt";
@@ -97,14 +99,24 @@ const nonEmpty = z.string().min(1);
 const positiveInt = z.number().int().positive();
 const expect = z.object({ exit: z.number().int() }).strict();
 
+/**
+ * Said to the agent when a node must be done by someone who has not seen the work so far. The
+ * engine cannot make an agent forget, so this is guidance, and the node's checks still decide.
+ */
+export const FRESH_CONTEXT_INSTRUCTION =
+  "Do this step in a fresh context: give it to a subagent (or a new session) that sees only this " +
+  "step's prompt and the repository, not your earlier reasoning, so it is an independent look. " +
+  "Take what it finds as it is and send that; do not change it to agree with your own work.";
+
 const agentNode: NodeHandler = {
   kind: "agent",
-  shape: { prompt: nonEmpty },
+  shape: { prompt: nonEmpty, fresh_context: z.boolean().optional() },
   allowsChecks: true,
   requiresRoutes: false,
   automaticFailures: true,
   labels: (node) => ({ success: ["passed"], failure: node.checks.map((c) => c.on_fail) }),
   begin: (params, render) => ({ needs: "agent", prompt: render(String(params.prompt)) }),
+  instruction: (params) => (params.fresh_context === true ? FRESH_CONTEXT_INSTRUCTION : undefined),
 };
 
 const commandNode: NodeHandler = {

@@ -1,5 +1,5 @@
 import { type PipelineHost, PipelineService } from "@kodel-ai/pipeline-core";
-import { registerPipelineTools } from "@kodel-ai/pipeline-core/mcp";
+import { registerPipelineTools, SERVER_INSTRUCTIONS } from "@kodel-ai/pipeline-core/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
@@ -8,7 +8,7 @@ export type StoppableHost = PipelineHost & { stop?(): void };
 
 /** Build the MCP server for a host; the transport is the caller's. */
 export function createServer(host: PipelineHost, version: string): McpServer {
-  const server = new McpServer({ name: "kodel", version });
+  const server = new McpServer({ name: "kodel", version }, { instructions: SERVER_INSTRUCTIONS });
   registerPipelineTools(server, new PipelineService(host));
   return server;
 }

@@ -5,11 +5,29 @@
  * tools. Anything extra in a call (a made-up `status`, say) is ignored, never trusted.
  */
 import { z } from "zod";
+import { MAX_WAIT_S } from "../next-step";
 import { RUN_ID_PATTERN } from "../run-id";
 import type { PipelineService, ToolResult } from "../service";
 
 /** Bump when a tool is renamed or its arguments change; a snapshot test pins the surface. */
 export const CONTRACT_VERSION = 1;
+
+/**
+ * What the agent is told about this server when it connects (the MCP `instructions` field), so the
+ * rules of working with a pipeline travel with the server and do not depend on a file in the
+ * project that someone has to write and keep up to date.
+ */
+export const SERVER_INSTRUCTIONS = [
+  "This server runs the project's pipelines: fixed sequences of steps that the engine, not you, checks.",
+  "",
+  "When the user asks you to do something through a pipeline (or to run one), work only through the pipeline_* tools:",
+  "1. If you do not know the pipeline's name, call pipeline_list. Then call pipeline_start with the task in the user's words.",
+  "2. Follow each answer. Never pick, reorder or skip steps yourself, and never decide that a step is done: after you do a step, call pipeline_complete_step and let the engine's checks decide. If a check fails you get the reason and the same step again.",
+  "3. pipeline_next_step tells you what is next: `node` (do it), `waiting` (a person has to decide), `running` (the engine is working: pass wait_s to wait, as the hint says), or `done`.",
+  "4. At a `waiting` answer, do what `tell_the_person` says: write the person what they are asked to decide, a summary of what was done and changed, what to look at, and the command to decide with. Then end your turn. You cannot approve, reject or resume anything yourself, and you must not try: those commands are for the person and refuse to run for an agent.",
+  "5. Do not read or edit the run files in .kodel/runs, and do not change the pipeline files while a run is going.",
+  "6. If a step's description or a check looks wrong or unclear, say so with pipeline_feedback; it never blocks the run.",
+].join("\n");
 
 export interface ToolDescriptor {
   name: string;
@@ -105,13 +123,24 @@ export const TOOLS: ToolDescriptor[] = [
     title: "What to do next",
     description:
       "Ask what to do next in a run. It is safe to repeat. The answer is one of four: `node` (do this work, " +
-      "then call pipeline_complete_step), `waiting` (a person has to decide; tell them how and end your turn), " +
-      "`running` (the engine is working; tell the user and end your turn, do not ask again in a loop), or " +
-      "`done`.",
-    shape: { run_id: runId },
+      "then call pipeline_complete_step), `waiting` (a person has to decide: do what `tell_the_person` says, " +
+      "then end your turn), `running` (the engine is working: pass wait_s to wait for it, as the hint says, " +
+      "or tell the user and end your turn; never ask again in a tight loop), or `done`.",
+    shape: {
+      run_id: runId,
+      wait_s: z
+        .number()
+        .int()
+        .min(0)
+        .max(MAX_WAIT_S)
+        .optional()
+        .describe(
+          `If the engine is working, wait up to this many seconds (at most ${MAX_WAIT_S}) for it to finish before answering.`,
+        ),
+    },
     readOnly: true,
     idempotent: true,
-    run: (service, input) => service.nextStep(input as { run_id: string }),
+    run: (service, input) => service.nextStep(input as { run_id: string; wait_s?: number }),
   },
   {
     name: "pipeline_report_result",

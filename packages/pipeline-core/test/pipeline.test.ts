@@ -203,6 +203,53 @@ describe("node kinds", () => {
     );
   });
 
+  test("a node may say how long it usually takes, as a hint that is kept on the node", () => {
+    const spec = parsePipeline(
+      VALID.replace("    command: make\n", "    command: make\n    expected_duration: 90\n"),
+    );
+    expect(spec.nodes.find((n) => n.slug === "build")?.expected_duration).toBe(90);
+    expect(spec.nodes.find((n) => n.slug === "work")?.expected_duration).toBeUndefined();
+  });
+
+  test("the expected duration is a positive whole number of seconds, never more than the timeout", () => {
+    const withLine = (line: string) =>
+      VALID.replace("    command: make\n", `    command: make\n${line}\n`);
+    expectIssue(withLine("    expected_duration: 0"), "expected_duration");
+    expectIssue(withLine("    expected_duration: 1.5"), "expected_duration");
+    expectIssue(
+      withLine("    expected_duration: 900\n    timeout: 600"),
+      "must not exceed the timeout",
+    );
+    expect(() =>
+      parsePipeline(withLine("    expected_duration: 60\n    timeout: 600")),
+    ).not.toThrow();
+  });
+
+  test("a pipeline-wide timeout also bounds the expected duration", () => {
+    const text = VALID.replace("nodes:", "defaults:\n  timeout: 100\nnodes:").replace(
+      "    command: make\n",
+      "    command: make\n    expected_duration: 500\n",
+    );
+    expectIssue(text, "must not exceed the timeout");
+  });
+
+  test("an agent node may ask for a fresh context, and only a boolean", () => {
+    const spec = parsePipeline(
+      VALID.replace(
+        "    prompt: do {{task}}\n",
+        "    prompt: do {{task}}\n    fresh_context: true\n",
+      ),
+    );
+    expect(spec.nodes[0]?.params.fresh_context).toBe(true);
+    expectIssue(
+      VALID.replace(
+        "    prompt: do {{task}}\n",
+        "    prompt: do {{task}}\n    fresh_context: maybe\n",
+      ),
+      "fresh_context",
+    );
+  });
+
   test("slugs must be safe", () => {
     const text = doc("name: x", "nodes:", "  - slug: Bad Slug", "    kind: agent", "    prompt: p");
     expectIssue(text, "slug must be lowercase");
