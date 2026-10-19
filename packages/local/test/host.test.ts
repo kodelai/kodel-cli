@@ -306,10 +306,8 @@ describe("starting and finding runs", () => {
     );
     const { run } = await host(spec).start("t");
     expect((await run.state()).nodes.work?.status).toBe("running");
-    expect(Object.keys(await host(spec).store.readSnapshots(run.runId))).toEqual([
-      "run",
-      "visit:1",
-    ]);
+    const kept = Object.keys(await host(spec).store.readSnapshots(run.runId)).sort();
+    expect(kept).toEqual(["run", "visit:1"]);
   });
 
   test("a secret in the task is redacted before anything is saved", async () => {

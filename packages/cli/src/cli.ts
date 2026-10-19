@@ -20,6 +20,8 @@ export interface CliEnv {
   interactive: boolean;
   /** Ask the person a yes/no question. */
   confirm(question: string): Promise<boolean>;
+  /** The environment the command runs in (`process.env`), looked at for the engine's marker. */
+  environment?: Record<string, string | undefined>;
 }
 
 /** A problem to report to the user without a stack trace. */
@@ -30,16 +32,45 @@ const WORK_WAIT_MS = 30 * 60_000;
 
 const SHOWN_FILES = 10;
 
-/** Text that came from the agent (a task, a name) with control characters taken out, so it cannot move the cursor or fake a line. */
-// biome-ignore lint/suspicious/noControlCharactersInRegex: removing them is the point
-const plain = (text: string): string => text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ");
+/**
+ * Text that came from the agent (a task, a name, a file name) or from files it can write, with
+ * what could mislead a person taking out: control characters (they move the cursor or fake a line),
+ * the characters that reorder text (a file name can be made to read backwards), and line and
+ * paragraph separators.
+ */
+const UNSAFE_CODES: [from: number, to: number][] = [
+  [0x00, 0x1f], // control characters
+  [0x7f, 0x9f], // delete and the C1 controls
+  [0x61c, 0x61c], // Arabic letter mark
+  [0x200e, 0x200f], // left-to-right and right-to-left marks
+  [0x2028, 0x2029], // line and paragraph separators
+  [0x202a, 0x202e], // embeddings and overrides
+  [0x2066, 0x2069], // isolates
+];
+
+export function plain(text: string): string {
+  let out = "";
+  let skipped = false;
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    if (UNSAFE_CODES.some(([from, to]) => code >= from && code <= to)) {
+      if (!skipped) out += " ";
+      skipped = true;
+    } else {
+      out += char;
+      skipped = false;
+    }
+  }
+  return out;
+}
 
 function describeRun(state: RunState | undefined): string {
   if (!state) return "unreadable";
+  const status = plain(String(state.status));
   if (state.status === "paused")
     return `paused (${plain(state.pause?.reason ?? "?")} at ${plain(state.pause?.node ?? "?")})`;
   const at = state.active.map((v) => `${plain(v.node)}#${v.attempt}`).join(", ");
-  return at ? `${state.status} at ${at}` : state.status;
+  return at ? `${status} at ${at}` : status;
 }
 
 function failIfRefused(decision: Decision): void {
@@ -66,8 +97,18 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     return run;
   }
 
-  /** The decisions are a person's: no terminal, no decision. */
+  /**
+   * The decisions are a person's: no terminal, no decision. A command the engine runs (a test that
+   * the agent wrote, say) is told so in its environment and is refused whatever its terminal is.
+   * An agent that gets itself a pseudo-terminal passes the first check: that is a limit of what a
+   * program run by the same user can tell, and the person's own terminal is what the rest rests on.
+   */
   function requireHuman(): void {
+    if (env.environment?.KODEL_ENGINE !== undefined) {
+      throw new UserError(
+        "this command is for a person; it will not run from a command the engine runs",
+      );
+    }
     if (!env.interactive) {
       throw new UserError(
         "this command is for a person at a terminal; it will not run from a script or an agent",
@@ -114,7 +155,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         if (runs.length === 0) env.out("no runs yet\n");
         for (const { meta, state } of runs) {
           env.out(
-            `${meta.runId}  ${plain(meta.pipeline)}  ${describeRun(state)}  ${plain(meta.task)}\n`,
+            `${plain(meta.runId)}  ${plain(meta.pipeline)}  ${describeRun(state)}  ${plain(meta.task)}\n`,
           );
         }
         return;
@@ -122,15 +163,21 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const run = await openRun(h, runId);
       const state = await run.state();
       env.out(
-        `run:       ${state.runId}\ntask:      ${plain(state.task)}\nstatus:    ${describeRun(state)}\n`,
+        `run:       ${plain(state.runId)}\ntask:      ${plain(state.task)}\nstatus:    ${describeRun(state)}\n`,
       );
       env.out(`integrity: ${await run.integrityStatus()}\n`);
       env.out(`seal:      ${await run.sealStatus()}\n`);
       env.out(`trail:     ${state.trail.map(plain).join(" > ")}\n`);
-      // Read-only: looking at a run must not restart its work or write anything.
-      const next = await run.inspect();
-      if ("waiting" in next) {
-        env.out(`waiting:   ${plain(next.waiting.node_slug)} (${next.waiting.reason})\n`);
+      // Read-only: looking at a run must not restart its work or write anything. A state that
+      // cannot be read as a step (it names a node that is not there) is said to be unreadable
+      // rather than ending the command, since this is the command one uses to find out what is wrong.
+      try {
+        const next = await run.inspect();
+        if ("waiting" in next) {
+          env.out(`waiting:   ${plain(next.waiting.node_slug)} (${next.waiting.reason})\n`);
+        }
+      } catch {
+        env.out("next:      cannot be worked out from this state (it is not readable as a run)\n");
       }
     });
 
@@ -156,16 +203,29 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           `run ${runId} is not waiting for a decision${opts.node ? ` at "${plain(opts.node)}"` : ""}`,
         );
       }
-      // What the agent did after the run stopped here is not what the checks saw.
-      const changes = await run.changesSinceGate(node);
-      const files = Object.keys(changes ?? {});
-      let question = `${decision === "approve" ? "Approve" : "Reject"} "${plain(node)}" of run ${runId}?`;
-      if (files.length > 0) {
-        const shown = files.slice(0, SHOWN_FILES).map((f) => `  ${plain(f)}`);
-        const more = files.length > SHOWN_FILES ? [`  and ${files.length - SHOWN_FILES} more`] : [];
-        question = `${files.length} file(s) changed since the run stopped here:\n${[...shown, ...more].join("\n")}\n${question}`;
+      // What the agent did after the run stopped here is not what the checks saw. When that cannot
+      // be told (the record is gone, or git fails: something an agent could make happen), it is
+      // said so and approving needs one more yes. "Nothing changed" is only ever shown when the
+      // engine really compared the files.
+      const found = await run.changesSinceGate(node);
+      let question = `${decision === "approve" ? "Approve" : "Reject"} "${plain(node)}" of run ${plain(runId)}?`;
+      if (found.kind === "changes") {
+        const files = Object.keys(found.files);
+        if (files.length > 0) {
+          const shown = files.slice(0, SHOWN_FILES).map((f) => `  ${plain(f)}`);
+          const more =
+            files.length > SHOWN_FILES ? [`  and ${files.length - SHOWN_FILES} more`] : [];
+          question = `${files.length} file(s) changed since the run stopped here:\n${[...shown, ...more].join("\n")}\n${question}`;
+        }
+      } else if (found.kind === "unavailable") {
+        question = `WARNING: the engine cannot tell what changed since the run stopped here: ${plain(found.reason)}\nThe agent may have gone on working after its checks passed.\n${question}`;
       }
       await mustConfirm(question);
+      if (found.kind === "unavailable" && decision === "approve") {
+        await mustConfirm(
+          "Approve although what changed since the run stopped here could not be checked?",
+        );
+      }
       failIfRefused(
         await run.decideHuman(node, decision === "approve" ? "approved" : "rejected", opts.reason),
       );
@@ -206,8 +266,16 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const h = host();
       const id = runId ?? (await h.runSummaries()).at(-1)?.meta.runId;
       if (!id) throw new UserError("there are no runs yet");
-      const report = await (await openRun(h, id)).report();
-      env.out(opts.json ? `${JSON.stringify(report, null, 2)}\n` : formatReport(report, plain));
+      const run = await openRun(h, id);
+      const report = await run.report();
+      // The report is read from the run's own files, so it is only as good as they are: whether they
+      // are as kodel last wrote them goes with it.
+      const trust = { integrity: await run.integrityStatus(), seal: await run.sealStatus() };
+      env.out(
+        opts.json
+          ? `${JSON.stringify({ ...report, ...trust }, null, 2)}\n`
+          : formatReport(report, plain, trust),
+      );
     });
 
   program
@@ -231,7 +299,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
   } catch (error) {
     if (error instanceof CommanderError) return error.exitCode;
     if (error instanceof UserError || error instanceof KodelError) {
-      env.err(`kodel: ${error.message}\n`);
+      env.err(`kodel: ${plain(error.message)}\n`);
       return 1;
     }
     throw error;

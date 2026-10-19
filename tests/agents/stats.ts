@@ -45,10 +45,22 @@ export function parseBunOutput(text: string): TestResult[] {
   return results;
 }
 
+const WEIGHT: Record<Verdict, number> = { skip: 0, pass: 1, fail: 2 };
+
+/** One result per test name in a run: if a name is listed twice (a recap), the worse verdict stands. */
+export function dedupe(results: TestResult[]): TestResult[] {
+  const byName = new Map<string, TestResult>();
+  for (const result of results) {
+    const seen = byName.get(result.name);
+    if (!seen || WEIGHT[result.verdict] > WEIGHT[seen.verdict]) byName.set(result.name, result);
+  }
+  return [...byName.values()];
+}
+
 export function aggregate(records: RunRecord[]): Row[] {
   const groups = new Map<string, { name: string; model: string; results: TestResult[] }>();
   for (const record of records) {
-    for (const result of record.results) {
+    for (const result of dedupe(record.results)) {
       const key = `${record.model}\u0000${result.name}`;
       const group = groups.get(key) ?? { name: result.name, model: record.model, results: [] };
       group.results.push(result);
@@ -94,4 +106,21 @@ export function formatTable(rows: Row[]): string {
 /** Scenarios that did not pass every time they were run, over the whole set. */
 export function unreliable(rows: Row[]): Row[] {
   return rows.filter((r) => r.rate !== undefined && r.rate < 1);
+}
+
+/**
+ * Scenarios that were never run, only skipped: a nightly job in which the agent tests were switched
+ * off by accident must not come out green, so these are reported apart from the reliable ones.
+ */
+export function neverRun(rows: Row[]): Row[] {
+  return rows.filter((r) => r.runs === 0);
+}
+
+/** A run of the test command that left nothing to count (it crashed, or timed out), as a failure. */
+export function crashed(model: string, run: number, detail: string): RunRecord {
+  return {
+    model,
+    run,
+    results: [{ name: `(the test command itself) ${detail}`, verdict: "fail" }],
+  };
 }

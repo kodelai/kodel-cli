@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { aggregate, formatTable, parseBunOutput, type RunRecord, unreliable } from "./stats";
+import {
+  aggregate,
+  crashed,
+  dedupe,
+  formatTable,
+  neverRun,
+  parseBunOutput,
+  type RunRecord,
+  unreliable,
+} from "./stats";
 
 const OUTPUT = [
   "bun test v1.3.5 (abc)",
@@ -74,5 +83,64 @@ describe("aggregate", () => {
     expect(lines[0]).toContain("0/1");
     expect(lines.at(-1)).toContain("skipped");
     expect(formatTable(rows)).toContain("3/3 (100%)");
+  });
+});
+
+describe("what makes a nightly run honest", () => {
+  test("a test listed twice in one run, as in a recap, is counted once, and the worse verdict stands", () => {
+    const twice = dedupe([
+      { name: "a", verdict: "pass" },
+      { name: "a", verdict: "fail" },
+      { name: "b", verdict: "fail" },
+      { name: "b", verdict: "fail" },
+      { name: "c", verdict: "skip" },
+    ]);
+    expect(twice.map((r) => `${r.name}:${r.verdict}`).sort()).toEqual([
+      "a:fail",
+      "b:fail",
+      "c:skip",
+    ]);
+    const rows = aggregate([
+      {
+        model: "m",
+        run: 1,
+        results: [
+          { name: "b", verdict: "fail" },
+          { name: "b", verdict: "fail" },
+        ],
+      },
+    ]);
+    expect(rows[0]).toMatchObject({ runs: 1, passes: 0 });
+  });
+
+  test("a run that left nothing to count is a failure of its own, not an empty page", () => {
+    const rows = aggregate([crashed("sonnet", 2, "produced no results (exit 1)")]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ runs: 1, passes: 0, rate: 0 });
+    expect(rows[0]?.name).toContain("produced no results");
+    expect(unreliable(rows)).toHaveLength(1);
+  });
+
+  test("scenarios that were only ever skipped are told apart from the reliable ones", () => {
+    const rows = aggregate([
+      {
+        model: "m",
+        run: 1,
+        results: [
+          { name: "a", verdict: "skip" },
+          { name: "b", verdict: "pass" },
+        ],
+      },
+      {
+        model: "m",
+        run: 2,
+        results: [
+          { name: "a", verdict: "skip" },
+          { name: "b", verdict: "pass" },
+        ],
+      },
+    ]);
+    expect(neverRun(rows).map((r) => r.name)).toEqual(["a"]);
+    expect(unreliable(rows)).toEqual([]); // so "nothing was unreliable" alone would pass a skipped night
   });
 });

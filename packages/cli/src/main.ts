@@ -17,5 +17,6 @@ const code = await runCli(process.argv.slice(2), {
   err: (text) => process.stderr.write(text),
   interactive: process.stdin.isTTY === true && process.stdout.isTTY === true,
   confirm,
+  environment: process.env,
 });
 process.exit(code);

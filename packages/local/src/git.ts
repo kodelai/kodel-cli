@@ -2,26 +2,41 @@
  * Working-tree snapshots for `diff` baselines.
  *
  * A snapshot is a git tree object built from the working tree (tracked and untracked files that
- * are not ignored, uncommitted changes included) through a private copy of the index. The user's
- * own index, working tree and branches are never touched; the only trace is a few unreferenced
- * objects that `git gc` removes. The changes between two snapshots are `git diff --numstat`
- * between the two trees: added plus removed lines per path.
+ * are not ignored, uncommitted changes included) through a private index. The user's own index,
+ * working tree and branches are never touched; the only trace is a few unreferenced objects that
+ * `git gc` removes. The changes between two snapshots are `git diff --numstat` between the two
+ * trees: added plus removed lines per path.
+ *
+ * Nothing here may run code the repository's own files ask for. The agent can write
+ * `.gitattributes` and `.git/config`, and `git add` and `git diff` would run the clean filters,
+ * text conversions and external diff programs those name, as the user, outside any sandbox. So the
+ * tree is built from plumbing that does not read attributes (`hash-object --no-filters`,
+ * `update-index --index-info`), and the diff is told to use neither text conversion nor an external
+ * program. The price is that files are read again for every snapshot.
  */
 import { execFile } from "node:child_process";
-import { copyFile, mkdtemp, rm, stat } from "node:fs/promises";
+import { lstat, mkdtemp, readlink, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { join } from "node:path";
 import type { ChangeSet } from "@kodel-ai/pipeline-core";
 
 interface GitResult {
   stdout: string;
 }
 
-function git(args: string[], cwd: string, env: Record<string, string> = {}): Promise<GitResult> {
+/** Configuration that would let the repository run something on our behalf, switched off. */
+const SAFE_CONFIG = ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"];
+
+function git(
+  args: string[],
+  cwd: string,
+  env: Record<string, string> = {},
+  input?: string,
+): Promise<GitResult> {
   return new Promise((resolveResult, reject) => {
-    execFile(
+    const child = execFile(
       "git",
-      args,
+      [...SAFE_CONFIG, ...args],
       {
         cwd,
         env: { ...process.env, ...env },
@@ -38,6 +53,8 @@ function git(args: string[], cwd: string, env: Record<string, string> = {}): Pro
         }
       },
     );
+    child.stdin?.on("error", () => undefined); // a failing git reports through the callback
+    child.stdin?.end(input ?? "");
   });
 }
 
@@ -45,6 +62,9 @@ export interface SnapshotterOptions {
   /** Directories that are never part of a snapshot (relative to the repository root). */
   exclude?: string[];
 }
+
+/** A path that `hash-object --stdin-paths` could misread: it takes one path a line, and unquotes. */
+const awkwardPath = (path: string) => /[\n\r]/.test(path) || path.startsWith('"');
 
 export class GitSnapshotter {
   private readonly exclude: string[];
@@ -65,27 +85,78 @@ export class GitSnapshotter {
     }
   }
 
+  private excluded(path: string): boolean {
+    return this.exclude.some((dir) => path === dir || path.startsWith(`${dir}/`));
+  }
+
   /** The tree object of the working tree as it is now. */
   async snapshot(): Promise<string> {
     if (!(await this.isRepo())) {
       throw new Error(`the diff check needs a git repository, and ${this.root} is not inside one`);
     }
+    // The listing is relative to the directory we are in; the index wants paths from the top of the
+    // repository, so the way down to this directory goes in front of each.
+    const { stdout: prefixOut } = await git(["rev-parse", "--show-prefix"], this.root);
+    const prefix = prefixOut.trim();
+    const { stdout: listed } = await git(
+      ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+      this.root,
+      { GIT_OPTIONAL_LOCKS: "0" },
+    );
+    const paths = [...new Set(listed.split("\0").filter(Boolean))].filter((p) => !this.excluded(p));
+
+    const regular: { path: string; mode: string }[] = [];
+    const entries: { mode: string; sha: string; path: string }[] = [];
+    for (const path of paths) {
+      const info = await lstat(join(this.root, path)).catch(() => undefined);
+      if (!info) continue; // tracked, but deleted from the working tree
+      if (info.isSymbolicLink()) {
+        const target = await readlink(join(this.root, path));
+        const { stdout } = await git(
+          ["hash-object", "-w", "--no-filters", "--stdin"],
+          this.root,
+          {},
+          target,
+        );
+        entries.push({ mode: "120000", sha: stdout.trim(), path: `${prefix}${path}` });
+      } else if (info.isFile()) {
+        regular.push({ path, mode: info.mode & 0o111 ? "100755" : "100644" });
+      }
+      // directories (a submodule, say) and special files are not part of a snapshot
+    }
+
+    const plain = regular.filter((f) => !awkwardPath(f.path));
+    if (plain.length > 0) {
+      const { stdout } = await git(
+        ["hash-object", "-w", "--no-filters", "--stdin-paths"],
+        this.root,
+        {},
+        `${plain.map((f) => join(this.root, f.path)).join("\n")}\n`,
+      );
+      const shas = stdout.split("\n").filter(Boolean);
+      if (shas.length !== plain.length)
+        throw new Error("git hash-object answered for fewer files than asked");
+      for (const [i, f] of plain.entries()) {
+        entries.push({ mode: f.mode, sha: shas[i] as string, path: `${prefix}${f.path}` });
+      }
+    }
+    for (const f of regular.filter((r) => awkwardPath(r.path))) {
+      const { stdout } = await git(
+        ["hash-object", "-w", "--no-filters", "--", join(this.root, f.path)],
+        this.root,
+      );
+      entries.push({ mode: f.mode, sha: stdout.trim(), path: `${prefix}${f.path}` });
+    }
+
     const scratch = await mkdtemp(join(tmpdir(), "kodel-index-"));
     try {
-      const index = join(scratch, "index");
-      const { stdout } = await git(["rev-parse", "--git-path", "index"], this.root);
-      const realIndex = isAbsolute(stdout.trim())
-        ? stdout.trim()
-        : resolve(this.root, stdout.trim());
-      // Copying the index keeps its stat cache, so unchanged files are not hashed again.
-      const hasIndex = await stat(realIndex).then(
-        () => true,
-        () => false,
+      const env = { GIT_INDEX_FILE: join(scratch, "index"), GIT_OPTIONAL_LOCKS: "0" };
+      await git(
+        ["update-index", "--add", "-z", "--index-info"],
+        this.root,
+        env,
+        entries.map((e) => `${e.mode} ${e.sha}\t${e.path}\0`).join(""),
       );
-      if (hasIndex) await copyFile(realIndex, index);
-      const env = { GIT_INDEX_FILE: index, GIT_OPTIONAL_LOCKS: "0" };
-      const pathspec = [".", ...this.exclude.map((dir) => `:(exclude)${dir}`)];
-      await git(["add", "-A", "--", ...pathspec], this.root, env);
       const { stdout: tree } = await git(["write-tree"], this.root, env);
       return tree.trim();
     } finally {
@@ -96,7 +167,17 @@ export class GitSnapshotter {
   /** Changed lines per path between two snapshots; a binary file counts as one line. */
   async changes(from: string, to: string): Promise<ChangeSet> {
     const { stdout } = await git(
-      ["diff", "--numstat", "--no-renames", "--relative", "-z", from, to],
+      [
+        "diff",
+        "--numstat",
+        "--no-renames",
+        "--no-textconv",
+        "--no-ext-diff",
+        "--relative",
+        "-z",
+        from,
+        to,
+      ],
       this.root,
     );
     const changes: ChangeSet = {};

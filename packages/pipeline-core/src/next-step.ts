@@ -8,7 +8,7 @@ import { renderTemplate } from "./render";
 import type { RunState, RunStatus, Visit } from "./run";
 
 /** Longest a single `pipeline_next_step` may wait, so a call never hangs for minutes. */
-export const MAX_WAIT_S = 60;
+export const MAX_WAIT_S = 45;
 
 export type NextStep =
   | {
@@ -41,6 +41,10 @@ export type NextStep =
         tell_the_person: string;
         /** Files changed since the run started, with the lines changed; added by the host. */
         changes?: Record<string, number>;
+        /** How many more files changed than `changes` lists. */
+        changes_omitted?: number;
+        /** Why the engine could not tell what changed; say so to the person, never "nothing changed". */
+        changes_unavailable?: string;
       };
     }
   | {
@@ -71,7 +75,10 @@ const TELL_AT_GATE =
   "Write to the person, in the language they use, before you end your turn: (1) what they are " +
   "asked to decide (the prompt); (2) a short summary of this run so far: what you did, and what " +
   "changed (use `changes`, the engine's own list of changed files with the lines changed, and " +
-  "say if anything differs from what the task asked for); (3) what to look at: the files listed " +
+  "say if anything differs from what the task asked for; if `changes_unavailable` is there, say " +
+  "plainly that the engine could not tell what changed and why, and never write that nothing " +
+  "changed; if `changes_omitted` is there, say that more files changed than are listed); " +
+  "(3) what to look at: the files listed " +
   "and anything else they should check; (4) how to decide, with the command in " +
   "`how_to_decide`. Do not decide for them and do not run that command. Then end your turn.";
 

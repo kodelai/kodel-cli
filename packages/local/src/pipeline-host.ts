@@ -16,7 +16,7 @@ import {
   type RunState,
   type StartOutcome,
 } from "@kodel-ai/pipeline-core";
-import { type HostOptions, hashSpec, LocalHost, type LocalRun } from "./host";
+import { type HostOptions, hashSource, hashSpec, LocalHost, type LocalRun } from "./host";
 import { FileStore, type RunMeta } from "./store";
 
 export interface LocalPipelineHostOptions extends HostOptions {
@@ -132,8 +132,10 @@ export class LocalPipelineHost implements PipelineHost {
    * state on disk says the work was interrupted, and a later session starts it again. Called when
    * the server goes away, so no command is left running with nobody to report to.
    */
-  stop(): void {
-    for (const run of this.runs.values()) run.stop();
+  stop(): number {
+    let stopped = 0;
+    for (const run of this.runs.values()) stopped += run.stop();
+    return stopped;
   }
 
   /** Every run on disk, oldest first, with its state when it can be read. */
@@ -171,7 +173,13 @@ export class LocalPipelineHost implements PipelineHost {
     } else {
       found = await this.find(meta.pipeline);
     }
-    if (!found || hashSpec(found.spec) !== state.specHash) {
+    // A run is pinned to the hash of its pipeline's source text. Runs started before that were
+    // pinned to the hash of the parsed pipeline, so that one is still accepted.
+    const pinned =
+      found !== undefined &&
+      ((found.source !== undefined && hashSource(found.source) === state.specHash) ||
+        hashSpec(found.spec) === state.specHash);
+    if (!found || !pinned) {
       throw new KodelError(
         "STATE_MODIFIED_EXTERNALLY",
         `the pipeline of run ${runId} is not the one it started with (its copy was changed, or the pipeline file was edited and no copy was kept); restore it before going on`,

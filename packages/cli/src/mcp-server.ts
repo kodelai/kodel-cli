@@ -1,16 +1,27 @@
+import { KILL_GRACE_MS } from "@kodel-ai/local";
 import { type PipelineHost, PipelineService } from "@kodel-ai/pipeline-core";
 import { registerPipelineTools, SERVER_INSTRUCTIONS } from "@kodel-ai/pipeline-core/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
-/** A host that can also stop the work it started (the local host does). */
-export type StoppableHost = PipelineHost & { stop?(): void };
+/** A host that can also stop the work it started (the local host does); it says how much it stopped. */
+export type StoppableHost = PipelineHost & { stop?(): number };
 
 /** Build the MCP server for a host; the transport is the caller's. */
 export function createServer(host: PipelineHost, version: string): McpServer {
   const server = new McpServer({ name: "kodel", version }, { instructions: SERVER_INSTRUCTIONS });
   registerPipelineTools(server, new PipelineService(host));
   return server;
+}
+
+/**
+ * Stop the commands the server is running and give them the moment they need to be gone: one that
+ * ignores the polite request is killed after `KILL_GRACE_MS`, by a timer this process has to stay
+ * alive for. Exiting at once would leave that command running with nobody to report to.
+ */
+async function stopAndWait(host: StoppableHost): Promise<void> {
+  const stopped = host.stop?.() ?? 0;
+  if (stopped > 0) await new Promise((resolve) => setTimeout(resolve, KILL_GRACE_MS + 300));
 }
 
 /**
@@ -21,11 +32,9 @@ export function createServer(host: PipelineHost, version: string): McpServer {
 export async function serveStdio(host: StoppableHost, version: string): Promise<void> {
   const server = createServer(host, version);
   await server.connect(new StdioServerTransport());
-  const stop = () => host.stop?.();
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.once(signal, () => {
-      stop();
-      process.exit(0);
+      void stopAndWait(host).then(() => process.exit(0));
     });
   }
   await new Promise<void>((resolve) => {
@@ -35,5 +44,5 @@ export async function serveStdio(host: StoppableHost, version: string): Promise<
     process.stdin.once("end", resolve);
     process.stdin.once("close", resolve);
   });
-  stop();
+  await stopAndWait(host);
 }

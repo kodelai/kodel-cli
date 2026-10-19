@@ -5,11 +5,15 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { parsePipeline } from "@kodel-ai/pipeline-core";
 import {
+  capChanges,
   engineEnv,
   FileStore,
+  GitSnapshotter,
+  hashSource,
   LocalHost,
   LocalPipelineHost,
   type LocalRun,
+  MAX_CHANGES_SHOWN,
   MemoryIntegrity,
   newRunId,
   processIsAlive,
@@ -88,10 +92,34 @@ describe("the pipeline a run started with cannot be swapped", () => {
     expect(await h.open(run.runId)).toBeDefined();
     const path = join(runDir(run.runId), "spec.yaml");
     await writeFile(path, `${await readFile(path, "utf8")}\n# changed\n`);
-    // a comment does not change the parsed pipeline, so it is still the same pipeline
-    expect(await h.open(run.runId)).toBeDefined();
-    await writeFile(path, (await readFile(path, "utf8")).replace("write", "wr1te"));
+    // the copy is pinned as it was written: not even a comment may be added to it
     await expect(h.open(run.runId)).rejects.toMatchObject({ code: "STATE_MODIFIED_EXTERNALLY" });
+  });
+
+  test("a run pinned the older way, to the parsed pipeline, still opens while the file is as it was", async () => {
+    // LocalHost without a source keeps no copy and pins to the hash of the parsed pipeline
+    const spec = parsePipeline(
+      await readFile(join(dir, ".kodel", "pipelines", "demo.yaml"), "utf8"),
+    );
+    const { run } = await new LocalHost(spec, { root: dir, heartbeatMs: 0 }).start("t");
+    const opened = await host().open(run.runId);
+    expect(opened?.runId).toBe(run.runId);
+    const file = join(dir, ".kodel", "pipelines", "demo.yaml");
+    await writeFile(file, (await readFile(file, "utf8")).replace("ok?", "fine?"));
+    await expect(host().open(run.runId)).rejects.toMatchObject({
+      code: "STATE_MODIFIED_EXTERNALLY",
+    });
+  });
+
+  test("a new run is pinned to the hash of the text of its pipeline", async () => {
+    // The pin is the hash of the text, so the text parsing differently later does not matter. This
+    // is checked by the text alone: the same source gives the same pin whatever the parsed form.
+    const run = await startRun();
+    const state = JSON.parse(await readFile(join(runDir(run.runId), "state.json"), "utf8")) as {
+      specHash: string;
+    };
+    const source = await readFile(join(runDir(run.runId), "spec.yaml"), "utf8");
+    expect(state.specHash).toBe(hashSource(source));
   });
 
   test("a run with no copy is refused once the pipeline file was edited", async () => {
@@ -247,15 +275,119 @@ describe("a failed save is not a failed node", () => {
   });
 });
 
-describe("approving knows what changed since the gate", () => {
-  test("nothing, then a file", async () => {
-    const run = await startRun();
+describe("approving knows what changed since the gate, and says when it cannot tell", () => {
+  /** A snapshotter that works until it is told to fail, the way a repository can be broken on purpose. */
+  class FailsOnDemand extends GitSnapshotter {
+    failing = false;
+    override async snapshot(): Promise<string> {
+      if (this.failing) throw new Error("git add failed: fatal: adding files failed");
+      return super.snapshot();
+    }
+  }
+
+  async function atGate(snapshotter?: FailsOnDemand, between?: () => void) {
+    const h = host(snapshotter ? { snapshotter } : {});
+    const run = await startRun(h);
+    between?.();
     await run.completeStep("write", 1);
     await run.waitForRest(10_000);
-    expect(await run.changesSinceGate("approve")).toEqual({});
+    return run;
+  }
+
+  test("nothing, then a file", async () => {
+    const run = await atGate();
+    expect(await run.changesSinceGate("approve")).toEqual({ kind: "changes", files: {} });
     await writeFile(join(dir, "later.txt"), "a\nb\n");
-    expect(await run.changesSinceGate("approve")).toEqual({ "later.txt": 2 });
-    expect(await run.changesSinceGate("write")).toBeUndefined();
+    expect(await run.changesSinceGate("approve")).toEqual({
+      kind: "changes",
+      files: { "later.txt": 2 },
+    });
+  });
+
+  test("a step the run is not waiting at has no such answer", async () => {
+    const run = await atGate();
+    expect(await run.changesSinceGate("write")).toMatchObject({ kind: "unavailable" });
+  });
+
+  test("a baseline that is gone from git is 'cannot tell', never 'nothing changed'", async () => {
+    const run = await atGate();
+    const file = join(runDir(run.runId), "snapshots.json");
+    const snapshots = JSON.parse(await readFile(file, "utf8")) as Record<string, string>;
+    const key = Object.keys(snapshots).find((k) => k.startsWith("gate:approve"));
+    snapshots[key as string] = "0".repeat(40); // an object that is not there, as after `git gc`
+    await writeFile(file, JSON.stringify(snapshots));
+    const found = await run.changesSinceGate("approve");
+    expect(found.kind).toBe("unavailable");
+    const step = await run.nextStep();
+    // the run baseline is still fine, so the answer to the agent is not affected by this one
+    expect("waiting" in step && step.waiting.changes_unavailable).toBeFalsy();
+  });
+
+  test("git made to fail as the gate is entered does not hide the changes: the gate says it cannot tell", async () => {
+    const snapshotter = new FailsOnDemand(dir);
+    const run = await atGate(snapshotter, () => {
+      snapshotter.failing = true;
+    });
+    // the step itself went through: the run is at the gate, and the agent got no error for it
+    expect((await run.state()).active.map((v) => `${v.node}:${v.phase}`)).toEqual([
+      "approve:human",
+    ]);
+    const found = await run.changesSinceGate("approve");
+    expect(found).toMatchObject({ kind: "unavailable" });
+    if (found.kind === "unavailable") expect(found.reason).toContain("not recorded");
+    // and what the agent is told does not read as a clean result either
+    snapshotter.failing = false;
+    const step = await run.nextStep();
+    if (!("waiting" in step)) throw new Error("expected a gate");
+    expect(step.waiting.changes).toBeUndefined();
+    snapshotter.failing = true;
+    const again = await run.nextStep();
+    if (!("waiting" in again)) throw new Error("expected a gate");
+    expect(again.waiting.changes_unavailable).toContain("adding files failed");
+  });
+
+  test("a start that cannot record the baseline still starts, and the gate says it cannot tell", async () => {
+    const snapshotter = new FailsOnDemand(dir);
+    snapshotter.failing = true;
+    const h = host({ snapshotter });
+    const run = await startRun(h);
+    snapshotter.failing = false;
+    await run.completeStep("write", 1);
+    await run.waitForRest(10_000);
+    const step = await run.nextStep();
+    if (!("waiting" in step)) throw new Error("expected a gate");
+    expect(step.waiting.changes_unavailable).toContain("not recorded when the run began");
+  });
+
+  test("with no git at all there is nothing to compare with, which is not an alarm", async () => {
+    const plain = await mkdtemp(join(tmpdir(), "kodel-nogit-"));
+    try {
+      await mkdir(join(plain, ".kodel", "pipelines"), { recursive: true });
+      await writeFile(join(plain, ".kodel", "pipelines", "demo.yaml"), DEMO);
+      const h = new LocalPipelineHost({ root: plain, heartbeatMs: 0 });
+      const { run } = await h.start({ pipeline: "demo", task: "t", restart: false });
+      const mine = (await h.open(run.runId)) as LocalRun;
+      await mine.completeStep("write", 1);
+      await mine.waitForRest(10_000);
+      expect(await mine.changesSinceGate("approve")).toEqual({ kind: "no_repo" });
+      const step = await mine.nextStep();
+      if (!("waiting" in step)) throw new Error("expected a gate");
+      expect(step.waiting.changes).toBeUndefined();
+      expect(step.waiting.changes_unavailable).toBeUndefined();
+    } finally {
+      await rm(plain, { recursive: true, force: true });
+    }
+  });
+
+  test("a very long list is cut to the files with the most changes, and the rest is counted", () => {
+    const files: Record<string, number> = {};
+    for (let i = 0; i < MAX_CHANGES_SHOWN + 50; i++) files[`f${i}.txt`] = i + 1;
+    const { shown, omitted } = capChanges(files);
+    expect(Object.keys(shown).length).toBe(MAX_CHANGES_SHOWN);
+    expect(omitted).toBe(50);
+    expect(shown[`f${MAX_CHANGES_SHOWN + 49}.txt`]).toBe(MAX_CHANGES_SHOWN + 50); // the biggest is in
+    expect(shown["f0.txt"]).toBeUndefined(); // the smallest is out
+    expect(capChanges({ a: 1 })).toEqual({ shown: { a: 1 }, omitted: 0 });
   });
 });
 

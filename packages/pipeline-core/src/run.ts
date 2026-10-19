@@ -14,6 +14,8 @@ import { renderDeep, renderTemplate } from "./render";
 
 export const DEFAULT_STALE_MS = 30_000;
 export const DEFAULT_MAX_RESTARTS = 3;
+/** How many times work may be taken over from a process known to be gone before the run pauses. */
+export const MAX_TAKEOVERS = 10;
 
 export interface EngineOptions {
   registry?: Registry;
@@ -78,6 +80,8 @@ export interface Visit {
    */
   declared?: string;
   restarts: number;
+  /** How many times the work was taken over from a process known to be gone. */
+  takeovers?: number;
   /** Engine work that was restarted too often; waits for `resume`. */
   suspended?: boolean;
   startedAt: number;
@@ -514,7 +518,24 @@ class Machine {
 
     switch (event.type) {
       case "agent_completed": {
-        const visit = this.visitFor(event.node, event.attempt, ["agent"]);
+        let visit: Visit;
+        try {
+          visit = this.visitFor(event.node, event.attempt, ["agent"]);
+        } catch (error) {
+          // The step was already completed. Doing it again is a repeat, but not when it asks for a
+          // different ending: the agent would think it had changed how the step ended.
+          if (error instanceof Repeat && event.outcome !== undefined) {
+            const standing = this.s.active.find((v) => v.node === event.node);
+            const label = standing ? (standing.declared ?? "passed") : this.run(event.node).outcome;
+            if (label !== null && event.outcome !== label) {
+              throw fail(
+                "NODE_NOT_RUNNING",
+                `node "${event.node}" was already completed with "${label}"; it cannot now end with "${event.outcome}"`,
+              );
+            }
+          }
+          throw error;
+        }
         const node = this.node(event.node);
         if (event.outcome !== undefined && event.outcome !== "passed") {
           const others = this.handler(node).labels(node).success.slice(1);
@@ -575,10 +596,15 @@ class Machine {
         const visit = this.s.active.find(
           (v) => v.node === event.node && v.attempt === event.attempt,
         );
-        if (visit && (visit.phase === "engine" || visit.phase === "checks")) {
-          visit.heartbeatAt = this.now;
-          if (event.owner !== undefined) visit.owner = event.owner;
-        } else throw new Repeat();
+        if (!visit || (visit.phase !== "engine" && visit.phase !== "checks")) throw new Repeat();
+        // Only the process that owns the work may say it is alive. One that stalled, was replaced
+        // and woke up again must not take the work back, or its later exit would look like the
+        // death of work another process is running.
+        if (event.owner !== undefined && visit.owner !== undefined && visit.owner !== event.owner) {
+          throw new Repeat();
+        }
+        visit.heartbeatAt = this.now;
+        if (event.owner !== undefined) visit.owner = event.owner;
         return;
       }
       case "tick": {
@@ -615,11 +641,23 @@ class Machine {
   }
 
   private restart(visit: Visit, ownerGone = false) {
-    visit.restarts += 1;
-    if (visit.restarts > this.maxRestarts) {
-      visit.suspended = true;
-      this.pause({ reason: "restarts", node: visit.node });
-      return;
+    // Work whose process went silent counts against `maxRestarts`. Work whose process is known to be
+    // gone is counted apart and allowed more: closing the agent in the middle of a build is a normal
+    // thing to do, and the next session picks the build up again; it is not a crash.
+    if (ownerGone) {
+      visit.takeovers = (visit.takeovers ?? 0) + 1;
+      if (visit.takeovers > MAX_TAKEOVERS) {
+        visit.suspended = true;
+        this.pause({ reason: "restarts", node: visit.node });
+        return;
+      }
+    } else {
+      visit.restarts += 1;
+      if (visit.restarts > this.maxRestarts) {
+        visit.suspended = true;
+        this.pause({ reason: "restarts", node: visit.node });
+        return;
+      }
     }
     visit.heartbeatAt = this.now;
     delete visit.owner;
@@ -627,6 +665,7 @@ class Machine {
       node: visit.node,
       attempt: visit.attempt,
       restarts: visit.restarts,
+      ...(ownerGone ? { takeovers: visit.takeovers } : {}),
       reason: ownerGone
         ? "the process running it is gone"
         : "the process running it stopped answering",

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { GitSnapshotter } from "../src";
@@ -221,5 +221,98 @@ describe("the repository is left alone", () => {
     await write("src/f7.ts", lines(25, "changed"));
     await s.changesSince(base);
     expect(Date.now() - started).toBeLessThan(10_000);
+  });
+});
+
+describe("a repository cannot make a snapshot run its programs", () => {
+  const marker = (name: string) => join(dir, `..`, `${name}-${process.pid}`);
+  const ran = async (path: string) =>
+    (await readdir(dirname(path))).includes(path.split("/").pop() ?? "");
+
+  test("a clean filter named by .gitattributes and .git/config is never run", async () => {
+    const mark = marker("filter-ran");
+    git("config", "filter.evil.clean", `touch ${mark}; cat`);
+    await write(".gitattributes", "* filter=evil\n");
+    await write("a.txt", lines(2));
+    const s = new GitSnapshotter(dir);
+    const base = await s.snapshot();
+    await write("a.txt", lines(5));
+    expect(await s.changesSince(base)).toEqual({ "a.txt": 3 }); // the work still gets measured
+    expect(await ran(mark)).toBe(false);
+    await rm(mark, { force: true });
+  });
+
+  test("a text conversion for the diff is never run", async () => {
+    const mark = marker("textconv-ran");
+    git("config", "diff.evil.textconv", `touch ${mark}; cat`);
+    await write(".gitattributes", "*.txt diff=evil\n");
+    await write("a.txt", lines(2));
+    const s = new GitSnapshotter(dir);
+    const base = await s.snapshot();
+    await write("a.txt", lines(4));
+    expect(await s.changesSince(base)).toEqual({ "a.txt": 2 });
+    expect(await ran(mark)).toBe(false);
+    await rm(mark, { force: true });
+  });
+
+  test("an external diff program and a file system monitor are never run either", async () => {
+    const mark = marker("external-ran");
+    git("config", "diff.external", `touch ${mark}; true`);
+    git("config", "core.fsmonitor", `touch ${mark}; true`);
+    await write("a.txt", lines(2));
+    const s = new GitSnapshotter(dir);
+    const base = await s.snapshot();
+    await write("a.txt", lines(3));
+    await s.changesSince(base);
+    expect(await ran(mark)).toBe(false);
+    await rm(mark, { force: true });
+  });
+});
+
+describe("what a snapshot sees", () => {
+  test("files with names that are awkward to pass around: a newline, a quote, a space, a dash", async () => {
+    const s = new GitSnapshotter(dir);
+    const base = await s.snapshot();
+    for (const name of ["new\nline.txt", '"quoted".txt', "with space.txt", "-dash.txt"]) {
+      await write(name, "x\n");
+    }
+    expect(Object.keys(await s.changesSince(base)).sort()).toEqual(
+      ['"quoted".txt', "-dash.txt", "new\nline.txt", "with space.txt"].sort(),
+    );
+  });
+
+  test("a symbolic link counts as a file of its own, and a change of its target as a change", async () => {
+    await write("target-a.txt", "a\n");
+    await write("target-b.txt", "b\n");
+    await symlink("target-a.txt", join(dir, "link"));
+    const s = new GitSnapshotter(dir);
+    const base = await s.snapshot();
+    expect(await s.changesSince(base)).toEqual({});
+    await rm(join(dir, "link"));
+    await symlink("target-b.txt", join(dir, "link"));
+    expect(await s.changesSince(base)).toEqual({ link: 2 });
+  });
+
+  test("making a file executable is a change of the tree, and a file deleted from disk is gone from it", async () => {
+    await write("run.sh", "echo\n");
+    await write("gone.txt", "bye\n");
+    commitAll();
+    const s = new GitSnapshotter(dir);
+    const base = await s.snapshot();
+    await chmod(join(dir, "run.sh"), 0o755);
+    await rm(join(dir, "gone.txt"));
+    expect(await s.snapshot()).not.toBe(base);
+    expect(await s.changesSince(base)).toEqual({ "gone.txt": 1 });
+  });
+
+  test("ignored files are not in it, and neither is the directory that is left out", async () => {
+    await write(".gitignore", "ignored.txt\n");
+    await write("ignored.txt", "x\n");
+    await write(".kodel/runs/state.json", "{}\n");
+    const s = new GitSnapshotter(dir);
+    const base = await s.snapshot();
+    await write("ignored.txt", lines(9));
+    await write(".kodel/runs/state.json", lines(9));
+    expect(await s.changesSince(base)).toEqual({});
   });
 });

@@ -203,6 +203,38 @@ describe("an agent node's other outcomes: the run", () => {
     expect(state?.active[0]?.declared).toBe("nothing_to_change");
   });
 
+  test("a second completion that asks for another ending is refused, not swallowed as a repeat", () => {
+    let state: RunState | undefined;
+    const send = (event: RunEvent) => {
+      const result = decide(spec, state, event, 0);
+      if (result.ok) state = result.state;
+      return result;
+    };
+    send({ type: "start", runId: "r1", task: "t", specHash: "h" });
+    send(finish(1)); // the usual ending; the checks are now running
+    const wrong = send(finish(1, "nothing_to_change"));
+    expect(wrong.ok).toBe(false);
+    if (!wrong.ok) {
+      expect(wrong.error.code).toBe("NODE_NOT_RUNNING");
+      expect(wrong.error.message).toContain('already completed with "passed"');
+    }
+    // asking for the same ending again, or for none, is the harmless repeat it always was
+    expect(send(finish(1, "passed")).ok).toBe(true);
+    expect(send(finish(1)).ok).toBe(true);
+    expect(state?.active[0]?.declared).toBeUndefined();
+  });
+
+  test("and the same goes after the step has finished and the run has moved on", () => {
+    const run = drive([finish(1, "nothing_to_change")]);
+    const state = run.state;
+    const again = decide(spec, state, finish(1, "nothing_to_change"), 0);
+    expect(again.ok && again.noop).toBe(true);
+    const other = decide(spec, state, finish(1), 0);
+    expect(other.ok).toBe(true); // no outcome named: a plain repeat
+    const different = decide(spec, state, finish(1, "passed"), 0);
+    expect(different.ok).toBe(false);
+  });
+
   test("a person confirming ends the run, and rejecting sends the plan back with the reason", () => {
     const approved = drive([
       finish(1, "nothing_to_change"),

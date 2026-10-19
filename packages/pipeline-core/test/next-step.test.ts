@@ -132,7 +132,15 @@ describe("next_step shapes", () => {
     const step = nextStep(feature, drive(auto).state, 5_000);
     if (!("waiting" in step)) throw new Error("expected waiting");
     const text = step.waiting.tell_the_person;
-    for (const part of ["what they are asked to decide", "summary", "changes", "how to decide"]) {
+    for (const part of [
+      "what they are asked to decide",
+      "summary",
+      "changes",
+      "how to decide",
+      "changes_unavailable",
+      "never write that nothing changed",
+      "changes_omitted",
+    ]) {
       expect(text, part).toContain(part);
     }
     expect(text).toContain("do not run that command");
@@ -264,11 +272,11 @@ describe("what a step says about time and about how to do it", () => {
     expect(step.running.hint).toContain("longer than expected");
   });
 
-  test("a long wait is capped at a minute", () => {
+  test("a long wait is capped at 45 seconds", () => {
     const long = parsePipeline(timedYaml({ expected: 900, timeout: 1200 }));
     const step = nextStep(long, startedAt(long), 1_000);
     if (!("running" in step)) throw new Error("expected running");
-    expect(step.running.hint).toContain("wait_s: 60");
+    expect(step.running.hint).toContain("wait_s: 45");
   });
 
   test("without an expected duration the agent is only told that it can wait", () => {
@@ -276,7 +284,7 @@ describe("what a step says about time and about how to do it", () => {
     const step = nextStep(plain, startedAt(plain), 1_000);
     if (!("running" in step)) throw new Error("expected running");
     expect(step.running.active[0]).not.toHaveProperty("expected_s");
-    expect(step.running.hint).toContain("wait_s (up to 60)");
+    expect(step.running.hint).toContain("wait_s (up to 45)");
   });
 
   test("an agent node that asks for a fresh context says how to do the step", () => {

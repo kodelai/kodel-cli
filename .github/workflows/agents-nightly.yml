@@ -3,6 +3,10 @@ name: agents-nightly
 # The scenarios with real coding agents are not part of the normal CI: they spend tokens and vary
 # from run to run. This runs them each night, several times on each model, and keeps the rates.
 # With an API key they cost money (a cap per turn is set); without the secret the job does nothing.
+#
+# The key is given to the one step that needs it, not to the whole job: installing dependencies runs
+# other people's scripts, and they must not see it. The workflow inputs reach the shell through the
+# environment, never pasted into the script, so a value cannot become a command.
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -15,16 +19,19 @@ on:
         description: "How many times each model runs the whole set"
         default: "3"
 
+permissions:
+  contents: read
+
 jobs:
   agents:
     runs-on: ubuntu-latest
     timeout-minutes: 240
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - id: key
+        env:
+          HAVE_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
         run: |
-          if [ -z "$ANTHROPIC_API_KEY" ]; then
+          if [ "$HAVE_KEY" != "true" ]; then
             echo "No ANTHROPIC_API_KEY secret: nothing to run."
             echo "have=false" >> "$GITHUB_OUTPUT"
           else
@@ -32,6 +39,8 @@ jobs:
           fi
       - if: steps.key.outputs.have == 'true'
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - if: steps.key.outputs.have == 'true'
         uses: oven-sh/setup-bun@v2
       - if: steps.key.outputs.have == 'true'
@@ -41,17 +50,18 @@ jobs:
       - if: steps.key.outputs.have == 'true'
         run: bun install --frozen-lockfile
       - if: steps.key.outputs.have == 'true'
-        run: npm install -g @anthropic-ai/claude-code
+        # A fixed version: what the nightly job runs must not change under it by itself.
+        run: npm install -g @anthropic-ai/claude-code@2.1.303
       - if: steps.key.outputs.have == 'true'
         run: git config --global user.email "ci@example.com" && git config --global user.name "CI"
       - if: steps.key.outputs.have == 'true'
         # A scenario that does not always pass is a finding, not a failure of the job: the rates
-        # are in the log and in the uploaded results.
-        run: >
-          bun run test:agents:stats --
-          --models "${{ github.event.inputs.models || 'sonnet' }}"
-          --repeat "${{ github.event.inputs.repeat || '3' }}"
-          --min-rate 0
+        # are in the log and in the uploaded results. A scenario that never ran does fail it.
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MODELS: ${{ github.event.inputs.models || 'sonnet' }}
+          REPEAT: ${{ github.event.inputs.repeat || '3' }}
+        run: bun run test:agents:stats -- --models "$MODELS" --repeat "$REPEAT" --min-rate 0
       - if: steps.key.outputs.have == 'true' && always()
         uses: actions/upload-artifact@v4
         with:

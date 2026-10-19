@@ -13,9 +13,21 @@ export function formatDuration(seconds: number): string {
  * The report as text for a person. `plain` strips control characters from what came from the agent
  * (a task, a failure reason) so it cannot move the cursor or pass as a line of its own.
  */
-export function formatReport(report: RunReport, plain: (text: string) => string): string {
+export function formatReport(
+  report: RunReport,
+  plain: (text: string) => string,
+  trust?: { integrity: string; seal: string },
+): string {
   const lines: string[] = [];
-  lines.push(`run ${report.runId}  ${report.status}  ${plain(report.task)}`);
+  lines.push(`run ${plain(report.runId)}  ${plain(report.status)}  ${plain(report.task)}`);
+  if (trust) {
+    const fine = trust.integrity !== "modified" && trust.seal !== "modified";
+    lines.push(
+      fine
+        ? `files: integrity ${trust.integrity}, seal ${trust.seal}`
+        : `WARNING: the files of this run were changed outside kodel (integrity ${trust.integrity}, seal ${trust.seal}); what follows may not be true`,
+    );
+  }
   lines.push(
     `total ${formatDuration(report.total_s)}: work ${formatDuration(report.work_s)}, ` +
       `waiting for a person ${formatDuration(report.waiting_s)}`,
@@ -39,7 +51,7 @@ export function formatReport(report: RunReport, plain: (text: string) => string)
       .filter((a) => a.failure)
       .map(
         (a) =>
-          `  ${plain(node.node)} #${a.attempt} ${a.outcome ?? ""}: ${plain(a.failure?.reason ?? "")}`,
+          `  ${plain(node.node)} #${a.attempt} ${plain(a.outcome ?? "")}: ${plain(a.failure?.reason ?? "")}`,
       ),
   );
   if (failures.length > 0) {

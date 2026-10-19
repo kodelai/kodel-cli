@@ -143,7 +143,9 @@ export class FileStore {
     for (const name of names) {
       if (!isRunId(name)) continue;
       const meta = await this.readMeta(name);
-      if (meta) metas.push(meta);
+      // The id inside the file has to be the folder's: otherwise a file an agent can write would
+      // put its own text where a run id is shown, and name a run that is not there.
+      if (meta && meta.runId === name) metas.push(meta);
     }
     return metas.sort((a, b) => a.createdAt - b.createdAt || a.runId.localeCompare(b.runId));
   }
@@ -410,15 +412,18 @@ export class FileStore {
    * claims to be from the future, or the file was never filled in (the holder died between creating
    * it and writing it, which shows as an old, empty file).
    */
-  private async lockAbandoned(lockPath: string): Promise<boolean> {
+  private async lockAbandoned(lockPath: string, sameAs?: string): Promise<string | undefined> {
     const now = Date.now();
     let text: string;
     try {
       text = await readFile(lockPath, "utf8");
     } catch (error) {
-      if (isMissing(error)) return false; // released meanwhile; the next try takes it
+      if (isMissing(error)) return undefined; // released meanwhile; the next try takes it
       throw error;
     }
+    // Asked about the very lock that was judged before: a different one is somebody else's, taken
+    // since, and is not ours to remove.
+    if (sameAs !== undefined && text !== sameAs) return undefined;
     let holder: { pid: number; since: number } | undefined;
     try {
       holder = JSON.parse(text) as { pid: number; since: number };
@@ -430,13 +435,13 @@ export class FileStore {
         (s) => s.mtimeMs,
         () => now,
       );
-      return now - modified > UNFINISHED_LOCK_MS;
+      return now - modified > UNFINISHED_LOCK_MS ? text : undefined;
     }
-    return (
+    const gone =
       !this.isAlive(holder.pid) ||
       now - holder.since > this.staleLockMs ||
-      holder.since > now + this.staleLockMs
-    );
+      holder.since > now + this.staleLockMs;
+    return gone ? text : undefined;
   }
 
   /**
@@ -444,7 +449,8 @@ export class FileStore {
    * removal), and it looks again once it is in, so a lock that someone took in the meantime stays.
    */
   private async takeOverAbandoned(lockPath: string): Promise<boolean> {
-    if (!(await this.lockAbandoned(lockPath))) return false;
+    const seen = await this.lockAbandoned(lockPath);
+    if (seen === undefined) return false;
     const guardPath = `${lockPath}.takeover`;
     let guard: Awaited<ReturnType<typeof open>>;
     try {
@@ -460,7 +466,9 @@ export class FileStore {
     }
     try {
       await guard.close();
-      if (!(await this.lockAbandoned(lockPath))) return false;
+      // Only the lock that was judged abandoned goes: if its holder let it go and someone took it
+      // since, the text is different and it stays.
+      if ((await this.lockAbandoned(lockPath, seen)) === undefined) return false;
       await rm(lockPath, { force: true });
       return true;
     } finally {

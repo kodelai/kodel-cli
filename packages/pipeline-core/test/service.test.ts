@@ -536,11 +536,11 @@ describe("waiting for the engine's work", () => {
     expect(host.waited).toEqual([25_000]);
   });
 
-  test("a wait is never longer than a minute, whatever was asked", async () => {
+  test("a wait is never longer than 45 seconds, whatever was asked", async () => {
     const { host, svc, runId } = await running();
     host.waited.length = 0;
     await svc.nextStep({ run_id: runId, wait_s: 5_000 });
-    expect(host.waited).toEqual([60_000]);
+    expect(host.waited).toEqual([45_000]);
   });
 
   test("nothing is waited for when there is nothing to wait for", async () => {
@@ -551,15 +551,15 @@ describe("waiting for the engine's work", () => {
     expect(host.waited).toEqual([]);
   });
 
-  test("the tool takes whole seconds from 0 to 60 and refuses anything else", async () => {
+  test("the tool takes whole seconds from 0 to 45 and refuses anything else", async () => {
     const { svc, runId } = await running();
-    for (const wait_s of [-1, 61, 1.5, "30"]) {
+    for (const wait_s of [-1, 46, 1.5, "30"]) {
       expect(await invokeTool(svc, "pipeline_next_step", { run_id: runId, wait_s })).toMatchObject({
         ok: false,
         code: "INVALID_ARGUMENTS",
       });
     }
-    expect((await invokeTool(svc, "pipeline_next_step", { run_id: runId, wait_s: 60 })).ok).toBe(
+    expect((await invokeTool(svc, "pipeline_next_step", { run_id: runId, wait_s: 45 })).ok).toBe(
       true,
     );
   });

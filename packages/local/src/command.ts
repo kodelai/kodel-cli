@@ -33,7 +33,8 @@ export interface CommandResult {
 }
 
 export const DEFAULT_MAX_TAIL_BYTES = 16 * 1024;
-const KILL_GRACE_MS = 2_000;
+/** How long a command that ignores SIGTERM is given before it is killed outright. */
+export const KILL_GRACE_MS = 2_000;
 const PIPE_GRACE_MS = 2_000;
 
 function killTree(pid: number | undefined) {

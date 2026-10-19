@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { LocalPipelineHost } from "@kodel-ai/local";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { runCli } from "../src/cli";
+import { plain, runCli } from "../src/cli";
 
 let dir: string;
 
@@ -46,7 +46,10 @@ afterEach(async () => {
 
 interface Person {
   interactive?: boolean;
-  answer?: boolean;
+  /** One answer for every question, or one answer per question in turn (the last one repeats). */
+  answer?: boolean | boolean[];
+  /** The environment the command runs in. */
+  environment?: Record<string, string | undefined>;
 }
 
 /** Run a command as a person at a terminal who says yes, unless told otherwise. */
@@ -63,9 +66,12 @@ async function cliAs(person: Person, ...args: string[]) {
       err += t;
     },
     interactive: person.interactive ?? true,
+    environment: person.environment ?? {},
     confirm: async (question) => {
       asked.push(question);
-      return person.answer ?? true;
+      const answers = person.answer ?? true;
+      if (typeof answers === "boolean") return answers;
+      return answers[Math.min(asked.length - 1, answers.length - 1)] ?? true;
     },
   });
   return { code, out, err, asked };
@@ -263,6 +269,144 @@ describe("report", () => {
   });
 });
 
+describe("a gate whose record of the files cannot be used", () => {
+  /** Make the record of the files at the gate unusable, as `git gc` or a broken repository would. */
+  async function spoilGateRecord(id: string, how: "bogus" | "missing") {
+    const file = join(dir, ".kodel", "runs", id, "snapshots.json");
+    const snapshots = JSON.parse(await readFile(file, "utf8")) as Record<string, string>;
+    const key = Object.keys(snapshots).find((k) => k.startsWith("gate:approve")) as string;
+    if (how === "bogus") snapshots[key] = "0".repeat(40);
+    else delete snapshots[key];
+    await writeFile(file, JSON.stringify(snapshots));
+  }
+
+  test("approving says it cannot tell what changed, and needs a second yes", async () => {
+    for (const how of ["bogus", "missing"] as const) {
+      const id = await runAtGate();
+      await spoilGateRecord(id, how);
+      const result = await cliAs({ answer: [true, false] }, "gate", "approve", id);
+      expect(result.code, how).toBe(1);
+      expect(result.asked.length, how).toBe(2);
+      expect(result.asked[0], how).toContain("WARNING: the engine cannot tell what changed");
+      expect(result.asked[1], how).toContain("could not be checked");
+      expect((await cli("status", id)).out, how).toContain("waiting:   approve (gate)");
+      await cli("gate", "reject", id, "--reason", "start over"); // leave nothing waiting
+      await rm(join(dir, ".kodel"), { recursive: true, force: true });
+      await mkdir(join(dir, ".kodel", "pipelines"), { recursive: true });
+      await writeFile(join(dir, ".kodel", "pipelines", "demo.yaml"), DEMO);
+    }
+  });
+
+  test("with both answers yes it goes through, and the warning was shown before", async () => {
+    const id = await runAtGate();
+    await spoilGateRecord(id, "bogus");
+    const result = await cliAs({ answer: true }, "gate", "approve", id);
+    expect(result.code).toBe(0);
+    expect(result.asked[0]).toContain("WARNING");
+    expect(result.asked.length).toBe(2);
+  });
+
+  test("rejecting is safe whatever was done, so it asks once, with the warning", async () => {
+    const id = await runAtGate();
+    await spoilGateRecord(id, "missing");
+    const result = await cliAs({}, "gate", "reject", id, "--reason", "no");
+    expect(result.code).toBe(0);
+    expect(result.asked.length).toBe(1);
+    expect(result.asked[0]).toContain("WARNING");
+  });
+
+  test("a gate whose files were compared says nothing alarming, and asks once", async () => {
+    const id = await runAtGate();
+    const result = await cliAs({}, "gate", "approve", id);
+    expect(result.code).toBe(0);
+    expect(result.asked.length).toBe(1);
+    expect(result.asked[0]).not.toContain("WARNING");
+  });
+});
+
+describe("commands a person runs refuse to run from the engine", () => {
+  test("gate, resume, ack and seal are refused whatever the terminal, and ask nothing", async () => {
+    const id = await runAtGate();
+    const inEngine = { environment: { KODEL_ENGINE: "1" } };
+    for (const args of [
+      ["gate", "approve", id],
+      ["gate", "reject", id, "--reason", "no"],
+      ["resume", id],
+      ["ack", id],
+      ["seal", id],
+    ]) {
+      const result = await cliAs(inEngine, ...args);
+      expect(result.code, args.join(" ")).toBe(1);
+      expect(result.err).toContain("will not run from a command the engine runs");
+      expect(result.asked).toEqual([]);
+    }
+    expect((await cli("status", id)).out).toContain("waiting:   approve (gate)");
+  });
+
+  test("looking is still allowed from there", async () => {
+    const id = await runAtGate();
+    const result = await cliAs({ environment: { KODEL_ENGINE: "1" } }, "status", id);
+    expect(result.code).toBe(0);
+  });
+});
+
+describe("what a person is shown cannot be bent by files an agent can write", () => {
+  const evil = `x${String.fromCodePoint(0x1b)}[2Jy${String.fromCodePoint(0x202e)}z${String.fromCodePoint(0x2028)}w${String.fromCodePoint(0x85)}v`;
+
+  test("plain takes out controls, reordering marks and separators, and keeps ordinary text", () => {
+    const cleaned = plain(evil);
+    for (const code of [0x1b, 0x202e, 0x2028, 0x85]) {
+      expect(cleaned.includes(String.fromCodePoint(code)), `U+${code.toString(16)}`).toBe(false);
+    }
+    expect(cleaned).toBe("x [2Jy z w v");
+    expect(plain("файл.txt, 日本語, 🙂")).toBe("файл.txt, 日本語, 🙂");
+    expect(plain("a\n\n\tb")).toBe("a b"); // a run of them is one space
+  });
+
+  test("an error that repeats what was typed does not carry the escape sequences", async () => {
+    const result = await cli("status", evil);
+    expect(result.code).toBe(1);
+    expect(result.err.includes(String.fromCodePoint(0x1b))).toBe(false);
+    expect(result.err.includes(String.fromCodePoint(0x202e))).toBe(false);
+  });
+
+  test("a run whose meta.json names another run is not listed, and its text is never shown", async () => {
+    const id = await runAtGate();
+    const file = join(dir, ".kodel", "runs", id, "meta.json");
+    const meta = JSON.parse(await readFile(file, "utf8")) as { runId: string };
+    meta.runId = `r_000000000_aaaa${String.fromCodePoint(0x1b)}[2J`;
+    await writeFile(file, JSON.stringify(meta));
+    const list = await cli("status");
+    expect(list.out).toBe("no runs yet\n");
+    expect(list.out.includes(String.fromCodePoint(0x1b))).toBe(false);
+  });
+});
+
+describe("status and report when the files of a run are not as they should be", () => {
+  test("a state that names a step that is not there is said to be unreadable, not a crash", async () => {
+    const id = await runAtGate();
+    const file = join(dir, ".kodel", "runs", id, "state.json");
+    const state = JSON.parse(await readFile(file, "utf8")) as { active: { node: string }[] };
+    (state.active[0] as { node: string }).node = "ghost";
+    await writeFile(file, JSON.stringify(state));
+    const result = await cli("status", id);
+    expect(result.code).toBe(0);
+    expect(result.out).toContain("integrity: modified");
+    expect(result.out).toContain("cannot be worked out from this state");
+  });
+
+  test("a report says whether the run's files are as kodel left them, and warns when they are not", async () => {
+    const id = await runAtGate();
+    expect((await cli("report", id)).out).toContain("files: integrity ok, seal open");
+    const file = join(dir, ".kodel", "runs", id, "state.json");
+    await writeFile(file, (await readFile(file, "utf8")).replace('"task": "t"', '"task": "u"'));
+    const text = (await cli("report", id)).out;
+    expect(text).toContain("WARNING: the files of this run were changed outside kodel");
+    const parsed = JSON.parse((await cli("report", id, "--json")).out);
+    expect(parsed).toMatchObject({ integrity: "modified", seal: "open" });
+  });
+});
+
 describe("what status shows and does", () => {
   test("control characters in an agent's text cannot move the cursor or fake a line", async () => {
     const host = new LocalPipelineHost({ root: dir, heartbeatMs: 0 });
@@ -340,9 +484,8 @@ describe("mcp over stdio", () => {
 
   // The agent's session ends while a command of the pipeline is still going. The server must not
   // leave that command running with nobody to report to: the next session starts it again.
-  test.skipIf(process.platform === "win32")(
-    "when the agent goes away, the command the server was running is stopped",
-    async () => {
+  const orphanCheck = async (script: string, waitMs: number) => {
+    {
       const marker = `kodel-orphan-check-${Date.now()}`;
       await writeFile(
         join(dir, ".kodel", "pipelines", "longcmd.yaml"),
@@ -351,7 +494,7 @@ describe("mcp over stdio", () => {
           "nodes:",
           "  - slug: wait",
           "    kind: command",
-          `    command: node -e "setTimeout(() => {}, 60000)" ${marker}`,
+          `    command: node -e "${script}" ${marker}`,
           "  - slug: after",
           "    kind: command",
           `    command: node -e "process.exit(0)"`,
@@ -381,7 +524,7 @@ describe("mcp over stdio", () => {
           true,
         );
         await client.close();
-        await new Promise((resolve) => setTimeout(resolve, 3_500));
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
         expect(running(), "the command was left running after the server exited").toBe(false);
       } finally {
         try {
@@ -390,7 +533,20 @@ describe("mcp over stdio", () => {
           // none left, which is the point
         }
       }
-    },
+    }
+  };
+
+  test.skipIf(process.platform === "win32")(
+    "when the agent goes away, the command the server was running is stopped",
+    () => orphanCheck("setTimeout(() => {}, 60000)", 3_500),
+    20_000,
+  );
+
+  // A command that ignores the polite request to stop is killed after a grace period, and the
+  // server has to stay up for that long: exiting at once would leave it running, orphaned.
+  test.skipIf(process.platform === "win32")(
+    "a command that ignores SIGTERM does not outlive the server either",
+    () => orphanCheck("process.on('SIGTERM', () => {}); setTimeout(() => {}, 60000)", 5_000),
     20_000,
   );
 });

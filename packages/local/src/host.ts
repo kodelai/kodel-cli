@@ -152,6 +152,34 @@ function redactEvent(event: RunEvent, rules: RedactRule[]): RunEvent {
 const REASON_TAIL = 2_000;
 const lastChars = (text: string, n: number) => (text.length > n ? `...${text.slice(-n)}` : text);
 
+/**
+ * What changed in the files, as far as it can be told. `no_repo`: there is no git here, so there is
+ * nothing to compare with. `unavailable`: there should be a comparison and there is none, which is
+ * different from "nothing changed" and has to be said so.
+ */
+export type ChangeReport =
+  | { kind: "changes"; files: ChangeSet }
+  | { kind: "unavailable"; reason: string }
+  | { kind: "no_repo" };
+
+/** The most files a gate answer lists; the rest are only counted. */
+export const MAX_CHANGES_SHOWN = 200;
+
+/** The files with the most lines changed, up to `MAX_CHANGES_SHOWN`, and how many were left out. */
+export function capChanges(files: ChangeSet): { shown: ChangeSet; omitted: number } {
+  const all = Object.entries(files).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  return {
+    shown: Object.fromEntries(all.slice(0, MAX_CHANGES_SHOWN)),
+    omitted: Math.max(0, all.length - MAX_CHANGES_SHOWN),
+  };
+}
+
+/** The hash a run is pinned to: of the pipeline's source text. */
+export function hashSource(source: string): string {
+  return createHash("sha256").update(source).digest("hex").slice(0, 16);
+}
+
+/** The hash older runs are pinned to: of the parsed pipeline (it changes when the parser does). */
 export function hashSpec(spec: PipelineSpec): string {
   return createHash("sha256").update(JSON.stringify(spec)).digest("hex").slice(0, 16);
 }
@@ -212,7 +240,7 @@ export class LocalHost {
     // Spaces at the ends or doubled are not a different task; otherwise a changed space would
     // slip past the run that is waiting for a person.
     const redactedTask = redactText(task.trim().replace(/\s+/g, " "), this.rules);
-    return this.store.withStartLock(async () => {
+    const started = await this.store.withStartLock(async () => {
       const existing = await this.store.findActive(this.spec.name, redactedTask);
       if (existing) {
         return { run: new LocalRun(this, existing.meta.runId), reused: true, terminal: false };
@@ -226,7 +254,10 @@ export class LocalHost {
 
       const now = this.clock();
       const runId = newRunId(now);
-      const specHash = hashSpec(this.spec);
+      // Of the text the pipeline was read from, when it is known: that is what a copy is checked
+      // against, and it does not change when the parser learns a new field.
+      const specHash =
+        this.options.source !== undefined ? hashSource(this.options.source) : hashSpec(this.spec);
       await this.store.createRun({
         v: 1,
         runId,
@@ -238,10 +269,6 @@ export class LocalHost {
       try {
         if (this.options.source !== undefined)
           await this.store.writeSpec(runId, this.options.source);
-        // Where the files stood when the run began, so a person at a gate can be shown what changed.
-        if (await this.snapshotter.isRepo()) {
-          await this.store.writeSnapshot(runId, "run", await this.snapshotter.snapshot());
-        }
         const run = new LocalRun(this, runId);
         const result = await run.apply({ type: "start", runId, task: redactedTask, specHash });
         if (!result.ok) throw result.error;
@@ -251,6 +278,12 @@ export class LocalHost {
         throw error;
       }
     });
+    // Where the files stood when the run began, so a person at a gate can be shown what changed.
+    // Taken once the run exists and the start lock is let go (it reads the whole working tree), and
+    // only if a check did not already take it. It may fail without failing the start; what is then
+    // missing is said at the gate, not hidden.
+    if (!started.reused && !started.terminal) await started.run.recordRunBaseline();
+    return started;
   }
 
   /** A handle on a run that is already on disk (after a restart, or from another process). */
@@ -393,16 +426,48 @@ export class LocalRun {
     );
   }
 
+  /** Take the working tree as it is, once, as the baseline of the whole run (not an error if it fails). */
+  async recordRunBaseline(): Promise<void> {
+    const { snapshotter, store } = this.host;
+    try {
+      if (!(await snapshotter.isRepo())) return;
+      if ((await store.readSnapshots(this.runId)).run !== undefined) return; // a check took it
+      await store.writeSnapshot(this.runId, "run", await snapshotter.snapshot());
+    } catch (error) {
+      await store
+        .writeSnapshot(this.runId, "run!", error instanceof Error ? error.message : String(error))
+        .catch(() => undefined);
+    }
+  }
+
   /**
    * What changed in the files since the run reached this human step: a person approving should know
-   * if the agent kept working after the checks passed. `undefined` when there is no baseline.
+   * if the agent kept working after the checks passed. When that cannot be told (the baseline is
+   * missing, or git fails now), that is said as it is, never as "nothing changed": whoever makes git
+   * fail must not get an approval that looks clean.
    */
-  async changesSinceGate(node: string): Promise<ChangeSet | undefined> {
+  async changesSinceGate(node: string): Promise<ChangeReport> {
     const visit = (await this.state()).active.find((v) => v.node === node && v.phase === "human");
-    if (!visit) return undefined;
-    const tree = (await this.host.store.readSnapshots(this.runId))[`gate:${node}:${visit.attempt}`];
-    if (!tree) return undefined;
-    return this.host.snapshotter.changesSince(tree);
+    if (!visit) return { kind: "unavailable", reason: `the run is not waiting at "${node}"` };
+    const snapshots = await this.host.store.readSnapshots(this.runId);
+    const tree = snapshots[`gate:${node}:${visit.attempt}`];
+    if (tree === undefined) {
+      if (snapshots.run === undefined && snapshots["run!"] === undefined)
+        return { kind: "no_repo" };
+      const why = snapshots[`gate:${node}:${visit.attempt}!`];
+      return {
+        kind: "unavailable",
+        reason: `the files were not recorded when the run reached this step${why ? ` (${why})` : ""}`,
+      };
+    }
+    try {
+      return { kind: "changes", files: await this.host.snapshotter.changesSince(tree) };
+    } catch (error) {
+      return {
+        kind: "unavailable",
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   /** Accept the files of this finished run after a deliberate change, and seal them again. */
@@ -431,13 +496,26 @@ export class LocalRun {
         return;
       case "await_human": {
         // Where the files stood when the person was asked, so approving can show what changed since.
-        if (await this.host.snapshotter.isRepo()) {
-          const tree = await this.host.snapshotter.snapshot();
-          await this.host.store.writeSnapshot(
-            this.runId,
-            `gate:${effect.node}:${effect.attempt}`,
-            tree,
-          );
+        // If that cannot be taken, the run still waits for the person (the state is already saved,
+        // and a failure here must not turn into an error for the agent that completed the step);
+        // what is missing is recorded, so the gate says it cannot tell instead of showing nothing.
+        const key = `gate:${effect.node}:${effect.attempt}`;
+        try {
+          if (await this.host.snapshotter.isRepo()) {
+            await this.host.store.writeSnapshot(
+              this.runId,
+              key,
+              await this.host.snapshotter.snapshot(),
+            );
+          }
+        } catch (error) {
+          await this.host.store
+            .writeSnapshot(
+              this.runId,
+              `${key}!`,
+              error instanceof Error ? error.message : String(error),
+            )
+            .catch(() => undefined);
         }
         return;
       }
@@ -606,14 +684,26 @@ export class LocalRun {
    * Wait until the work running in this process has finished and its results are applied.
    * `parked` says how many tasks are known to be stuck on purpose (tests), so they are not waited for.
    */
-  async settle(parked: () => number = () => 0): Promise<void> {
+  async settle(parked: () => number = () => 0, deadline = Number.POSITIVE_INFINITY): Promise<void> {
     for (;;) {
       await this.queue.catch(() => undefined);
       if (this.pending.size <= parked()) {
         await this.queue.catch(() => undefined);
         if (this.pending.size <= parked()) return;
       }
-      await Promise.race([...this.pending]);
+      const left = deadline - Date.now();
+      if (left <= 0) return;
+      // Wake up for the deadline too, so a wait that runs out does not leave a loop behind that
+      // goes on until the work is done.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const wake = new Promise<void>((resolve) => {
+        timer = Number.isFinite(left) ? setTimeout(resolve, left) : undefined;
+      });
+      try {
+        await Promise.race([...this.pending, wake]);
+      } finally {
+        clearTimeout(timer);
+      }
     }
   }
 
@@ -625,17 +715,15 @@ export class LocalRun {
   async waitForRest(ms: number): Promise<void> {
     if (ms <= 0) return;
     const deadline = Date.now() + ms;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, ms);
-    });
-    try {
-      await Promise.race([this.settle(), timeout]);
-    } finally {
-      clearTimeout(timer);
-    }
+    await this.settle(() => 0, deadline);
+    // What is left is work another process owns. It is watched in the state on disk, and looked at
+    // with a tick now and then, so work that has gone silent or lost its owner is started again
+    // during the wait instead of after it.
+    let rounds = 0;
     while (Date.now() < deadline && (await this.engineBusy())) {
       await new Promise((resolve) => setTimeout(resolve, Math.min(300, deadline - Date.now())));
+      if (++rounds % 4 === 0) await this.tick().catch(() => undefined);
+      await this.settle(() => 0, deadline); // a tick may have started work in this process
     }
   }
 
@@ -644,9 +732,15 @@ export class LocalRun {
     return state?.active.some((v) => v.phase === "engine" || v.phase === "checks") ?? false;
   }
 
-  /** Stop all work in this process without reporting anything, as if the process had died. */
-  stop(): void {
-    for (const { controller } of this.tasks.values()) controller.abort();
+  /**
+   * Stop all work in this process without reporting anything, as if the process had died. Returns
+   * how many pieces of work were stopped, so a caller that is about to exit knows whether to give
+   * them the moment they need to die (see `KILL_GRACE_MS`).
+   */
+  stop(): number {
+    const running = [...this.tasks.values()];
+    for (const { controller } of running) controller.abort();
+    return running.length;
   }
 
   // what callers do
@@ -669,8 +763,14 @@ export class LocalRun {
       this.host.engine.registry ?? defaultRegistry(),
     );
     if ("waiting" in step && step.waiting.reason === "gate") {
-      const changes = await this.changesSinceStart();
-      if (changes && Object.keys(changes).length > 0) step.waiting.changes = changes;
+      const found = await this.changesSinceStart();
+      if (found.kind === "unavailable") {
+        step.waiting.changes_unavailable = found.reason;
+      } else if (found.kind === "changes" && Object.keys(found.files).length > 0) {
+        const { shown, omitted } = capChanges(found.files);
+        step.waiting.changes = shown;
+        if (omitted > 0) step.waiting.changes_omitted = omitted;
+      }
     }
     return step;
   }
@@ -680,11 +780,25 @@ export class LocalRun {
     return summarizeRun(await this.state(), await this.host.store.readJournal(this.runId));
   }
 
-  /** Files changed since the run started, with the lines changed; `undefined` without a git baseline. */
-  async changesSinceStart(): Promise<ChangeSet | undefined> {
-    const tree = (await this.host.store.readSnapshots(this.runId)).run;
-    if (!tree) return undefined;
-    return this.host.snapshotter.changesSince(tree).catch(() => undefined);
+  /** Files changed since the run started, with the lines changed, or why that cannot be told. */
+  async changesSinceStart(): Promise<ChangeReport> {
+    const snapshots = await this.host.store.readSnapshots(this.runId);
+    const tree = snapshots.run;
+    if (tree === undefined) {
+      if (snapshots["run!"] === undefined) return { kind: "no_repo" };
+      return {
+        kind: "unavailable",
+        reason: `the files were not recorded when the run began (${snapshots["run!"]})`,
+      };
+    }
+    try {
+      return { kind: "changes", files: await this.host.snapshotter.changesSince(tree) };
+    } catch (error) {
+      return {
+        kind: "unavailable",
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   /** Owners of engine work that are gone (their process is dead), so their work can restart at once. */
