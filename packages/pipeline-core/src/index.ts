@@ -7,6 +7,7 @@ export * from "./errors";
 export * from "./format";
 export * from "./next-step";
 export * from "./pipeline";
+export * from "./redact";
 export * from "./registry";
 export * from "./render";
 export * from "./result";
