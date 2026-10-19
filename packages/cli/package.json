@@ -1,0 +1,20 @@
+{
+  "name": "kodel",
+  "version": "0.0.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "kodel": "dist/kodel.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "bun build src/main.ts --target node --outfile dist/kodel.js --banner '#!/usr/bin/env node' && chmod +x dist/kodel.js"
+  },
+  "dependencies": {
+    "@kodel-ai/local": "workspace:*",
+    "@kodel-ai/pipeline-core": "workspace:*",
+    "commander": "^14.0.0"
+  }
+}
