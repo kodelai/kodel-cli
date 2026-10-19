@@ -20,6 +20,8 @@ export interface ResultReport {
 export interface Production {
   /** Files the agent changed in this attempt: path -> number of changed lines. Default: none. */
   changes?: Record<string, number>;
+  /** Files the agent put back to how they were before the pipeline started. */
+  restore?: string[];
   /** The result report the agent sends. Default: none sent. */
   result?: ResultReport;
   /** Exit code of the node's own command (`command` nodes). Default: 0. */

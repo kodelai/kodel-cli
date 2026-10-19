@@ -6,6 +6,7 @@
 export * from "./dsl";
 export * from "./load";
 export * from "./matchers";
+export * from "./memory-engine";
 export * from "./run";
 export * from "./scenarios/feature";
 export * from "./scripted-engine";

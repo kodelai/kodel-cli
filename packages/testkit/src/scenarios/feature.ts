@@ -210,7 +210,7 @@ export const featureScenarios: Scenario[] = [
     .inject(
       inj("plan", { 1: planOk }),
       inj("impl", { 1: implOk, 2: {}, 3: implOk }),
-      inj("review", { 1: cleanReview }),
+      inj("review", { 1: cleanReview, 2: cleanReview }),
       inj("docs", { 1: docsOk }),
     )
     .on(humanApprove("plan-approval"))
@@ -228,7 +228,8 @@ export const featureScenarios: Scenario[] = [
     .inject(
       inj("plan", {
         1: { changes: { [PLAN_FILE]: 24, "packages/oops.ts": 3 } },
-        2: planOk,
+        // The second round puts the stray file back; the plan written in round one stays.
+        2: { restore: ["packages/oops.ts"] },
       }),
       inj("impl", { 1: implOk }),
       inj("review", { 1: cleanReview }),

@@ -25,6 +25,12 @@ export interface Labels {
   failure: string[];
 }
 
+/** What a node needs in order to do its work. Strings are already rendered (placeholders filled). */
+export type Begin =
+  | { needs: "agent"; prompt: string }
+  | { needs: "engine"; command: string; expect: { exit: number } }
+  | { needs: "human"; prompt: string; files: string[] };
+
 export interface NodeHandler {
   kind: string;
   /** Kind-specific fields (the common fields and `checks` are added by the parser). */
@@ -33,8 +39,14 @@ export interface NodeHandler {
   allowsChecks: boolean;
   /** Whether every failure label must have an outgoing edge (nobody else can retry the node). */
   requiresRoutes: boolean;
+  /** Whether a failure counts toward `max_consecutive_failures` (a human rejection does not). */
+  automaticFailures: boolean;
   labels(node: NodeInfo): Labels;
+  /** How the node starts: who does the work and with what instructions. */
+  begin(params: Record<string, unknown>, render: (text: string) => string): Begin;
 }
+
+export type Baseline = "run" | "node" | "attempt";
 
 export interface CheckHandler {
   kind: string;
@@ -42,6 +54,12 @@ export interface CheckHandler {
   shape: z.ZodRawShape;
   /** Cross-field validation; return one message per problem. */
   validate?(params: Record<string, unknown>): string[];
+  /** The snapshot this check compares against, if it needs one. */
+  baseline?(params: Record<string, unknown>): Baseline | undefined;
+  /** Text appended to the agent's prompt, for checks the agent has to feed (a result report). */
+  instruction?(params: Record<string, unknown>): string | undefined;
+  /** Whether the check's parameters are shown to the agent as the `result_spec`. */
+  exposeSpec?: boolean;
 }
 
 export class Registry {
@@ -84,7 +102,9 @@ const agentNode: NodeHandler = {
   shape: { prompt: nonEmpty },
   allowsChecks: true,
   requiresRoutes: false,
+  automaticFailures: true,
   labels: (node) => ({ success: ["passed"], failure: node.checks.map((c) => c.on_fail) }),
+  begin: (params, render) => ({ needs: "agent", prompt: render(String(params.prompt)) }),
 };
 
 const commandNode: NodeHandler = {
@@ -92,9 +112,15 @@ const commandNode: NodeHandler = {
   shape: { command: nonEmpty, expect: expect.optional(), on_fail: nonEmpty.optional() },
   allowsChecks: true,
   requiresRoutes: true,
+  automaticFailures: true,
   labels: (node) => ({
     success: ["passed"],
     failure: [node.on_fail, ...node.checks.map((c) => c.on_fail)],
+  }),
+  begin: (params, render) => ({
+    needs: "engine",
+    command: render(String(params.command)),
+    expect: (params.expect as { exit: number } | undefined) ?? { exit: 0 },
   }),
 };
 
@@ -103,7 +129,13 @@ const humanNode: NodeHandler = {
   shape: { prompt: nonEmpty, files: z.array(nonEmpty).optional() },
   allowsChecks: false,
   requiresRoutes: true,
+  automaticFailures: false,
   labels: () => ({ success: ["approved"], failure: ["rejected"] }),
+  begin: (params, render) => ({
+    needs: "human",
+    prompt: render(String(params.prompt)),
+    files: ((params.files as string[] | undefined) ?? []).map(render),
+  }),
 };
 
 export const COLUMN_SCALARS = [
@@ -141,6 +173,7 @@ const diffCheck: CheckHandler = {
       ? [`min_lines (${min}) must not exceed max_lines (${max})`]
       : [];
   },
+  baseline: (p) => (p.since as Baseline | undefined) ?? "node",
 };
 
 const commandCheck: CheckHandler = {
@@ -148,8 +181,24 @@ const commandCheck: CheckHandler = {
   shape: { command: nonEmpty, timeout: positiveInt.optional(), expect: expect.optional() },
 };
 
+function resultInstruction(p: Record<string, unknown>): string {
+  const columns = Object.entries((p.columns ?? {}) as Record<string, unknown>)
+    .map(([name, type]) =>
+      typeof type === "string"
+        ? `${name} (${type})`
+        : `${name} (one of ${(type as { enum: string[] }).enum.join(", ")})`,
+    )
+    .join(", ");
+  return (
+    "When you are done, send your findings with pipeline_report_result as a complete list for " +
+    `this attempt: one row per finding with the columns ${columns}. If you found nothing, send an empty list.`
+  );
+}
+
 const resultCheck: CheckHandler = {
   kind: "result",
+  instruction: resultInstruction,
+  exposeSpec: true,
   shape: {
     columns: z.record(nonEmpty, columnType).refine((c) => Object.keys(c).length > 0, {
       message: "at least one column is required",

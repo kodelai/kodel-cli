@@ -458,7 +458,9 @@ describe("extensibility", () => {
         shape: {},
         allowsChecks: true,
         requiresRoutes: false,
+        automaticFailures: true,
         labels: () => ({ success: ["passed"], failure: ["failed"] }),
+        begin: () => ({ needs: "agent", prompt: "do nothing" }),
       })
       .registerCheck({ kind: "always", shape: {} });
     const spec = parsePipeline(text, { registry });

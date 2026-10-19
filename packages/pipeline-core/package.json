@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",
+    "minimatch": "^10",
     "yaml": "^2.6.0",
     "zod": "^3.24.0"
   }
