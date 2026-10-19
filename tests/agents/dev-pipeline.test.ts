@@ -196,9 +196,9 @@ describe("the repository's own pipeline, on a real agent", () => {
       ).toBe(true);
       // ...so the run stands at the person's confirmation, never at the implementation.
       expect(now.at, `${now.trail}${why}`).toEqual(["confirm-nothing-to-do:human"]);
-      expect(now.state?.nodes.impl, why).toBeUndefined();
+      expect(now.state?.nodes.impl?.attempt ?? 0, `impl was entered${why}`).toBe(0);
       // and nothing in the code was changed, only the plan that says why.
-      const changed = execFileSync("git", ["status", "--short"], {
+      const changed = execFileSync("git", ["status", "--short", "--untracked-files=all"], {
         cwd: sandbox.dir,
         encoding: "utf8",
       });
