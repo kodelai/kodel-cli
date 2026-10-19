@@ -182,6 +182,22 @@ function textOf(content: unknown): string {
   return "";
 }
 
+/**
+ * The environment of the agent under test. The KODEL_AGENT_* switches are removed: the engine runs
+ * the repository's own `bun test` inside the sandbox, and a child that still saw
+ * KODEL_AGENT_TESTS=1 would run these same scenarios again, each starting another agent.
+ */
+export function agentEnv(
+  stateDir: string,
+  base: Record<string, string | undefined> = process.env,
+): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = { ...base, KODEL_STATE_DIR: stateDir };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("KODEL_AGENT_")) delete env[key];
+  }
+  return env;
+}
+
 export interface TurnOptions {
   sandbox: Sandbox;
   prompt: string;
@@ -227,7 +243,7 @@ export async function runAgentTurn(options: TurnOptions): Promise<AgentTurn> {
   const child: ChildProcess = spawn("claude", args, {
     cwd: sandbox.dir,
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, KODEL_STATE_DIR: sandbox.stateDir },
+    env: agentEnv(sandbox.stateDir),
   });
   let stdout = "";
   let stderr = "";

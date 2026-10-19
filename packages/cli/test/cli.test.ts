@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -249,6 +249,25 @@ describe("mcp over stdio", () => {
     const body = JSON.parse(((started.content as { text: string }[])[0] as { text: string }).text);
     expect(body).toMatchObject({ ok: true, next: { node: { slug: "write" } } });
     await client.close();
+  });
+
+  test("a server whose agent closed the pipe exits, and does not wait for ever", async () => {
+    const child = spawn(
+      process.execPath,
+      [join(import.meta.dir, "../src/main.ts"), "--root", dir, "mcp"],
+      { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } },
+    );
+    const exited = new Promise<number | null>((resolve) =>
+      child.on("exit", (code) => resolve(code)),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 800)); // let it start and begin to listen
+    child.stdin.end();
+    const outcome = await Promise.race([
+      exited,
+      new Promise<string>((resolve) => setTimeout(() => resolve("still running"), 5_000)),
+    ]);
+    if (outcome === "still running") child.kill("SIGKILL");
+    expect(outcome).toBe(0);
   });
 
   // The agent's session ends while a command of the pipeline is still going. The server must not

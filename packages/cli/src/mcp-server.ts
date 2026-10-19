@@ -30,6 +30,10 @@ export async function serveStdio(host: StoppableHost, version: string): Promise<
   }
   await new Promise<void>((resolve) => {
     server.server.onclose = resolve;
+    // The SDK does not count the agent's end of the pipe closing as the server closing, so a server
+    // whose agent was killed outright would otherwise run for ever.
+    process.stdin.once("end", resolve);
+    process.stdin.once("close", resolve);
   });
   stop();
 }
