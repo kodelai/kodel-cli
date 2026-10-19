@@ -19,19 +19,15 @@ those notes once the first working version is done. Reference pipeline: `example
 ## Running a pipeline on this repository
 
 `.mcp.json` starts the `kodel` MCP server from source (`bun packages/cli/src/main.ts mcp`), and
-`.kodel/pipelines/dev.yaml` is the pipeline. When the user asks for a change "through the pipeline":
+`.kodel/pipelines/dev.yaml` is the pipeline. When the user asks for a change "through the pipeline",
+work only through the `pipeline_*` tools: the server's own instructions (sent when it connects) say how.
 
-1. Call `pipeline_start` with the task, then follow each answer. Never choose steps yourself and
-   never skip one: the engine, not you, decides whether a step is done.
-2. `pipeline_next_step` returns `node` (do the work, then `pipeline_complete_step`), `waiting` (a person
-   decides with `kodel gate approve|reject <run>`; tell them and end your turn), `running` (engine work
-   is going; end your turn) or `done`.
-3. Do not touch `.kodel/runs/`, and do not run `gate`, `ack`, `seal` or `resume`: those are for the person
-   (they refuse to run without a terminal and ask for a confirmation, so trying them only fails). Do not edit
-   `.kodel/pipelines/`, `.mcp.json` or `.claude/settings*.json` either: the person decides what pipeline runs.
-4. If a step description or check looks wrong, say so with `pipeline_feedback`.
+This repository adds two rules: do not edit `.kodel/pipelines/`, `.mcp.json` or `.claude/settings*.json`
+(the person decides what pipeline runs), and do not run `gate`, `ack`, `seal` or `resume`: they refuse to
+run without a terminal and ask for a confirmation, so trying them only fails.
 
-Humans: `bun packages/cli/src/main.ts status` lists runs; the same binary has `gate`, `resume`, `ack`, `seal`.
+Humans: `bun packages/cli/src/main.ts status` lists runs, `report` shows where the time went; the same
+binary has `gate`, `resume`, `ack`, `seal`.
 
 ## Language
 

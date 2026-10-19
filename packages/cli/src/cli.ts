@@ -9,6 +9,7 @@ import { LocalPipelineHost } from "@kodel-ai/local";
 import { type Decision, KodelError, type RunState } from "@kodel-ai/pipeline-core";
 import { Command, CommanderError } from "commander";
 import pkg from "../package.json" with { type: "json" };
+import { formatReport } from "./format";
 import { serveStdio } from "./mcp-server";
 
 export interface CliEnv {
@@ -184,6 +185,18 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       await mustConfirm(`Accept the state of run ${runId} as it is now?`);
       failIfRefused(await run.acknowledge(opts.note));
       env.out(`${runId}: accepted\n`);
+    });
+
+  program
+    .command("report [run]")
+    .description("Where the time went and what was redone in a run (the latest, if none is named)")
+    .option("--json", "print the report as JSON")
+    .action(async (runId: string | undefined, opts: { json?: boolean }) => {
+      const h = host();
+      const id = runId ?? (await h.runSummaries()).at(-1)?.meta.runId;
+      if (!id) throw new UserError("there are no runs yet");
+      const report = await (await openRun(h, id)).report();
+      env.out(opts.json ? `${JSON.stringify(report, null, 2)}\n` : formatReport(report, plain));
     });
 
   program

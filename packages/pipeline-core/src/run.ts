@@ -405,6 +405,7 @@ class Machine {
       attempt: visit.attempt,
       outcome: label,
       status: run.status,
+      ...(failure ? { source: failure.source, reason: failure.reason } : {}),
     });
     this.route(node, label, failure !== undefined);
   }

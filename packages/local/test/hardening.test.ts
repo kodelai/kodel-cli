@@ -5,6 +5,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { parsePipeline } from "@kodel-ai/pipeline-core";
 import {
+  engineEnv,
   FileStore,
   LocalHost,
   LocalPipelineHost,
@@ -481,6 +482,97 @@ describe("what a person is shown at a gate", () => {
     if (!again || !("waiting" in again)) throw new Error("expected a gate");
     expect(waiting.changes).toEqual({ "a.txt": 1 });
     expect(again.waiting.changes).toEqual({ "a.txt": 1, "b.txt": 2 });
+  });
+});
+
+describe("the environment of the commands the engine runs", () => {
+  const dump = (file: string) => `node dump-env.js ${file}`;
+
+  test("no KODEL_ switch reaches a command, which is told it is run by the engine and for what", async () => {
+    process.env.KODEL_AGENT_TESTS = "1";
+    process.env.KODEL_SOME_SWITCH = "on";
+    await writeFile(
+      join(dir, "dump-env.js"),
+      "require('node:fs').writeFileSync(process.argv[2], JSON.stringify(process.env));\n",
+    );
+    try {
+      const spec = parsePipeline(
+        [
+          "name: env",
+          "nodes:",
+          "  - slug: first",
+          "    kind: command",
+          `    command: ${dump("env-node.json")}`,
+          "    checks:",
+          `      - { kind: command, command: ${dump("env-check.json")} }`,
+          "  - slug: second",
+          "    kind: command",
+          `    command: node -e "process.exit(0)"`,
+          "edges:",
+          "  - { from: first, to: second }",
+          "  - { from: first, to: second, when: failed }",
+          "  - { from: second, to: first, when: failed }",
+          "",
+        ].join("\n"),
+      );
+      const { run } = await new LocalHost(spec, { root: dir, heartbeatMs: 0 }).start("t");
+      await run.settle();
+      expect((await run.state()).status).toBe("completed");
+      for (const [file, node] of [
+        ["env-node.json", "first"],
+        ["env-check.json", "first"],
+      ] as const) {
+        const env = JSON.parse(await readFile(join(dir, file), "utf8")) as Record<string, string>;
+        const kodel = Object.keys(env).filter((k) => k.startsWith("KODEL_"));
+        expect(kodel.sort(), file).toEqual([
+          "KODEL_ATTEMPT",
+          "KODEL_ENGINE",
+          "KODEL_NODE",
+          "KODEL_RUN_ID",
+        ]);
+        expect(env.KODEL_ENGINE).toBe("1");
+        expect(env.KODEL_NODE).toBe(node);
+        expect(env.KODEL_ATTEMPT).toBe("1");
+        expect(env.KODEL_RUN_ID).toBe(run.runId);
+        expect(env.PATH, "the rest of the environment is kept").toBe(process.env.PATH);
+      }
+    } finally {
+      delete process.env.KODEL_AGENT_TESTS;
+      delete process.env.KODEL_SOME_SWITCH;
+    }
+  });
+
+  test("engineEnv takes every KODEL_ variable out, and nothing else", () => {
+    const env = engineEnv(
+      { runId: "r", node: "n", attempt: 2 },
+      { PATH: "/bin", HOME: "/h", KODEL_X: "1", KODEL_STATE_DIR: "/s", KODEL: "kept" },
+    );
+    expect(env).toEqual({
+      PATH: "/bin",
+      HOME: "/h",
+      KODEL: "kept",
+      KODEL_ENGINE: "1",
+      KODEL_RUN_ID: "r",
+      KODEL_NODE: "n",
+      KODEL_ATTEMPT: "2",
+    });
+  });
+
+  test("a command run on its own still inherits everything, unless it asks not to", async () => {
+    process.env.KODEL_PLAIN_COMMAND = "yes";
+    try {
+      const inherited = await runCommand(`node -e "console.log(process.env.KODEL_PLAIN_COMMAND)"`, {
+        cwd: dir,
+      });
+      expect(inherited.tail.trim()).toBe("yes");
+      const clean = await runCommand(
+        `node -e "console.log(process.env.KODEL_PLAIN_COMMAND ?? 'unset')"`,
+        { cwd: dir, env: { PATH: process.env.PATH }, inheritEnv: false },
+      );
+      expect(clean.tail.trim()).toBe("unset");
+    } finally {
+      delete process.env.KODEL_PLAIN_COMMAND;
+    }
   });
 });
 

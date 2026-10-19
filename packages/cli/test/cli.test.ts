@@ -200,6 +200,46 @@ describe("only a person can decide", () => {
   });
 });
 
+describe("report", () => {
+  test("shows where the time went for the latest run, and for one that is named", async () => {
+    const id = await runAtGate();
+    const latest = await cli("report");
+    expect(latest.code).toBe(0);
+    expect(latest.out).toContain(`run ${id}`);
+    expect(latest.out).toContain("waiting for a person");
+    expect(latest.out).toContain("write");
+    expect(latest.out).toContain("(a person decides)");
+    expect(latest.out).toBe((await cli("report", id)).out);
+  });
+
+  test("with --json it is the data, for anything that wants to read it", async () => {
+    const id = await runAtGate();
+    const parsed = JSON.parse((await cli("report", id, "--json")).out);
+    expect(parsed).toMatchObject({ runId: id, status: "running", extra_attempts: 0 });
+    expect(parsed.nodes.map((n: { node: string }) => n.node)).toEqual(["write", "approve"]);
+  });
+
+  test("a rejection and its reason show under what did not pass", async () => {
+    const id = await runAtGate();
+    await cli("gate", "reject", id, "--reason", "too big");
+    const out = (await cli("report", id)).out;
+    expect(out).toContain("what did not pass");
+    expect(out).toContain("approve #1 rejected: too big");
+    expect(out).toContain("1 extra attempt(s)");
+  });
+
+  test("no runs, or an unknown one, is an error and not a crash", async () => {
+    expect(await cli("report")).toMatchObject({ code: 1, err: "kodel: there are no runs yet\n" });
+    expect((await cli("report", "r_000000009_aaaa")).code).toBe(1);
+  });
+
+  test("control characters from the agent cannot get into the report", async () => {
+    const host = new LocalPipelineHost({ root: dir, heartbeatMs: 0 });
+    await host.start({ pipeline: "demo", task: "x\u001b[2Jfake", restart: false });
+    expect((await cli("report")).out).not.toContain("\u001b");
+  });
+});
+
 describe("what status shows and does", () => {
   test("control characters in an agent's text cannot move the cursor or fake a line", async () => {
     const host = new LocalPipelineHost({ root: dir, heartbeatMs: 0 });

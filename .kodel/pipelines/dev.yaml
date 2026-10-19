@@ -39,20 +39,24 @@ nodes:
   - slug: verify
     kind: command
     command: "bun run typecheck && bun run lint"
+    expected_duration: 20
     timeout: 300
 
   - slug: test
     kind: command
     command: "bun test"
+    expected_duration: 60
     timeout: 900
 
   - slug: build
     kind: command
     command: "bun run build && bun run check:artifact"
+    expected_duration: 30
     timeout: 300
 
   - slug: review
     kind: agent
+    fresh_context: true     # an independent look: not by the one who wrote the change
     prompt: |
       Review the changes against the plan in docs/plans/{{task.slug}}.md and against AGENTS.md.
       Report every problem as a finding.

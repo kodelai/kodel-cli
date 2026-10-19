@@ -25,10 +25,12 @@ import {
   type PipelineSpec,
   type RedactRule,
   type RunEvent,
+  type RunReport,
   type RunState,
   redactText,
   renderDeep,
   type StepResult,
+  summarizeRun,
   validateReport,
 } from "@kodel-ai/pipeline-core";
 import { type CommandOptions, type CommandResult, runCommand } from "./command";
@@ -90,6 +92,27 @@ export interface HostOptions {
   ownerId?: string;
   /** Whether an owner is still alive. Tests replace it; by default a process id on this machine is looked up. */
   isOwnerAlive?: (owner: string) => boolean;
+}
+
+/**
+ * The environment of a command the engine runs: this process's, except that no `KODEL_*` variable
+ * is passed on (a switch meant for kodel or for its tests must not reach the project's own commands:
+ * a `bun test` that saw the switch of the real-agent tests started them again), and the command is
+ * told it is run by the engine, for which run, node and attempt.
+ */
+export function engineEnv(
+  step: { runId: string; node: string; attempt: number },
+  base: Record<string, string | undefined> = process.env,
+): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(base)) {
+    if (!key.startsWith("KODEL_")) env[key] = value;
+  }
+  env.KODEL_ENGINE = "1";
+  env.KODEL_RUN_ID = step.runId;
+  env.KODEL_NODE = step.node;
+  env.KODEL_ATTEMPT = String(step.attempt);
+  return env;
 }
 
 /** `<host>:<pid>` of this process. */
@@ -507,10 +530,16 @@ export class LocalRun {
     }
   }
 
-  private commandOptions(signal: AbortSignal, timeout: number | undefined): CommandOptions {
+  private commandOptions(
+    signal: AbortSignal,
+    timeout: number | undefined,
+    step: { node: string; attempt: number },
+  ): CommandOptions {
     const { options, rules, maxTailBytes } = this.host;
     return {
       cwd: options.root,
+      env: engineEnv({ runId: this.runId, ...step }),
+      inheritEnv: false,
       signal,
       redact: (text) => redactText(text, rules),
       // A command with no limit of its own gets a long one: it may never hang the run for good.
@@ -525,7 +554,7 @@ export class LocalRun {
   ): Promise<RunEvent> {
     const result = await this.host.runner(
       effect.command,
-      this.commandOptions(signal, effect.timeout),
+      this.commandOptions(signal, effect.timeout, effect),
       {
         runId: this.runId,
         node: effect.node,
@@ -644,6 +673,11 @@ export class LocalRun {
       if (changes && Object.keys(changes).length > 0) step.waiting.changes = changes;
     }
     return step;
+  }
+
+  /** Where the time went and what was redone, from the run's own state and journal. */
+  async report(): Promise<RunReport> {
+    return summarizeRun(await this.state(), await this.host.store.readJournal(this.runId));
   }
 
   /** Files changed since the run started, with the lines changed; `undefined` without a git baseline. */
@@ -773,6 +807,8 @@ function builtinCheckRunners(host: LocalHost): Record<string, CheckRunner> {
         command,
         {
           cwd: host.options.root,
+          env: engineEnv({ runId: context.runId, node: effect.node, attempt: effect.attempt }),
+          inheritEnv: false,
           signal: context.signal,
           redact: (text) => redactText(text, host.rules),
           timeoutMs: timeout * 1000,

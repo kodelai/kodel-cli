@@ -10,6 +10,7 @@ export * from "./pipeline";
 export * from "./redact";
 export * from "./registry";
 export * from "./render";
+export * from "./report";
 export * from "./result";
 export * from "./run";
 export * from "./run-id";

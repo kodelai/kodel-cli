@@ -11,7 +11,10 @@ export interface CommandOptions {
   timeoutMs?: number;
   /** How much of the end of the output to keep. */
   maxTailBytes?: number;
+  /** Added to this process's environment, or used as the whole environment with `inheritEnv: false`. */
   env?: Record<string, string | undefined>;
+  /** Whether the command starts from this process's environment (the default) or only from `env`. */
+  inheritEnv?: boolean;
   signal?: AbortSignal;
   /** Applied to the tail before it is returned (secret redaction). */
   redact?: (text: string) => string;
@@ -92,7 +95,7 @@ export function runCommand(command: string, options: CommandOptions): Promise<Co
     const child = spawn(command, {
       shell: true,
       cwd: options.cwd,
-      env: { ...process.env, ...options.env },
+      env: options.inheritEnv === false ? options.env : { ...process.env, ...options.env },
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
       windowsHide: true,
