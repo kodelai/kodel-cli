@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
   BASELINE_FORMAT,
+  DEFAULT_MAX_ATTEMPTS,
+  DEFAULT_MAX_CONSECUTIVE_FAILURES,
   defaultRegistry,
   KodelError,
   MAX_SUPPORTED_FORMAT,
@@ -80,7 +82,8 @@ describe("the reference pipeline", () => {
     const node = (slug: string) => spec.nodes.find((n) => n.slug === slug);
     expect(node("plan")?.timeout).toBe(900);
     expect(node("build")?.timeout).toBe(600);
-    expect(node("review")?.max_attempts).toBe(3);
+    expect(node("review")?.max_consecutive_failures).toBe(3);
+    expect(node("review")?.max_attempts).toBe(10);
   });
 
   test("checks keep their kind, label and parameters", () => {
@@ -158,6 +161,45 @@ describe("node kinds", () => {
     expectIssue(
       doc("name: x", "nodes:", "  - slug: a", "    prompt: p"),
       'field "kind" is required',
+    );
+  });
+
+  test("attempt limits default to 3 failures in a row and 10 attempts in all", () => {
+    const spec = parsePipeline(VALID);
+    for (const node of spec.nodes) {
+      expect(node.max_consecutive_failures).toBe(DEFAULT_MAX_CONSECUTIVE_FAILURES);
+      expect(node.max_attempts).toBe(DEFAULT_MAX_ATTEMPTS);
+    }
+    expect([DEFAULT_MAX_CONSECUTIVE_FAILURES, DEFAULT_MAX_ATTEMPTS]).toEqual([3, 10]);
+  });
+
+  test("a node overrides the pipeline defaults, and the pipeline defaults override ours", () => {
+    const text = VALID.replace(
+      "name: demo\n",
+      "name: demo\ndefaults:\n  max_attempts: 6\n",
+    ).replace(
+      "    prompt: do {{task}}\n",
+      "    prompt: do {{task}}\n    max_consecutive_failures: 2\n",
+    );
+    const spec = parsePipeline(text);
+    expect(spec.nodes[0]?.max_consecutive_failures).toBe(2);
+    expect(spec.nodes[0]?.max_attempts).toBe(6);
+    expect(spec.nodes[1]?.max_consecutive_failures).toBe(3);
+    expect(spec.nodes[1]?.max_attempts).toBe(6);
+  });
+
+  test("failures in a row cannot exceed all attempts", () => {
+    const text = VALID.replace(
+      "    prompt: do {{task}}\n",
+      "    prompt: do {{task}}\n    max_consecutive_failures: 5\n    max_attempts: 4\n",
+    );
+    expectIssue(text, "must not exceed max_attempts", 6);
+  });
+
+  test("limits must be positive integers", () => {
+    expectIssue(
+      VALID.replace("    prompt: do {{task}}\n", "    prompt: do {{task}}\n    max_attempts: 0\n"),
+      "max_attempts",
     );
   });
 

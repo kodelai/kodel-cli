@@ -27,6 +27,7 @@ export const humanReject = (node: string, reason?: string): ScenarioEvent =>
   reason === undefined ? { kind: "humanReject", node } : { kind: "humanReject", node, reason };
 export const interrupt = (): ScenarioEvent => ({ kind: "interrupt" });
 export const advanceTime = (ms: number): ScenarioEvent => ({ kind: "advanceTime", ms });
+export const resume = (): ScenarioEvent => ({ kind: "resume" });
 export const cancelRun = (): ScenarioEvent => ({ kind: "cancel" });
 
 export const matcher = (key: string, expected: unknown): Assertion => ({ key, expected });

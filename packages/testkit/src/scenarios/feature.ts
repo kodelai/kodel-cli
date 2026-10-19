@@ -12,6 +12,7 @@ import {
   inj,
   interrupt,
   matcher,
+  resume,
 } from "../dsl";
 import type { Production, ResultReport, Scenario } from "../types";
 
@@ -55,6 +56,39 @@ const quiet = () => [
   inj("review", { 1: cleanReview }),
   inj("docs", { 1: docsOk }),
 ];
+
+/** The same production for attempts 1..n. */
+const upTo = (n: number, production: Production): Record<number, Production> =>
+  Object.fromEntries(Array.from({ length: n }, (_, i) => [i + 1, production]));
+
+/**
+ * Human rejections are not failures, so they never trip max_consecutive_failures; the total
+ * limit (max_attempts, 10) is what stops an endless back and forth.
+ */
+function endlessRejections(): Scenario {
+  const scenario = base("feature/endless-rejections-hit-the-total-limit")
+    .describe(
+      "a human rejecting the same work again and again exhausts max_attempts: the run pauses",
+    )
+    .inject(
+      inj("plan", { 1: planOk }),
+      inj("impl", upTo(10, implOk)),
+      inj("review", upTo(10, cleanReview)),
+      inj("docs", { 1: docsOk }),
+    )
+    .on(humanApprove("plan-approval"));
+  for (let round = 1; round <= 10; round++) {
+    scenario.on(humanReject("manual-test", `round ${round}`));
+  }
+  return scenario
+    .expect([
+      matcher("runStatus", "paused"),
+      matcher("attempts", { impl: 10, "manual-test": 10 }),
+      matcher("journalHas", "run_paused"),
+      matcher("never", ["docs"]),
+    ])
+    .build();
+}
 
 export const featureScenarios: Scenario[] = [
   base("feature/happy-path")
@@ -102,7 +136,9 @@ export const featureScenarios: Scenario[] = [
     .build(),
 
   base("feature/build-exhausts-attempts")
-    .describe("build keeps failing; after max_attempts the run pauses and waits for a human")
+    .describe(
+      "build fails three times in a row (max_consecutive_failures); the run pauses and waits for a human",
+    )
     .inject(
       inj("plan", { 1: planOk }),
       inj("impl", { 1: implOk, 2: implOk, 3: implOk }),
@@ -206,6 +242,30 @@ export const featureScenarios: Scenario[] = [
       matcher("trail", HAPPY_TRAIL),
     ])
     .build(),
+
+  base("feature/resume-grants-a-fresh-failure-count")
+    .describe(
+      "after the pause a human resumes: the blocked route is taken and the count starts over",
+    )
+    .inject(
+      inj("plan", { 1: planOk }),
+      inj("impl", upTo(4, implOk)),
+      inj("build", { 1: { exit: 1 }, 2: { exit: 1 }, 3: { exit: 1 } }),
+      inj("review", { 1: cleanReview }),
+      inj("docs", { 1: docsOk }),
+    )
+    .on(humanApprove("plan-approval"))
+    .expect([matcher("runStatus", "paused"), matcher("attempts", { impl: 3, build: 3 })])
+    .on(resume())
+    .expect([
+      matcher("runStatus", "running"),
+      matcher("waitingGate", "manual-test"),
+      matcher("attempts", { impl: 4, build: 4 }),
+      matcher("journalHas", ["run_paused", "run_resumed"]),
+    ])
+    .build(),
+
+  endlessRejections(),
 
   base("feature/interrupted-build-restarts")
     .describe("the process dies while build runs; the next step restarts it without a new attempt")

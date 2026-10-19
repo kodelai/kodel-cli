@@ -46,6 +46,8 @@ export type ScenarioEvent =
   /** The process running engine work died; the next `next_step` restarts the node. */
   | { kind: "interrupt" }
   | { kind: "advanceTime"; ms: number }
+  /** A human resumes a paused run: the failure count starts over and the blocked route is taken. */
+  | { kind: "resume" }
   | { kind: "cancel" };
 
 /** A direct tool call, for scenarios about the agent protocol (adversarial agents). */

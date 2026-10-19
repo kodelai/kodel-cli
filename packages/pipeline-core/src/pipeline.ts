@@ -31,7 +31,13 @@ export interface NodeSpec {
   name?: string;
   kind: string;
   timeout?: number;
-  max_attempts?: number;
+  /**
+   * Failed attempts in a row before the run pauses. Counts automatic failures only (a human
+   * rejection is not one) and starts over when the node passes.
+   */
+  max_consecutive_failures: number;
+  /** All attempts of this node in one run, re-entries after a human decision included. */
+  max_attempts: number;
   /** Label emitted when the node itself fails (meaningful for `command` nodes). */
   on_fail: string;
   checks: CheckSpec[];
@@ -70,11 +76,14 @@ export interface ParseOptions {
 export const PLACEHOLDERS = ["task", "task.slug"] as const;
 
 const DEFAULT_ON_FAIL = "failed";
+export const DEFAULT_MAX_CONSECUTIVE_FAILURES = 3;
+export const DEFAULT_MAX_ATTEMPTS = 10;
 const GENERIC_NODE_FIELDS = new Set([
   "slug",
   "name",
   "kind",
   "timeout",
+  "max_consecutive_failures",
   "max_attempts",
   "on_fail",
   "checks",
@@ -89,7 +98,11 @@ const topSchema = z
     name: nonEmpty,
     description: z.string().optional(),
     defaults: z
-      .object({ timeout: positiveInt.optional(), max_attempts: positiveInt.optional() })
+      .object({
+        timeout: positiveInt.optional(),
+        max_consecutive_failures: positiveInt.optional(),
+        max_attempts: positiveInt.optional(),
+      })
       .strict()
       .optional(),
     nodes: z.array(z.unknown()).min(1),
@@ -104,6 +117,7 @@ const commonNodeShape = {
   name: nonEmpty.optional(),
   kind: nonEmpty,
   timeout: positiveInt.optional(),
+  max_consecutive_failures: positiveInt.optional(),
   max_attempts: positiveInt.optional(),
 };
 
@@ -352,18 +366,34 @@ export function validatePipeline(text: string, options: ParseOptions = {}): Pars
     const params = Object.fromEntries(
       Object.entries(data).filter(([key]) => !GENERIC_NODE_FIELDS.has(key)),
     );
+    const maxConsecutive =
+      (data.max_consecutive_failures as number | undefined) ??
+      defaults?.max_consecutive_failures ??
+      DEFAULT_MAX_CONSECUTIVE_FAILURES;
+    const maxAttempts =
+      (data.max_attempts as number | undefined) ?? defaults?.max_attempts ?? DEFAULT_MAX_ATTEMPTS;
+    if (maxConsecutive > maxAttempts) {
+      c.add(
+        [...base, "max_consecutive_failures"],
+        `max_consecutive_failures (${maxConsecutive}) must not exceed max_attempts (${maxAttempts})`,
+        [
+          ...base,
+          typeof data.max_consecutive_failures === "number" ? "max_consecutive_failures" : "slug",
+        ],
+      );
+    }
     const node: NodeSpec = {
       slug: data.slug as string,
       kind,
+      max_consecutive_failures: maxConsecutive,
+      max_attempts: maxAttempts,
       on_fail: (data.on_fail as string | undefined) ?? DEFAULT_ON_FAIL,
       checks,
       params,
     };
     const timeout = (data.timeout as number | undefined) ?? defaults?.timeout;
-    const maxAttempts = (data.max_attempts as number | undefined) ?? defaults?.max_attempts;
     if (data.name !== undefined) node.name = data.name as string;
     if (timeout !== undefined) node.timeout = timeout;
-    if (maxAttempts !== undefined) node.max_attempts = maxAttempts;
     nodes.push(node);
   });
 
@@ -407,7 +437,10 @@ function validateEdges(
       }
     }
     if (from === to) {
-      c.add(base, `edge from "${from}" to itself: use max_attempts to retry a node`);
+      c.add(
+        base,
+        `edge from "${from}" to itself is not allowed (agent nodes are retried automatically)`,
+      );
       ok = false;
     }
     if (!ok) return;

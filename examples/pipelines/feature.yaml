@@ -20,8 +20,9 @@ name: feature
 description: Plan, implement, verify and document a feature, with two human gates.
 
 defaults:
-  timeout: 900          # seconds, per node attempt
-  max_attempts: 3       # per node; when exhausted the run pauses and waits for a human
+  timeout: 900                  # seconds, per node attempt
+  max_consecutive_failures: 3   # automatic failures of a node in a row; then the run pauses
+  max_attempts: 10              # all attempts of a node in one run (human rejections included)
 
 nodes:
   - slug: plan
