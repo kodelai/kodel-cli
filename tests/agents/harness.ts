@@ -123,6 +123,33 @@ export function makeSandbox(
   };
 }
 
+/**
+ * A clone of this repository as committed (its own pipeline, driver text and deny rules), with the
+ * dependencies installed, so the repository's own pipeline can run on it. Kept for inspection when
+ * KODEL_AGENT_KEEP=1.
+ */
+export function makeCloneSandbox(): Sandbox {
+  const dir = mkdtempSync(join(tmpdir(), "kodel-agent-clone-"));
+  const stateDir = mkdtempSync(join(tmpdir(), "kodel-agent-state-"));
+  execFileSync("git", ["clone", "-q", "--local", REPO_ROOT, dir], { stdio: "ignore" });
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+  git("config", "user.email", "t@example.com");
+  git("config", "user.name", "T");
+  execFileSync("bun", ["install", "--frozen-lockfile"], { cwd: dir, stdio: "ignore" });
+  return {
+    dir,
+    stateDir,
+    cleanup() {
+      if (process.env.KODEL_AGENT_KEEP === "1") {
+        console.log(`kept for inspection: ${dir} (state: ${stateDir})`);
+        return;
+      }
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(stateDir, { recursive: true, force: true });
+    },
+  };
+}
+
 /** The parts of Claude Code's `stream-json` output that the scenarios read. */
 interface StreamBlock {
   type?: string;
@@ -158,6 +185,8 @@ function textOf(content: unknown): string {
 export interface TurnOptions {
   sandbox: Sandbox;
   prompt: string;
+  /** How long the turn may run before it is killed; `TURN_TIMEOUT_MS` when left out. */
+  timeoutMs?: number;
   /** Continue the conversation of an earlier turn. */
   resume?: string;
   /** Tools the agent may use without asking; anything else is refused (headless cannot ask). */
@@ -208,7 +237,7 @@ export async function runAgentTurn(options: TurnOptions): Promise<AgentTurn> {
   child.stderr?.on("data", (d: Buffer) => {
     stderr += d.toString();
   });
-  const timer = setTimeout(() => child.kill("SIGKILL"), TURN_TIMEOUT_MS);
+  const timer = setTimeout(() => child.kill("SIGKILL"), options.timeoutMs ?? TURN_TIMEOUT_MS);
   await new Promise<void>((resolveExit) => child.on("close", () => resolveExit()));
   clearTimeout(timer);
 

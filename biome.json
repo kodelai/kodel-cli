@@ -1,5 +1,7 @@
 {
   "formatter": { "indentStyle": "space", "indentWidth": 2, "lineWidth": 100 },
   "linter": { "enabled": true, "rules": { "recommended": true } },
-  "files": { "includes": ["**", "!**/dist", "!**/node_modules", "!notes", "!examples"] }
+  "files": {
+    "includes": ["**", "!**/dist", "!**/node_modules", "!notes", "!examples", "!**/.kodel/runs"]
+  }
 }
