@@ -25,14 +25,22 @@ const TURN_MS = 15 * 60_000;
 const TOOLS = ["mcp__kodel", "Read", "Write", "Edit", "Glob", "Grep", "Bash"];
 
 /**
- * A change with real work in it (source and a test), whose result can be tried afterwards. It must
- * be something the repository does not have yet: a task already done gives the plan nothing to
- * change, and then the step that has to change files cannot pass.
+ * A change with real work in it (source and a test), whose result is tried afterwards by this test
+ * itself. It must be something the repository does not have: a task already done gives the plan
+ * nothing to change (which the pipeline handles, with its own outcome, but is not what this test is
+ * about). It is a task whose result is thrown away with the clone, never kept in the repository, so
+ * that it stays new; `TASK_FILES` is checked before the run so that, if someone does add it, the
+ * failure says that the task has to be changed and not that the pipeline broke.
  */
+const TASK_FILES = {
+  source: "packages/cli/src/format-bytes.ts",
+  test: "packages/cli/test/format-bytes.test.ts",
+};
 const TASK =
-  "Add a --json option to `kodel status` when it lists the runs (no run id given): print the " +
-  "runs as a JSON array of objects with runId, pipeline, status and task, instead of the lines of " +
-  "text. Cover it with a test in packages/cli/test/cli.test.ts.";
+  `Add ${TASK_FILES.source} exporting a function formatBytes(n: number): string that writes a ` +
+  'size for a person: 0 gives "0 B", 1023 gives "1023 B", 1024 gives "1.0 KB", 1536 gives "1.5 KB", ' +
+  `1048576 gives "1.0 MB", one decimal for KB and MB, and sizes of a GB or more stay in MB. Cover ` +
+  `it with a test in ${TASK_FILES.test}.`;
 
 const explain = (turn: AgentTurn) => `\n${describeCalls(turn)}\n${turn.finalText}`;
 
@@ -52,6 +60,12 @@ describe("the repository's own pipeline, on a real agent", () => {
       const sandbox = makeCloneSandbox();
       sandboxes.push(sandbox);
       const host = humanHost(sandbox);
+      for (const file of Object.values(TASK_FILES)) {
+        expect(
+          existsSync(join(sandbox.dir, file)),
+          `${file} is already in the repository: the task of this test is done, give it a new one`,
+        ).toBe(false);
+      }
 
       // Turn 1: plan, then stop at the first gate.
       const first = await runAgentTurn({
@@ -93,25 +107,21 @@ describe("the repository's own pipeline, on a real agent", () => {
         cwd: sandbox.dir,
         encoding: "utf8",
       });
-      expect(changed, `no source change${detail}`).toContain("packages/cli/src/");
-      expect(changed, `no test change${detail}`).toContain("packages/cli/test/cli.test.ts");
-      // ...and it works: the option the task asked for prints the runs as JSON.
-      const listed = JSON.parse(
-        execFileSync(
-          "bun",
-          ["packages/cli/src/main.ts", "--root", sandbox.dir, "status", "--json"],
-          {
-            cwd: sandbox.dir,
-            encoding: "utf8",
-            env: { ...process.env, KODEL_STATE_DIR: sandbox.stateDir },
-          },
-        ),
-      ) as { runId: string; pipeline: string; status: string; task: string }[];
-      expect(
-        listed.map((r) => r.runId),
-        detail,
-      ).toEqual([runId]);
-      expect(listed[0]).toMatchObject({ pipeline: "dev", status: "running" });
+      expect(changed, `no source change${detail}`).toContain(TASK_FILES.source);
+      expect(changed, `no test change${detail}`).toContain(TASK_FILES.test);
+      // ...and it works, as this test finds out for itself, not from what the agent said.
+      const shown = execFileSync(
+        "bun",
+        [
+          "-e",
+          `import { formatBytes } from "./${TASK_FILES.source}";` +
+            "console.log([0, 1023, 1024, 1536, 1048576].map(formatBytes).join('|'))",
+        ],
+        { cwd: sandbox.dir, encoding: "utf8" },
+      ).trim();
+      expect(shown, `formatBytes gives the wrong sizes${detail}`).toBe(
+        "0 B|1023 B|1.0 KB|1.5 KB|1.0 MB",
+      );
       // The engine ran the repository's real commands, and they passed before the review started.
       for (const node of ["verify", "test", "build", "review"]) {
         expect(now.state?.nodes[node]?.status, `${node} did not pass${detail}`).toBe("passed");
