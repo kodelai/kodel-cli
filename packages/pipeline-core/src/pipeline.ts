@@ -30,6 +30,7 @@ export interface NodeSpec {
   slug: string;
   name?: string;
   kind: string;
+  /** Seconds per attempt; the node fails when it runs longer. */
   timeout?: number;
   /**
    * How long the node usually takes, in seconds. The agent is told, so it knows how long to wait
