@@ -15,7 +15,7 @@
 #   * When a node is re-entered, the engine adds the reason (command output tail, blocking
 #     findings, the human's rejection reason) to the next_step prompt.
 
-format: 1
+version: 1
 name: feature
 description: Plan, implement, verify and document a feature, with two human gates.
 

@@ -16,7 +16,7 @@ import type { Decision, RunState } from "./run";
 export interface PipelineInfo {
   name: string;
   description?: string;
-  format: number;
+  version: string;
 }
 
 /** A pipeline file that could not be read; listed so the user can fix it. */

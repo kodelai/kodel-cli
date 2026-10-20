@@ -6,8 +6,8 @@ import type { Document } from "yaml";
 import { isMap, isScalar, isSeq, LineCounter, parseDocument } from "yaml";
 import { z } from "zod";
 import { type ErrorCode, KodelError } from "./errors";
-import { MAX_SUPPORTED_FORMAT, resolveFormat } from "./format";
 import { defaultRegistry, type Registry } from "./registry";
+import { MAX_SUPPORTED_MAJOR, parseVersion, resolveVersion } from "./version";
 
 export type Path = (string | number)[];
 
@@ -58,7 +58,7 @@ export interface EdgeSpec {
 }
 
 export interface PipelineSpec {
-  format: number;
+  version: string;
   name: string;
   description?: string;
   /** The node a run starts at: the first node in the file. */
@@ -73,8 +73,8 @@ export type ParseResult =
 
 export interface ParseOptions {
   registry?: Registry;
-  /** The project's `format` from `.kodel/config.yaml`, used when the pipeline has none. */
-  configFormat?: number;
+  /** The project's `version`, used when the pipeline has none. */
+  configVersion?: string | number;
 }
 
 /** Placeholders a pipeline may use in its strings. */
@@ -100,7 +100,8 @@ const positiveInt = z.number().int().positive();
 
 const topSchema = z
   .object({
-    format: z.number().optional(),
+    // Validated by `resolveVersion`, so every bad value gets the same message with the accepted forms.
+    version: z.unknown().optional(),
     name: nonEmpty,
     description: z.string().optional(),
     defaults: z
@@ -265,11 +266,19 @@ export function validatePipeline(text: string, options: ParseOptions = {}): Pars
     return failure(c);
   }
 
-  // The format is checked first: a newer format may legitimately have fields we do not know.
-  if (typeof root.format === "number" && root.format > MAX_SUPPORTED_FORMAT) {
-    const message = `format ${root.format} is newer than this engine supports (max ${MAX_SUPPORTED_FORMAT}); upgrade kodel`;
-    c.add(["format"], message);
-    return { ok: false, code: "UNSUPPORTED_FORMAT", message, issues: c.issues };
+  // The version is checked first: a newer version may legitimately have fields we do not know.
+  if (root.version !== undefined) {
+    let major = 0;
+    try {
+      major = parseVersion(root.version).major;
+    } catch {
+      // Malformed values are reported with the other issues below.
+    }
+    if (major > MAX_SUPPORTED_MAJOR) {
+      const message = `version ${String(root.version)} is newer than this engine supports (max major ${MAX_SUPPORTED_MAJOR}); upgrade kodel`;
+      c.add(["version"], message);
+      return { ok: false, code: "UNSUPPORTED_FORMAT", message, issues: c.issues };
+    }
   }
 
   const top = topSchema.safeParse(root);
@@ -280,14 +289,14 @@ export function validatePipeline(text: string, options: ParseOptions = {}): Pars
   const { name, description, defaults, nodes: rawNodes } = top.data;
   const rawEdges = top.data.edges ?? [];
 
-  let format = 1;
+  let version = "1.0.0";
   try {
-    format = resolveFormat(top.data.format, options.configFormat);
+    version = resolveVersion(top.data.version, options.configVersion);
   } catch (e) {
     if (e instanceof KodelError && e.code === "UNSUPPORTED_FORMAT") {
       return { ok: false, code: e.code, message: e.message, issues: [] };
     }
-    c.add(["format"], e instanceof Error ? e.message : String(e));
+    c.add(["version"], e instanceof Error ? e.message : String(e));
   }
 
   const nodes: NodeSpec[] = [];
@@ -422,7 +431,7 @@ export function validatePipeline(text: string, options: ParseOptions = {}): Pars
 
   const first = nodes[0];
   if (!first) return failure(c);
-  const spec: PipelineSpec = { format, name, entry: first.slug, nodes, edges };
+  const spec: PipelineSpec = { version, name, entry: first.slug, nodes, edges };
   if (description !== undefined) spec.description = description;
   return { ok: true, spec };
 }

@@ -71,7 +71,7 @@ describe("an agent driving a run through MCP, with the real adapters", () => {
 
     const listed = await call("pipeline_list");
     expect(listed.body.pipelines).toEqual([
-      { name: "demo", format: 1, description: "A small pipeline for the tests." },
+      { name: "demo", version: "1.0.0", description: "A small pipeline for the tests." },
     ]);
 
     const started = await call("pipeline_start", { task: "add a file" });

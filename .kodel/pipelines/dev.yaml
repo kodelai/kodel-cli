@@ -1,5 +1,4 @@
 # The pipeline we use on this repository itself (dogfooding). Syntax: examples/pipelines/feature.yaml.
-format: 1
 name: dev
 description: Plan, implement and verify a change to Kodel, with a human gate on the plan and on the result.
 

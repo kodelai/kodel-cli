@@ -52,7 +52,7 @@ class FakeHost implements PipelineHost {
   async list() {
     const pipelines: PipelineInfo[] = this.specs.map((s) => ({
       name: s.name,
-      format: s.format,
+      version: s.version,
       ...(s.description === undefined ? {} : { description: s.description }),
     }));
     return { pipelines, problems: [] };
@@ -193,7 +193,7 @@ const asOk = (result: Awaited<ReturnType<PipelineService["start"]>>) => {
 };
 
 describe("reading pipelines", () => {
-  test("list shows each pipeline with its name and format", async () => {
+  test("list shows each pipeline with its name and version", async () => {
     const { svc } = service([feature, other]);
     const result = asOk(await svc.list());
     expect((result.pipelines as PipelineInfo[]).map((p) => p.name)).toEqual(["feature", "other"]);

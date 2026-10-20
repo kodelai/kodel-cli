@@ -4,7 +4,6 @@
  */
 export * from "./checks";
 export * from "./errors";
-export * from "./format";
 export * from "./next-step";
 export * from "./pipeline";
 export * from "./redact";
@@ -16,3 +15,4 @@ export * from "./run";
 export * from "./run-id";
 export * from "./service";
 export * from "./slug";
+export * from "./version";

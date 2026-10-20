@@ -60,7 +60,29 @@ The engine is meant to be shared with Kodel Server: the server implements the sa
 5. **Side effects behind traits** (clock, filesystem, process execution) so tests can fake them.
 6. **Humans decide trust.** Trust, gate decisions, `ack` and `seal` are never available as agent-callable MCP tools.
 7. **Node kinds and check kinds are adapters.** Handlers sit behind traits and are registered by `kind`; the engine never matches on concrete kinds, so a plugin system can be added later without engine changes.
-8. **Formats are versioned** (`format` cascade, `v` on every machine-written record). Never rewrite history on disk.
+8. **Formats are versioned** (`version` cascade for user files, `v` on every machine-written record). Never rewrite history on disk.
+
+## Stored data and compatibility
+
+Two kinds of format, with different rules:
+
+- **User-written files** (pipelines, project config) carry `version`. A new engine may reject an old
+  `version`, but only with a message that names the version and says what to do.
+- **Stored data** (run state, journal, the pipeline snapshot kept with each run, reports) is history.
+  It stays readable by every later engine, and it is never edited to make that true.
+
+For stored data:
+
+1. A change that renames, removes or retypes a stored field ships, in the same change, a reader for the
+   previous format that migrates **in memory on read**, and a golden fixture of a real old run in
+   `fixtures/formats/v<N>/` with a test that opens it with the current engine (`status`, `report`).
+2. A pipeline snapshot kept with a run is parsed by the reader of the format it was written in, never by
+   the current user-file parser. A user-file rule (a field removed, a stricter check) must not make an
+   old run unreadable.
+3. "Cannot read" and "was modified" are different errors. A run written in a format this engine does not
+   know says so ("written in format X, upgrade or migrate"); only a hash mismatch says it was modified.
+4. Before the first release, formats may break freely. At the first release, freeze what exists as v1:
+   add the golden fixtures above for it, and from then on rules 1-3 apply to every change.
 
 ## Decisions and tests
 

@@ -85,7 +85,7 @@ export class LocalPipelineHost implements PipelineHost {
     return {
       pipelines: loaded.map(({ spec }) => ({
         name: spec.name,
-        format: spec.format,
+        version: spec.version,
         ...(spec.description === undefined ? {} : { description: spec.description }),
       })),
       problems,

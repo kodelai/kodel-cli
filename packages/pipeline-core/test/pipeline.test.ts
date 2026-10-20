@@ -1,16 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
-  BASELINE_FORMAT,
+  BASELINE_VERSION,
   DEFAULT_MAX_ATTEMPTS,
   DEFAULT_MAX_CONSECUTIVE_FAILURES,
   defaultRegistry,
   KodelError,
-  MAX_SUPPORTED_FORMAT,
+  MAX_SUPPORTED_MAJOR,
   type ParseOptions,
   parsePipeline,
   type Registry,
-  resolveFormat,
+  resolveVersion,
   validatePipeline,
 } from "../src";
 
@@ -61,7 +61,7 @@ describe("the reference pipeline", () => {
   test("examples/pipelines/feature.yaml is valid", () => {
     const spec = parsePipeline(text);
     expect(spec.name).toBe("feature");
-    expect(spec.format).toBe(1);
+    expect(spec.version).toBe("1.0.0");
     expect(spec.entry).toBe("plan");
     expect(spec.nodes.map((n) => n.slug)).toEqual([
       "plan",
@@ -440,38 +440,72 @@ describe("result check", () => {
   });
 });
 
-describe("format", () => {
-  test("resolveFormat cascades pipeline, then project, then 1", () => {
-    expect(resolveFormat()).toBe(BASELINE_FORMAT);
-    expect(resolveFormat(undefined, 1)).toBe(1);
-    expect(resolveFormat(1, undefined)).toBe(1);
+describe("version", () => {
+  test("resolveVersion cascades pipeline, then project, then the baseline", () => {
+    expect(resolveVersion()).toBe(BASELINE_VERSION);
+    expect(resolveVersion(undefined, 1)).toBe("1.0.0");
+    expect(resolveVersion(undefined, "1.2.0")).toBe("1.2.0");
+    expect(resolveVersion("1.0.1", "1.2.0")).toBe("1.0.1");
   });
 
-  test("a newer format is rejected, not guessed", () => {
-    const tooNew = MAX_SUPPORTED_FORMAT + 1;
-    expect(() => resolveFormat(tooNew)).toThrow(KodelError);
-    expect(() => resolveFormat(undefined, tooNew)).toThrow(KodelError);
+  test("a bare number and a semver string are both accepted", () => {
+    expect(parsePipeline(`version: 1\n${VALID}`).version).toBe("1.0.0");
+    expect(parsePipeline(`version: "1.3.2-beta.1"\n${VALID}`).version).toBe("1.3.2-beta.1");
+  });
+
+  test("a pipeline without a version takes the project's, else the baseline", () => {
+    expect(parsePipeline(VALID).version).toBe(BASELINE_VERSION);
+    expect(parsePipeline(VALID, { configVersion: "1.4.0" }).version).toBe("1.4.0");
+    expect(parsePipeline(`version: 1\n${VALID}`, { configVersion: "1.4.0" }).version).toBe("1.0.0");
+  });
+
+  test("a newer major is rejected, not guessed", () => {
+    const tooNew = MAX_SUPPORTED_MAJOR + 1;
+    expect(() => resolveVersion(tooNew)).toThrow(KodelError);
+    expect(() => resolveVersion(undefined, `${tooNew}.0.0`)).toThrow(KodelError);
     try {
-      resolveFormat(tooNew);
+      resolveVersion(tooNew);
     } catch (e) {
       expect((e as KodelError).code).toBe("UNSUPPORTED_FORMAT");
     }
   });
 
-  test("a pipeline with a newer format fails with UNSUPPORTED_FORMAT before anything else", () => {
-    const result = validatePipeline(doc("format: 99", "name: x", "future_field: 1", "nodes: []"));
+  test("a pipeline with a newer version fails with UNSUPPORTED_FORMAT before anything else", () => {
+    for (const v of ["99", '"99.0.0"']) {
+      const result = validatePipeline(
+        doc(`version: ${v}`, "name: x", "future_field: 1", "nodes: []"),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.code).toBe("UNSUPPORTED_FORMAT");
+    }
+  });
+
+  test("a project version that is too new applies to pipelines without their own", () => {
+    const result = validatePipeline(VALID, { configVersion: `${MAX_SUPPORTED_MAJOR + 1}.0.0` });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe("UNSUPPORTED_FORMAT");
   });
 
-  test("a project format that is too new applies to pipelines without their own", () => {
-    const result = validatePipeline(VALID, { configFormat: MAX_SUPPORTED_FORMAT + 1 });
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.code).toBe("UNSUPPORTED_FORMAT");
+  test("a malformed version shows the value and the accepted forms", () => {
+    for (const v of [
+      '"1"',
+      '"x"',
+      '""',
+      "0",
+      "1.5",
+      "-1",
+      "true",
+      "[]",
+      "null",
+      '"99"',
+      '"01.0.0"',
+    ]) {
+      expectIssue(`version: ${v}\n${VALID}`, "semver");
+    }
   });
 
-  test("format must be a positive integer", () => {
-    expectIssue(`format: 0\n${VALID}`, "positive integer");
+  test("the old `format` key is no longer a known field", () => {
+    expectIssue(`format: 1\n${VALID}`, "format");
   });
 });
 
