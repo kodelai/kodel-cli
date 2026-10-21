@@ -39,8 +39,12 @@ export interface FeedbackInput {
 export interface RunHandle {
   readonly runId: string;
   state(): Promise<RunState>;
-  /** What to do next. Throws `KodelError` (for example when the state was tampered with). */
-  nextStep(): Promise<NextStep>;
+  /**
+   * What to do next. Throws `KodelError` (for example when the state was tampered with).
+   * `atCompletion`: the agent has just said its step is done; a change of the pipeline that holds
+   * the run is answered here, not while the agent is still working.
+   */
+  nextStep(options?: { atCompletion?: boolean }): Promise<NextStep>;
   completeStep(
     node: string,
     attempt: number,
@@ -304,7 +308,7 @@ export class PipelineService {
         ...(checkFailed && failed
           ? { failed_check: { kind: failed.source.slice("check:".length), reason: failed.reason } }
           : {}),
-        next: await run.nextStep(),
+        next: await run.nextStep({ atCompletion: true }),
       };
     });
   }

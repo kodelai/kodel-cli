@@ -120,6 +120,33 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     if (!(await env.confirm(question))) throw new UserError("not confirmed, nothing was changed");
   }
 
+  /** A change of the run's pipeline that waits for the person, as one line; none when there is none. */
+  async function pendingLine(
+    run: Awaited<ReturnType<typeof openRun>>,
+  ): Promise<string | undefined> {
+    const found = await run.pendingChange().catch(() => undefined);
+    if (!found) return undefined;
+    const { info } = found;
+    const where = info.watched === undefined ? "" : ` in ${plain(info.watched)}`;
+    if (info.refused !== undefined) {
+      return `a change of the pipeline${where} cannot be accepted: ${plain(info.refused)}`;
+    }
+    return `a change of the pipeline${where} waits for you: ${plain(info.apply)}`;
+  }
+
+  /** The decisions at a gate or a pause go after the pipeline change that is waiting, not before it. */
+  async function refuseWhilePending(
+    run: Awaited<ReturnType<typeof openRun>>,
+    ignore: boolean | undefined,
+  ): Promise<void> {
+    if (ignore) return;
+    const found = await run.pendingChange().catch(() => undefined);
+    if (!found?.info.blocking) return;
+    throw new UserError(
+      `a change of the pipeline of run ${run.runId} is waiting for you: look at it and accept it with "${plain(found.info.apply)}", or put the pipeline file back as it was. To decide here without it: --ignore-pending-change`,
+    );
+  }
+
   /** Engine work started by a command runs in this process, so the command stays until it is done. */
   async function afterDecision(run: Awaited<ReturnType<typeof openRun>>) {
     await run.waitForRest(WORK_WAIT_MS);
@@ -157,8 +184,14 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         for (const { meta, state } of runs) {
           // Only a run that works somewhere other than the root says where.
           const where = state?.workdir === undefined ? "" : `  in ${plain(state.workdir)}`;
+          const open =
+            state?.status === "running" || state?.status === "paused"
+              ? await h.open(meta.runId).catch(() => undefined)
+              : undefined;
+          const pending = open && (await open.pendingChange().catch(() => undefined));
+          const note = pending ? "  [pipeline change waiting]" : "";
           env.out(
-            `${plain(meta.runId)}  ${plain(meta.pipeline)}  ${describeRun(state)}${where}  ${plain(meta.task)}\n`,
+            `${plain(meta.runId)}  ${plain(meta.pipeline)}  ${describeRun(state)}${note}${where}  ${plain(meta.task)}\n`,
           );
         }
         return;
@@ -175,6 +208,8 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       env.out(`integrity: ${await run.integrityStatus()}\n`);
       env.out(`seal:      ${await run.sealStatus()}\n`);
       env.out(`trail:     ${state.trail.map(plain).join(" > ")}\n`);
+      const pending = await pendingLine(run);
+      if (pending) env.out(`pipeline:  ${pending}\n`);
       // Read-only: looking at a run must not restart its work or write anything. A state that
       // cannot be read as a step (it names a node that is not there) is said to be unreadable
       // rather than ending the command, since this is the command one uses to find out what is wrong.
@@ -196,65 +231,85 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       "--reason <text>",
       "why (required when rejecting, unless comments were recorded at the step)",
     )
-    .action(async (decision: string, runId: string, opts: { node?: string; reason?: string }) => {
-      requireHuman();
-      if (decision !== "approve" && decision !== "reject") {
-        throw new UserError(`the decision is "approve" or "reject", not "${decision}"`);
-      }
-      const run = await openRun(host(), runId);
-      const state = await run.state();
-      const waiting = state.active.filter((v) => v.phase === "human");
-      const node = opts.node ?? waiting[0]?.node;
-      if (!node || !waiting.some((v) => v.node === node)) {
-        throw new UserError(
-          `run ${runId} is not waiting for a decision${opts.node ? ` at "${plain(opts.node)}"` : ""}`,
-        );
-      }
-      // What the agent did after the run stopped here is not what the checks saw. When that cannot
-      // be told (the record is gone, or git fails: something an agent could make happen), it is
-      // said so and approving needs one more yes. "Nothing changed" is only ever shown when the
-      // engine really compared the files.
-      const found = await run.changesSinceGate(node);
-      // What the agent recorded as the person's comments goes back with a rejection, so it is
-      // shown before the person confirms: the agent's wording, not necessarily theirs.
-      const comments = decision === "reject" ? await run.gateResults(node) : undefined;
-      if (decision === "reject" && !opts.reason && !comments) {
-        throw new UserError('a rejection needs a reason: --reason "..."');
-      }
-      let question = `${decision === "approve" ? "Approve" : "Reject"} "${plain(node)}" of run ${plain(runId)}?`;
-      if (comments) {
-        const lines = comments.csv.split("\n").map((line) => `  ${plain(line)}`);
-        question = `${comments.count} comment(s) recorded at this step will go back with the rejection:\n${lines.join("\n")}\n${question}`;
-      }
-      if (found.kind === "changes") {
-        const files = Object.keys(found.files);
-        if (files.length > 0) {
-          const shown = files.slice(0, SHOWN_FILES).map((f) => `  ${plain(f)}`);
-          const more =
-            files.length > SHOWN_FILES ? [`  and ${files.length - SHOWN_FILES} more`] : [];
-          question = `${files.length} file(s) changed since the run stopped here:\n${[...shown, ...more].join("\n")}\n${question}`;
+    .option(
+      "--ignore-pending-change",
+      "decide although a change of the pipeline is waiting for you",
+    )
+    .action(
+      async (
+        decision: string,
+        runId: string,
+        opts: { node?: string; reason?: string; ignorePendingChange?: boolean },
+      ) => {
+        requireHuman();
+        if (decision !== "approve" && decision !== "reject") {
+          throw new UserError(`the decision is "approve" or "reject", not "${decision}"`);
         }
-      } else if (found.kind === "unavailable") {
-        question = `WARNING: the engine cannot tell what changed since the run stopped here: ${plain(found.reason)}\nThe agent may have gone on working after its checks passed.\n${question}`;
-      }
-      await mustConfirm(question);
-      if (found.kind === "unavailable" && decision === "approve") {
-        await mustConfirm(
-          "Approve although what changed since the run stopped here could not be checked?",
+        const run = await openRun(host(), runId);
+        await refuseWhilePending(run, opts.ignorePendingChange);
+        const state = await run.state();
+        const waiting = state.active.filter((v) => v.phase === "human");
+        const node = opts.node ?? waiting[0]?.node;
+        if (!node || !waiting.some((v) => v.node === node)) {
+          throw new UserError(
+            `run ${runId} is not waiting for a decision${opts.node ? ` at "${plain(opts.node)}"` : ""}`,
+          );
+        }
+        // What the agent did after the run stopped here is not what the checks saw. When that cannot
+        // be told (the record is gone, or git fails: something an agent could make happen), it is
+        // said so and approving needs one more yes. "Nothing changed" is only ever shown when the
+        // engine really compared the files.
+        const found = await run.changesSinceGate(node);
+        // What the agent recorded as the person's comments goes back with a rejection, so it is
+        // shown before the person confirms: the agent's wording, not necessarily theirs.
+        const comments = decision === "reject" ? await run.gateResults(node) : undefined;
+        if (decision === "reject" && !opts.reason && !comments) {
+          throw new UserError('a rejection needs a reason: --reason "..."');
+        }
+        let question = `${decision === "approve" ? "Approve" : "Reject"} "${plain(node)}" of run ${plain(runId)}?`;
+        if (comments) {
+          const lines = comments.csv.split("\n").map((line) => `  ${plain(line)}`);
+          question = `${comments.count} comment(s) recorded at this step will go back with the rejection:\n${lines.join("\n")}\n${question}`;
+        }
+        if (found.kind === "changes") {
+          const files = Object.keys(found.files);
+          if (files.length > 0) {
+            const shown = files.slice(0, SHOWN_FILES).map((f) => `  ${plain(f)}`);
+            const more =
+              files.length > SHOWN_FILES ? [`  and ${files.length - SHOWN_FILES} more`] : [];
+            question = `${files.length} file(s) changed since the run stopped here:\n${[...shown, ...more].join("\n")}\n${question}`;
+          }
+        } else if (found.kind === "unavailable") {
+          question = `WARNING: the engine cannot tell what changed since the run stopped here: ${plain(found.reason)}\nThe agent may have gone on working after its checks passed.\n${question}`;
+        }
+        await mustConfirm(question);
+        if (found.kind === "unavailable" && decision === "approve") {
+          await mustConfirm(
+            "Approve although what changed since the run stopped here could not be checked?",
+          );
+        }
+        failIfRefused(
+          await run.decideHuman(
+            node,
+            decision === "approve" ? "approved" : "rejected",
+            opts.reason,
+          ),
         );
-      }
-      failIfRefused(
-        await run.decideHuman(node, decision === "approve" ? "approved" : "rejected", opts.reason),
-      );
-      await afterDecision(run);
-    });
+        await afterDecision(run);
+      },
+    );
 
   program
     .command("resume <run>")
     .description("Carry on a paused run, with more attempts for the step that stopped it")
-    .action(async (runId: string) => {
+    .option(
+      "--ignore-pending-change",
+      "resume although a change of the pipeline is waiting for you",
+    )
+    .action(async (runId: string, opts: { ignorePendingChange?: boolean }) => {
       requireHuman();
       const run = await openRun(host(), runId);
+      await refuseWhilePending(run, opts.ignorePendingChange);
       if ((await run.state()).status !== "paused") {
         throw new UserError(`run ${runId} is not paused`);
       }

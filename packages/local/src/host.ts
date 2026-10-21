@@ -7,13 +7,18 @@
  * work without a heartbeat and restarts it; the state on disk is all that is needed for that.
  */
 import { createHash } from "node:crypto";
+import { readFile, realpath } from "node:fs/promises";
 import { hostname } from "node:os";
+import { isAbsolute, join, relative } from "node:path";
 import {
   type ChangeSet,
   type CheckVerdict,
+  canonicalPipeline,
   type Decision,
   decide,
   defaultRegistry,
+  describeEffect,
+  diffPipelines,
   type Effect,
   type EngineOptions,
   evaluateCommand,
@@ -23,7 +28,10 @@ import {
   mergeReports,
   type NextStep,
   nextStep,
+  type PendingChange,
   type PipelineSpec,
+  parsePipeline,
+  parseSnapshot,
   type RedactRule,
   type RunEvent,
   type RunReport,
@@ -276,8 +284,7 @@ export class LocalHost {
       const runId = newRunId(now);
       // Of the text the pipeline was read from, when it is known: that is what a copy is checked
       // against, and it does not change when the parser learns a new field.
-      const specHash =
-        this.options.source !== undefined ? hashSource(this.options.source) : hashSpec(this.spec);
+      const specHash = this.specHash;
       // The directory first, then the run: a failure after this point takes the directory away
       // again, so no half-made run is left behind.
       const provider =
@@ -335,6 +342,13 @@ export class LocalHost {
   /** Throws `WORKDIR_MISSING` or `WORKDIR_INVALID` unless `workdir` is still the run's own directory. */
   verifyWorkdir(workdir: string): Promise<void> {
     return (this.options.workdirs ?? new GitWorktreeProvider(this.options.root)).verify(workdir);
+  }
+
+  /** The hash a run started with this pipeline is pinned to. */
+  get specHash(): string {
+    return this.options.source !== undefined
+      ? hashSource(this.options.source)
+      : hashSpec(this.spec);
   }
 
   /** A handle on a run that is already on disk (after a restart, or from another process). */
@@ -434,6 +448,133 @@ export class LocalRun {
     return state;
   }
 
+  private readonly versions = new Map<string, PipelineSpec>();
+
+  /**
+   * The pipeline of a version the run has had, read from the copy kept with it and held against its
+   * hash. The run's state names the version it is on, so what a run does follows what was accepted,
+   * not what this process happened to be started with.
+   */
+  async specFor(hash: string): Promise<PipelineSpec> {
+    if (hash === this.host.specHash) return this.host.spec;
+    const known = this.versions.get(hash);
+    if (known) return known;
+    const text = await this.host.store.readSpec(this.runId, hash);
+    if (text === undefined || hashSource(text) !== hash) {
+      throw new KodelError(
+        "STATE_MODIFIED_EXTERNALLY",
+        `the pipeline of run ${this.runId} is not the one it is pinned to (its kept copy was changed or is missing); restore it before going on`,
+      );
+    }
+    const spec = parseSnapshot(text);
+    this.versions.set(hash, spec);
+    return spec;
+  }
+
+  /** The pipeline the run is on now. */
+  async currentSpec(state?: RunState): Promise<PipelineSpec> {
+    return this.specFor((state ?? (await this.state())).specHash);
+  }
+
+  /**
+   * The file the run's own pipeline is kept in, or none: for a run in a worktree that is the copy
+   * there (a change in it reaches only this run, and the other runs after a merge), otherwise the
+   * file in the repository. The path comes from the run's state, never from `meta.json`, and has to
+   * stay inside the directory it is relative to, links followed.
+   */
+  private async watched(state: RunState): Promise<{ path: string; relative: string } | undefined> {
+    if (state.pipelineFile === undefined) return undefined;
+    const base = state.workdir ?? this.host.options.root;
+    const path = join(base, state.pipelineFile);
+    const inside = (from: string, to: string) => {
+      const rel = relative(from, to);
+      return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+    };
+    if (!inside(base, path)) return undefined;
+    try {
+      if (!inside(await realpath(base), await realpath(path))) return undefined;
+    } catch {
+      return undefined;
+    }
+    return { path, relative: state.pipelineFile };
+  }
+
+  /**
+   * A change of the pipeline that waits for a person: the run's own file no longer says what the run
+   * is pinned to. Only what the pipeline means counts, not comments or layout, and a file that is
+   * not a pipeline is not a change. The text and hash come along for `acceptChange`.
+   */
+  async pendingChange(
+    state?: RunState,
+  ): Promise<{ info: PendingChange; text: string; hash: string; spec: PipelineSpec } | undefined> {
+    const now = state ?? (await this.state());
+    if (now.status !== "running" && now.status !== "paused") return undefined;
+    const where = await this.watched(now);
+    if (!where) return undefined;
+    let text: string;
+    try {
+      text = await readFile(where.path, "utf8");
+    } catch {
+      return undefined;
+    }
+    const hash = hashSource(text);
+    if (hash === now.specHash) return undefined;
+    let spec: PipelineSpec;
+    try {
+      spec = parsePipeline(text);
+    } catch (error) {
+      if (error instanceof KodelError) return undefined;
+      throw error;
+    }
+    const current = await this.currentSpec(now);
+    if (canonicalPipeline(spec) === canonicalPipeline(current)) return undefined;
+    const diff = diffPipelines(current, spec, now);
+    return {
+      text,
+      hash,
+      spec,
+      info: {
+        source: "file",
+        watched: where.relative,
+        changes: diff.nodes,
+        effect: diff.effect,
+        redo: describeEffect(diff.effect),
+        ...(diff.refused === undefined ? {} : { refused: diff.refused }),
+        apply: `kodel pipeline changes apply ${this.runId}`,
+        blocking: diff.refused === undefined,
+      },
+    };
+  }
+
+  /**
+   * Take another version of the pipeline for this run: keep it with the run, then let the machine
+   * move the run onto it. A person decides this (`kodel pipeline changes apply`), never the agent.
+   */
+  async acceptChange(input: {
+    source: "file" | "proposal";
+    text: string;
+    reason?: string;
+  }): Promise<Decision> {
+    const state = await this.state();
+    const before = await this.currentSpec(state);
+    const to = hashSource(input.text);
+    try {
+      parsePipeline(input.text);
+    } catch (error) {
+      if (error instanceof KodelError) return { ok: false, error };
+      throw error;
+    }
+    await this.host.store.writeSpec(this.runId, to, input.text);
+    return this.apply({
+      type: "pipeline_accepted",
+      from: state.specHash,
+      to,
+      source: input.source,
+      before,
+      ...(input.reason === undefined ? {} : { reason: input.reason }),
+    });
+  }
+
   /**
    * Apply one event under the run's lock, save the result and start the work it asks for.
    * If the state file is not what kodel last wrote, nothing is applied (`STATE_MODIFIED_EXTERNALLY`);
@@ -448,7 +589,7 @@ export class LocalRun {
   }
 
   private applyLocked(incoming: RunEvent, trust: boolean): Promise<Decision> {
-    const { store, spec, engine, clock, integrity, rules } = this.host;
+    const { store, engine, clock, integrity, rules } = this.host;
     // Whatever text came with the event (a reason, a message) reaches state and journal redacted.
     const event = redactEvent(incoming, rules);
     return store.withLock(this.runId, async () => {
@@ -478,6 +619,11 @@ export class LocalRun {
           }
         }
       }
+      // An event is decided with the pipeline the run is on; the one that moves it to another version,
+      // with that other.
+      const spec = !state
+        ? this.host.spec
+        : await this.specFor(event.type === "pipeline_accepted" ? event.to : state.specHash);
       const decision = decide(spec, state, event, clock(), engine);
       if (!decision.ok || decision.noop) return decision;
       // A tick that found nothing to do changes nothing, so it writes nothing.
@@ -527,11 +673,14 @@ export class LocalRun {
    * command that only looks (`kodel status`).
    */
   async inspect(): Promise<NextStep> {
+    const state = await this.state();
+    const pending = await this.pendingChange(state);
     return nextStep(
-      this.host.spec,
-      await this.state(),
+      await this.currentSpec(state),
+      state,
       this.host.clock(),
       this.host.engine.registry ?? defaultRegistry(),
+      pending ? { pending: pending.info } : {},
     );
   }
 
@@ -741,6 +890,7 @@ export class LocalRun {
     signal: AbortSignal,
   ): Promise<RunEvent> {
     const cwd = await this.cwd();
+    const { specHash } = await this.state();
     const result = await this.host.runner(
       effect.command,
       this.commandOptions(signal, effect.timeout, effect, cwd),
@@ -765,6 +915,7 @@ export class LocalRun {
       reason: verdict.reason,
       exit: result.exit,
       duration_ms: result.durationMs,
+      specHash,
     };
   }
 
@@ -772,6 +923,7 @@ export class LocalRun {
     const runner = this.host.checkRunners[effect.kind];
     const started = Date.now();
     const cwd = await this.cwd();
+    const { specHash } = await this.state();
     const verdict: CheckVerdict = runner
       ? await runner(effect, {
           runId: this.runId,
@@ -790,6 +942,7 @@ export class LocalRun {
       reason: verdict.reason,
       ...(verdict.exit === undefined ? {} : { exit: verdict.exit }),
       duration_ms: Date.now() - started,
+      specHash,
     };
   }
 
@@ -864,7 +1017,7 @@ export class LocalRun {
   // what callers do
 
   /** What the agent should do next. Throws `STATE_MODIFIED_EXTERNALLY` if the files were tampered with. */
-  async nextStep(): Promise<NextStep> {
+  async nextStep(options: { atCompletion?: boolean } = {}): Promise<NextStep> {
     const tick = await this.tick();
     if (!tick.ok && tick.error.code === "STATE_MODIFIED_EXTERNALLY") throw tick.error;
     if ((await this.sealStatus()) === "modified") {
@@ -874,11 +1027,16 @@ export class LocalRun {
       );
     }
     const state = await this.state();
+    const pending = await this.pendingChange(state);
     const step = nextStep(
-      this.host.spec,
+      await this.currentSpec(state),
       state,
       this.host.clock(),
       this.host.engine.registry ?? defaultRegistry(),
+      {
+        ...(pending ? { pending: pending.info } : {}),
+        ...(options.atCompletion === true ? { atCompletion: true } : {}),
+      },
     );
     if ("done" in step && step.run_status === "completed") {
       const where = await this.locationForDisplay();
@@ -942,6 +1100,18 @@ export class LocalRun {
   }
 
   async completeStep(node: string, attempt: number, summary?: string, outcome?: string) {
+    // A change of the pipeline that waits for a person is met here: what the step is judged by may be
+    // about to change, so it is not judged yet. The agent is told to wait for the person.
+    const held = await this.pendingChange();
+    if (held?.info.blocking) {
+      return {
+        ok: true,
+        state: await this.state(),
+        effects: [],
+        journal: [],
+        noop: true,
+      } satisfies Decision;
+    }
     const decision = await this.apply({
       type: "agent_completed",
       node,
@@ -989,7 +1159,8 @@ export class LocalRun {
    * nothing when the step takes none or none were made.
    */
   async gateResults(node: string): Promise<{ csv: string; count: number } | undefined> {
-    const { spec, engine, store } = this.host;
+    const { engine, store } = this.host;
+    const spec = await this.currentSpec();
     const nodeSpec = spec.nodes.find((n) => n.slug === node);
     const columns = (
       (engine.registry ?? defaultRegistry())
@@ -1067,12 +1238,12 @@ export class LocalRun {
     raw: unknown,
     replace: boolean,
   ): Promise<StepResult> {
-    const { spec, engine, store } = this.host;
+    const { engine, store } = this.host;
     const registry = engine.registry ?? defaultRegistry();
-    const nodeSpec = spec.nodes.find((n) => n.slug === node);
+    const state = await this.state();
+    const nodeSpec = (await this.currentSpec(state)).nodes.find((n) => n.slug === node);
     if (!nodeSpec)
       return { ok: false, code: "UNKNOWN_NODE", message: `the pipeline has no node "${node}"` };
-    const state = await this.state();
     const visit = state.active.find((v) => v.node === node);
     if (!visit)
       return { ok: false, code: "NODE_NOT_RUNNING", message: `node "${node}" is not running` };

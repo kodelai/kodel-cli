@@ -90,6 +90,53 @@ async function runAtGate() {
   return run.runId;
 }
 
+/** The pipeline file edited under a run: a step it has not reached yet runs another command. */
+const editPipeline = () =>
+  writeFile(join(dir, ".kodel", "pipelines", "demo.yaml"), DEMO.replace("built", "rebuilt"));
+
+describe("a change of the pipeline that waits for a person", () => {
+  test("status says so, in the list and for the run", async () => {
+    const id = await runAtGate();
+    await editPipeline();
+    expect((await cli("status")).out).toContain("[pipeline change waiting]");
+    const one = await cli("status", id);
+    expect(one.out).toContain("waiting:   approve (pipeline_changed)");
+    expect(one.out).toContain(
+      `pipeline:  a change of the pipeline in .kodel/pipelines/demo.yaml waits for you: kodel pipeline changes apply ${id}`,
+    );
+  });
+
+  test("gate_and_resume_refuse_while_a_change_is_pending", async () => {
+    const id = await runAtGate();
+    await editPipeline();
+    for (const args of [
+      ["gate", "approve", id],
+      ["resume", id],
+    ]) {
+      const result = await cli(...args);
+      expect(result.code).not.toBe(0);
+      expect(result.err).toContain("a change of the pipeline");
+      expect(result.err).toContain("--ignore-pending-change");
+      expect(result.asked).toEqual([]);
+    }
+  });
+
+  test("a person who says so decides anyway", async () => {
+    const id = await runAtGate();
+    await editPipeline();
+    const result = await cli("gate", "approve", id, "--ignore-pending-change");
+    expect(result.code).toBe(0);
+    expect(result.out).toContain(id);
+  });
+
+  test("putting the file back lets the decision through", async () => {
+    const id = await runAtGate();
+    await editPipeline();
+    await writeFile(join(dir, ".kodel", "pipelines", "demo.yaml"), DEMO);
+    expect((await cli("gate", "approve", id)).code).toBe(0);
+  });
+});
+
 describe("status", () => {
   test("says so when there are no runs", async () => {
     expect(await cli("status")).toMatchObject({ code: 0, out: "no runs yet\n" });

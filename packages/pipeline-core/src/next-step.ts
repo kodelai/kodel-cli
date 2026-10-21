@@ -3,12 +3,36 @@
  * whatever node and check kinds are installed.
  */
 import type { PipelineSpec } from "./pipeline";
+import type { AcceptEffect, NodeDiff } from "./pipeline-diff";
 import { defaultRegistry, type Registry } from "./registry";
 import { renderTemplate } from "./render";
 import type { RunState, RunStatus, Visit } from "./run";
 
 /** Longest a single `pipeline_next_step` may wait, so a call never hangs for minutes. */
 export const MAX_WAIT_S = 45;
+
+/** A change of the run's pipeline that waits for a person, as the agent is told about it. */
+export interface PipelineChange {
+  /** Who made it: the agent's proposal, or an edit of the run's own pipeline file. */
+  source: "file" | "proposal";
+  /** The file the engine found it in, relative to the repository, for a change made in the file. */
+  watched?: string;
+  /** What differs, per step; changes of checks are listed in each step's `changes`. */
+  changes: NodeDiff[];
+  effect: AcceptEffect;
+  /** What will run again once the person accepts, in words. */
+  redo: string[];
+  /** Why the change cannot be accepted, when it cannot; then it holds nothing back. */
+  refused?: string;
+  /** The command the person accepts it with. */
+  apply: string;
+}
+
+/** What the host knows about a change, for `nextStep`. */
+export interface PendingChange extends PipelineChange {
+  /** Whether the change holds the run until the person decides (it does unless it was refused). */
+  blocking: boolean;
+}
 
 export type NextStep =
   | {
@@ -19,6 +43,8 @@ export type NextStep =
         attempt: number;
         prompt: string;
         reentry_feedback?: string;
+        /** A change of this run's pipeline is waiting for the person; finish what you are doing. */
+        pipeline_change?: PipelineChange;
         result_spec?: Record<string, unknown>;
         /** How to do the step (as opposed to what to do), when the node asks for something special. */
         execution?: { instruction: string };
@@ -31,8 +57,14 @@ export type NextStep =
     }
   | {
       waiting: {
-        /** `gate`: a human node awaits a decision. `paused`: the run awaits `resume`. */
-        reason: "gate" | "paused";
+        /**
+         * `gate`: a human node awaits a decision. `paused`: the run awaits `resume`.
+         * `pipeline_changed`: a change of the pipeline awaits the person; see `pipeline_change`.
+         */
+        reason: "gate" | "paused" | "pipeline_changed";
+        /** With `pipeline_changed`: what the run was waiting for besides. */
+        behind?: "gate" | "paused" | "step";
+        pipeline_change?: PipelineChange;
         node_slug: string;
         prompt: string;
         files?: string[];
@@ -55,6 +87,7 @@ export type NextStep =
     }
   | {
       running: {
+        pipeline_change?: PipelineChange;
         active: {
           node_slug: string;
           attempt: number;
@@ -105,12 +138,64 @@ const TELL_WHEN_PAUSED =
   "you tried, and the command in `how_to_decide` that lets it go on. Do not retry the step and " +
   "do not run that command. Then end your turn.";
 
+export interface NextStepOptions {
+  /** A change of the run's pipeline that waits for a person. */
+  pending?: PendingChange;
+  /** The agent has just said a step is done: a change that holds the run is met here, not before. */
+  atCompletion?: boolean;
+}
+
+const TELL_PIPELINE_CHANGED =
+  "Tell the person, in the language they use: that the pipeline of this run was changed (see " +
+  "`pipeline_change`); what changed in each step, with changes to checks first; which steps will " +
+  "run again (`redo`); and the command in `how_to_decide` that accepts it. If they do not want the " +
+  "change, the pipeline file has to go back as it was. Do not run that command and do not undo " +
+  "the change yourself. Then end your turn.";
+
+function changedWaiting(
+  change: PipelineChange,
+  slug: string,
+  behind: "gate" | "paused" | "step",
+): NextStep {
+  const steps = change.changes.map((c) => `"${c.slug}" (${c.changes.join(", ")})`).join(", ");
+  const redo = change.redo.length > 0 ? ` ${change.redo.join("; ")}.` : " Nothing runs again.";
+  return {
+    waiting: {
+      reason: "pipeline_changed",
+      behind,
+      node_slug: slug,
+      prompt: `The pipeline of this run was changed: ${steps || "no step differs"}.${redo}`,
+      pipeline_change: change,
+      how_to_decide: { cli: change.apply },
+      tell_the_person: TELL_PIPELINE_CHANGED,
+    },
+  };
+}
+
+/** What the agent is told next; a change of the pipeline that waits for a person comes first. */
 export function nextStep(
   spec: PipelineSpec,
   state: RunState,
   now: number,
   registry: Registry = defaultRegistry(),
+  options: NextStepOptions = {},
 ): NextStep {
+  const step = baseStep(spec, state, now, registry);
+  const pending = options.pending;
+  if (!pending || "done" in step) return step;
+  const { blocking, ...change } = pending;
+  if ("waiting" in step) {
+    if (!blocking) return { waiting: { ...step.waiting, pipeline_change: change } };
+    return changedWaiting(change, step.waiting.node_slug, step.waiting.reason as "gate" | "paused");
+  }
+  if ("node" in step) {
+    if (blocking && options.atCompletion) return changedWaiting(change, step.node.slug, "step");
+    return { node: { ...step.node, pipeline_change: change } };
+  }
+  return { running: { ...step.running, pipeline_change: change } };
+}
+
+function baseStep(spec: PipelineSpec, state: RunState, now: number, registry: Registry): NextStep {
   if (state.status === "completed" || state.status === "failed" || state.status === "canceled") {
     return { done: true, run_status: state.status };
   }

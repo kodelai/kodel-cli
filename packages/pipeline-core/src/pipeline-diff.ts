@@ -145,3 +145,23 @@ export function diffPipelines(
   }
   return { nodes, effect: NONE };
 }
+
+/** What the run will do about a change, in words for a person. */
+export function describeEffect(effect: AcceptEffect): string[] {
+  switch (effect.kind) {
+    case "none":
+      return [];
+    case "restart":
+      return [
+        `step "${effect.node}" starts again on its new definition (a new attempt; the work already done stays in the working directory)`,
+      ];
+    case "recheck":
+      return [
+        `the checks of step "${effect.node}" run again on the work that is there; the work is not redone`,
+      ];
+    case "reroute":
+      return [
+        `the run goes on from the failure of step "${effect.node}", with the way on worked out again from the new pipeline`,
+      ];
+  }
+}
