@@ -13,7 +13,7 @@ import {
   type Sandbox,
   TURN_TIMEOUT_MS,
 } from "./harness";
-import { AUDIT, INDEPENDENT, REVIEWED, SECRET, SLOW, STUBBORN } from "./pipelines";
+import { AUDIT, INDEPENDENT, INSTRUCTED, REVIEWED, SECRET, SLOW, STUBBORN } from "./pipelines";
 
 const sandboxes: Sandbox[] = [];
 afterEach(() => {
@@ -102,6 +102,40 @@ describe("Claude Code on a real kodel server: harder paths", () => {
       expect(journalEvents(sandbox, runId)).toContain("gate_decided");
     },
     TURN_TIMEOUT_MS * 2,
+  );
+
+  scenario(
+    "the instructions of a human node reach the person, in the agent's message at the gate",
+    async () => {
+      const sandbox = makeSandbox({ fixture: INSTRUCTED });
+      sandboxes.push(sandbox);
+      const turn = await runAgentTurn({
+        sandbox,
+        prompt: "Use the instructed pipeline to create note.txt.",
+        allowedTools: TOOLS,
+      });
+      const why = explain(turn);
+
+      const runId = await onlyRun(sandbox);
+      const state = await (await humanHost(sandbox).open(runId))?.state();
+      expect(
+        state?.active.map((v) => `${v.node}:${v.phase}`),
+        why,
+      ).toEqual(["approve:human"]);
+      // The engine gave them to the agent...
+      // (the gate answer comes with the end of the previous step, or from next_step)
+      const gate = [
+        ...callsTo(turn, "pipeline_complete_step"),
+        ...callsTo(turn, "pipeline_next_step"),
+      ].find((c) => c.output.includes('"waiting"'));
+      expect(gate?.output, `the gate answer has no instructions${why}`).toContain("TKT-9137");
+      // ...and the agent passed them on to the person: the two details it could only get there.
+      expect(turn.finalText, `the person was not told to verify${why}`).toContain("verify-note.js");
+      expect(turn.finalText, `the person was not told what to compare with${why}`).toContain(
+        "TKT-9137",
+      );
+    },
+    TURN_TIMEOUT_MS,
   );
 
   scenario(
