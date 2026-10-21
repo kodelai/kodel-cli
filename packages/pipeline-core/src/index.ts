@@ -7,6 +7,7 @@ export * from "./checks";
 export * from "./errors";
 export * from "./next-step";
 export * from "./pipeline";
+export * from "./pipeline-diff";
 export * from "./redact";
 export * from "./registry";
 export * from "./render";
