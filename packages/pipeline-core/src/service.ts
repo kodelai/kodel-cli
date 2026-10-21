@@ -5,8 +5,9 @@
  * every host answers an agent the same way.
  */
 import { type ErrorCode, KodelError } from "./errors";
-import { MAX_WAIT_S, type NextStep } from "./next-step";
+import { MAX_WAIT_S, type NextStep, type PipelineChange } from "./next-step";
 import type { PipelineSpec } from "./pipeline";
+import type { NodeDiff } from "./pipeline-diff";
 import { defaultRegistry, type Registry } from "./registry";
 import { renderTemplate } from "./render";
 import type { Decision, RunState } from "./run";
@@ -35,12 +36,25 @@ export interface FeedbackInput {
   suggestion?: string;
 }
 
+export type ProposeOutcome =
+  | { ok: false; code: ErrorCode; message: string }
+  | {
+      ok: true;
+      /** `withdrawn`: there was a proposal and it was taken back. `none`: there was none to take back. */
+      status: "proposed" | "withdrawn" | "none";
+      change?: PipelineChange;
+    };
+
 /** One run, as the service sees it. */
 export interface RunHandle {
   readonly runId: string;
   state(): Promise<RunState>;
-  /** What to do next. Throws `KodelError` (for example when the state was tampered with). */
-  nextStep(): Promise<NextStep>;
+  /**
+   * What to do next. Throws `KodelError` (for example when the state was tampered with).
+   * `atCompletion`: the agent has just said its step is done; a change of the pipeline that holds
+   * the run is answered here, not while the agent is still working.
+   */
+  nextStep(options?: { atCompletion?: boolean }): Promise<NextStep>;
   completeStep(
     node: string,
     attempt: number,
@@ -55,6 +69,13 @@ export interface RunHandle {
     options?: { replace?: boolean },
   ): Promise<StepResult>;
   feedback(input: FeedbackInput): Promise<Decision>;
+  /** The pipeline the run is on now: its text as it was kept, parsed, and its hash. */
+  pinnedPipeline(): Promise<{ yaml: string; spec: PipelineSpec; hash: string }>;
+  /**
+   * The agent's proposal to change the run's pipeline; an empty `yaml` takes the proposal back. It
+   * changes nothing about the run: a person decides.
+   */
+  proposeChange(input: { yaml: string; summary: string }): Promise<ProposeOutcome>;
   /** Wait until the engine's work has come to rest, but no longer than `ms`. */
   waitForRest(ms: number): Promise<void>;
 }
@@ -66,6 +87,28 @@ export interface RunLocation {
   branch?: string;
   /** Something the agent should know about it (for example, what the directory does not have). */
   note?: string;
+}
+
+/** The pipeline file has changes that are not committed, and the run can use either version. */
+export interface PipelineChoice {
+  reason: "pipeline_uncommitted";
+  pipeline: string;
+  /** The file, relative to the repository. */
+  file: string;
+  options: ("working" | "committed")[];
+  /** What the working version changes against the committed one, per step. */
+  changes: NodeDiff[];
+  tell_the_person: string;
+}
+
+/**
+ * Thrown by a host's `start` when nothing was started because the person has to say which version
+ * of the pipeline the run uses. The service turns it into an answer, not a failure.
+ */
+export class ChoiceNeeded extends Error {
+  constructor(readonly choice: PipelineChoice) {
+    super("the pipeline file has changes that are not committed");
+  }
 }
 
 export interface StartOutcome {
@@ -88,6 +131,8 @@ export interface PipelineHost {
     task: string;
     restart: boolean;
     cwd?: string;
+    /** Which version to use when the pipeline file has uncommitted changes; asked, never guessed. */
+    pipeline_version?: "working" | "committed";
   }): Promise<StartOutcome>;
   open(runId: string): Promise<RunHandle | undefined>;
 }
@@ -159,8 +204,37 @@ export class PipelineService {
     });
   }
 
-  resolve(input: { pipeline: string }): Promise<ToolResult> {
-    return guarded(async () => ({ ok: true, spec: await this.spec(input.pipeline) }));
+  /**
+   * The definition of a pipeline. With a run, the one that run is on: its text as kept, which is what a
+   * proposal to change it starts from (the file in the project may be another version).
+   */
+  resolve(input: { pipeline: string; run_id?: string }): Promise<ToolResult> {
+    return guarded(async () => {
+      if (input.run_id !== undefined) {
+        const pinned = await (await this.run(input.run_id)).pinnedPipeline();
+        return { ok: true, spec: pinned.spec, yaml: pinned.yaml, version: pinned.hash };
+      }
+      return { ok: true, spec: await this.spec(input.pipeline) };
+    });
+  }
+
+  proposeChange(input: { run_id: string; pipeline: string; summary: string }): Promise<ToolResult> {
+    return guarded(async () => {
+      const run = await this.run(input.run_id);
+      const outcome = await run.proposeChange({ yaml: input.pipeline, summary: input.summary });
+      if (!outcome.ok) return failure(outcome.code, outcome.message);
+      return {
+        ok: true,
+        status: outcome.status,
+        ...(outcome.change ? { pipeline_change: outcome.change } : {}),
+        note:
+          outcome.status === "proposed"
+            ? "The run does not change until the person accepts it. Tell the person what you propose and why, which steps run again (`redo`), and the command in `pipeline_change.apply`; do not run it. Then end your turn, or go on if the next step is not affected."
+            : outcome.status === "withdrawn"
+              ? "The proposal was taken back."
+              : "There was no proposal to take back.",
+      };
+    });
   }
 
   /** A dry run: what would happen, with the task filled in, and nothing started. */
@@ -196,6 +270,7 @@ export class PipelineService {
     pipeline?: string;
     restart?: boolean;
     cwd?: string;
+    pipeline_version?: "working" | "committed";
   }): Promise<ToolResult> {
     return guarded(async () => {
       let name = input.pipeline;
@@ -217,12 +292,23 @@ export class PipelineService {
         name = (pipelines[0] as PipelineInfo).name;
       }
       await this.spec(name);
-      const outcome = await this.host.start({
-        pipeline: name,
-        task: input.task,
-        restart: input.restart === true,
-        ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
-      });
+      let outcome: StartOutcome;
+      try {
+        outcome = await this.host.start({
+          pipeline: name,
+          task: input.task,
+          restart: input.restart === true,
+          ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+          ...(input.pipeline_version === undefined
+            ? {}
+            : { pipeline_version: input.pipeline_version }),
+        });
+      } catch (error) {
+        // No run exists yet: the answer has no run_id, only what the person has to decide.
+        if (error instanceof ChoiceNeeded)
+          return { ok: true, started: false, choice: error.choice };
+        throw error;
+      }
       return {
         ok: true,
         run_id: outcome.run.runId,
@@ -304,7 +390,7 @@ export class PipelineService {
         ...(checkFailed && failed
           ? { failed_check: { kind: failed.source.slice("check:".length), reason: failed.reason } }
           : {}),
-        next: await run.nextStep(),
+        next: await run.nextStep({ atCompletion: true }),
       };
     });
   }

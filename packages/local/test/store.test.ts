@@ -14,7 +14,7 @@ afterEach(async () => {
 });
 
 const meta = (runId: string, over: Partial<RunMeta> = {}): RunMeta => ({
-  v: 1,
+  v: 2,
   runId,
   pipeline: "feature",
   task: "add a limit",

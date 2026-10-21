@@ -28,7 +28,18 @@ describe("the project config", () => {
     await write("");
     expect((await loadConfig(dir)).worktree).toEqual(expected);
     await write("version: 1\n");
-    expect(await loadConfig(dir)).toEqual({ version: "1.0.0", worktree: expected });
+    expect(await loadConfig(dir)).toEqual({
+      version: "1.0.0",
+      worktree: expected,
+      pipeline: { uncommitted: "ask" },
+    });
+  });
+
+  test("tNN_config_reads_what_to_do_with_an_uncommitted_pipeline", async () => {
+    await write("pipeline:\n  uncommitted: working\n");
+    expect((await loadConfig(dir)).pipeline).toEqual({ uncommitted: "working" });
+    expect((await failure("pipeline:\n  uncommitted: sometimes\n")).code).toBe("CONFIG_INVALID");
+    expect((await failure("pipeline:\n  uncomitted: working\n")).message).toContain("uncomitted");
   });
 
   test("tNN_config_reads_mode_and_dir", async () => {

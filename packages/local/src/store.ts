@@ -2,7 +2,7 @@
  * The local state store: one directory per run under `<root>/runs/`.
  *
  *   meta.json       what the run is (pipeline, task, spec hash)
- *   spec.yaml       the pipeline the run started with, checked against the state's spec hash
+ *   specs/<hash>.yaml  every version of the pipeline the run has had, each checked against its hash
  *   state.json      the run state, replaced atomically
  *   journal.jsonl   append-only records, redacted on the way in
  *   snapshots.json  working-tree snapshots by key (for `diff` baselines)
@@ -27,8 +27,11 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { sha256 } from "./integrity";
 
+/** The layout of a run directory. Runs written before versioned pipelines have no `v: 2`. */
+export const META_VERSION = 2;
+
 export interface RunMeta {
-  v: 1;
+  v: 2;
   runId: string;
   pipeline: string;
   task: string;
@@ -66,6 +69,14 @@ const processIsAlive = (pid: number): boolean => {
 
 /** A lock file that stays empty this long was left by a process that died while creating it. */
 const UNFINISHED_LOCK_MS = 5_000;
+
+/** The hash names a file, so it has to be nothing but what `hashSource` makes. */
+const specFileName = (hash: string): string => {
+  if (!/^[0-9a-f]{16}$/.test(hash)) {
+    throw new KodelError("UNKNOWN_RUN", `"${hash}" is not a pipeline hash`);
+  }
+  return `${hash}.yaml`;
+};
 
 const isMissing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
 
@@ -179,19 +190,76 @@ export class FileStore {
     return undefined;
   }
 
-  /** Keep the pipeline a run started with, so editing the file later does not change a run in flight. */
-  async writeSpec(runId: string, source: string): Promise<void> {
-    await this.writeAtomic(join(this.runDir(runId), "spec.yaml"), source);
+  /**
+   * Keep a version of the pipeline a run has had, named by its hash, so editing the file later does
+   * not change a run in flight. A version is never rewritten or removed.
+   */
+  async writeSpec(runId: string, hash: string, source: string): Promise<void> {
+    const dir = this.specsDir(runId);
+    await mkdir(dir, { recursive: true });
+    await this.writeAtomic(join(dir, specFileName(hash)), source);
   }
 
-  /** The pipeline source a run started with. It is parsed and checked again by whoever uses it. */
-  async readSpec(runId: string): Promise<string | undefined> {
+  /** A kept version of the pipeline. It is parsed and checked again by whoever uses it. */
+  async readSpec(runId: string, hash: string): Promise<string | undefined> {
     try {
-      return await readFile(join(this.runDir(runId), "spec.yaml"), "utf8");
+      return await readFile(join(this.specsDir(runId), specFileName(hash)), "utf8");
     } catch (error) {
       if (isMissing(error)) return undefined;
       throw error;
     }
+  }
+
+  /** The hashes of the versions kept with a run. */
+  async listSpecs(runId: string): Promise<string[]> {
+    try {
+      return (await readdir(this.specsDir(runId)))
+        .filter((name) => name.endsWith(".yaml"))
+        .map((name) => name.slice(0, -".yaml".length))
+        .sort();
+    } catch (error) {
+      if (isMissing(error)) return [];
+      throw error;
+    }
+  }
+
+  private specsDir(runId: string): string {
+    return join(this.runDir(runId), "specs");
+  }
+
+  // the agent's proposal to change the pipeline: one file, replaced by the next proposal
+
+  private proposalPath(runId: string): string {
+    return join(this.runDir(runId), "pending", "proposal.yaml");
+  }
+
+  async writeProposal(runId: string, source: string): Promise<void> {
+    await mkdir(dirname(this.proposalPath(runId)), { recursive: true });
+    await this.writeAtomic(this.proposalPath(runId), source);
+  }
+
+  async readProposal(runId: string): Promise<string | undefined> {
+    try {
+      return await readFile(this.proposalPath(runId), "utf8");
+    } catch (error) {
+      if (isMissing(error)) return undefined;
+      throw error;
+    }
+  }
+
+  async removeProposal(runId: string): Promise<boolean> {
+    try {
+      await rm(this.proposalPath(runId));
+      return true;
+    } catch (error) {
+      if (isMissing(error)) return false;
+      throw error;
+    }
+  }
+
+  /** Write a file that is not the store's own (a pipeline file the person accepted), all or nothing. */
+  async replaceFile(path: string, content: string): Promise<void> {
+    await this.writeAtomic(path, content);
   }
 
   /** The newest run of this pipeline and task that has not finished. */

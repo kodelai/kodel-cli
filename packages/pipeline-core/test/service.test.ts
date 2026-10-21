@@ -13,6 +13,7 @@ import {
   type PipelineInfo,
   PipelineService,
   type PipelineSpec,
+  type ProposeOutcome,
   parsePipeline,
   nextStep as projectNextStep,
   type RunEvent,
@@ -186,6 +187,20 @@ class FakeRun implements RunHandle {
 
   feedback(input: FeedbackInput) {
     return this.send({ type: "feedback", ...input });
+  }
+
+  readonly proposals: { yaml: string; summary: string }[] = [];
+
+  async pinnedPipeline() {
+    return { yaml: "name: pinned\n", spec: this.spec, hash: "h" };
+  }
+
+  async proposeChange(input: { yaml: string; summary: string }): Promise<ProposeOutcome> {
+    this.proposals.push(input);
+    if (input.yaml === "bad") {
+      return { ok: false, code: "PIPELINE_CHANGE_REFUSED", message: "not like that" };
+    }
+    return input.yaml === "" ? { ok: true, status: "withdrawn" } : { ok: true, status: "proposed" };
   }
 
   async waitForRest(ms: number): Promise<void> {
@@ -647,6 +662,7 @@ describe("the tool surface", () => {
       "pipeline_report_result",
       "pipeline_complete_step",
       "pipeline_feedback",
+      "pipeline_propose_change",
     ]);
   });
 
@@ -665,9 +681,9 @@ describe("the tool surface", () => {
     const shapes = Object.fromEntries(TOOLS.map((t) => [t.name, Object.keys(t.shape)]));
     expect(shapes).toEqual({
       pipeline_list: [],
-      pipeline_resolve: ["pipeline"],
+      pipeline_resolve: ["pipeline", "run_id"],
       pipeline_plan: ["pipeline", "task"],
-      pipeline_start: ["task", "pipeline", "restart", "cwd"],
+      pipeline_start: ["task", "pipeline", "restart", "pipeline_version", "cwd"],
       pipeline_next_step: ["run_id", "wait_s"],
       pipeline_report_result: [
         "run_id",
@@ -681,6 +697,7 @@ describe("the tool surface", () => {
       ],
       pipeline_complete_step: ["run_id", "node_slug", "attempt", "summary", "outcome"],
       pipeline_feedback: ["run_id", "node_slug", "attempt", "category", "message", "suggestion"],
+      pipeline_propose_change: ["run_id", "pipeline", "summary"],
     });
   });
 
@@ -751,6 +768,54 @@ describe("invokeTool", () => {
         message: "x".repeat(4_001),
       }),
     ).toMatchObject({ code: "INVALID_ARGUMENTS" });
+  });
+
+  test("a proposal to change the pipeline reaches the run, and its refusal reaches the agent", async () => {
+    const { svc, host } = service();
+    const run_id = asOk(await invokeTool(svc, "pipeline_start", { task: "t" })).run_id as string;
+    const proposed = await invokeTool(svc, "pipeline_propose_change", {
+      run_id,
+      pipeline: "name: x\n",
+      summary: "a looser limit",
+    });
+    expect(proposed).toMatchObject({ ok: true, status: "proposed" });
+    expect(JSON.stringify(proposed)).toContain("do not run it");
+    expect((host.runs.get(run_id) as FakeRun).proposals).toEqual([
+      { yaml: "name: x\n", summary: "a looser limit" },
+    ]);
+    expect(
+      await invokeTool(svc, "pipeline_propose_change", { run_id, pipeline: "bad", summary: "s" }),
+    ).toMatchObject({ ok: false, code: "PIPELINE_CHANGE_REFUSED" });
+    expect(
+      await invokeTool(svc, "pipeline_propose_change", { run_id, pipeline: "", summary: "back" }),
+    ).toMatchObject({ ok: true, status: "withdrawn" });
+  });
+
+  test("a proposal has a size limit and needs a run", async () => {
+    const { svc } = service();
+    const run_id = asOk(await invokeTool(svc, "pipeline_start", { task: "t" })).run_id as string;
+    expect(
+      await invokeTool(svc, "pipeline_propose_change", {
+        run_id,
+        pipeline: "x".repeat(256 * 1024 + 1),
+        summary: "s",
+      }),
+    ).toMatchObject({ code: "INVALID_ARGUMENTS" });
+    expect(
+      await invokeTool(svc, "pipeline_propose_change", {
+        run_id: "r_000000999_zzzz",
+        pipeline: "name: x\n",
+        summary: "s",
+      }),
+    ).toMatchObject({ ok: false, code: "UNKNOWN_RUN" });
+  });
+
+  test("resolve_with_run_id_returns_the_pinned_text", async () => {
+    const { svc } = service();
+    const run_id = asOk(await invokeTool(svc, "pipeline_start", { task: "t" })).run_id as string;
+    expect(
+      await invokeTool(svc, "pipeline_resolve", { pipeline: "feature", run_id }),
+    ).toMatchObject({ ok: true, yaml: "name: pinned\n", version: "h" });
   });
 
   test("anything the agent adds on its own, like a status or an exit code, is ignored", async () => {

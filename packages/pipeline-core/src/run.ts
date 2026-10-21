@@ -7,8 +7,10 @@
  * an *attempt*. A failed attempt of an agent node with no edge for its label is retried as a new
  * attempt of the same visit (rework). Limits: `max_consecutive_failures` and `max_attempts`.
  */
+import { canonicalNode, type NodeForms } from "./canonical";
 import { type ErrorCode, KodelError } from "./errors";
 import type { NodeSpec, PipelineSpec } from "./pipeline";
+import { diffPipelines } from "./pipeline-diff";
 import { defaultRegistry, type Registry } from "./registry";
 import { renderDeep, renderTemplate } from "./render";
 
@@ -23,6 +25,11 @@ export interface EngineOptions {
   staleMs?: number;
   /** How many times interrupted work is restarted before the run pauses. */
   maxRestarts?: number;
+  /**
+   * Turns the canonical form of a node (`canonicalNode`) into a short stable string. The core does not
+   * hash anything itself; without this the journal simply carries no node hashes.
+   */
+  fingerprint?: (text: string) => string;
 }
 
 // ── state ───────────────────────────────────────────────────────────────────
@@ -58,6 +65,8 @@ export interface NodeRun {
   /** The current visit (entry into the node from the start or from another node). */
   visitId: number;
   lastFailure?: Feedback;
+  /** The node is no longer in the pipeline; its attempts stay in the history. */
+  removed?: boolean;
 }
 
 export type Phase = "agent" | "engine" | "checks" | "human";
@@ -122,16 +131,26 @@ export interface RunState {
   seq: number;
   /** How many refused calls were journaled; there is a limit (`MAX_LOGGED_REFUSALS`). */
   refusals?: number;
+  /** How many proposals to change the pipeline were journaled; there is a limit. */
+  proposals?: number;
   /**
    * Where the host runs this run's commands, when not in the repository root; opaque to the core.
    * It lives in the state, which the host checks against its trusted hash, because a command must
    * never be run somewhere a file the agent can write has sent it.
    */
   workdir?: string;
+  /**
+   * The pipeline file of this run, relative to the repository root. Like `workdir` it lives in the
+   * state and not in `meta.json`, which an agent can write.
+   */
+  pipelineFile?: string;
 }
 
 /** How many refused calls a run journals: enough to see what was tried, too few to be a way to fill the disk. */
 export const MAX_LOGGED_REFUSALS = 100;
+
+/** How many proposals to change the pipeline a run journals. */
+export const MAX_LOGGED_PROPOSALS = 100;
 
 // ── events in, effects out ──────────────────────────────────────────────────
 
@@ -145,6 +164,8 @@ export type RunEvent =
       workdir?: string;
       /** The branch the host made for the run, when it made one. */
       branch?: string;
+      /** The pipeline file, relative to the repository root, when the pipeline was read from one. */
+      pipelineFile?: string;
     }
   | {
       type: "agent_completed";
@@ -164,6 +185,8 @@ export type RunEvent =
       /** What the command exited with and how long it ran, for the journal. */
       exit?: number;
       duration_ms?: number;
+      /** The pipeline version the work ran under; a result of another version is dropped. */
+      specHash?: string;
     }
   | {
       type: "check_finished";
@@ -174,6 +197,21 @@ export type RunEvent =
       reason: string;
       exit?: number;
       duration_ms?: number;
+      /** The pipeline version the check ran under; a result of another version is dropped. */
+      specHash?: string;
+    }
+  /**
+   * A person accepted another version of the pipeline for this run. The event is decided with the
+   * new pipeline (`decide`'s first argument); `before` is the one the run was on.
+   */
+  | {
+      type: "pipeline_accepted";
+      from: string;
+      to: string;
+      /** Where the new version came from: the agent's proposal or an edit of the file. */
+      source: "proposal" | "file";
+      before: PipelineSpec;
+      reason?: string;
     }
   /** The host accepted the agent's report of findings. Journaled; it changes nothing else. */
   | {
@@ -206,6 +244,11 @@ export type RunEvent =
       message: string;
       suggestion?: string;
     }
+  /**
+   * The agent proposed another version of the pipeline (`withdrawn`: took its proposal back).
+   * Journaled; changes nothing else: only a person's `pipeline_accepted` moves the run.
+   */
+  | { type: "change_proposed"; hash: string; summary: string; withdrawn?: boolean }
   /** A human accepted a change made to the run's files outside kodel. Journaled; changes nothing else. */
   | { type: "acknowledge"; note?: string }
   /**
@@ -268,6 +311,7 @@ class Machine {
   private readonly registry: Registry;
   private readonly staleMs: number;
   private readonly maxRestarts: number;
+  private readonly fingerprint: ((text: string) => string) | undefined;
 
   constructor(
     private readonly spec: PipelineSpec,
@@ -279,6 +323,7 @@ class Machine {
     this.registry = options.registry ?? defaultRegistry();
     this.staleMs = options.staleMs ?? DEFAULT_STALE_MS;
     this.maxRestarts = options.maxRestarts ?? DEFAULT_MAX_RESTARTS;
+    this.fingerprint = options.fingerprint;
   }
 
   // lookups
@@ -337,6 +382,20 @@ class Machine {
     return visit;
   }
 
+  /** The hashes of the definition an attempt runs on, so the history shows which one it was. */
+  private definitionOf(node: NodeSpec): { definition?: NodeForms } {
+    const fingerprint = this.fingerprint;
+    if (!fingerprint) return {};
+    const forms = canonicalNode(this.spec, node);
+    return {
+      definition: {
+        work: fingerprint(forms.work),
+        checks: fingerprint(forms.checks),
+        routing: fingerprint(forms.routing),
+      },
+    };
+  }
+
   // entering nodes
 
   private enter(slug: string, rework: boolean, feedback?: Feedback) {
@@ -360,7 +419,13 @@ class Machine {
     };
     this.s.active.push(visit);
     run.status = begin.needs === "human" ? "waiting" : rework ? "rework" : "running";
-    this.log("node_entered", { node: slug, attempt: run.attempt, visit: run.visitId, rework });
+    this.log("node_entered", {
+      node: slug,
+      attempt: run.attempt,
+      visit: run.visitId,
+      rework,
+      ...this.definitionOf(node),
+    });
 
     for (const check of node.checks) {
       const baseline = this.registry.check(check.kind)?.baseline?.(check.params);
@@ -546,12 +611,30 @@ class Machine {
     }
     if (event.type === "feedback") {
       if (event.node !== undefined) this.node(event.node);
+      // A note is about the pipeline as it was when it was written, and the pipeline may change
+      // under a run, so it says which version and, when only one step is going, which step.
+      const only = this.s.active.length === 1 ? this.s.active[0]?.node : undefined;
       this.log("feedback_reported", {
-        node: event.node ?? null,
+        node: event.node ?? only ?? null,
         attempt: event.attempt ?? null,
         category: event.category,
         message: event.message,
         suggestion: event.suggestion ?? null,
+        spec: this.s.specHash,
+      });
+      return;
+    }
+    if (event.type === "change_proposed") {
+      // Only the first few are kept, like refused calls: a proposal is one file that is replaced, but
+      // every one of them is a line in the journal.
+      const so_far = this.s.proposals ?? 0;
+      if (so_far >= MAX_LOGGED_PROPOSALS) throw new Repeat();
+      this.s.proposals = so_far + 1;
+      this.log("pipeline_change_proposed", {
+        hash: event.hash,
+        summary: event.summary,
+        from: this.s.specHash,
+        ...(event.withdrawn === true ? { withdrawn: true } : {}),
       });
       return;
     }
@@ -586,6 +669,7 @@ class Machine {
       return;
     }
     if (event.type === "resume") return this.resume();
+    if (event.type === "pipeline_accepted") return this.acceptPipeline(event);
     if (event.type === "tick" || event.type === "heartbeat") {
       if (this.s.status !== "running") throw new Repeat();
     } else if (this.s.status !== "running") {
@@ -635,6 +719,7 @@ class Machine {
         return;
       }
       case "work_finished": {
+        if (event.specHash !== undefined && event.specHash !== this.s.specHash) throw new Repeat();
         const visit = this.visitFor(event.node, event.attempt, ["engine"]);
         const node = this.node(event.node);
         this.log("command_finished", {
@@ -650,6 +735,7 @@ class Machine {
         return;
       }
       case "check_finished": {
+        if (event.specHash !== undefined && event.specHash !== this.s.specHash) throw new Repeat();
         const visit = this.visitFor(event.node, event.attempt, ["checks"]);
         if (event.index !== visit.checkIndex) throw new Repeat();
         const check = this.node(event.node).checks[event.index];
@@ -738,6 +824,7 @@ class Machine {
       spec: event.specHash,
       ...(event.workdir === undefined ? {} : { workdir: event.workdir }),
       ...(event.branch === undefined ? {} : { branch: event.branch }),
+      ...(event.pipelineFile === undefined ? {} : { pipelineFile: event.pipelineFile }),
     });
     const needsRunBaseline = this.spec.nodes.some((n) =>
       n.checks.some((c) => this.registry.check(c.kind)?.baseline?.(c.params) === "run"),
@@ -783,6 +870,102 @@ class Machine {
     if (visit.phase === "engine")
       this.effects.push(this.commandEffect(this.node(visit.node), visit, true));
     else this.emitCheck(visit, true);
+  }
+
+  /** Clear a pause that the change takes care of. */
+  private unpause() {
+    if (this.s.status !== "paused") return;
+    this.s.status = "running";
+    delete this.s.pause;
+  }
+
+  private acceptPipeline(event: Extract<RunEvent, { type: "pipeline_accepted" }>) {
+    if (this.s.specHash === event.to) throw new Repeat();
+    if (this.s.specHash !== event.from) {
+      throw fail(
+        "PIPELINE_CHANGE_REFUSED",
+        "the run is no longer on the version this change was made from",
+      );
+    }
+    const diff = diffPipelines(event.before, this.spec, this.s);
+    if (diff.refused !== undefined) throw fail("PIPELINE_CHANGE_REFUSED", diff.refused);
+
+    for (const { slug, changes } of diff.nodes) {
+      if (changes.includes("added")) {
+        this.s.nodes[slug] = {
+          slug,
+          status: "pending",
+          outcome: null,
+          attempt: 0,
+          consecutiveFailures: 0,
+          extraAttempts: 0,
+          visitId: 0,
+        };
+      } else if (changes.includes("removed")) {
+        this.run(slug).removed = true;
+      }
+    }
+    this.s.specHash = event.to;
+    this.log("pipeline_accepted", {
+      from: event.from,
+      to: event.to,
+      source: event.source,
+      nodes: diff.nodes,
+      effect: diff.effect,
+      ...(event.reason === undefined ? {} : { reason: event.reason }),
+    });
+
+    const effect = diff.effect;
+    if (effect.kind === "restart") {
+      const visit = this.s.active.find((v) => v.node === effect.node);
+      if (!visit) return;
+      // The attempt is closed without a verdict: it is not routed, it does not count as a failure,
+      // and it does not use up an attempt of the node.
+      this.s.active = this.s.active.filter((v) => v !== visit);
+      this.log("node_superseded", { node: visit.node, attempt: visit.attempt });
+      this.unpause();
+      this.run(visit.node).extraAttempts += 1;
+      this.enter(visit.node, true, {
+        source: "pipeline",
+        reason:
+          "the definition of this step was changed; the work done so far is still in the working directory",
+      });
+    } else if (effect.kind === "recheck") {
+      this.unpause();
+      const visit = this.s.active.find((v) => v.node === effect.node);
+      if (visit) {
+        visit.suspended = false;
+        visit.restarts = 0;
+        visit.checkIndex = 0;
+        visit.heartbeatAt = this.now;
+        delete visit.owner;
+        this.log("checks_rerun", { node: visit.node, attempt: visit.attempt });
+        this.emitCheck(visit, true);
+        return;
+      }
+      // The attempt failed a check and the run was held back: it is opened again to be checked.
+      const run = this.run(effect.node);
+      run.status = "running";
+      run.consecutiveFailures = Math.max(0, run.consecutiveFailures - 1);
+      const reopened: Visit = {
+        node: effect.node,
+        attempt: run.attempt,
+        visitId: run.visitId,
+        phase: "checks",
+        checkIndex: 0,
+        restarts: 0,
+        heartbeatAt: this.now,
+        startedAt: this.now,
+      };
+      this.s.active.push(reopened);
+      this.log("checks_rerun", { node: effect.node, attempt: run.attempt });
+      this.emitCheck(reopened, false);
+    } else if (effect.kind === "reroute") {
+      const blocked = this.s.pause?.blocked;
+      if (!blocked) return;
+      this.unpause();
+      this.route(this.node(blocked.from), blocked.label, true);
+    }
   }
 
   private resume() {
@@ -855,6 +1038,7 @@ export function decide(
     draft.task = event.task;
     draft.specHash = event.specHash;
     if (event.workdir !== undefined) draft.workdir = event.workdir;
+    if (event.pipelineFile !== undefined) draft.pipelineFile = event.pipelineFile;
   }
   const machine = new Machine(spec, draft, now, options);
   try {

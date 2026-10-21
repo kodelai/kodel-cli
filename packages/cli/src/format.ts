@@ -1,4 +1,79 @@
-import type { RunReport } from "@kodel-ai/pipeline-core";
+import type { NodeDiff, PipelineSpec, RunReport } from "@kodel-ai/pipeline-core";
+
+const SHOWN_CHARS = 600;
+
+/**
+ * A change of a run's pipeline as text for the person who accepts it: what differs in each step, with
+ * the changes to checks first, because a looser check is what the person most needs to see before
+ * saying yes. Everything here may have been written by the agent, so it goes through `plain` and is cut.
+ */
+export function formatChange(
+  before: PipelineSpec,
+  after: PipelineSpec,
+  nodes: NodeDiff[],
+  redo: string[],
+  plain: (text: string) => string,
+): string {
+  const show = (value: unknown) => {
+    const text = plain(JSON.stringify(value) ?? "none");
+    return text.length > SHOWN_CHARS ? `${text.slice(0, SHOWN_CHARS)}...` : text;
+  };
+  const oldNode = (slug: string) => before.nodes.find((n) => n.slug === slug);
+  const newNode = (slug: string) => after.nodes.find((n) => n.slug === slug);
+  const edges = (spec: PipelineSpec, slug: string) =>
+    spec.edges.filter((e) => e.from === slug).map((e) => `${e.when} -> ${e.to}`);
+
+  const checks: string[] = [];
+  const other: string[] = [];
+  for (const { slug, changes } of nodes) {
+    const name = plain(slug);
+    const was = oldNode(slug);
+    const now = newNode(slug);
+    if (changes.includes("added") && now) {
+      other.push(`+ step "${name}" is added (${plain(now.kind)})`);
+      continue;
+    }
+    if (changes.includes("removed")) {
+      other.push(`- step "${name}" is removed; its attempts stay in the history`);
+      continue;
+    }
+    if (!was || !now) continue;
+    if (changes.includes("checks")) {
+      checks.push(`step "${name}": checks`);
+      const length = Math.max(was.checks.length, now.checks.length);
+      for (let i = 0; i < length; i++) {
+        const a = was.checks[i];
+        const b = now.checks[i];
+        if (JSON.stringify(a) === JSON.stringify(b)) continue;
+        if (a) checks.push(`  - ${show(a)}`);
+        if (b) checks.push(`  + ${show(b)}`);
+      }
+    }
+    if (changes.includes("work")) {
+      other.push(`step "${name}": work`);
+      other.push(`  - ${show({ kind: was.kind, params: was.params, timeout: was.timeout })}`);
+      other.push(`  + ${show({ kind: now.kind, params: now.params, timeout: now.timeout })}`);
+    }
+    if (changes.includes("routing")) {
+      other.push(`step "${name}": what happens next and how many attempts it gets`);
+      other.push(
+        `  - ${show({ edges: edges(before, slug), max_attempts: was.max_attempts, max_consecutive_failures: was.max_consecutive_failures })}`,
+      );
+      other.push(
+        `  + ${show({ edges: edges(after, slug), max_attempts: now.max_attempts, max_consecutive_failures: now.max_consecutive_failures })}`,
+      );
+    }
+  }
+  const lines: string[] = [];
+  if (checks.length > 0) lines.push("Checks changed:", ...checks.map((l) => `  ${l}`), "");
+  if (other.length > 0) lines.push("Other changes:", ...other.map((l) => `  ${l}`), "");
+  lines.push(
+    redo.length > 0
+      ? `What happens when you accept:\n${redo.map((l) => `  ${plain(l)}`).join("\n")}`
+      : "What happens when you accept: nothing is redone; the new definition is used from now on.",
+  );
+  return lines.join("\n");
+}
 
 /** `45 s`, `2m 05s`, `1h 03m`: short enough for a table. */
 export function formatDuration(seconds: number): string {
@@ -47,6 +122,38 @@ export function formatReport(
     lines.push(
       `${name}  ${String(node.attempts.length).padEnd(8)}  ${formatDuration(node.seconds)}${gate}`,
     );
+  }
+  const changed = report.nodes.flatMap((node) =>
+    node.attempts
+      .filter((a) => a.definition_changed)
+      .map((a) => `  ${plain(node.node)} #${a.attempt}: ${a.definition_changed?.join(", ")}`),
+  );
+  if (report.pipeline_changes.length > 0) {
+    const checked = new Set(
+      report.pipeline_changes.flatMap((c) =>
+        c.nodes.filter((n) => n.changes.includes("checks")).map((n) => plain(n.slug)),
+      ),
+    );
+    lines.push("", "the pipeline was changed while the run went:");
+    for (const change of report.pipeline_changes) {
+      const when = new Date(change.at).toISOString().replace("T", " ").slice(0, 19);
+      const steps = change.nodes.map(
+        (n) => `${plain(n.slug)} (${n.changes.map(plain).join(", ")})`,
+      );
+      const how = change.source === "proposal" ? "the agent's proposal" : "a change in the file";
+      lines.push(
+        `  ${when}  ${how}  ${steps.join(", ") || "no step differs"}  then: ${plain(change.effect)}` +
+          (change.reason ? `  (${plain(change.reason)})` : ""),
+      );
+    }
+    if (checked.size > 0) {
+      lines.push(
+        `  NOTE: the checks of ${[...checked].join(", ")} were changed during this run; what passed may have passed a different check than the pipeline file has now`,
+      );
+    }
+  }
+  if (changed.length > 0) {
+    lines.push("", "attempts that ran on another definition than the one before:", ...changed);
   }
   const failures = report.nodes.flatMap((node) =>
     node.attempts

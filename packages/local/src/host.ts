@@ -7,13 +7,18 @@
  * work without a heartbeat and restarts it; the state on disk is all that is needed for that.
  */
 import { createHash } from "node:crypto";
+import { mkdir, readFile, realpath } from "node:fs/promises";
 import { hostname } from "node:os";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import {
   type ChangeSet,
   type CheckVerdict,
+  canonicalPipeline,
   type Decision,
   decide,
   defaultRegistry,
+  describeEffect,
+  diffPipelines,
   type Effect,
   type EngineOptions,
   evaluateCommand,
@@ -23,7 +28,12 @@ import {
   mergeReports,
   type NextStep,
   nextStep,
+  type PendingChange,
+  type PipelineChange,
   type PipelineSpec,
+  type ProposeOutcome,
+  parsePipeline,
+  parseSnapshot,
   type RedactRule,
   type RunEvent,
   type RunReport,
@@ -39,7 +49,7 @@ import { type CommandOptions, type CommandResult, runCommand } from "./command";
 import type { WorktreeConfig } from "./config";
 import { GitSnapshotter } from "./git";
 import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integrity";
-import { FileStore, newRunId, type RunMeta } from "./store";
+import { FileStore, META_VERSION, newRunId, type RunMeta } from "./store";
 import { GitWorktreeProvider, type Workdir, type WorkdirProvider } from "./worktree";
 
 export interface CommandContext {
@@ -97,6 +107,8 @@ export interface HostOptions {
   integrityDir?: string;
   /** The YAML the pipeline was read from; a copy is kept with each run so the run is pinned to it. */
   source?: string;
+  /** The pipeline file, relative to `root` with `/` separators; kept in the run's state. */
+  pipelineFile?: string;
   /** How this process is named as the owner of engine work; `<host>:<pid>` by default. */
   ownerId?: string;
   /** Whether an owner is still alive. Tests replace it; by default a process id on this machine is looked up. */
@@ -228,7 +240,7 @@ export class LocalHost {
       new FileIntegrity(options.integrityDir ?? defaultIntegrityDir(), storeRoot);
     this.snapshotter = options.snapshotter ?? new GitSnapshotter(options.root);
     this.clock = options.clock ?? Date.now;
-    this.engine = options.engine ?? {};
+    this.engine = { fingerprint: hashSource, ...options.engine };
     this.runner = options.runCommand ?? ((command, opts) => runCommand(command, opts));
     this.heartbeatMs =
       options.heartbeatMs ?? Math.max(1_000, (options.engine?.staleMs ?? 30_000) / 3);
@@ -244,7 +256,13 @@ export class LocalHost {
    */
   async start(
     task: string,
-    options: { restart?: boolean; cwd?: string; worktree?: WorktreeConfig } = {},
+    options: {
+      restart?: boolean;
+      cwd?: string;
+      worktree?: WorktreeConfig;
+      /** A pipeline file to put into the run's directory, when the last commit does not have it as it should be. */
+      pipelineCopy?: { path: string; text: string };
+    } = {},
   ): Promise<{ run: LocalRun; reused: boolean; terminal: boolean; workdir?: Workdir }> {
     const registry = this.engine.registry ?? defaultRegistry();
     const needsGit = this.spec.nodes.some((n) =>
@@ -257,7 +275,7 @@ export class LocalHost {
     }
     // Spaces at the ends or doubled are not a different task; otherwise a changed space would
     // slip past the run that is waiting for a person.
-    const redactedTask = redactText(task.trim().replace(/\s+/g, " "), this.rules);
+    const redactedTask = normalizeTask(task, this.rules);
     const started = await this.store.withStartLock(async () => {
       const existing = await this.store.findActive(this.spec.name, redactedTask);
       if (existing) {
@@ -274,8 +292,7 @@ export class LocalHost {
       const runId = newRunId(now);
       // Of the text the pipeline was read from, when it is known: that is what a copy is checked
       // against, and it does not change when the parser learns a new field.
-      const specHash =
-        this.options.source !== undefined ? hashSource(this.options.source) : hashSpec(this.spec);
+      const specHash = this.specHash;
       // The directory first, then the run: a failure after this point takes the directory away
       // again, so no half-made run is left behind.
       const provider =
@@ -288,8 +305,14 @@ export class LocalHost {
         ...(options.cwd === undefined ? {} : { callerCwd: options.cwd }),
       });
       try {
+        // The copy is part of the start: if it cannot be made the directory is taken away again.
+        if (workdir && options.pipelineCopy) {
+          const target = join(workdir.path, options.pipelineCopy.path);
+          await mkdir(dirname(target), { recursive: true });
+          await this.store.replaceFile(target, options.pipelineCopy.text);
+        }
         const meta: RunMeta = {
-          v: 1,
+          v: META_VERSION,
           runId,
           pipeline: this.spec.name,
           task: redactedTask,
@@ -301,7 +324,7 @@ export class LocalHost {
         };
         await this.store.createRun(meta);
         if (this.options.source !== undefined)
-          await this.store.writeSpec(runId, this.options.source);
+          await this.store.writeSpec(runId, specHash, this.options.source);
         const run = new LocalRun(this, runId);
         const result = await run.apply({
           type: "start",
@@ -310,6 +333,9 @@ export class LocalHost {
           specHash,
           ...(workdir ? { workdir: workdir.path } : {}),
           ...(workdir?.branch === undefined ? {} : { branch: workdir.branch }),
+          ...(this.options.pipelineFile === undefined
+            ? {}
+            : { pipelineFile: this.options.pipelineFile }),
         });
         if (!result.ok) throw result.error;
         return { run, reused: false, terminal: false, ...(workdir ? { workdir } : {}) };
@@ -332,6 +358,13 @@ export class LocalHost {
     return (this.options.workdirs ?? new GitWorktreeProvider(this.options.root)).verify(workdir);
   }
 
+  /** The hash a run started with this pipeline is pinned to. */
+  get specHash(): string {
+    return this.options.source !== undefined
+      ? hashSource(this.options.source)
+      : hashSpec(this.spec);
+  }
+
   /** A handle on a run that is already on disk (after a restart, or from another process). */
   open(runId: string): LocalRun {
     return new LocalRun(this, runId);
@@ -350,6 +383,25 @@ export class LocalHost {
     const result = await this.open(runId).acknowledge("sealed after a manual change");
     if (!result.ok) throw result.error;
   }
+}
+
+/**
+ * A task as it is kept and compared: spaces at the ends or doubled are not a different task, and
+ * what redaction takes out is gone before anything is compared or stored.
+ */
+export function normalizeTask(task: string, rules: RedactRule[]): string {
+  return redactText(task.trim().replace(/\s+/g, " "), rules);
+}
+
+/** The largest pipeline an agent may propose. */
+const MAX_PROPOSAL_BYTES = 256 * 1024;
+
+/** A change of the pipeline that waits, with the text it came as (for `acceptChange`). */
+export interface PendingFound {
+  info: PendingChange;
+  text: string;
+  hash: string;
+  spec: PipelineSpec;
 }
 
 export class LocalRun {
@@ -429,6 +481,334 @@ export class LocalRun {
     return state;
   }
 
+  private readonly versions = new Map<string, PipelineSpec>();
+
+  /**
+   * The pipeline of a version the run has had, read from the copy kept with it and held against its
+   * hash. The run's state names the version it is on, so what a run does follows what was accepted,
+   * not what this process happened to be started with.
+   */
+  async specFor(hash: string): Promise<PipelineSpec> {
+    if (hash === this.host.specHash) return this.host.spec;
+    const known = this.versions.get(hash);
+    if (known) return known;
+    const text = await this.host.store.readSpec(this.runId, hash);
+    if (text === undefined || hashSource(text) !== hash) {
+      throw new KodelError(
+        "STATE_MODIFIED_EXTERNALLY",
+        `the pipeline of run ${this.runId} is not the one it is pinned to (its kept copy was changed or is missing); restore it before going on`,
+      );
+    }
+    const spec = parseSnapshot(text);
+    this.versions.set(hash, spec);
+    return spec;
+  }
+
+  /** The pipeline the run is on now. */
+  async currentSpec(state?: RunState): Promise<PipelineSpec> {
+    return this.specFor((state ?? (await this.state())).specHash);
+  }
+
+  /**
+   * The file the run's own pipeline is kept in, or none: for a run in a worktree that is the copy
+   * there (a change in it reaches only this run, and the other runs after a merge), otherwise the
+   * file in the repository. The path comes from the run's state, never from `meta.json`, and has to
+   * stay inside the directory it is relative to, links followed.
+   */
+  private async watched(state: RunState): Promise<{ path: string; relative: string } | undefined> {
+    if (state.pipelineFile === undefined) return undefined;
+    const base = state.workdir ?? this.host.options.root;
+    const path = join(base, state.pipelineFile);
+    const inside = (from: string, to: string) => {
+      const rel = relative(from, to);
+      return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+    };
+    if (!inside(base, path)) return undefined;
+    try {
+      if (!inside(await realpath(base), await realpath(path))) return undefined;
+    } catch {
+      return undefined;
+    }
+    return { path, relative: state.pipelineFile };
+  }
+
+  /**
+   * A change of the pipeline that waits for a person: the run's own file no longer says what the run
+   * is pinned to. Only what the pipeline means counts, not comments or layout, and a file that is
+   * not a pipeline is not a change. The text and hash come along for `acceptChange`.
+   */
+  async pendingChange(
+    state?: RunState,
+    only?: "file" | "proposal",
+  ): Promise<PendingFound | undefined> {
+    const now = state ?? (await this.state());
+    if (now.status !== "running" && now.status !== "paused") return undefined;
+    const current = await this.currentSpec(now);
+    // The agent's proposal comes first; a change made in the file is looked at when there is none.
+    if (only !== "file") {
+      const proposal = await this.host.store.readProposal(this.runId);
+      if (proposal !== undefined) {
+        const found = this.describeChange("proposal", proposal, undefined, now, current);
+        if (found) return found;
+      }
+    }
+    if (only === "proposal") return undefined;
+    const where = await this.watched(now);
+    if (!where) return undefined;
+    let text: string;
+    try {
+      text = await readFile(where.path, "utf8");
+    } catch {
+      return undefined;
+    }
+    return this.describeChange("file", text, where.relative, now, current);
+  }
+
+  /** Drop the agent's proposal. A person's act; it is journaled like the agent taking it back. */
+  async discardProposal(): Promise<boolean> {
+    const had = await this.host.store.removeProposal(this.runId);
+    if (had) {
+      await this.apply({
+        type: "change_proposed",
+        hash: "",
+        summary: "dropped by a person",
+        withdrawn: true,
+      });
+    }
+    return had;
+  }
+
+  /**
+   * Every version of the pipeline the run has had, oldest first, from the journal (which says when,
+   * and what a person accepted), and the kept copies that the journal knows nothing about (an `apply`
+   * that did not finish).
+   */
+  async history(): Promise<{
+    versions: {
+      hash: string;
+      at: number;
+      how: "started" | "proposal" | "file";
+      nodes: { slug: string; changes: string[] }[];
+      effect?: string;
+      reason?: string;
+      current: boolean;
+    }[];
+    orphans: string[];
+  }> {
+    const state = await this.state();
+    const journal = await this.host.store.readJournal(this.runId);
+    const out: Awaited<ReturnType<LocalRun["history"]>>["versions"] = [];
+    for (const record of journal) {
+      if (record.event === "run_started") {
+        out.push({
+          hash: String(record.spec),
+          at: record.ts,
+          how: "started",
+          nodes: [],
+          current: false,
+        });
+      } else if (record.event === "pipeline_accepted") {
+        const effect = record.effect as { kind?: string } | undefined;
+        out.push({
+          hash: String(record.to),
+          at: record.ts,
+          how: record.source === "proposal" ? "proposal" : "file",
+          nodes: (record.nodes as { slug: string; changes: string[] }[] | undefined) ?? [],
+          ...(effect?.kind === undefined ? {} : { effect: effect.kind }),
+          ...(typeof record.reason === "string" ? { reason: record.reason } : {}),
+          current: false,
+        });
+      }
+    }
+    const last = out.at(-1);
+    if (last) last.current = last.hash === state.specHash;
+    const known = new Set(out.map((v) => v.hash));
+    const orphans = (await this.host.store.listSpecs(this.runId)).filter((h) => !known.has(h));
+    return { versions: out, orphans };
+  }
+
+  /**
+   * Write a version the run has had (the one it is on, by default) into the run's own pipeline file.
+   * A version the run could not be moved to now is refused before anything is written, so the file is
+   * never left in a state that only gets in the way.
+   */
+  async restoreFile(hash?: string): Promise<{ path: string; hash: string }> {
+    const state = await this.state();
+    const target = hash ?? state.specHash;
+    const where = await this.watched(state);
+    if (!where) {
+      throw new KodelError(
+        "INVALID_ARGUMENTS",
+        `run ${this.runId} has no pipeline file of its own`,
+      );
+    }
+    const spec = await this.specFor(target);
+    if (target !== state.specHash) {
+      const diff = diffPipelines(await this.currentSpec(state), spec, state);
+      if (diff.refused !== undefined) throw new KodelError("PIPELINE_CHANGE_REFUSED", diff.refused);
+    }
+    const text = await this.host.store.readSpec(this.runId, target);
+    if (text === undefined) throw new KodelError("UNKNOWN_RUN", `no kept version ${target}`);
+    await this.host.store.replaceFile(where.path, text);
+    return { path: where.relative, hash: target };
+  }
+
+  private describeChange(
+    source: "file" | "proposal",
+    text: string,
+    watched: string | undefined,
+    now: RunState,
+    current: PipelineSpec,
+  ): PendingFound | undefined {
+    const hash = hashSource(text);
+    if (hash === now.specHash) return undefined;
+    let spec: PipelineSpec;
+    try {
+      spec = parsePipeline(text);
+    } catch (error) {
+      if (error instanceof KodelError) return undefined;
+      throw error;
+    }
+    if (canonicalPipeline(spec) === canonicalPipeline(current)) return undefined;
+    const diff = diffPipelines(current, spec, now);
+    return {
+      text,
+      hash,
+      spec,
+      info: {
+        source,
+        ...(watched === undefined ? {} : { watched }),
+        changes: diff.nodes,
+        effect: diff.effect,
+        redo: describeEffect(diff.effect),
+        ...(diff.refused === undefined ? {} : { refused: diff.refused }),
+        apply: `kodel pipeline changes apply ${this.runId}`,
+        blocking: diff.refused === undefined,
+      },
+    };
+  }
+
+  /** The pipeline the run is on, as the text it was kept as. */
+  async pinnedPipeline(): Promise<{ yaml: string; spec: PipelineSpec; hash: string }> {
+    const state = await this.state();
+    const spec = await this.currentSpec(state);
+    const yaml = await this.host.store.readSpec(this.runId, state.specHash);
+    if (yaml === undefined) {
+      throw new KodelError("STATE_MODIFIED_EXTERNALLY", `run ${this.runId} has no kept pipeline`);
+    }
+    return { yaml, spec, hash: state.specHash };
+  }
+
+  /**
+   * The agent proposes another version of the pipeline. Nothing about the run changes: the proposal
+   * is checked, kept apart, and journaled, and a person accepts it or not. What would be refused at
+   * the person's command is refused here, so the agent hears it at once.
+   */
+  async proposeChange(input: { yaml: string; summary: string }): Promise<ProposeOutcome> {
+    const { store, rules } = this.host;
+    const state = await this.state();
+    if (state.status !== "running" && state.status !== "paused") {
+      return { ok: false, code: "NODE_NOT_RUNNING", message: `the run is ${state.status}` };
+    }
+    if (input.yaml.trim() === "") {
+      const had = await store.removeProposal(this.runId);
+      if (had) {
+        await this.apply({
+          type: "change_proposed",
+          hash: "",
+          summary: input.summary,
+          withdrawn: true,
+        });
+      }
+      return { ok: true, status: had ? "withdrawn" : "none" };
+    }
+    if (Buffer.byteLength(input.yaml) > MAX_PROPOSAL_BYTES) {
+      return { ok: false, code: "INVALID_ARGUMENTS", message: "the pipeline is too large" };
+    }
+    // A proposal is the agent's text and is kept as it is, so it may not hold what redaction would
+    // take out of anything else the agent writes.
+    if (redactText(input.yaml, rules) !== input.yaml) {
+      return {
+        ok: false,
+        code: "INVALID_ARGUMENTS",
+        message:
+          "the pipeline contains something that looks like a secret (a key, a token, a password); leave it out",
+      };
+    }
+    let spec: PipelineSpec;
+    try {
+      spec = parsePipeline(input.yaml);
+    } catch (error) {
+      if (error instanceof KodelError) {
+        return { ok: false, code: error.code, message: error.message };
+      }
+      throw error;
+    }
+    const current = await this.currentSpec(state);
+    if (canonicalPipeline(spec) === canonicalPipeline(current)) {
+      return {
+        ok: false,
+        code: "PIPELINE_CHANGE_REFUSED",
+        message: "this is what the run is already on; nothing differs",
+      };
+    }
+    const diff = diffPipelines(current, spec, state);
+    if (diff.refused !== undefined) {
+      return { ok: false, code: "PIPELINE_CHANGE_REFUSED", message: diff.refused };
+    }
+    await store.writeProposal(this.runId, input.yaml);
+    const logged = await this.apply({
+      type: "change_proposed",
+      hash: hashSource(input.yaml),
+      summary: input.summary,
+    });
+    if (!logged.ok) return { ok: false, code: logged.error.code, message: logged.error.message };
+    const pending = await this.pendingChange();
+    const { blocking: _blocking, ...change } = pending?.info ?? {};
+    return {
+      ok: true,
+      status: "proposed",
+      ...(pending ? { change: change as PipelineChange } : {}),
+    };
+  }
+
+  /**
+   * Take another version of the pipeline for this run: keep it with the run, then let the machine
+   * move the run onto it. A person decides this (`kodel pipeline changes apply`), never the agent.
+   * A proposal is also written into the run's pipeline file, so the change is in what the person
+   * commits and reaches the next runs with it.
+   */
+  async acceptChange(input: {
+    source: "file" | "proposal";
+    text: string;
+    reason?: string;
+  }): Promise<Decision> {
+    const state = await this.state();
+    const before = await this.currentSpec(state);
+    const to = hashSource(input.text);
+    try {
+      parsePipeline(input.text);
+    } catch (error) {
+      if (error instanceof KodelError) return { ok: false, error };
+      throw error;
+    }
+    await this.host.store.writeSpec(this.runId, to, input.text);
+    if (input.source === "proposal") {
+      const where = await this.watched(state);
+      if (where) await this.host.store.replaceFile(where.path, input.text);
+    }
+    const decision = await this.apply({
+      type: "pipeline_accepted",
+      from: state.specHash,
+      to,
+      source: input.source,
+      before,
+      ...(input.reason === undefined ? {} : { reason: input.reason }),
+    });
+    if (decision.ok) await this.host.store.removeProposal(this.runId).catch(() => undefined);
+    return decision;
+  }
+
   /**
    * Apply one event under the run's lock, save the result and start the work it asks for.
    * If the state file is not what kodel last wrote, nothing is applied (`STATE_MODIFIED_EXTERNALLY`);
@@ -443,7 +823,7 @@ export class LocalRun {
   }
 
   private applyLocked(incoming: RunEvent, trust: boolean): Promise<Decision> {
-    const { store, spec, engine, clock, integrity, rules } = this.host;
+    const { store, engine, clock, integrity, rules } = this.host;
     // Whatever text came with the event (a reason, a message) reaches state and journal redacted.
     const event = redactEvent(incoming, rules);
     return store.withLock(this.runId, async () => {
@@ -473,6 +853,11 @@ export class LocalRun {
           }
         }
       }
+      // An event is decided with the pipeline the run is on; the one that moves it to another version,
+      // with that other.
+      const spec = !state
+        ? this.host.spec
+        : await this.specFor(event.type === "pipeline_accepted" ? event.to : state.specHash);
       const decision = decide(spec, state, event, clock(), engine);
       if (!decision.ok || decision.noop) return decision;
       // A tick that found nothing to do changes nothing, so it writes nothing.
@@ -522,11 +907,14 @@ export class LocalRun {
    * command that only looks (`kodel status`).
    */
   async inspect(): Promise<NextStep> {
+    const state = await this.state();
+    const pending = await this.pendingChange(state);
     return nextStep(
-      this.host.spec,
-      await this.state(),
+      await this.currentSpec(state),
+      state,
       this.host.clock(),
       this.host.engine.registry ?? defaultRegistry(),
+      pending ? { pending: pending.info } : {},
     );
   }
 
@@ -736,6 +1124,7 @@ export class LocalRun {
     signal: AbortSignal,
   ): Promise<RunEvent> {
     const cwd = await this.cwd();
+    const { specHash } = await this.state();
     const result = await this.host.runner(
       effect.command,
       this.commandOptions(signal, effect.timeout, effect, cwd),
@@ -760,6 +1149,7 @@ export class LocalRun {
       reason: verdict.reason,
       exit: result.exit,
       duration_ms: result.durationMs,
+      specHash,
     };
   }
 
@@ -767,6 +1157,7 @@ export class LocalRun {
     const runner = this.host.checkRunners[effect.kind];
     const started = Date.now();
     const cwd = await this.cwd();
+    const { specHash } = await this.state();
     const verdict: CheckVerdict = runner
       ? await runner(effect, {
           runId: this.runId,
@@ -785,6 +1176,7 @@ export class LocalRun {
       reason: verdict.reason,
       ...(verdict.exit === undefined ? {} : { exit: verdict.exit }),
       duration_ms: Date.now() - started,
+      specHash,
     };
   }
 
@@ -859,7 +1251,7 @@ export class LocalRun {
   // what callers do
 
   /** What the agent should do next. Throws `STATE_MODIFIED_EXTERNALLY` if the files were tampered with. */
-  async nextStep(): Promise<NextStep> {
+  async nextStep(options: { atCompletion?: boolean } = {}): Promise<NextStep> {
     const tick = await this.tick();
     if (!tick.ok && tick.error.code === "STATE_MODIFIED_EXTERNALLY") throw tick.error;
     if ((await this.sealStatus()) === "modified") {
@@ -869,11 +1261,16 @@ export class LocalRun {
       );
     }
     const state = await this.state();
+    const pending = await this.pendingChange(state);
     const step = nextStep(
-      this.host.spec,
+      await this.currentSpec(state),
       state,
       this.host.clock(),
       this.host.engine.registry ?? defaultRegistry(),
+      {
+        ...(pending ? { pending: pending.info } : {}),
+        ...(options.atCompletion === true ? { atCompletion: true } : {}),
+      },
     );
     if ("done" in step && step.run_status === "completed") {
       const where = await this.locationForDisplay();
@@ -937,6 +1334,18 @@ export class LocalRun {
   }
 
   async completeStep(node: string, attempt: number, summary?: string, outcome?: string) {
+    // A change of the pipeline that waits for a person is met here: what the step is judged by may be
+    // about to change, so it is not judged yet. The agent is told to wait for the person.
+    const held = await this.pendingChange();
+    if (held?.info.blocking) {
+      return {
+        ok: true,
+        state: await this.state(),
+        effects: [],
+        journal: [],
+        noop: true,
+      } satisfies Decision;
+    }
     const decision = await this.apply({
       type: "agent_completed",
       node,
@@ -984,7 +1393,8 @@ export class LocalRun {
    * nothing when the step takes none or none were made.
    */
   async gateResults(node: string): Promise<{ csv: string; count: number } | undefined> {
-    const { spec, engine, store } = this.host;
+    const { engine, store } = this.host;
+    const spec = await this.currentSpec();
     const nodeSpec = spec.nodes.find((n) => n.slug === node);
     const columns = (
       (engine.registry ?? defaultRegistry())
@@ -1062,12 +1472,12 @@ export class LocalRun {
     raw: unknown,
     replace: boolean,
   ): Promise<StepResult> {
-    const { spec, engine, store } = this.host;
+    const { engine, store } = this.host;
     const registry = engine.registry ?? defaultRegistry();
-    const nodeSpec = spec.nodes.find((n) => n.slug === node);
+    const state = await this.state();
+    const nodeSpec = (await this.currentSpec(state)).nodes.find((n) => n.slug === node);
     if (!nodeSpec)
       return { ok: false, code: "UNKNOWN_NODE", message: `the pipeline has no node "${node}"` };
-    const state = await this.state();
     const visit = state.active.find((v) => v.node === node);
     if (!visit)
       return { ok: false, code: "NODE_NOT_RUNNING", message: `node "${node}" is not running` };
