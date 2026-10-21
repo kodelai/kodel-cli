@@ -146,18 +146,32 @@ export interface NextStepOptions {
 }
 
 const TELL_PIPELINE_CHANGED =
-  "Tell the person, in the language they use: that the pipeline of this run was changed (see " +
-  "`pipeline_change`); what changed in each step, with changes to checks first; which steps will " +
-  "run again (`redo`); and the command in `how_to_decide` that accepts it. If they do not want the " +
-  "change, the pipeline file has to go back as it was. Do not run that command and do not undo " +
-  "the change yourself. Then end your turn.";
+  "Tell the person, in the language they use and in plain words: that the pipeline of this run was " +
+  "changed and nothing goes on until they decide; what exactly changed in each step (read the " +
+  "`pipeline_change` entry: a change to a step's checks is what the step is judged by, one to its " +
+  "work is what it does, one to its routing is where it goes next and how many attempts it gets), " +
+  "with changes to checks first because those matter most; whether anything is done again " +
+  "(`redo`; if it is empty, say that nothing is redone); and the command in `how_to_decide` that " +
+  "accepts it. Do not use the names of the fields (effect, redo, work, routing) in what you write. " +
+  "If they do not want the change, the pipeline file has to go back as it was. Do not run that " +
+  "command and do not undo the change yourself. Then end your turn.";
+
+const CHANGE_WORDS: Record<string, string> = {
+  work: "what it does",
+  checks: "its checks",
+  routing: "where it goes next",
+  added: "added",
+  removed: "removed",
+};
 
 function changedWaiting(
   change: PipelineChange,
   slug: string,
   behind: "gate" | "paused" | "step",
 ): NextStep {
-  const steps = change.changes.map((c) => `"${c.slug}" (${c.changes.join(", ")})`).join(", ");
+  const steps = change.changes
+    .map((c) => `"${c.slug}" (${c.changes.map((w) => CHANGE_WORDS[w] ?? w).join(", ")})`)
+    .join(", ");
   const redo = change.redo.length > 0 ? ` ${change.redo.join("; ")}.` : " Nothing runs again.";
   return {
     waiting: {
