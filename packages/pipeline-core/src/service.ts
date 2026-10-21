@@ -7,6 +7,7 @@
 import { type ErrorCode, KodelError } from "./errors";
 import { MAX_WAIT_S, type NextStep, type PipelineChange } from "./next-step";
 import type { PipelineSpec } from "./pipeline";
+import type { NodeDiff } from "./pipeline-diff";
 import { defaultRegistry, type Registry } from "./registry";
 import { renderTemplate } from "./render";
 import type { Decision, RunState } from "./run";
@@ -88,6 +89,28 @@ export interface RunLocation {
   note?: string;
 }
 
+/** The pipeline file has changes that are not committed, and the run can use either version. */
+export interface PipelineChoice {
+  reason: "pipeline_uncommitted";
+  pipeline: string;
+  /** The file, relative to the repository. */
+  file: string;
+  options: ("working" | "committed")[];
+  /** What the working version changes against the committed one, per step. */
+  changes: NodeDiff[];
+  tell_the_person: string;
+}
+
+/**
+ * Thrown by a host's `start` when nothing was started because the person has to say which version
+ * of the pipeline the run uses. The service turns it into an answer, not a failure.
+ */
+export class ChoiceNeeded extends Error {
+  constructor(readonly choice: PipelineChoice) {
+    super("the pipeline file has changes that are not committed");
+  }
+}
+
 export interface StartOutcome {
   /** `reused`: the active run for this task. `terminal`: the task already ran to its end. */
   status: "started" | "reused" | "terminal";
@@ -108,6 +131,8 @@ export interface PipelineHost {
     task: string;
     restart: boolean;
     cwd?: string;
+    /** Which version to use when the pipeline file has uncommitted changes; asked, never guessed. */
+    pipeline_version?: "working" | "committed";
   }): Promise<StartOutcome>;
   open(runId: string): Promise<RunHandle | undefined>;
 }
@@ -245,6 +270,7 @@ export class PipelineService {
     pipeline?: string;
     restart?: boolean;
     cwd?: string;
+    pipeline_version?: "working" | "committed";
   }): Promise<ToolResult> {
     return guarded(async () => {
       let name = input.pipeline;
@@ -266,12 +292,23 @@ export class PipelineService {
         name = (pipelines[0] as PipelineInfo).name;
       }
       await this.spec(name);
-      const outcome = await this.host.start({
-        pipeline: name,
-        task: input.task,
-        restart: input.restart === true,
-        ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
-      });
+      let outcome: StartOutcome;
+      try {
+        outcome = await this.host.start({
+          pipeline: name,
+          task: input.task,
+          restart: input.restart === true,
+          ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+          ...(input.pipeline_version === undefined
+            ? {}
+            : { pipeline_version: input.pipeline_version }),
+        });
+      } catch (error) {
+        // No run exists yet: the answer has no run_id, only what the person has to decide.
+        if (error instanceof ChoiceNeeded)
+          return { ok: true, started: false, choice: error.choice };
+        throw error;
+      }
       return {
         ok: true,
         run_id: outcome.run.runId,

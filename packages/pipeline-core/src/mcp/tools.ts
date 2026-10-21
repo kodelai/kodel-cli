@@ -110,7 +110,10 @@ export const TOOLS: ToolDescriptor[] = [
       "The answer has a run_id and what to do first (next). If terminal is true the task already ran to " +
       "its end: tell the user, and pass restart: true only if they want to run it again. Pass cwd, the " +
       "directory you are working in. If the answer has a workdir, do the run's work there. Work through the " +
-      "run by following each answer; never choose steps yourself.",
+      "run by following each answer; never choose steps yourself. If the answer has a `choice` and no run_id, " +
+      "nothing was started: the pipeline file has changes that are not committed, and the person has to say " +
+      "whether the run uses the working version or the committed one. Ask them (do what `tell_the_person` " +
+      "says), never choose yourself, then call pipeline_start again with the same arguments and pipeline_version.",
     shape: {
       task: z
         .string()
@@ -124,6 +127,12 @@ export const TOOLS: ToolDescriptor[] = [
         .optional()
         .describe("Omit it if the project has only one pipeline."),
       restart: z.boolean().optional(),
+      pipeline_version: z
+        .enum(["working", "committed"])
+        .optional()
+        .describe(
+          "Only after a `choice` answer, and only what the person said: `working` (the file as it is now) or `committed` (as it is in the last commit).",
+        ),
       cwd: z
         .string()
         .min(1)
@@ -136,8 +145,7 @@ export const TOOLS: ToolDescriptor[] = [
     },
     readOnly: false,
     idempotent: true,
-    run: (service, input) =>
-      service.start(input as { task: string; pipeline?: string; restart?: boolean; cwd?: string }),
+    run: (service, input) => service.start(input as Parameters<PipelineService["start"]>[0]),
   },
   {
     name: "pipeline_next_step",

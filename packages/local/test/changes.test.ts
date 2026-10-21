@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { ChoiceNeeded, PipelineService } from "@kodel-ai/pipeline-core";
 import { hashSource, LocalPipelineHost, type LocalRun } from "../src";
 
 // The test ids are a placeholder until the decision log gives this change one (see the plan).
@@ -30,6 +31,7 @@ const FILE = ".kodel/pipelines/demo.yaml";
 
 let dir: string;
 const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+const git_ = (...args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
 
 async function makeRepo(config: string): Promise<void> {
   dir = await realpath(await mkdtemp(join(tmpdir(), "kodel-changes-")));
@@ -390,5 +392,98 @@ describe("the agent's proposal to change the pipeline", () => {
         reentry_feedback: expect.stringContaining("The pipeline was changed under this run"),
       },
     });
+  });
+});
+
+describe("starting a run while the pipeline file has changes that are not committed", () => {
+  const DIRTY = PIPELINE("node -e 2");
+  const start = (h: LocalPipelineHost, version?: "working" | "committed", task = "t") =>
+    h.start({
+      pipeline: "demo",
+      task,
+      restart: false,
+      ...(version === undefined ? {} : { pipeline_version: version }),
+    });
+
+  beforeEach(async () => {
+    await makeRepo("worktree:\n  mode: auto\n");
+    await writeFile(join(dir, FILE), DIRTY); // the root has the edit, the last commit does not
+  });
+
+  test("start_with_uncommitted_pipeline_asks_and_creates_nothing", async () => {
+    const h = host();
+    const error = await start(h).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ChoiceNeeded);
+    expect((error as ChoiceNeeded).choice).toMatchObject({
+      reason: "pipeline_uncommitted",
+      pipeline: "demo",
+      file: FILE,
+      options: ["working", "committed"],
+      changes: [{ slug: "write", changes: ["checks"] }],
+    });
+    expect((error as ChoiceNeeded).choice.tell_the_person).toContain("Do not choose yourself");
+    expect(await h.runSummaries()).toEqual([]);
+    expect(git_("worktree", "list").trim().split("\n")).toHaveLength(1);
+  });
+
+  test("the_service_answers_with_the_choice_and_no_run_id", async () => {
+    const svc = new PipelineService(host());
+    const answer = await svc.start({ task: "t", pipeline: "demo" });
+    expect(answer).toMatchObject({
+      ok: true,
+      started: false,
+      choice: { options: expect.any(Array) },
+    });
+    expect(JSON.stringify(answer)).not.toContain("run_id");
+  });
+
+  test("start_working_copies_the_root_file_into_the_worktree", async () => {
+    const { run } = await start(host(), "working");
+    const state = await run.state();
+    expect(state.specHash).toBe(hashSource(DIRTY));
+    expect(await readFile(join(state.workdir ?? "", FILE), "utf8")).toBe(DIRTY);
+    expect(await (run as LocalRun).pendingChange()).toBeUndefined();
+  });
+
+  test("start_committed_pins_head", async () => {
+    const { run } = await start(host(), "committed");
+    const state = await run.state();
+    expect(state.specHash).toBe(hashSource(V1));
+    expect(await readFile(join(state.workdir ?? "", FILE), "utf8")).toBe(V1);
+    expect(await readFile(join(dir, FILE), "utf8")).toBe(DIRTY); // the root is left alone
+    expect(await (run as LocalRun).pendingChange()).toBeUndefined();
+  });
+
+  test("start_new_untracked_pipeline_gets_a_copy_without_a_question", async () => {
+    git("rm", "-q", "--cached", FILE);
+    git("commit", "-q", "-m", "stop tracking");
+    const { run } = await start(host());
+    const state = await run.state();
+    expect(state.specHash).toBe(hashSource(DIRTY));
+    expect(await readFile(join(state.workdir ?? "", FILE), "utf8")).toBe(DIRTY);
+  });
+
+  test("start_config_default_skips_the_question", async () => {
+    await writeFile(
+      join(dir, ".kodel", "config.yaml"),
+      "worktree:\n  mode: auto\npipeline:\n  uncommitted: committed\n",
+    );
+    const { run } = await start(host());
+    expect((await run.state()).specHash).toBe(hashSource(V1));
+  });
+
+  test("a_comment_or_whitespace_difference_is_not_a_question", async () => {
+    await writeFile(join(dir, FILE), `# a note\n${V1}\n\n`);
+    const { run } = await start(host());
+    expect((await run.state()).specHash).toBe(hashSource(`# a note\n${V1}\n\n`));
+    expect(await (run as LocalRun).pendingChange()).toBeUndefined();
+  });
+
+  test("a_run_that_exists_is_picked_up_without_a_question", async () => {
+    const h = host();
+    const first = await start(h, "committed");
+    const again = await start(h);
+    expect(again.status).toBe("reused");
+    expect(again.run.runId).toBe(first.run.runId);
   });
 });

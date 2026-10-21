@@ -6,8 +6,12 @@
 import { readdir, readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import {
+  ChoiceNeeded,
+  canonicalPipeline,
+  diffNodes,
   isRunId,
   KodelError,
+  type PipelineChoice,
   type PipelineHost,
   type PipelineInfo,
   type PipelineProblem,
@@ -18,7 +22,15 @@ import {
   type StartOutcome,
 } from "@kodel-ai/pipeline-core";
 import { loadConfig, type WorktreeConfig } from "./config";
-import { type HostOptions, hashSource, hashSpec, LocalHost, type LocalRun } from "./host";
+import { GitSnapshotter, git } from "./git";
+import {
+  type HostOptions,
+  hashSource,
+  hashSpec,
+  LocalHost,
+  type LocalRun,
+  normalizeTask,
+} from "./host";
 import { FileStore, META_VERSION, type RunMeta } from "./store";
 
 export interface LocalPipelineHostOptions extends HostOptions {
@@ -36,6 +48,26 @@ interface Loaded {
 
 const isPipelineFile = (name: string) => name.endsWith(".yaml") || name.endsWith(".yml");
 const stemOf = (file: string) => file.replace(/\.ya?ml$/, "");
+
+/** What the agent is given when the person has to say which version of the pipeline the run uses. */
+function askWhich(found: Loaded, file: string, committedText: string): PipelineChoice {
+  const changes = diffNodes(parsePipeline(committedText), found.spec);
+  const steps = changes.map((c) => `"${c.slug}" (${c.changes.join(", ")})`).join(", ");
+  return {
+    reason: "pipeline_uncommitted",
+    pipeline: found.spec.name,
+    file,
+    options: ["working", "committed"],
+    changes,
+    tell_the_person:
+      `Nothing was started. Ask the person, in the language they use: the pipeline file ${file} has ` +
+      `changes that are not committed${steps ? ` (${steps})` : ""}, and the run works in its own copy of ` +
+      "the repository made from the last commit, which does not have them. Should the run use the working " +
+      "version (the file as it is now; it is also put into the run's copy, so it goes with the run's changes) " +
+      "or the committed version? Do not choose yourself. Then call pipeline_start again with the same " +
+      "arguments and pipeline_version set to what they say.",
+  };
+}
 
 export class LocalPipelineHost implements PipelineHost {
   private readonly dir: string;
@@ -129,17 +161,82 @@ export class LocalPipelineHost implements PipelineHost {
     return host;
   }
 
+  /**
+   * Whether the pipeline file differs from the last commit in what it means. The run's worktree is
+   * made from that commit, so it does not have the difference. `committed` is undefined when the
+   * commit has no such file (a new pipeline) or it is not a pipeline; the worktree has none then.
+   */
+  private async uncommitted(
+    found: Loaded,
+    file: string,
+  ): Promise<{ committed: string | undefined } | undefined> {
+    try {
+      if (!(await new GitSnapshotter(this.options.root).isRepo())) return undefined;
+      let committed: string | undefined;
+      try {
+        committed = (await git(["show", `HEAD:${file}`], this.options.root)).stdout;
+      } catch {
+        return { committed: undefined };
+      }
+      if (committed === found.source) return undefined;
+      try {
+        if (canonicalPipeline(parsePipeline(committed)) === canonicalPipeline(found.spec)) {
+          return undefined;
+        }
+      } catch (error) {
+        if (!(error instanceof KodelError)) throw error;
+        return { committed: undefined };
+      }
+      return { committed };
+    } catch {
+      return undefined;
+    }
+  }
+
   async start(input: {
     pipeline: string;
     task: string;
     restart: boolean;
     cwd?: string;
+    pipeline_version?: "working" | "committed";
   }): Promise<StartOutcome> {
-    const found = await this.find(input.pipeline);
+    let found = await this.find(input.pipeline);
     if (!found)
       throw new KodelError("UNKNOWN_PIPELINE", `there is no pipeline "${input.pipeline}"`);
     // Read at each start, so an edit of the config applies to the next run without a restart.
-    const worktree = this.options.worktree ?? (await loadConfig(this.storeRoot)).worktree;
+    const config = this.options.worktree ? undefined : await loadConfig(this.storeRoot);
+    const worktree = this.options.worktree ?? (config as NonNullable<typeof config>).worktree;
+    let pipelineCopy: { path: string; text: string } | undefined;
+    let tellCopy = false;
+    const file = this.pipelineFileOf(found.file);
+    if (file !== undefined && worktree.mode === "auto" && this.options.workdirs === undefined) {
+      const dirt = await this.uncommitted(found, file);
+      if (dirt && !(await this.runExists(found.spec.name, input))) {
+        if (dirt.committed === undefined) {
+          // Only the working version exists: the worktree has none, so it gets this one.
+          pipelineCopy = { path: file, text: found.source };
+        } else {
+          const choice =
+            input.pipeline_version ??
+            (await (config ? Promise.resolve(config) : loadConfig(this.storeRoot))).pipeline
+              .uncommitted;
+          if (choice === "ask") {
+            throw new ChoiceNeeded(askWhich(found, file, dirt.committed));
+          }
+          if (choice === "working") {
+            pipelineCopy = { path: file, text: found.source };
+            // The run's branch will differ from the last commit in this file: the person is told.
+            tellCopy = true;
+          } else {
+            found = {
+              file: found.file,
+              spec: parsePipeline(dirt.committed),
+              source: dirt.committed,
+            };
+          }
+        }
+      }
+    }
     const { run, reused, terminal, workdir } = await this.hostFor(
       found.spec,
       found.source,
@@ -148,6 +245,7 @@ export class LocalPipelineHost implements PipelineHost {
       restart: input.restart,
       worktree,
       ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+      ...(pipelineCopy === undefined ? {} : { pipelineCopy }),
     });
     // An existing run goes on with the pipeline it started with, which may no longer be the file's.
     const known = reused || terminal ? await this.open(run.runId) : run;
@@ -155,12 +253,15 @@ export class LocalPipelineHost implements PipelineHost {
     this.runs.set(run.runId, known);
     // Where the run works is what its record says, also for a run picked up again.
     const where = await known.location();
+    const copied =
+      pipelineCopy && workdir && tellCopy
+        ? `The pipeline file ${pipelineCopy.path} was put into the run's directory as it is now, so it goes into the run's branch with its other changes.`
+        : undefined;
+    const note = [workdir?.note, copied].filter((part) => part !== undefined).join(" ");
     return {
       status: reused ? "reused" : terminal ? "terminal" : "started",
       run: known,
-      ...(where
-        ? { workdir: { ...where, ...(workdir?.note === undefined ? {} : { note: workdir.note }) } }
-        : {}),
+      ...(where ? { workdir: { ...where, ...(note === "" ? {} : { note }) } } : {}),
     };
   }
 
@@ -173,6 +274,13 @@ export class LocalPipelineHost implements PipelineHost {
     let stopped = 0;
     for (const run of this.runs.values()) stopped += run.stop();
     return stopped;
+  }
+
+  /** Whether a start for this task would pick up a run that exists, instead of making one. */
+  private async runExists(name: string, input: { task: string; restart: boolean }) {
+    const task = normalizeTask(input.task, this.options.rules ?? []);
+    if (await this.store.findActive(name, task)) return true;
+    return !input.restart && (await this.store.findLatest(name, task)) !== undefined;
   }
 
   /** Every run on disk, oldest first, with its state when it can be read. */

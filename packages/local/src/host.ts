@@ -7,9 +7,9 @@
  * work without a heartbeat and restarts it; the state on disk is all that is needed for that.
  */
 import { createHash } from "node:crypto";
-import { readFile, realpath } from "node:fs/promises";
+import { mkdir, readFile, realpath } from "node:fs/promises";
 import { hostname } from "node:os";
-import { isAbsolute, join, relative } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import {
   type ChangeSet,
   type CheckVerdict,
@@ -256,7 +256,13 @@ export class LocalHost {
    */
   async start(
     task: string,
-    options: { restart?: boolean; cwd?: string; worktree?: WorktreeConfig } = {},
+    options: {
+      restart?: boolean;
+      cwd?: string;
+      worktree?: WorktreeConfig;
+      /** A pipeline file to put into the run's directory, when the last commit does not have it as it should be. */
+      pipelineCopy?: { path: string; text: string };
+    } = {},
   ): Promise<{ run: LocalRun; reused: boolean; terminal: boolean; workdir?: Workdir }> {
     const registry = this.engine.registry ?? defaultRegistry();
     const needsGit = this.spec.nodes.some((n) =>
@@ -269,7 +275,7 @@ export class LocalHost {
     }
     // Spaces at the ends or doubled are not a different task; otherwise a changed space would
     // slip past the run that is waiting for a person.
-    const redactedTask = redactText(task.trim().replace(/\s+/g, " "), this.rules);
+    const redactedTask = normalizeTask(task, this.rules);
     const started = await this.store.withStartLock(async () => {
       const existing = await this.store.findActive(this.spec.name, redactedTask);
       if (existing) {
@@ -299,6 +305,12 @@ export class LocalHost {
         ...(options.cwd === undefined ? {} : { callerCwd: options.cwd }),
       });
       try {
+        // The copy is part of the start: if it cannot be made the directory is taken away again.
+        if (workdir && options.pipelineCopy) {
+          const target = join(workdir.path, options.pipelineCopy.path);
+          await mkdir(dirname(target), { recursive: true });
+          await this.store.replaceFile(target, options.pipelineCopy.text);
+        }
         const meta: RunMeta = {
           v: META_VERSION,
           runId,
@@ -371,6 +383,14 @@ export class LocalHost {
     const result = await this.open(runId).acknowledge("sealed after a manual change");
     if (!result.ok) throw result.error;
   }
+}
+
+/**
+ * A task as it is kept and compared: spaces at the ends or doubled are not a different task, and
+ * what redaction takes out is gone before anything is compared or stored.
+ */
+export function normalizeTask(task: string, rules: RedactRule[]): string {
+  return redactText(task.trim().replace(/\s+/g, " "), rules);
 }
 
 /** The largest pipeline an agent may propose. */

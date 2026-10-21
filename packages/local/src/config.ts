@@ -18,12 +18,23 @@ export interface WorktreeConfig {
   dir: string;
 }
 
+export interface PipelineConfig {
+  /**
+   * What a run uses when its pipeline file has changes that are not committed (it works in a worktree
+   * made from the last commit, which does not have them). `ask`: the agent asks the person each time.
+   * For people who work on the pipeline itself and always mean the file as it is.
+   */
+  uncommitted: "ask" | "working" | "committed";
+}
+
 export interface ProjectConfig {
   version: string;
   worktree: WorktreeConfig;
+  pipeline: PipelineConfig;
 }
 
 export const DEFAULT_WORKTREE: WorktreeConfig = { mode: "auto", dir: DEFAULT_WORKTREE_DIR };
+export const DEFAULT_PIPELINE: PipelineConfig = { uncommitted: "ask" };
 
 export const CONFIG_FILE = "config.yaml";
 
@@ -36,6 +47,12 @@ const configSchema = z
       .object({
         mode: z.enum(["auto", "off"]).optional(),
         dir: z.string().min(1).optional(),
+      })
+      .strict()
+      .optional(),
+    pipeline: z
+      .object({
+        uncommitted: z.enum(["ask", "working", "committed"]).optional(),
       })
       .strict()
       .optional(),
@@ -53,7 +70,11 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
     text = await readFile(file, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { version: parseVersion(1).version, worktree: { ...DEFAULT_WORKTREE } };
+      return {
+        version: parseVersion(1).version,
+        worktree: { ...DEFAULT_WORKTREE },
+        pipeline: { ...DEFAULT_PIPELINE },
+      };
     }
     throw error;
   }
@@ -92,5 +113,6 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
       mode: parsed.data.worktree?.mode ?? DEFAULT_WORKTREE.mode,
       dir: parsed.data.worktree?.dir ?? DEFAULT_WORKTREE.dir,
     },
+    pipeline: { uncommitted: parsed.data.pipeline?.uncommitted ?? DEFAULT_PIPELINE.uncommitted },
   };
 }

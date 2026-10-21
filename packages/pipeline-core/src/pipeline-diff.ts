@@ -49,7 +49,8 @@ function reachable(spec: PipelineSpec, from: string[]): Set<string> {
   return seen;
 }
 
-function diffNodes(before: PipelineSpec, after: PipelineSpec): NodeDiff[] {
+/** What differs per node between two versions of a pipeline. */
+export function diffNodes(before: PipelineSpec, after: PipelineSpec): NodeDiff[] {
   const out: NodeDiff[] = [];
   const old = new Map(before.nodes.map((n) => [n.slug, n]));
   for (const node of after.nodes) {

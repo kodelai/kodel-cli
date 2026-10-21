@@ -683,7 +683,7 @@ describe("the tool surface", () => {
       pipeline_list: [],
       pipeline_resolve: ["pipeline", "run_id"],
       pipeline_plan: ["pipeline", "task"],
-      pipeline_start: ["task", "pipeline", "restart", "cwd"],
+      pipeline_start: ["task", "pipeline", "restart", "pipeline_version", "cwd"],
       pipeline_next_step: ["run_id", "wait_s"],
       pipeline_report_result: [
         "run_id",
