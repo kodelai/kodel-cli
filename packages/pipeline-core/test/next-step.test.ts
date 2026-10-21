@@ -114,7 +114,7 @@ describe("next_step shapes", () => {
     });
   });
 
-  test("a human node: a waiting gate with the files and how to decide", () => {
+  test("a human node: a waiting gate with the instructions and how to decide", () => {
     const run = drive(auto);
     const step = nextStep(feature, run.state, 5_000);
     expect(step).toMatchObject({
@@ -122,7 +122,7 @@ describe("next_step shapes", () => {
         reason: "gate",
         node_slug: "plan-approval",
         prompt: "Review the plan. Approve to start implementation, or reject with a reason.",
-        files: ["docs/plans/dobavit_limit_popytok_vkhoda.md"],
+        instructions: expect.stringContaining("docs/plans/dobavit_limit_popytok_vkhoda.md"),
         how_to_decide: { cli: 'kodel gate approve|reject r7 --reason "..."' },
       },
     });

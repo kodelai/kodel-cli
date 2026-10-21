@@ -47,7 +47,7 @@ export interface NodeSpec {
   /** Label emitted when the node itself fails (meaningful for `command` nodes). */
   on_fail: string;
   checks: CheckSpec[];
-  /** Kind-specific parameters (`prompt`, `command`, `files`, ...). */
+  /** Kind-specific parameters (`prompt`, `command`, `instructions`, ...). */
   params: Record<string, unknown>;
 }
 

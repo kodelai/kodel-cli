@@ -80,6 +80,37 @@ export const REVIEWED: Fixture = {
   ].join("\n"),
 };
 
+/** A gate with `instructions` for the person, whose details the agent cannot know unless the gate gives them. */
+export const INSTRUCTED: Fixture = {
+  pipeline: [
+    "name: instructed",
+    "nodes:",
+    "  - slug: write",
+    "    kind: agent",
+    "    prompt: |",
+    "      Task: {{task}}",
+    "      Create note.txt containing one line with the word hello. Change nothing else.",
+    "    checks:",
+    '      - { kind: diff, paths: ["note.txt"], mode: changed_only }',
+    "  - slug: approve",
+    "    kind: human",
+    "    prompt: Is note.txt right?",
+    "    instructions: |",
+    "      Run `node verify-note.js` and check that it prints OK.",
+    "      Then compare note.txt with the ticket TKT-9137, and approve only if they agree.",
+    "  - slug: verify",
+    "    kind: command",
+    `    command: node -e "process.exit(0)"`,
+    "edges:",
+    "  - { from: write, to: approve }",
+    "  - { from: approve, to: verify }",
+    "  - { from: approve, to: write, when: rejected }",
+    "  - { from: verify, to: write, when: failed }",
+    "",
+  ].join("\n"),
+  files: { "verify-note.js": "console.log('OK');\n" },
+};
+
 /** A check nothing can pass, with a low limit, so the run pauses. */
 export const STUBBORN: Fixture = {
   pipeline: [

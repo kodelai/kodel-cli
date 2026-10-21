@@ -45,7 +45,7 @@ nodes:
   - slug: plan-approval
     kind: human
     prompt: Review the plan. Approve to start implementing, or reject with a reason.
-    files: ["docs/plans/{{task.slug}}.md"]
+    instructions: "Read docs/plans/{{task.slug}}.md."
   - slug: impl
     kind: agent
     prompt: |
@@ -93,7 +93,7 @@ nodes:
   - slug: plan-approval
     kind: human
     prompt: Review the plan. Approve to start implementing, or reject with a reason.
-    files: ["docs/plans/{{task.slug}}.md"]
+    instructions: "Read docs/plans/{{task.slug}}.md."
   - slug: impl
     kind: agent
     prompt: Implement the approved plan in docs/plans/{{task.slug}}.md, with tests.
