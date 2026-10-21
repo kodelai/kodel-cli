@@ -53,17 +53,36 @@ export interface RunHandle {
   waitForRest(ms: number): Promise<void>;
 }
 
+/** Where a run's commands and checks run, when that is not the directory the agent started in. */
+export interface RunLocation {
+  /** Absolute. The host decides it; the core never reads or writes there. */
+  path: string;
+  branch?: string;
+  /** Something the agent should know about it (for example, what the directory does not have). */
+  note?: string;
+}
+
 export interface StartOutcome {
   /** `reused`: the active run for this task. `terminal`: the task already ran to its end. */
   status: "started" | "reused" | "terminal";
   run: RunHandle;
+  /** Absent when the run works in the agent's own directory. */
+  workdir?: RunLocation;
 }
 
 export interface PipelineHost {
   list(): Promise<{ pipelines: PipelineInfo[]; problems: PipelineProblem[] }>;
   resolve(name: string): Promise<PipelineSpec | undefined>;
-  /** Start or find the run for a task; throws `KodelError`. */
-  start(input: { pipeline: string; task: string; restart: boolean }): Promise<StartOutcome>;
+  /**
+   * Start or find the run for a task; throws `KodelError`. `cwd` is the directory the agent says it
+   * is working in: a hint the host may check and use, never a place it has to run anything.
+   */
+  start(input: {
+    pipeline: string;
+    task: string;
+    restart: boolean;
+    cwd?: string;
+  }): Promise<StartOutcome>;
   open(runId: string): Promise<RunHandle | undefined>;
 }
 
@@ -166,7 +185,12 @@ export class PipelineService {
     });
   }
 
-  start(input: { task: string; pipeline?: string; restart?: boolean }): Promise<ToolResult> {
+  start(input: {
+    task: string;
+    pipeline?: string;
+    restart?: boolean;
+    cwd?: string;
+  }): Promise<ToolResult> {
     return guarded(async () => {
       let name = input.pipeline;
       if (!name) {
@@ -191,12 +215,17 @@ export class PipelineService {
         pipeline: name,
         task: input.task,
         restart: input.restart === true,
+        ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
       });
       return {
         ok: true,
         run_id: outcome.run.runId,
         reused: outcome.status === "reused",
         terminal: outcome.status === "terminal",
+        // null: work in the directory you are in, as before.
+        workdir: outcome.workdir?.path ?? null,
+        ...(outcome.workdir?.branch === undefined ? {} : { branch: outcome.workdir.branch }),
+        ...(outcome.workdir?.note === undefined ? {} : { note: outcome.workdir.note }),
         next: await outcome.run.nextStep(),
       };
     });

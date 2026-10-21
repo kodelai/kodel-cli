@@ -148,14 +148,17 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
             pipeline: meta.pipeline,
             status: state?.status ?? "unreadable",
             task: meta.task,
+            ...(state?.workdir === undefined ? {} : { workdir: state.workdir }),
           }));
           env.out(`${JSON.stringify(list, null, 2)}\n`);
           return;
         }
         if (runs.length === 0) env.out("no runs yet\n");
         for (const { meta, state } of runs) {
+          // Only a run that works somewhere other than the root says where.
+          const where = state?.workdir === undefined ? "" : `  in ${plain(state.workdir)}`;
           env.out(
-            `${plain(meta.runId)}  ${plain(meta.pipeline)}  ${describeRun(state)}  ${plain(meta.task)}\n`,
+            `${plain(meta.runId)}  ${plain(meta.pipeline)}  ${describeRun(state)}${where}  ${plain(meta.task)}\n`,
           );
         }
         return;
@@ -165,6 +168,10 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       env.out(
         `run:       ${plain(state.runId)}\ntask:      ${plain(state.task)}\nstatus:    ${describeRun(state)}\n`,
       );
+      // A state that is not as kodel left it is said below (integrity); the place is not guessed.
+      const where = await run.location().catch(() => undefined);
+      if (where) env.out(`workdir:   ${plain(where.path)}\n`);
+      if (where?.branch) env.out(`branch:    ${plain(where.branch)}\n`);
       env.out(`integrity: ${await run.integrityStatus()}\n`);
       env.out(`seal:      ${await run.sealStatus()}\n`);
       env.out(`trail:     ${state.trail.map(plain).join(" > ")}\n`);

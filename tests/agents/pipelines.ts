@@ -159,3 +159,33 @@ export const AUDIT: Fixture = {
     ].join("\n"),
   },
 };
+
+/**
+ * One step whose check looks for the file in the directory the engine runs it in: whether the
+ * agent wrote it where the run works is the whole question.
+ */
+export const WORKTREE: Fixture = {
+  pipeline: [
+    "name: worktree",
+    "nodes:",
+    "  - slug: write",
+    "    kind: agent",
+    "    prompt: |",
+    "      Task: {{task}}",
+    "      Create answer.txt containing the word hello and nothing else.",
+    "    checks:",
+    "      - { kind: command, command: node check.js }",
+    "",
+  ].join("\n"),
+  files: {
+    "check.js": [
+      "const fs = require('node:fs');",
+      "const word = fs.existsSync('answer.txt') ? fs.readFileSync('answer.txt', 'utf8').trim() : '';",
+      "if (word !== 'hello') {",
+      "  console.log('there is no answer.txt with the word hello in ' + process.cwd());",
+      "  process.exit(1);",
+      "}",
+      "",
+    ].join("\n"),
+  },
+};

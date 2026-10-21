@@ -17,6 +17,7 @@ import {
   nextStep as projectNextStep,
   type RunEvent,
   type RunHandle,
+  type RunLocation,
   type RunState,
   type StartOutcome,
   type StepResult,
@@ -45,6 +46,10 @@ class FakeHost implements PipelineHost {
   holdCommands = false;
   /** The waits the service asked for, in milliseconds. */
   readonly waited: number[] = [];
+  /** What the service asked `start` for. */
+  readonly starts: { pipeline: string; task: string; restart: boolean; cwd?: string }[] = [];
+  /** Where this host says its runs work, when it has an opinion. */
+  location: RunLocation | undefined;
   private count = 0;
 
   constructor(private readonly specs: PipelineSpec[]) {}
@@ -62,7 +67,13 @@ class FakeHost implements PipelineHost {
     return this.specs.find((s) => s.name === name);
   }
 
-  async start(input: { pipeline: string; task: string; restart: boolean }): Promise<StartOutcome> {
+  async start(input: {
+    pipeline: string;
+    task: string;
+    restart: boolean;
+    cwd?: string;
+  }): Promise<StartOutcome> {
+    this.starts.push(input);
     const spec = this.specs.find((s) => s.name === input.pipeline) as PipelineSpec;
     const active = [...this.runs.values()].find(
       (r) => r.spec.name === input.pipeline && r.task === input.task,
@@ -80,7 +91,7 @@ class FakeHost implements PipelineHost {
     );
     this.runs.set(run.runId, run);
     await run.send({ type: "start", runId: run.runId, task: input.task, specHash: "h" });
-    return { status: "started", run };
+    return { status: "started", run, ...(this.location ? { workdir: this.location } : {}) };
   }
 
   async open(runId: string) {
@@ -565,6 +576,65 @@ describe("waiting for the engine's work", () => {
   });
 });
 
+describe("where a run works", () => {
+  test("tNN_start_passes_the_agents_cwd_on_and_answers_workdir_null_when_the_host_has_none", async () => {
+    const { host, svc } = service();
+    const started = await invokeTool(svc, "pipeline_start", { task: "x", cwd: "/work/here" });
+    const answer = asOk(started);
+    expect(host.starts[0]?.cwd).toBe("/work/here");
+    expect(answer.workdir).toBeNull();
+    expect(answer).not.toHaveProperty("branch");
+    expect(answer).not.toHaveProperty("note");
+    // without a cwd the host is not given one
+    await invokeTool(svc, "pipeline_start", { task: "y" });
+    expect(host.starts[1]).not.toHaveProperty("cwd");
+  });
+
+  test("tNN_start_names_the_workdir_the_host_chose_with_its_branch_and_note", async () => {
+    const { host, svc } = service();
+    host.location = {
+      path: "/repo/.kodel/worktrees/r_1",
+      branch: "kodel/r_1",
+      note: "starts from HEAD",
+    };
+    const answer = asOk(await invokeTool(svc, "pipeline_start", { task: "x" }));
+    expect(answer).toMatchObject({
+      workdir: "/repo/.kodel/worktrees/r_1",
+      branch: "kodel/r_1",
+      note: "starts from HEAD",
+    });
+  });
+
+  test("tNN_cwd_must_be_an_absolute_path_of_a_sensible_size", async () => {
+    const { svc } = service();
+    for (const cwd of ["relative/path", ".", "", "x".repeat(4_097)]) {
+      expect(
+        await invokeTool(svc, "pipeline_start", { task: "a", cwd }),
+        cwd.slice(0, 20),
+      ).toMatchObject({
+        code: "INVALID_ARGUMENTS",
+      });
+    }
+    for (const cwd of [
+      "/a/b",
+      "C:\\Users\\me\\repo",
+      "C:/Users/me/repo",
+      "\\\\server\\share\\repo",
+    ]) {
+      expect((await invokeTool(svc, "pipeline_start", { task: `ok ${cwd}`, cwd })).ok, cwd).toBe(
+        true,
+      );
+    }
+  });
+
+  test("tNN_the_instructions_and_the_start_tool_tell_the_agent_to_work_in_the_workdir", () => {
+    expect(SERVER_INSTRUCTIONS).toContain("`workdir`");
+    const start = TOOLS.find((t) => t.name === "pipeline_start");
+    expect(start?.description).toContain("workdir");
+    expect(start?.description).toContain("cwd");
+  });
+});
+
 describe("the tool surface", () => {
   test("these tools exist, in this order, and the surface is versioned", () => {
     expect(CONTRACT_VERSION).toBe(1);
@@ -597,7 +667,7 @@ describe("the tool surface", () => {
       pipeline_list: [],
       pipeline_resolve: ["pipeline"],
       pipeline_plan: ["pipeline", "task"],
-      pipeline_start: ["task", "pipeline", "restart"],
+      pipeline_start: ["task", "pipeline", "restart", "cwd"],
       pipeline_next_step: ["run_id", "wait_s"],
       pipeline_report_result: [
         "run_id",

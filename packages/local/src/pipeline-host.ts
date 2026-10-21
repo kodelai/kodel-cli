@@ -16,12 +16,15 @@ import {
   type RunState,
   type StartOutcome,
 } from "@kodel-ai/pipeline-core";
+import { loadConfig, type WorktreeConfig } from "./config";
 import { type HostOptions, hashSource, hashSpec, LocalHost, type LocalRun } from "./host";
 import { FileStore, type RunMeta } from "./store";
 
 export interface LocalPipelineHostOptions extends HostOptions {
   /** Where the pipeline files are; defaults to `<root>/.kodel/pipelines`. */
   pipelinesDir?: string;
+  /** Instead of the `worktree` section of the project config; mostly for tests. */
+  worktree?: WorktreeConfig;
 }
 
 interface Loaded {
@@ -36,15 +39,16 @@ const stemOf = (file: string) => file.replace(/\.ya?ml$/, "");
 export class LocalPipelineHost implements PipelineHost {
   private readonly dir: string;
   private readonly store: FileStore;
+  private readonly storeRoot: string;
   private readonly hosts = new Map<string, LocalHost>();
   /** One handle per run, so that work running in this process is shared by every call. */
   private readonly runs = new Map<string, LocalRun>();
 
   constructor(private readonly options: LocalPipelineHostOptions) {
-    const storeRoot = options.storeRoot ?? `${options.root}/.kodel`;
-    this.dir = options.pipelinesDir ?? join(storeRoot, "pipelines");
+    this.storeRoot = options.storeRoot ?? `${options.root}/.kodel`;
+    this.dir = options.pipelinesDir ?? join(this.storeRoot, "pipelines");
     this.store = new FileStore({
-      root: storeRoot,
+      root: this.storeRoot,
       ...(options.rules ? { rules: options.rules } : {}),
     });
   }
@@ -112,19 +116,34 @@ export class LocalPipelineHost implements PipelineHost {
     return host;
   }
 
-  async start(input: { pipeline: string; task: string; restart: boolean }): Promise<StartOutcome> {
+  async start(input: {
+    pipeline: string;
+    task: string;
+    restart: boolean;
+    cwd?: string;
+  }): Promise<StartOutcome> {
     const found = await this.find(input.pipeline);
     if (!found)
       throw new KodelError("UNKNOWN_PIPELINE", `there is no pipeline "${input.pipeline}"`);
-    const { run, reused, terminal } = await this.hostFor(found.spec, found.source).start(
+    // Read at each start, so an edit of the config applies to the next run without a restart.
+    const worktree = this.options.worktree ?? (await loadConfig(this.storeRoot)).worktree;
+    const { run, reused, terminal, workdir } = await this.hostFor(found.spec, found.source).start(
       input.task,
-      { restart: input.restart },
+      { restart: input.restart, worktree, ...(input.cwd === undefined ? {} : { cwd: input.cwd }) },
     );
     // An existing run goes on with the pipeline it started with, which may no longer be the file's.
     const known = reused || terminal ? await this.open(run.runId) : run;
     if (!known) throw new KodelError("UNKNOWN_RUN", `there is no run "${run.runId}"`);
     this.runs.set(run.runId, known);
-    return { status: reused ? "reused" : terminal ? "terminal" : "started", run: known };
+    // Where the run works is what its record says, also for a run picked up again.
+    const where = await known.location();
+    return {
+      status: reused ? "reused" : terminal ? "terminal" : "started",
+      run: known,
+      ...(where
+        ? { workdir: { ...where, ...(workdir?.note === undefined ? {} : { note: workdir.note }) } }
+        : {}),
+    };
   }
 
   /**

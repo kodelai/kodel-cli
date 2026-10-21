@@ -41,6 +41,8 @@ export interface RunReport {
   /** Seconds spent waiting for a person at gates. */
   waiting_s: number;
   nodes: NodeReport[];
+  /** Where the run works, when not in the repository root; added by a host that knows. */
+  workdir?: string;
   restarts: number;
   pauses: number;
   feedback: number;

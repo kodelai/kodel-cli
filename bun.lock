@@ -29,6 +29,8 @@
       "version": "0.0.0",
       "dependencies": {
         "@kodel-ai/pipeline-core": "workspace:*",
+        "yaml": "^2.6.0",
+        "zod": "^3.24.0",
       },
       "devDependencies": {
         "@modelcontextprotocol/sdk": "^1.31.0",

@@ -34,6 +34,10 @@ export interface RunMeta {
   task: string;
   specHash: string;
   createdAt: number;
+  /** Where the run works, when not in the repository root. Runs from before this read as the root. */
+  workdir?: string;
+  /** The branch made for the run's worktree, when kodel made one. */
+  branch?: string;
 }
 
 export interface StoreOptions {
@@ -121,9 +125,18 @@ export class FileStore {
 
   async createRun(meta: RunMeta): Promise<void> {
     await mkdir(join(this.runDir(meta.runId), "reports"), { recursive: true });
+    // The directory and the branch are made by kodel, not typed by the agent, and a path the rules
+    // rewrote (a long random-looking folder name is enough) would no longer name the directory: the
+    // run could not find its way back to it. They are kept as they are.
+    const { workdir, branch, ...rest } = meta;
+    const record: RunMeta = {
+      ...this.redact(rest),
+      ...(workdir === undefined ? {} : { workdir }),
+      ...(branch === undefined ? {} : { branch }),
+    };
     await this.writeAtomic(
       join(this.runDir(meta.runId), "meta.json"),
-      `${JSON.stringify(this.redact(meta), null, 2)}\n`,
+      `${JSON.stringify(record, null, 2)}\n`,
     );
   }
 

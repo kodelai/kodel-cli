@@ -34,9 +34,11 @@ import {
   validateReport,
 } from "@kodel-ai/pipeline-core";
 import { type CommandOptions, type CommandResult, runCommand } from "./command";
+import type { WorktreeConfig } from "./config";
 import { GitSnapshotter } from "./git";
 import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integrity";
-import { FileStore, newRunId } from "./store";
+import { FileStore, newRunId, type RunMeta } from "./store";
+import { GitWorktreeProvider, type Workdir, type WorkdirProvider } from "./worktree";
 
 export interface CommandContext {
   runId: string;
@@ -62,7 +64,10 @@ export interface CheckContext {
   runId: string;
   signal: AbortSignal;
   store: FileStore;
+  /** The run's own: it looks at the run's working directory, not at the root. */
   snapshotter: GitSnapshotter;
+  /** The run's working directory, checked just now. */
+  cwd: string;
 }
 
 /** How a kind of check gathers its facts and reaches a verdict. Plugin kinds add one. */
@@ -78,6 +83,8 @@ export interface HostOptions {
   clock?: () => number;
   runCommand?: RunCommandFn;
   snapshotter?: GitSnapshotter;
+  /** Makes and checks the directories runs work in; by default git worktrees of `root`. */
+  workdirs?: WorkdirProvider;
   checkRunners?: Record<string, CheckRunner>;
   /** How often running engine work sends a heartbeat; 0 turns the timer off (tests). */
   heartbeatMs?: number;
@@ -101,7 +108,7 @@ export interface HostOptions {
  * told it is run by the engine, for which run, node and attempt.
  */
 export function engineEnv(
-  step: { runId: string; node: string; attempt: number },
+  step: { runId: string; node: string; attempt: number; workdir?: string },
   base: Record<string, string | undefined> = process.env,
 ): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = {};
@@ -112,6 +119,7 @@ export function engineEnv(
   env.KODEL_RUN_ID = step.runId;
   env.KODEL_NODE = step.node;
   env.KODEL_ATTEMPT = String(step.attempt);
+  if (step.workdir !== undefined) env.KODEL_WORKDIR = step.workdir;
   return env;
 }
 
@@ -148,6 +156,14 @@ function redactEvent(event: RunEvent, rules: RedactRule[]): RunEvent {
   }
   return copy as unknown as RunEvent;
 }
+
+/** An error as text for a person or an agent; the code of the engine's own errors goes first. */
+const describeError = (error: unknown): string =>
+  error instanceof KodelError
+    ? `${error.code}: ${error.message}`
+    : error instanceof Error
+      ? error.message
+      : String(error);
 
 const REASON_TAIL = 2_000;
 const lastChars = (text: string, n: number) => (text.length > n ? `...${text.slice(-n)}` : text);
@@ -226,8 +242,8 @@ export class LocalHost {
    */
   async start(
     task: string,
-    options: { restart?: boolean } = {},
-  ): Promise<{ run: LocalRun; reused: boolean; terminal: boolean }> {
+    options: { restart?: boolean; cwd?: string; worktree?: WorktreeConfig } = {},
+  ): Promise<{ run: LocalRun; reused: boolean; terminal: boolean; workdir?: Workdir }> {
     const registry = this.engine.registry ?? defaultRegistry();
     const needsGit = this.spec.nodes.some((n) =>
       n.checks.some((c) => registry.check(c.kind)?.baseline?.(c.params)),
@@ -258,23 +274,46 @@ export class LocalHost {
       // against, and it does not change when the parser learns a new field.
       const specHash =
         this.options.source !== undefined ? hashSource(this.options.source) : hashSpec(this.spec);
-      await this.store.createRun({
-        v: 1,
+      // The directory first, then the run: a failure after this point takes the directory away
+      // again, so no half-made run is left behind.
+      const provider =
+        this.options.workdirs ??
+        (options.worktree
+          ? new GitWorktreeProvider(this.options.root, options.worktree)
+          : undefined);
+      const workdir = await provider?.prepare({
         runId,
-        pipeline: this.spec.name,
-        task: redactedTask,
-        specHash,
-        createdAt: now,
+        ...(options.cwd === undefined ? {} : { callerCwd: options.cwd }),
       });
       try {
+        const meta: RunMeta = {
+          v: 1,
+          runId,
+          pipeline: this.spec.name,
+          task: redactedTask,
+          specHash,
+          createdAt: now,
+          ...(workdir ? { workdir: workdir.path } : {}),
+          // The branch only when kodel made it: it is what the hint at the end offers to delete.
+          ...(workdir?.branch === undefined ? {} : { branch: workdir.branch }),
+        };
+        await this.store.createRun(meta);
         if (this.options.source !== undefined)
           await this.store.writeSpec(runId, this.options.source);
         const run = new LocalRun(this, runId);
-        const result = await run.apply({ type: "start", runId, task: redactedTask, specHash });
+        const result = await run.apply({
+          type: "start",
+          runId,
+          task: redactedTask,
+          specHash,
+          ...(workdir ? { workdir: workdir.path } : {}),
+          ...(workdir?.branch === undefined ? {} : { branch: workdir.branch }),
+        });
         if (!result.ok) throw result.error;
-        return { run, reused: false, terminal: false };
+        return { run, reused: false, terminal: false, ...(workdir ? { workdir } : {}) };
       } catch (error) {
         await this.store.removeRun(runId).catch(() => undefined);
+        if (workdir) await provider?.discard(workdir).catch(() => undefined);
         throw error;
       }
     });
@@ -284,6 +323,11 @@ export class LocalHost {
     // missing is said at the gate, not hidden.
     if (!started.reused && !started.terminal) await started.run.recordRunBaseline();
     return started;
+  }
+
+  /** Throws `WORKDIR_MISSING` or `WORKDIR_INVALID` unless `workdir` is still the run's own directory. */
+  verifyWorkdir(workdir: string): Promise<void> {
+    return (this.options.workdirs ?? new GitWorktreeProvider(this.options.root)).verify(workdir);
   }
 
   /** A handle on a run that is already on disk (after a restart, or from another process). */
@@ -314,10 +358,68 @@ export class LocalRun {
   >();
   private readonly pending = new Set<Promise<void>>();
 
+  private recorded: Promise<RunMeta | undefined> | undefined;
+
   constructor(
     private readonly host: LocalHost,
     readonly runId: string,
   ) {}
+
+  /** The run's record of where it works (its `meta.json`); read once, it does not change. */
+  private meta(): Promise<RunMeta | undefined> {
+    if (!this.recorded) {
+      this.recorded = this.host.store.readMeta(this.runId);
+      // A read that failed is tried again next time, not remembered.
+      this.recorded.catch(() => {
+        this.recorded = undefined;
+      });
+    }
+    return this.recorded;
+  }
+
+  /**
+   * Where the run works, if that is not the repository root: the worktree made for it, or one it was
+   * started in. The path is read from the run's state and held against the trusted hash like every
+   * other read of it: `meta.json` can be rewritten by the agent, and a path taken from it would send
+   * commands wherever the agent liked, or, with the field deleted, to the root. Only the branch (for
+   * the hint at the end) comes from `meta.json`.
+   */
+  async location(): Promise<{ path: string; branch?: string } | undefined> {
+    const raw = await this.host.store.readStateRaw(this.runId);
+    if (raw && (await this.host.integrity.trusts(this.runId, raw.hash)) === false) {
+      throw new KodelError(
+        "STATE_MODIFIED_EXTERNALLY",
+        `the state of run ${this.runId} was changed outside kodel; look at what changed, then accept it with "kodel ack ${this.runId}"`,
+      );
+    }
+    const path = raw?.state.workdir;
+    if (!path) return undefined;
+    const branch = (await this.meta())?.branch;
+    return { path, ...(branch === undefined ? {} : { branch }) };
+  }
+
+  /** The same, for a display that must not fail because the files are not as kodel left them. */
+  private async locationForDisplay(): Promise<{ path: string; branch?: string } | undefined> {
+    return this.location().catch(() => undefined);
+  }
+
+  /**
+   * The directory commands, checks and snapshots of this run work in, checked just now: a worktree
+   * that was removed or swapped since the last command is refused (`WORKDIR_MISSING`,
+   * `WORKDIR_INVALID`), never replaced by the root.
+   */
+  private async cwd(): Promise<string> {
+    const where = await this.location();
+    if (!where) return this.host.options.root;
+    await this.host.verifyWorkdir(where.path);
+    return where.path;
+  }
+
+  private async snapshotter(): Promise<GitSnapshotter> {
+    const cwd = await this.cwd();
+    if (this.host.options.snapshotter) return this.host.options.snapshotter;
+    return cwd === this.host.options.root ? this.host.snapshotter : new GitSnapshotter(cwd);
+  }
 
   async state(): Promise<RunState> {
     const state = await this.host.store.readState(this.runId);
@@ -428,8 +530,9 @@ export class LocalRun {
 
   /** Take the working tree as it is, once, as the baseline of the whole run (not an error if it fails). */
   async recordRunBaseline(): Promise<void> {
-    const { snapshotter, store } = this.host;
+    const { store } = this.host;
     try {
+      const snapshotter = await this.snapshotter();
       if (!(await snapshotter.isRepo())) return;
       if ((await store.readSnapshots(this.runId)).run !== undefined) return; // a check took it
       await store.writeSnapshot(this.runId, "run", await snapshotter.snapshot());
@@ -461,12 +564,9 @@ export class LocalRun {
       };
     }
     try {
-      return { kind: "changes", files: await this.host.snapshotter.changesSince(tree) };
+      return { kind: "changes", files: await (await this.snapshotter()).changesSince(tree) };
     } catch (error) {
-      return {
-        kind: "unavailable",
-        reason: error instanceof Error ? error.message : String(error),
-      };
+      return { kind: "unavailable", reason: describeError(error) };
     }
   }
 
@@ -486,7 +586,7 @@ export class LocalRun {
   private async dispatch(effect: Effect): Promise<void> {
     switch (effect.type) {
       case "take_snapshot": {
-        const tree = await this.host.snapshotter.snapshot();
+        const tree = await (await this.snapshotter()).snapshot();
         await this.host.store.writeSnapshot(this.runId, effect.key, tree);
         return;
       }
@@ -501,12 +601,9 @@ export class LocalRun {
         // what is missing is recorded, so the gate says it cannot tell instead of showing nothing.
         const key = `gate:${effect.node}:${effect.attempt}`;
         try {
-          if (await this.host.snapshotter.isRepo()) {
-            await this.host.store.writeSnapshot(
-              this.runId,
-              key,
-              await this.host.snapshotter.snapshot(),
-            );
+          const snapshotter = await this.snapshotter();
+          if (await snapshotter.isRepo()) {
+            await this.host.store.writeSnapshot(this.runId, key, await snapshotter.snapshot());
           }
         } catch (error) {
           await this.host.store
@@ -562,7 +659,7 @@ export class LocalRun {
               : await this.runCheck(effect, controller.signal);
         } catch (error) {
           if (controller.signal.aborted) return;
-          const reason = `the host could not finish this: ${error instanceof Error ? error.message : String(error)}`;
+          const reason = `the host could not finish this: ${describeError(error)}`;
           event =
             effect.type === "run_command"
               ? {
@@ -612,11 +709,17 @@ export class LocalRun {
     signal: AbortSignal,
     timeout: number | undefined,
     step: { node: string; attempt: number },
+    cwd: string,
   ): CommandOptions {
-    const { options, rules, maxTailBytes } = this.host;
+    const { rules, maxTailBytes } = this.host;
     return {
-      cwd: options.root,
-      env: engineEnv({ runId: this.runId, ...step }),
+      cwd,
+      // Told only to a run that works somewhere other than the root: for the rest nothing changes.
+      env: engineEnv({
+        runId: this.runId,
+        ...step,
+        ...(cwd === this.host.options.root ? {} : { workdir: cwd }),
+      }),
       inheritEnv: false,
       signal,
       redact: (text) => redactText(text, rules),
@@ -630,9 +733,10 @@ export class LocalRun {
     effect: Extract<Effect, { type: "run_command" }>,
     signal: AbortSignal,
   ): Promise<RunEvent> {
+    const cwd = await this.cwd();
     const result = await this.host.runner(
       effect.command,
-      this.commandOptions(signal, effect.timeout, effect),
+      this.commandOptions(signal, effect.timeout, effect, cwd),
       {
         runId: this.runId,
         node: effect.node,
@@ -660,12 +764,14 @@ export class LocalRun {
   private async runCheck(effect: RunCheckEffect, signal: AbortSignal): Promise<RunEvent> {
     const runner = this.host.checkRunners[effect.kind];
     const started = Date.now();
+    const cwd = await this.cwd();
     const verdict: CheckVerdict = runner
       ? await runner(effect, {
           runId: this.runId,
           signal,
           store: this.host.store,
-          snapshotter: this.host.snapshotter,
+          snapshotter: await this.snapshotter(),
+          cwd,
         })
       : { passed: false, reason: `no runner for the check kind "${effect.kind}"` };
     return {
@@ -767,6 +873,12 @@ export class LocalRun {
       this.host.clock(),
       this.host.engine.registry ?? defaultRegistry(),
     );
+    if ("done" in step && step.run_status === "completed") {
+      const where = await this.locationForDisplay();
+      if (where?.branch !== undefined) {
+        step.tell_the_person = doneHint(this.host.options.root, where.path, where.branch);
+      }
+    }
     if ("waiting" in step && step.waiting.reason === "gate") {
       const found = await this.changesSinceStart();
       if (found.kind === "unavailable") {
@@ -782,7 +894,9 @@ export class LocalRun {
 
   /** Where the time went and what was redone, from the run's own state and journal. */
   async report(): Promise<RunReport> {
-    return summarizeRun(await this.state(), await this.host.store.readJournal(this.runId));
+    const report = summarizeRun(await this.state(), await this.host.store.readJournal(this.runId));
+    const where = await this.locationForDisplay();
+    return where ? { ...report, workdir: where.path } : report;
   }
 
   /** Files changed since the run started, with the lines changed, or why that cannot be told. */
@@ -797,12 +911,9 @@ export class LocalRun {
       };
     }
     try {
-      return { kind: "changes", files: await this.host.snapshotter.changesSince(tree) };
+      return { kind: "changes", files: await (await this.snapshotter()).changesSince(tree) };
     } catch (error) {
-      return {
-        kind: "unavailable",
-        reason: error instanceof Error ? error.message : String(error),
-      };
+      return { kind: "unavailable", reason: describeError(error) };
     }
   }
 
@@ -942,6 +1053,29 @@ export class LocalRun {
   }
 }
 
+/** A path as one word for the shell the person types into. */
+function shellQuote(path: string): string {
+  if (/^[\w@%+=:,./-]+$/.test(path)) return path;
+  return process.platform === "win32"
+    ? `"${path.replace(/"/g, '\\"')}"`
+    : `'${path.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * What the agent tells the person when a run in its own worktree is done. Nothing is removed by
+ * kodel: the agent has no tool for it, and the person runs these commands when they have looked.
+ */
+export function doneHint(root: string, workdir: string, branch: string): string {
+  const dir = shellQuote(workdir);
+  const repo = shellQuote(root);
+  return [
+    "Tell the person, in the language they use, where the work is and how to take it on. Do not run these commands yourself:",
+    `The work is in ${workdir} on branch ${branch}.`,
+    `Commit:  git -C ${dir} add -A && git -C ${dir} commit -s`,
+    `Remove:  git -C ${repo} worktree remove ${dir} && git -C ${repo} branch -d ${branch}  (branch -d refuses while the branch is not merged)`,
+  ].join("\n");
+}
+
 function commandVerdict(
   result: CommandResult,
   expect: { exit: number },
@@ -982,8 +1116,13 @@ function builtinCheckRunners(host: LocalHost): Record<string, CheckRunner> {
       const result = await host.runner(
         command,
         {
-          cwd: host.options.root,
-          env: engineEnv({ runId: context.runId, node: effect.node, attempt: effect.attempt }),
+          cwd: context.cwd,
+          env: engineEnv({
+            runId: context.runId,
+            node: effect.node,
+            attempt: effect.attempt,
+            ...(context.cwd === host.options.root ? {} : { workdir: context.cwd }),
+          }),
           inheritEnv: false,
           signal: context.signal,
           redact: (text) => redactText(text, host.rules),

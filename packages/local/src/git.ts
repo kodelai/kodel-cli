@@ -25,9 +25,10 @@ interface GitResult {
 }
 
 /** Configuration that would let the repository run something on our behalf, switched off. */
-const SAFE_CONFIG = ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"];
+export const SAFE_CONFIG = ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"];
 
-function git(
+/** Run git with the hardened configuration; the one place the local adapters start it. */
+export function git(
   args: string[],
   cwd: string,
   env: Record<string, string> = {},

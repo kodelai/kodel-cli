@@ -28,6 +28,7 @@ export function formatReport(
         : `WARNING: the files of this run were changed outside kodel (integrity ${trust.integrity}, seal ${trust.seal}); what follows may not be true`,
     );
   }
+  if (report.workdir !== undefined) lines.push(`workdir: ${plain(report.workdir)}`);
   lines.push(
     `total ${formatDuration(report.total_s)}: work ${formatDuration(report.work_s)}, ` +
       `waiting for a person ${formatDuration(report.waiting_s)}`,

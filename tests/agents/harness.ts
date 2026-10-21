@@ -89,6 +89,11 @@ export function makeSandbox(
     withDriverText?: boolean;
     /** The pipeline (and files) to run on; the `mini` pipeline when left out. */
     fixture?: Fixture;
+    /**
+     * Whether each run gets its own git worktree, as it does by default. Off unless asked: the
+     * other scenarios are about the pipeline, and look for the agent's files in the repository.
+     */
+    worktree?: boolean;
   } = {},
 ): Sandbox {
   const fixture = options.fixture ?? { pipeline: MINI_PIPELINE };
@@ -107,7 +112,10 @@ export function makeSandbox(
   // By default the project says nothing about pipelines: the rules come from the server itself.
   const driver = options.withDriverText === true ? shippedDriverSection() : "";
   writeFileSync(join(dir, "CLAUDE.md"), `# Test repository\n\n${driver}`);
-  writeFileSync(join(dir, ".gitignore"), ".kodel/runs\n");
+  writeFileSync(join(dir, ".gitignore"), ".kodel/runs\n.kodel/worktrees\n");
+  if (options.worktree !== true) {
+    writeFileSync(join(dir, ".kodel", "config.yaml"), "worktree:\n  mode: off\n");
+  }
   if (options.withProjectSettings) {
     mkdirSync(join(dir, ".claude"), { recursive: true });
     cpSync(join(REPO_ROOT, ".claude/settings.json"), join(dir, ".claude/settings.json"));
@@ -137,6 +145,8 @@ export function makeCloneSandbox(): Sandbox {
   git("config", "user.email", "t@example.com");
   git("config", "user.name", "T");
   execFileSync("bun", ["install", "--frozen-lockfile"], { cwd: dir, stdio: "ignore" });
+  // A fresh worktree has no node_modules, so the repository's own pipeline runs in the checkout.
+  writeFileSync(join(dir, ".kodel", "config.yaml"), "worktree:\n  mode: off\n");
   return {
     dir,
     stateDir,
@@ -208,6 +218,8 @@ export interface TurnOptions {
   resume?: string;
   /** Tools the agent may use without asking; anything else is refused (headless cannot ask). */
   allowedTools: string[];
+  /** The directory the agent is started in; the sandbox when left out. */
+  cwd?: string;
 }
 
 /** One `claude -p` call: the agent works until it ends its turn. */
@@ -242,7 +254,7 @@ export async function runAgentTurn(options: TurnOptions): Promise<AgentTurn> {
     ...(options.resume ? ["--resume", options.resume] : []),
   ];
   const child: ChildProcess = spawn("claude", args, {
-    cwd: sandbox.dir,
+    cwd: options.cwd ?? sandbox.dir,
     stdio: ["ignore", "pipe", "pipe"],
     env: agentEnv(sandbox.stateDir),
   });

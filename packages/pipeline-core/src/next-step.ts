@@ -63,7 +63,12 @@ export type NextStep =
         hint: string;
       };
     }
-  | { done: true; run_status: RunStatus };
+  | {
+      done: true;
+      run_status: RunStatus;
+      /** What the agent should pass on to the person at the end; added by a host that has something to say. */
+      tell_the_person?: string;
+    };
 
 const PAUSE_TEXT = {
   consecutive: "a node failed too many times in a row",

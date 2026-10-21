@@ -32,6 +32,8 @@ beforeEach(async () => {
   git("commit", "-q", "--allow-empty", "-m", "initial");
   await mkdir(join(dir, ".kodel", "pipelines"), { recursive: true });
   await writeFile(join(dir, ".kodel", "pipelines", "demo.yaml"), DEMO);
+  // These tests are about the root; the run's own worktree is tested in worktree.test.ts.
+  await writeFile(join(dir, ".kodel", "config.yaml"), "worktree:\n  mode: off\n");
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });

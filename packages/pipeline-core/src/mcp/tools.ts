@@ -27,6 +27,7 @@ export const SERVER_INSTRUCTIONS = [
   "4. At a `waiting` answer, do what `tell_the_person` says: write the person what they are asked to decide, a summary of what was done and changed, what to look at, and the command to decide with. Then end your turn. You cannot approve, reject or resume anything yourself, and you must not try: those commands are for the person and refuse to run for an agent.",
   "5. Do not read or edit the run files in .kodel/runs, and do not change the pipeline files while a run is going.",
   "6. If a step's description or a check looks wrong or unclear, say so with pipeline_feedback; it never blocks the run.",
+  "7. If the answer to pipeline_start names a `workdir`, do all your work for the run in that directory (read and write files there, not in the directory you started in): the engine runs the commands and checks there.",
 ].join("\n");
 
 export interface ToolDescriptor {
@@ -42,6 +43,9 @@ export interface ToolDescriptor {
 
 /** Free text from the agent is bounded: everything is scanned for secrets and kept in the history. */
 const LIMITS = { name: 200, task: 4_000, text: 4_000 } as const;
+
+/** A POSIX path, a drive path or a UNC path: the core has no `node:path` and no file system. */
+const ABSOLUTE_PATH = /^(\/|[A-Za-z]:[\\/]|\\\\)/;
 
 const runId = z
   .string()
@@ -97,7 +101,8 @@ export const TOOLS: ToolDescriptor[] = [
     description:
       "Start a run of a pipeline on a task, or pick up the run that is already active for the same task. " +
       "The answer has a run_id and what to do first (next). If terminal is true the task already ran to " +
-      "its end: tell the user, and pass restart: true only if they want to run it again. Work through the " +
+      "its end: tell the user, and pass restart: true only if they want to run it again. Pass cwd, the " +
+      "directory you are working in. If the answer has a workdir, do the run's work there. Work through the " +
       "run by following each answer; never choose steps yourself.",
     shape: {
       task: z
@@ -112,11 +117,20 @@ export const TOOLS: ToolDescriptor[] = [
         .optional()
         .describe("Omit it if the project has only one pipeline."),
       restart: z.boolean().optional(),
+      cwd: z
+        .string()
+        .min(1)
+        .max(4_096)
+        .refine((value) => ABSOLUTE_PATH.test(value), "must be an absolute path")
+        .optional()
+        .describe(
+          "The directory you are working in, as an absolute path. If it is a git worktree of this project, the run uses it; otherwise the engine makes one and the answer names it.",
+        ),
     },
     readOnly: false,
     idempotent: true,
     run: (service, input) =>
-      service.start(input as { task: string; pipeline?: string; restart?: boolean }),
+      service.start(input as { task: string; pipeline?: string; restart?: boolean; cwd?: string }),
   },
   {
     name: "pipeline_next_step",

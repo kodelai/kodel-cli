@@ -21,6 +21,10 @@ export const ERROR_CODES = [
   "INVALID_ARGUMENTS",
   "STATE_LOCKED",
   "UNKNOWN_OUTCOME",
+  "WORKDIR_MISSING",
+  "WORKDIR_INVALID",
+  "WORKDIR_CREATE_FAILED",
+  "CONFIG_INVALID",
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];

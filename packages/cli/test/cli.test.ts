@@ -39,6 +39,8 @@ beforeEach(async () => {
   git("commit", "-q", "--allow-empty", "-m", "initial");
   await mkdir(join(dir, ".kodel", "pipelines"), { recursive: true });
   await writeFile(join(dir, ".kodel", "pipelines", "demo.yaml"), DEMO);
+  // These tests are about the root; the run's own worktree is tested in worktree.test.ts.
+  await writeFile(join(dir, ".kodel", "config.yaml"), "worktree:\n  mode: off\n");
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
@@ -567,4 +569,58 @@ describe("mcp over stdio", () => {
     () => orphanCheck("process.on('SIGTERM', () => {}); setTimeout(() => {}, 60000)", 5_000),
     20_000,
   );
+});
+
+describe("a run in its own worktree", () => {
+  async function runInWorktree() {
+    const host = new LocalPipelineHost({
+      root: dir,
+      heartbeatMs: 0,
+      worktree: { mode: "auto", dir: ".kodel/worktrees" },
+    });
+    const { run, workdir } = await host.start({ pipeline: "demo", task: "wt", restart: false });
+    return { id: run.runId, workdir: workdir?.path ?? "", branch: workdir?.branch ?? "" };
+  }
+
+  test("tNN_status_and_report_show_where_the_run_works", async () => {
+    const { id, workdir, branch } = await runInWorktree();
+    expect((await cli("status")).out).toContain(`in ${workdir}`);
+    const one = (await cli("status", id)).out;
+    expect(one).toContain(`workdir:   ${workdir}`);
+    expect(one).toContain(`branch:    ${branch}`);
+    expect(JSON.parse((await cli("status", "--json")).out)[0].workdir).toBe(workdir);
+    expect((await cli("report", id)).out).toContain(`workdir: ${workdir}`);
+    expect(JSON.parse((await cli("report", id, "--json")).out).workdir).toBe(workdir);
+  });
+
+  test("tNN_a_gate_reads_the_workdir_from_the_run_and_shows_what_changed_there", async () => {
+    const { id, workdir } = await runInWorktree();
+    await writeFile(join(workdir, "out.txt"), "hi\n");
+    const host = new LocalPipelineHost({ root: dir, heartbeatMs: 0 });
+    const run = await host.open(id);
+    await run?.completeStep("write", 1);
+    await run?.waitForRest(5_000);
+    await writeFile(join(workdir, "after.txt"), "later\n");
+    await writeFile(join(dir, "in-the-root.txt"), "not this\n");
+
+    const result = await cli("gate", "approve", id);
+    expect(result.code).toBe(0);
+    expect(result.asked[0]).toContain("after.txt");
+    expect(result.asked[0]).not.toContain("in-the-root.txt");
+  });
+
+  test("tNN_a_gate_whose_worktree_is_gone_cannot_tell_what_changed_and_says_so", async () => {
+    const { id, workdir } = await runInWorktree();
+    await writeFile(join(workdir, "out.txt"), "hi\n");
+    const host = new LocalPipelineHost({ root: dir, heartbeatMs: 0 });
+    const run = await host.open(id);
+    await run?.completeStep("write", 1);
+    await run?.waitForRest(5_000);
+    execFileSync("git", ["worktree", "remove", "--force", workdir], { cwd: dir, stdio: "ignore" });
+
+    const result = await cli("gate", "approve", id);
+    expect(result.asked[0]).toContain("WARNING");
+    expect(result.asked[0]).toContain("WORKDIR_MISSING");
+    expect(result.asked.length).toBe(2); // approving needs one more yes
+  });
 });

@@ -122,6 +122,12 @@ export interface RunState {
   seq: number;
   /** How many refused calls were journaled; there is a limit (`MAX_LOGGED_REFUSALS`). */
   refusals?: number;
+  /**
+   * Where the host runs this run's commands, when not in the repository root; opaque to the core.
+   * It lives in the state, which the host checks against its trusted hash, because a command must
+   * never be run somewhere a file the agent can write has sent it.
+   */
+  workdir?: string;
 }
 
 /** How many refused calls a run journals: enough to see what was tried, too few to be a way to fill the disk. */
@@ -130,7 +136,16 @@ export const MAX_LOGGED_REFUSALS = 100;
 // ── events in, effects out ──────────────────────────────────────────────────
 
 export type RunEvent =
-  | { type: "start"; runId: string; task: string; specHash: string }
+  | {
+      type: "start";
+      runId: string;
+      task: string;
+      specHash: string;
+      /** Where the host runs this run's commands, when not in the repository root. Opaque to the core. */
+      workdir?: string;
+      /** The branch the host made for the run, when it made one. */
+      branch?: string;
+    }
   | {
       type: "agent_completed";
       node: string;
@@ -717,7 +732,13 @@ class Machine {
         visitId: 0,
       };
     }
-    this.log("run_started", { run: event.runId, task: event.task, spec: event.specHash });
+    this.log("run_started", {
+      run: event.runId,
+      task: event.task,
+      spec: event.specHash,
+      ...(event.workdir === undefined ? {} : { workdir: event.workdir }),
+      ...(event.branch === undefined ? {} : { branch: event.branch }),
+    });
     const needsRunBaseline = this.spec.nodes.some((n) =>
       n.checks.some((c) => this.registry.check(c.kind)?.baseline?.(c.params) === "run"),
     );
@@ -833,6 +854,7 @@ export function decide(
     draft.runId = event.runId;
     draft.task = event.task;
     draft.specHash = event.specHash;
+    if (event.workdir !== undefined) draft.workdir = event.workdir;
   }
   const machine = new Machine(spec, draft, now, options);
   try {

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PipelineService } from "@kodel-ai/pipeline-core";
@@ -20,6 +20,8 @@ beforeEach(async () => {
   git("commit", "-q", "--allow-empty", "-m", "initial");
   await mkdir(join(dir, ".kodel", "pipelines"), { recursive: true });
   await writeFile(join(dir, ".kodel", "pipelines", "demo.yaml"), DEMO("write a file"));
+  // These tests are about the root; the run's own worktree is tested in worktree.test.ts.
+  await writeFile(join(dir, ".kodel", "config.yaml"), "worktree:\n  mode: off\n");
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
@@ -193,6 +195,54 @@ describe("an agent driving a run through MCP, with the real adapters", () => {
     });
     expect(traversal.isError).toBe(true);
     expect(JSON.stringify(traversal.content)).toContain("run_id");
+    await close();
+  });
+});
+
+describe("the agent and its workdir", () => {
+  const withWorktrees = () =>
+    new LocalPipelineHost({
+      ...hostOptions(),
+      worktree: { mode: "auto", dir: ".kodel/worktrees" },
+    });
+  const listed = () =>
+    execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: dir, encoding: "utf8" })
+      .split("\n")
+      .filter((line) => line.startsWith("worktree ")).length;
+
+  test("tNN_pipeline_start_names_the_workdir_and_the_agents_cwd_there_picks_it_up_again", async () => {
+    const { call, close } = await connect(withWorktrees());
+    const first = (await call("pipeline_start", { task: "one", cwd: dir })).body;
+    expect(first.ok).toBe(true);
+    const workdir = first.workdir as string;
+    expect(workdir).toBe(join(await realpath(dir), ".kodel", "worktrees", first.run_id));
+    expect(first.branch).toBe(`kodel/${first.run_id}`);
+    expect(listed()).toBe(2);
+
+    // another task, started by an agent that now works inside that worktree: nothing new is made
+    const second = (await call("pipeline_start", { task: "two", cwd: workdir })).body;
+    expect(second.workdir).toBe(workdir);
+    expect(second).not.toHaveProperty("branch");
+    expect(listed()).toBe(2);
+
+    // the same task again is the same run, and it still says where it works
+    const again = (await call("pipeline_start", { task: "one" })).body;
+    expect(again).toMatchObject({ reused: true, run_id: first.run_id, workdir });
+    await close();
+  });
+
+  test("tNN_a_run_in_a_worktree_goes_from_the_first_step_to_done_there", async () => {
+    const { call, close } = await connect(withWorktrees());
+    const started = (await call("pipeline_start", { task: "wt", cwd: dir })).body;
+    const id = started.run_id as string;
+    await writeFile(join(started.workdir, "out.txt"), "hi\n");
+    const done = (
+      await call("pipeline_complete_step", { run_id: id, node_slug: "write", attempt: 1 })
+    ).body;
+    expect(done.next.waiting.node_slug).toBe("approve");
+    // what the person is shown is what changed in the worktree
+    expect(Object.keys(done.next.waiting.changes)).toContain("out.txt");
+    await expect(readFile(join(dir, "out.txt"), "utf8")).rejects.toThrow();
     await close();
   });
 });
