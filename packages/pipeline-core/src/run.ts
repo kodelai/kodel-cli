@@ -7,6 +7,7 @@
  * an *attempt*. A failed attempt of an agent node with no edge for its label is retried as a new
  * attempt of the same visit (rework). Limits: `max_consecutive_failures` and `max_attempts`.
  */
+import { canonicalNode, type NodeForms } from "./canonical";
 import { type ErrorCode, KodelError } from "./errors";
 import type { NodeSpec, PipelineSpec } from "./pipeline";
 import { defaultRegistry, type Registry } from "./registry";
@@ -23,6 +24,11 @@ export interface EngineOptions {
   staleMs?: number;
   /** How many times interrupted work is restarted before the run pauses. */
   maxRestarts?: number;
+  /**
+   * Turns the canonical form of a node (`canonicalNode`) into a short stable string. The core does not
+   * hash anything itself; without this the journal simply carries no node hashes.
+   */
+  fingerprint?: (text: string) => string;
 }
 
 // ── state ───────────────────────────────────────────────────────────────────
@@ -128,6 +134,11 @@ export interface RunState {
    * never be run somewhere a file the agent can write has sent it.
    */
   workdir?: string;
+  /**
+   * The pipeline file of this run, relative to the repository root. Like `workdir` it lives in the
+   * state and not in `meta.json`, which an agent can write.
+   */
+  pipelineFile?: string;
 }
 
 /** How many refused calls a run journals: enough to see what was tried, too few to be a way to fill the disk. */
@@ -145,6 +156,8 @@ export type RunEvent =
       workdir?: string;
       /** The branch the host made for the run, when it made one. */
       branch?: string;
+      /** The pipeline file, relative to the repository root, when the pipeline was read from one. */
+      pipelineFile?: string;
     }
   | {
       type: "agent_completed";
@@ -268,6 +281,7 @@ class Machine {
   private readonly registry: Registry;
   private readonly staleMs: number;
   private readonly maxRestarts: number;
+  private readonly fingerprint: ((text: string) => string) | undefined;
 
   constructor(
     private readonly spec: PipelineSpec,
@@ -279,6 +293,7 @@ class Machine {
     this.registry = options.registry ?? defaultRegistry();
     this.staleMs = options.staleMs ?? DEFAULT_STALE_MS;
     this.maxRestarts = options.maxRestarts ?? DEFAULT_MAX_RESTARTS;
+    this.fingerprint = options.fingerprint;
   }
 
   // lookups
@@ -337,6 +352,20 @@ class Machine {
     return visit;
   }
 
+  /** The hashes of the definition an attempt runs on, so the history shows which one it was. */
+  private definitionOf(node: NodeSpec): { definition?: NodeForms } {
+    const fingerprint = this.fingerprint;
+    if (!fingerprint) return {};
+    const forms = canonicalNode(this.spec, node);
+    return {
+      definition: {
+        work: fingerprint(forms.work),
+        checks: fingerprint(forms.checks),
+        routing: fingerprint(forms.routing),
+      },
+    };
+  }
+
   // entering nodes
 
   private enter(slug: string, rework: boolean, feedback?: Feedback) {
@@ -360,7 +389,13 @@ class Machine {
     };
     this.s.active.push(visit);
     run.status = begin.needs === "human" ? "waiting" : rework ? "rework" : "running";
-    this.log("node_entered", { node: slug, attempt: run.attempt, visit: run.visitId, rework });
+    this.log("node_entered", {
+      node: slug,
+      attempt: run.attempt,
+      visit: run.visitId,
+      rework,
+      ...this.definitionOf(node),
+    });
 
     for (const check of node.checks) {
       const baseline = this.registry.check(check.kind)?.baseline?.(check.params);
@@ -738,6 +773,7 @@ class Machine {
       spec: event.specHash,
       ...(event.workdir === undefined ? {} : { workdir: event.workdir }),
       ...(event.branch === undefined ? {} : { branch: event.branch }),
+      ...(event.pipelineFile === undefined ? {} : { pipelineFile: event.pipelineFile }),
     });
     const needsRunBaseline = this.spec.nodes.some((n) =>
       n.checks.some((c) => this.registry.check(c.kind)?.baseline?.(c.params) === "run"),
@@ -855,6 +891,7 @@ export function decide(
     draft.task = event.task;
     draft.specHash = event.specHash;
     if (event.workdir !== undefined) draft.workdir = event.workdir;
+    if (event.pipelineFile !== undefined) draft.pipelineFile = event.pipelineFile;
   }
   const machine = new Machine(spec, draft, now, options);
   try {

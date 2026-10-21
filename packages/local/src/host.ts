@@ -39,7 +39,7 @@ import { type CommandOptions, type CommandResult, runCommand } from "./command";
 import type { WorktreeConfig } from "./config";
 import { GitSnapshotter } from "./git";
 import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integrity";
-import { FileStore, newRunId, type RunMeta } from "./store";
+import { FileStore, META_VERSION, newRunId, type RunMeta } from "./store";
 import { GitWorktreeProvider, type Workdir, type WorkdirProvider } from "./worktree";
 
 export interface CommandContext {
@@ -97,6 +97,8 @@ export interface HostOptions {
   integrityDir?: string;
   /** The YAML the pipeline was read from; a copy is kept with each run so the run is pinned to it. */
   source?: string;
+  /** The pipeline file, relative to `root` with `/` separators; kept in the run's state. */
+  pipelineFile?: string;
   /** How this process is named as the owner of engine work; `<host>:<pid>` by default. */
   ownerId?: string;
   /** Whether an owner is still alive. Tests replace it; by default a process id on this machine is looked up. */
@@ -228,7 +230,7 @@ export class LocalHost {
       new FileIntegrity(options.integrityDir ?? defaultIntegrityDir(), storeRoot);
     this.snapshotter = options.snapshotter ?? new GitSnapshotter(options.root);
     this.clock = options.clock ?? Date.now;
-    this.engine = options.engine ?? {};
+    this.engine = { fingerprint: hashSource, ...options.engine };
     this.runner = options.runCommand ?? ((command, opts) => runCommand(command, opts));
     this.heartbeatMs =
       options.heartbeatMs ?? Math.max(1_000, (options.engine?.staleMs ?? 30_000) / 3);
@@ -289,7 +291,7 @@ export class LocalHost {
       });
       try {
         const meta: RunMeta = {
-          v: 1,
+          v: META_VERSION,
           runId,
           pipeline: this.spec.name,
           task: redactedTask,
@@ -301,7 +303,7 @@ export class LocalHost {
         };
         await this.store.createRun(meta);
         if (this.options.source !== undefined)
-          await this.store.writeSpec(runId, this.options.source);
+          await this.store.writeSpec(runId, specHash, this.options.source);
         const run = new LocalRun(this, runId);
         const result = await run.apply({
           type: "start",
@@ -310,6 +312,9 @@ export class LocalHost {
           specHash,
           ...(workdir ? { workdir: workdir.path } : {}),
           ...(workdir?.branch === undefined ? {} : { branch: workdir.branch }),
+          ...(this.options.pipelineFile === undefined
+            ? {}
+            : { pipelineFile: this.options.pipelineFile }),
         });
         if (!result.ok) throw result.error;
         return { run, reused: false, terminal: false, ...(workdir ? { workdir } : {}) };

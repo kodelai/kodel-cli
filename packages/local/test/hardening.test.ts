@@ -69,10 +69,18 @@ async function startRun(h = host()): Promise<LocalRun> {
   return (await h.open(run.runId)) as LocalRun;
 }
 
+/** The kept version of the pipeline a run is pinned to. */
+async function keptSpec(id: string): Promise<string> {
+  const state = JSON.parse(await readFile(join(runDir(id), "state.json"), "utf8")) as {
+    specHash: string;
+  };
+  return join(runDir(id), "specs", `${state.specHash}.yaml`);
+}
+
 describe("the pipeline a run started with cannot be swapped", () => {
   test("a copy edited after the start is refused, not obeyed", async () => {
     const run = await startRun();
-    const path = join(runDir(run.runId), "spec.yaml");
+    const path = await keptSpec(run.runId);
     const text = await readFile(path, "utf8");
     await writeFile(path, text.replace("console.log('ok')", "process.exit(0)"));
     await expect(host().open(run.runId)).rejects.toMatchObject({
@@ -82,7 +90,7 @@ describe("the pipeline a run started with cannot be swapped", () => {
 
   test("a copy turned into something that is not a pipeline is refused too", async () => {
     const run = await startRun();
-    await writeFile(join(runDir(run.runId), "spec.yaml"), "name: x\nnodes: []\n");
+    await writeFile(await keptSpec(run.runId), "name: x\nnodes: []\n");
     await expect(host().open(run.runId)).rejects.toMatchObject({
       code: "STATE_MODIFIED_EXTERNALLY",
     });
@@ -92,25 +100,49 @@ describe("the pipeline a run started with cannot be swapped", () => {
     const h = host();
     const run = await startRun(h);
     expect(await h.open(run.runId)).toBeDefined();
-    const path = join(runDir(run.runId), "spec.yaml");
+    const path = await keptSpec(run.runId);
     await writeFile(path, `${await readFile(path, "utf8")}\n# changed\n`);
     // the copy is pinned as it was written: not even a comment may be added to it
     await expect(h.open(run.runId)).rejects.toMatchObject({ code: "STATE_MODIFIED_EXTERNALLY" });
   });
 
-  test("a run pinned the older way, to the parsed pipeline, still opens while the file is as it was", async () => {
-    // LocalHost without a source keeps no copy and pins to the hash of the parsed pipeline
-    const spec = parsePipeline(
-      await readFile(join(dir, ".kodel", "pipelines", "demo.yaml"), "utf8"),
-    );
-    const { run } = await new LocalHost(spec, { root: dir, heartbeatMs: 0 }).start("t");
-    const opened = await host().open(run.runId);
-    expect(opened?.runId).toBe(run.runId);
+  test("a run written before pipelines were kept in versions is refused by its format, not as modified", async () => {
+    const run = await startRun();
+    const path = join(runDir(run.runId), "meta.json");
+    const meta = JSON.parse(await readFile(path, "utf8")) as { v: number };
+    meta.v = 1;
+    await writeFile(path, JSON.stringify(meta));
+    await expect(host().open(run.runId)).rejects.toMatchObject({ code: "UNSUPPORTED_FORMAT" });
+  });
+
+  test("editing the pipeline file does not touch a run: it goes on with its kept version", async () => {
+    const h = host();
+    const run = await startRun(h);
     const file = join(dir, ".kodel", "pipelines", "demo.yaml");
     await writeFile(file, (await readFile(file, "utf8")).replace("ok?", "fine?"));
-    await expect(host().open(run.runId)).rejects.toMatchObject({
-      code: "STATE_MODIFIED_EXTERNALLY",
+    expect((await host().open(run.runId))?.runId).toBe(run.runId);
+  });
+
+  test("each attempt records the hashes of the definition it ran on", async () => {
+    const run = await startRun();
+    const lines = (await readFile(join(runDir(run.runId), "journal.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const entered = lines.find((l) => l.event === "node_entered");
+    expect(entered?.definition).toMatchObject({
+      work: expect.stringMatching(/^[0-9a-f]{16}$/),
+      checks: expect.stringMatching(/^[0-9a-f]{16}$/),
+      routing: expect.stringMatching(/^[0-9a-f]{16}$/),
     });
+  });
+
+  test("the pipeline file of the run is in its state, relative to the repository", async () => {
+    const run = await startRun();
+    const state = JSON.parse(await readFile(join(runDir(run.runId), "state.json"), "utf8")) as {
+      pipelineFile?: string;
+    };
+    expect(state.pipelineFile).toBe(".kodel/pipelines/demo.yaml");
   });
 
   test("a new run is pinned to the hash of the text of its pipeline", async () => {
@@ -120,15 +152,13 @@ describe("the pipeline a run started with cannot be swapped", () => {
     const state = JSON.parse(await readFile(join(runDir(run.runId), "state.json"), "utf8")) as {
       specHash: string;
     };
-    const source = await readFile(join(runDir(run.runId), "spec.yaml"), "utf8");
+    const source = await readFile(await keptSpec(run.runId), "utf8");
     expect(state.specHash).toBe(hashSource(source));
   });
 
-  test("a run with no copy is refused once the pipeline file was edited", async () => {
+  test("a run whose kept version is gone is refused as modified", async () => {
     const run = await startRun();
-    await rm(join(runDir(run.runId), "spec.yaml"));
-    const file = join(dir, ".kodel", "pipelines", "demo.yaml");
-    await writeFile(file, (await readFile(file, "utf8")).replace("ok?", "fine?"));
+    await rm(await keptSpec(run.runId));
     await expect(host().open(run.runId)).rejects.toMatchObject({
       code: "STATE_MODIFIED_EXTERNALLY",
     });
@@ -920,7 +950,7 @@ describe("a write never follows a planted link", () => {
     const store = new FileStore({ root: join(dir, ".kodel"), pid: 4242 });
     const id = newRunId();
     await store.createRun({
-      v: 1,
+      v: 2,
       runId: id,
       pipeline: "demo",
       task: "t",

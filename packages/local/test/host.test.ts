@@ -214,7 +214,11 @@ describe("starting and finding runs", () => {
 
   test("the pipeline source a run started with is kept next to it", async () => {
     const { run } = await host(COMMANDS, { source: "name: cmds # as written\n" }).start("t");
-    const kept = await readFile(join(dir, ".kodel", "runs", run.runId, "spec.yaml"), "utf8");
+    const { specHash } = await run.state();
+    const kept = await readFile(
+      join(dir, ".kodel", "runs", run.runId, "specs", `${specHash}.yaml`),
+      "utf8",
+    );
     expect(kept).toBe("name: cmds # as written\n");
   });
 

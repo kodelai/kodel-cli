@@ -4,7 +4,7 @@
  * changes a run in flight.
  */
 import { readdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import {
   isRunId,
   KodelError,
@@ -13,12 +13,13 @@ import {
   type PipelineProblem,
   type PipelineSpec,
   parsePipeline,
+  parseSnapshot,
   type RunState,
   type StartOutcome,
 } from "@kodel-ai/pipeline-core";
 import { loadConfig, type WorktreeConfig } from "./config";
 import { type HostOptions, hashSource, hashSpec, LocalHost, type LocalRun } from "./host";
-import { FileStore, type RunMeta } from "./store";
+import { FileStore, META_VERSION, type RunMeta } from "./store";
 
 export interface LocalPipelineHostOptions extends HostOptions {
   /** Where the pipeline files are; defaults to `<root>/.kodel/pipelines`. */
@@ -106,11 +107,23 @@ export class LocalPipelineHost implements PipelineHost {
     return (await this.find(name))?.spec;
   }
 
-  private hostFor(spec: PipelineSpec, source: string | undefined): LocalHost {
-    const key = hashSpec(spec);
+  /** The path of a pipeline file relative to the repository root, `/`-separated; none outside it. */
+  private pipelineFileOf(file: string): string | undefined {
+    const path = relative(this.options.root, join(this.dir, file));
+    if (path === "" || path.startsWith("..") || isAbsolute(path)) return undefined;
+    return path.split(sep).join("/");
+  }
+
+  private hostFor(spec: PipelineSpec, source: string | undefined, file?: string): LocalHost {
+    const pipelineFile = file === undefined ? undefined : this.pipelineFileOf(file);
+    const key = `${hashSpec(spec)}:${pipelineFile ?? ""}`;
     let host = this.hosts.get(key);
     if (!host) {
-      host = new LocalHost(spec, { ...this.options, ...(source === undefined ? {} : { source }) });
+      host = new LocalHost(spec, {
+        ...this.options,
+        ...(source === undefined ? {} : { source }),
+        ...(pipelineFile === undefined ? {} : { pipelineFile }),
+      });
       this.hosts.set(key, host);
     }
     return host;
@@ -127,10 +140,15 @@ export class LocalPipelineHost implements PipelineHost {
       throw new KodelError("UNKNOWN_PIPELINE", `there is no pipeline "${input.pipeline}"`);
     // Read at each start, so an edit of the config applies to the next run without a restart.
     const worktree = this.options.worktree ?? (await loadConfig(this.storeRoot)).worktree;
-    const { run, reused, terminal, workdir } = await this.hostFor(found.spec, found.source).start(
-      input.task,
-      { restart: input.restart, worktree, ...(input.cwd === undefined ? {} : { cwd: input.cwd }) },
-    );
+    const { run, reused, terminal, workdir } = await this.hostFor(
+      found.spec,
+      found.source,
+      found.file,
+    ).start(input.task, {
+      restart: input.restart,
+      worktree,
+      ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+    });
     // An existing run goes on with the pipeline it started with, which may no longer be the file's.
     const known = reused || terminal ? await this.open(run.runId) : run;
     if (!known) throw new KodelError("UNKNOWN_RUN", `there is no run "${run.runId}"`);
@@ -169,9 +187,9 @@ export class LocalPipelineHost implements PipelineHost {
   }
 
   /**
-   * The pipeline a run started with: the copy kept with the run, read and checked again, and held
-   * against the spec hash in the run's state (which is itself protected). A copy that was edited, or
-   * a pipeline file that changed under a run that kept no copy, is refused rather than obeyed.
+   * The pipeline a run is on: the kept version named by the hash in the run's state (which is itself
+   * protected), read again and held against that hash. A kept version that was edited or is missing
+   * is refused rather than obeyed. A run from before versions were kept is refused by its format.
    */
   private async specFor(
     runId: string,
@@ -181,30 +199,30 @@ export class LocalPipelineHost implements PipelineHost {
     if (!meta) return undefined;
     const state = await this.store.readState(runId);
     if (!state) return undefined;
-    const kept = await this.store.readSpec(runId);
-    let found: { spec: PipelineSpec; source: string | undefined } | undefined;
-    if (kept !== undefined) {
-      try {
-        found = { spec: parsePipeline(kept), source: kept };
-      } catch (error) {
-        if (!(error instanceof KodelError)) throw error;
-      }
-    } else {
-      found = await this.find(meta.pipeline);
-    }
-    // A run is pinned to the hash of its pipeline's source text. Runs started before that were
-    // pinned to the hash of the parsed pipeline, so that one is still accepted.
-    const pinned =
-      found !== undefined &&
-      ((found.source !== undefined && hashSource(found.source) === state.specHash) ||
-        hashSpec(found.spec) === state.specHash);
-    if (!found || !pinned) {
+    if ((meta.v as number) !== META_VERSION) {
       throw new KodelError(
-        "STATE_MODIFIED_EXTERNALLY",
-        `the pipeline of run ${runId} is not the one it started with (its copy was changed, or the pipeline file was edited and no copy was kept); restore it before going on`,
+        "UNSUPPORTED_FORMAT",
+        `run ${runId} was written before pipelines were kept in versions (format ${meta.v}, this kodel reads ${META_VERSION}); finish it with the kodel that started it, or remove it`,
       );
     }
-    return found;
+    const kept = await this.store.readSpec(runId, state.specHash);
+    if (kept === undefined || hashSource(kept) !== state.specHash) {
+      throw new KodelError(
+        "STATE_MODIFIED_EXTERNALLY",
+        `the pipeline of run ${runId} is not the one it is pinned to (its kept copy was changed or is missing); restore it before going on`,
+      );
+    }
+    try {
+      return { spec: parseSnapshot(kept), source: kept };
+    } catch (error) {
+      if (!(error instanceof KodelError)) throw error;
+      // A version that cannot be read is not a version that was modified; say which.
+      if (error.code === "UNSUPPORTED_FORMAT") throw error;
+      throw new KodelError(
+        "STATE_MODIFIED_EXTERNALLY",
+        `the pipeline of run ${runId} is not the one it is pinned to (its kept copy is not a pipeline: ${error.message}); restore it before going on`,
+      );
+    }
   }
 
   async open(runId: string): Promise<LocalRun | undefined> {
