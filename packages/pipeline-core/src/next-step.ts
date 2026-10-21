@@ -67,7 +67,8 @@ export type NextStep =
         pipeline_change?: PipelineChange;
         node_slug: string;
         prompt: string;
-        files?: string[];
+        /** What the person has to do or look at, from the node; the agent tells them. */
+        instructions?: string;
         /** The attempt of the waiting step; `pipeline_report_result` needs it. */
         attempt?: number;
         /** Columns of the comments the person's words are recorded in, when the step takes them. */
@@ -122,8 +123,8 @@ const TELL_AT_GATE =
   "say if anything differs from what the task asked for; if `changes_unavailable` is there, say " +
   "plainly that the engine could not tell what changed and why, and never write that nothing " +
   "changed; if `changes_omitted` is there, say that more files changed than are listed); " +
-  "(3) what to look at: the files listed " +
-  "and anything else they should check; (4) how to decide, with the command in " +
+  "(3) what they need to do or look at: `instructions`, if there are any (put them in your own " +
+  "words, concretely, and do not leave out a step), and anything else they should check; (4) how to decide, with the command in " +
   "`how_to_decide`. Do not decide for them and do not run that command. Then end your turn.";
 
 const TELL_RESULTS =
@@ -284,7 +285,9 @@ function baseStep(spec: PipelineSpec, state: RunState, now: number, registry: Re
         reason: "gate",
         node_slug: spec_.slug,
         prompt: begin?.needs === "human" ? begin.prompt : "A decision is needed.",
-        ...(begin?.needs === "human" && begin.files.length > 0 ? { files: begin.files } : {}),
+        ...(begin?.needs === "human" && begin.instructions !== undefined
+          ? { instructions: begin.instructions }
+          : {}),
         ...(begin?.needs === "human" && begin.results
           ? { attempt: humanVisit.attempt, result_spec: begin.results }
           : {}),

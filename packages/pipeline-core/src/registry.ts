@@ -34,7 +34,8 @@ export type Begin =
   | {
       needs: "human";
       prompt: string;
-      files: string[];
+      /** What the person is asked to do or look at; the agent passes it on to them. */
+      instructions?: string;
       /** The columns of the comments recorded while the person talks to the agent, when the node takes them. */
       results?: Record<string, unknown>;
     };
@@ -197,7 +198,7 @@ const humanNode: NodeHandler = {
   kind: "human",
   shape: {
     prompt: nonEmpty,
-    files: z.array(nonEmpty).optional(),
+    instructions: nonEmpty.optional(),
     // Where the person's comments are recorded while they talk to the agent; sent back on a rejection.
     results: z.object({ columns: columnsSchema }).strict().optional(),
   },
@@ -208,7 +209,9 @@ const humanNode: NodeHandler = {
   begin: (params, render) => ({
     needs: "human",
     prompt: render(String(params.prompt)),
-    files: ((params.files as string[] | undefined) ?? []).map(render),
+    ...(params.instructions === undefined
+      ? {}
+      : { instructions: render(String(params.instructions)) }),
     ...(params.results === undefined ? {} : { results: params.results as Record<string, unknown> }),
   }),
   resultsSpec: (params) => params.results as Record<string, unknown> | undefined,

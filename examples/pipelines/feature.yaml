@@ -42,7 +42,7 @@ nodes:
   - slug: plan-approval
     kind: human
     prompt: "Review the plan. Approve to start implementation, or reject with a reason."
-    files: ["docs/plans/{{task.slug}}.md"]
+    instructions: "Read docs/plans/{{task.slug}}.md: does it solve the task, and are its steps and tests concrete enough to implement?"
 
   - slug: impl
     kind: agent

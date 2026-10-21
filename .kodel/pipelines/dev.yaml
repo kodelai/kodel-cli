@@ -29,7 +29,7 @@ nodes:
   - slug: plan-approval
     kind: human
     prompt: "Review the plan. Approve to start implementation, or reject with a reason."
-    files: ["docs/plans/{{task.slug}}.md"]
+    instructions: "Read docs/plans/{{task.slug}}.md: does it solve the task, and are its steps and tests concrete enough to implement?"
     results:
       columns:
         severity:    { enum: [blocker, critical, major, minor, info] }
@@ -41,7 +41,7 @@ nodes:
     prompt: |
       The plan says the task needs no change. Read it and check the evidence. Approve to end the
       run, or reject with what was missed, and the plan is made again.
-    files: ["docs/plans/{{task.slug}}.md"]
+    instructions: "Read docs/plans/{{task.slug}}.md and check that its evidence shows the task really needs no change."
     results:
       columns:
         severity:    { enum: [blocker, critical, major, minor, info] }

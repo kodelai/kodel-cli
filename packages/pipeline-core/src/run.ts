@@ -283,7 +283,7 @@ export type Effect =
       baseline?: string;
       restart: boolean;
     }
-  | { type: "await_human"; node: string; attempt: number; prompt: string; files: string[] };
+  | { type: "await_human"; node: string; attempt: number; prompt: string; instructions?: string };
 
 export interface JournalRecord {
   v: 1;
@@ -452,7 +452,7 @@ class Machine {
         node: slug,
         attempt: run.attempt,
         prompt: begin.prompt,
-        files: begin.files,
+        ...(begin.instructions === undefined ? {} : { instructions: begin.instructions }),
       });
       this.log("gate_waiting", { node: slug, attempt: run.attempt });
     }
