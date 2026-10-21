@@ -30,6 +30,11 @@ nodes:
     kind: human
     prompt: "Review the plan. Approve to start implementation, or reject with a reason."
     files: ["docs/plans/{{task.slug}}.md"]
+    results:
+      columns:
+        severity:    { enum: [blocker, critical, major, minor, info] }
+        location:    location
+        description: text
 
   - slug: confirm-nothing-to-do
     kind: human
@@ -37,6 +42,11 @@ nodes:
       The plan says the task needs no change. Read it and check the evidence. Approve to end the
       run, or reject with what was missed, and the plan is made again.
     files: ["docs/plans/{{task.slug}}.md"]
+    results:
+      columns:
+        severity:    { enum: [blocker, critical, major, minor, info] }
+        location:    location
+        description: text
 
   - slug: impl
     kind: agent
@@ -84,6 +94,11 @@ nodes:
     kind: human
     prompt: |
       Look at the diff and try the change. Approve to finish, or reject with what is wrong.
+    results:
+      columns:
+        severity:    { enum: [blocker, critical, major, minor, info] }
+        location:    location
+        description: text
 
 edges:
   - { from: plan,           to: plan-approval }
