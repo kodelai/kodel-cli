@@ -3,10 +3,12 @@ import {
   type Decision,
   decide,
   diffPipelines,
+  type JournalRecord,
   type PipelineSpec,
   parsePipeline,
   type RunEvent,
   type RunState,
+  summarizeRun,
 } from "../src";
 
 const TEXT = [
@@ -352,6 +354,56 @@ describe("a run held back at a failure", () => {
     const decision = ok(accept(before, after, heldAtCheck()));
     expect(decision.state.status).toBe("paused");
     expect(decision.state.specHash).toBe("h2");
+  });
+});
+
+describe("the report of a run whose pipeline changed", () => {
+  test("it lists the change, marks the attempt that ran on another definition, and the superseded one", () => {
+    const fp = { fingerprint: (text: string) => `h(${text.length})` };
+    const journal: JournalRecord[] = [];
+    const run = (spec: PipelineSpec, state: RunState | undefined, event: RunEvent) => {
+      const result = ok(decide(spec, state, event, 0, fp));
+      journal.push(...result.journal);
+      return result.state;
+    };
+    let state = run(V1, undefined, { type: "start", runId: "r", task: "t", specHash: "h" });
+    state = run(V1, state, { type: "agent_completed", node: "plan", attempt: 1 });
+    state = run(V1, state, { type: "human_decided", node: "gate", decision: "approved" });
+    const after = specOf(TEXT.replace("write it", "write it carefully"));
+    const accepted = ok(
+      decide(
+        after,
+        state,
+        {
+          type: "pipeline_accepted",
+          from: "h",
+          to: "h2",
+          source: "proposal",
+          before: V1,
+          reason: "r",
+        },
+        0,
+        fp,
+      ),
+    );
+    journal.push(...accepted.journal);
+
+    const report = summarizeRun(accepted.state, journal);
+    expect(report.pipeline_changes).toEqual([
+      {
+        at: 0,
+        from: "h",
+        to: "h2",
+        source: "proposal",
+        nodes: [{ slug: "impl", changes: ["work"] }],
+        effect: "restart",
+        reason: "r",
+      },
+    ]);
+    const impl = report.nodes.find((n) => n.node === "impl");
+    expect(impl?.attempts.map((a) => a.outcome)).toEqual(["superseded", undefined]);
+    expect(impl?.attempts[1]?.definition_changed).toEqual(["work"]);
+    expect(impl?.attempts[0]?.definition_changed).toBeUndefined();
   });
 });
 

@@ -137,6 +137,122 @@ describe("a change of the pipeline that waits for a person", () => {
   });
 });
 
+describe("pipeline changes", () => {
+  const hostOf = () => new LocalPipelineHost({ root: dir, heartbeatMs: 0 });
+  const journalOf = async (id: string) =>
+    (await readFile(join(dir, ".kodel", "runs", id, "journal.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+  test("show says what differs, with the command to accept it", async () => {
+    const id = await runAtGate();
+    expect((await cli("pipeline", "changes", id)).out).toContain("no change of the pipeline waits");
+    await editPipeline();
+    const shown = await cli("pipeline", "changes", "show", id);
+    expect(shown.code).toBe(0);
+    expect(shown.out).toContain('step "build": work');
+    expect(shown.out).toContain("rebuilt");
+    expect(shown.out).toContain(`kodel pipeline changes apply ${id}`);
+    // the short form is the same
+    expect((await cli("pipeline", "changes", id)).out).toBe(shown.out);
+  });
+
+  test("apply asks, moves the run to the new version, and journals who and how", async () => {
+    const id = await runAtGate();
+    await editPipeline();
+    const result = await cli("pipeline", "changes", "apply", id, "--reason", "build twice");
+    expect(result.code).toBe(0);
+    expect(result.asked[0]).toContain("Accept it for run");
+    expect(result.asked[0]).toContain("rebuilt");
+    expect(result.out).toContain(id);
+
+    expect((await cli("status", id)).out).not.toContain("pipeline:");
+    const accepted = (await journalOf(id)).find((r) => r.event === "pipeline_accepted");
+    expect(accepted).toMatchObject({
+      source: "file",
+      reason: "build twice",
+      nodes: [{ slug: "build", changes: ["work"] }],
+    });
+    // the run goes on with the step it was at
+    expect((await cli("gate", "approve", id)).code).toBe(0);
+  });
+
+  test("a person who does not confirm changes nothing", async () => {
+    const id = await runAtGate();
+    await editPipeline();
+    const result = await cliAs({ answer: false }, "pipeline", "changes", "apply", id);
+    expect(result.code).toBe(1);
+    expect(result.err).toContain("not confirmed");
+    expect((await journalOf(id)).some((r) => r.event === "pipeline_accepted")).toBe(false);
+    expect((await cli("status", id)).out).toContain("pipeline_changed");
+  });
+
+  test("what is accepted is what was shown", async () => {
+    const id = await runAtGate();
+    await editPipeline();
+    const file = join(dir, ".kodel", "pipelines", "demo.yaml");
+    const result = await runCli(["pipeline", "changes", "apply", id], {
+      cwd: dir,
+      out: () => {},
+      err: () => {},
+      interactive: true,
+      environment: {},
+      confirm: async () => {
+        await writeFile(file, DEMO.replace("built", "swapped"));
+        return true;
+      },
+    });
+    expect(result).toBe(1);
+    expect((await journalOf(id)).some((r) => r.event === "pipeline_accepted")).toBe(false);
+  });
+
+  test("nothing to accept, or a change that cannot be accepted, is said", async () => {
+    const id = await runAtGate();
+    const none = await cli("pipeline", "changes", "apply", id);
+    expect(none.code).toBe(1);
+    expect(none.err).toContain("no change of the pipeline waits");
+    await writeFile(
+      join(dir, ".kodel", "pipelines", "demo.yaml"),
+      DEMO.replace("name: demo", "name: other"),
+    );
+    const refused = await cli("pipeline", "changes", "apply", id);
+    expect(refused.code).toBe(1);
+    expect(refused.err).toContain("cannot be accepted");
+  });
+
+  test("discard drops a proposal, and puts a changed file back", async () => {
+    const id = await runAtGate();
+    const run = (await hostOf().open(id)) as NonNullable<
+      Awaited<ReturnType<LocalPipelineHost["open"]>>
+    >;
+    await run.proposeChange({ yaml: DEMO.replace("built", "proposed"), summary: "s" });
+    expect((await cli("pipeline", "changes", "discard", id)).out).toContain("proposal is dropped");
+    expect(await run.pendingChange()).toBeUndefined();
+
+    await editPipeline();
+    expect((await cli("pipeline", "changes", "discard", id)).out).toContain("is back as it was");
+    expect(await readFile(join(dir, ".kodel", "pipelines", "demo.yaml"), "utf8")).toBe(DEMO);
+  });
+
+  test("history lists the versions, and restore writes one back", async () => {
+    const id = await runAtGate();
+    await editPipeline();
+    await cli("pipeline", "changes", "apply", id);
+    const history = await cli("pipeline", "changes", "history", id);
+    expect(history.out).toContain("started with");
+    expect(history.out).toContain("accepted (a change in the file)");
+    expect(history.out).toContain("<- now");
+
+    await writeFile(join(dir, ".kodel", "pipelines", "demo.yaml"), "scribbled\n");
+    const restored = await cli("pipeline", "changes", "restore", id);
+    expect(restored.code).toBe(0);
+    expect(await readFile(join(dir, ".kodel", "pipelines", "demo.yaml"), "utf8")).toBe(
+      DEMO.replace("built", "rebuilt"),
+    );
+  });
+});
+
 describe("status", () => {
   test("says so when there are no runs", async () => {
     expect(await cli("status")).toMatchObject({ code: 0, out: "no runs yet\n" });
@@ -246,6 +362,9 @@ describe("only a person can decide", () => {
       ["resume", id],
       ["ack", id],
       ["seal", id],
+      ["pipeline", "changes", "apply", id],
+      ["pipeline", "changes", "discard", id],
+      ["pipeline", "changes", "restore", id],
     ]) {
       const result = await cliAs(script, ...args);
       expect(result.code).toBe(1);
@@ -448,6 +567,9 @@ describe("commands a person runs refuse to run from the engine", () => {
       ["resume", id],
       ["ack", id],
       ["seal", id],
+      ["pipeline", "changes", "apply", id],
+      ["pipeline", "changes", "discard", id],
+      ["pipeline", "changes", "restore", id],
     ]) {
       const result = await cliAs(inEngine, ...args);
       expect(result.code, args.join(" ")).toBe(1);

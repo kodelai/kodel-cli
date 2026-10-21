@@ -20,6 +20,21 @@ export interface AttemptReport {
   checks?: { index: number; kind: string; passed: boolean; exit?: number; ms?: number }[];
   /** Reports of findings the agent sent that were accepted. */
   reports?: { completeness: string; rows: number }[];
+  /** The hashes of the definition of the node this attempt ran on, when the journal has them. */
+  definition?: { work: string; checks: string; routing: string };
+  /** Which parts of the node's definition differ from the attempt before this one. */
+  definition_changed?: ("work" | "checks" | "routing")[];
+}
+
+/** A version of the pipeline a person accepted for the run. */
+export interface PipelineChangeReport {
+  at: number;
+  from: string;
+  to: string;
+  source: string;
+  nodes: { slug: string; changes: string[] }[];
+  effect: string;
+  reason?: string;
 }
 
 export interface NodeReport {
@@ -52,6 +67,8 @@ export interface RunReport {
   refusals: { about: string; node?: string; code: string; message: string }[];
   /** Attempts beyond the first, over all nodes: how much rework there was. */
   extra_attempts: number;
+  /** The versions of the pipeline a person accepted while the run went, in order. */
+  pipeline_changes: PipelineChangeReport[];
 }
 
 const seconds = (from: number, to: number) => Math.max(0, Math.round((to - from) / 100) / 10);
@@ -76,6 +93,7 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
   };
 
   const refusals: RunReport["refusals"] = [];
+  const pipelineChanges: PipelineChangeReport[] = [];
   const attemptOf = (name: string, attempt: number) =>
     nodes.get(name)?.attempts.find((a) => a.attempt === attempt);
 
@@ -86,8 +104,35 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
       case "node_entered":
         if (name && attempt !== undefined) {
           entered.set(`${name}#${attempt}`, record.ts);
-          nodeOf(name).attempts.push({ attempt, seconds: 0 });
+          const definition = record.definition as AttemptReport["definition"] | undefined;
+          nodeOf(name).attempts.push({
+            attempt,
+            seconds: 0,
+            ...(definition ? { definition } : {}),
+          });
         }
+        break;
+      case "node_superseded":
+        // closed without a verdict because the pipeline changed under it
+        if (name && attempt !== undefined) {
+          const found = attemptOf(name, attempt);
+          const from = entered.get(`${name}#${attempt}`) ?? record.ts;
+          if (found) {
+            found.seconds = seconds(from, record.ts);
+            found.outcome = "superseded";
+          }
+        }
+        break;
+      case "pipeline_accepted":
+        pipelineChanges.push({
+          at: record.ts,
+          from: String(record.from),
+          to: String(record.to),
+          source: String(record.source),
+          nodes: (record.nodes as PipelineChangeReport["nodes"] | undefined) ?? [],
+          effect: String((record.effect as { kind?: string } | undefined)?.kind ?? "none"),
+          ...(typeof record.reason === "string" ? { reason: record.reason } : {}),
+        });
         break;
       case "gate_waiting":
         if (name) gates.add(name);
@@ -180,6 +225,15 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
         attempt.seconds = seconds(entered.get(`${report.node}#${attempt.attempt}`) ?? last, last);
       }
     }
+    // Which attempts ran on another definition than the one before them.
+    for (const [i, attempt] of report.attempts.entries()) {
+      const before = report.attempts[i - 1]?.definition;
+      if (!before || !attempt.definition) continue;
+      const parts = (["work", "checks", "routing"] as const).filter(
+        (part) => before[part] !== attempt.definition?.[part],
+      );
+      if (parts.length > 0) attempt.definition_changed = parts;
+    }
     report.gate = gates.has(report.node);
     report.seconds = Math.round(report.attempts.reduce((sum, a) => sum + a.seconds, 0) * 10) / 10;
   }
@@ -202,5 +256,6 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
     refused: Math.max(state.refusals ?? 0, refusals.length),
     refusals,
     extra_attempts: all.reduce((total, n) => total + Math.max(0, n.attempts.length - 1), 0),
+    pipeline_changes: pipelineChanges,
   };
 }

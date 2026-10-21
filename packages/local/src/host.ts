@@ -517,16 +517,22 @@ export class LocalRun {
    * is pinned to. Only what the pipeline means counts, not comments or layout, and a file that is
    * not a pipeline is not a change. The text and hash come along for `acceptChange`.
    */
-  async pendingChange(state?: RunState): Promise<PendingFound | undefined> {
+  async pendingChange(
+    state?: RunState,
+    only?: "file" | "proposal",
+  ): Promise<PendingFound | undefined> {
     const now = state ?? (await this.state());
     if (now.status !== "running" && now.status !== "paused") return undefined;
     const current = await this.currentSpec(now);
     // The agent's proposal comes first; a change made in the file is looked at when there is none.
-    const proposal = await this.host.store.readProposal(this.runId);
-    if (proposal !== undefined) {
-      const found = this.describeChange("proposal", proposal, undefined, now, current);
-      if (found) return found;
+    if (only !== "file") {
+      const proposal = await this.host.store.readProposal(this.runId);
+      if (proposal !== undefined) {
+        const found = this.describeChange("proposal", proposal, undefined, now, current);
+        if (found) return found;
+      }
     }
+    if (only === "proposal") return undefined;
     const where = await this.watched(now);
     if (!where) return undefined;
     let text: string;
@@ -536,6 +542,95 @@ export class LocalRun {
       return undefined;
     }
     return this.describeChange("file", text, where.relative, now, current);
+  }
+
+  /** Drop the agent's proposal. A person's act; it is journaled like the agent taking it back. */
+  async discardProposal(): Promise<boolean> {
+    const had = await this.host.store.removeProposal(this.runId);
+    if (had) {
+      await this.apply({
+        type: "change_proposed",
+        hash: "",
+        summary: "dropped by a person",
+        withdrawn: true,
+      });
+    }
+    return had;
+  }
+
+  /**
+   * Every version of the pipeline the run has had, oldest first, from the journal (which says when,
+   * and what a person accepted), and the kept copies that the journal knows nothing about (an `apply`
+   * that did not finish).
+   */
+  async history(): Promise<{
+    versions: {
+      hash: string;
+      at: number;
+      how: "started" | "proposal" | "file";
+      nodes: { slug: string; changes: string[] }[];
+      effect?: string;
+      reason?: string;
+      current: boolean;
+    }[];
+    orphans: string[];
+  }> {
+    const state = await this.state();
+    const journal = await this.host.store.readJournal(this.runId);
+    const out: Awaited<ReturnType<LocalRun["history"]>>["versions"] = [];
+    for (const record of journal) {
+      if (record.event === "run_started") {
+        out.push({
+          hash: String(record.spec),
+          at: record.ts,
+          how: "started",
+          nodes: [],
+          current: false,
+        });
+      } else if (record.event === "pipeline_accepted") {
+        const effect = record.effect as { kind?: string } | undefined;
+        out.push({
+          hash: String(record.to),
+          at: record.ts,
+          how: record.source === "proposal" ? "proposal" : "file",
+          nodes: (record.nodes as { slug: string; changes: string[] }[] | undefined) ?? [],
+          ...(effect?.kind === undefined ? {} : { effect: effect.kind }),
+          ...(typeof record.reason === "string" ? { reason: record.reason } : {}),
+          current: false,
+        });
+      }
+    }
+    const last = out.at(-1);
+    if (last) last.current = last.hash === state.specHash;
+    const known = new Set(out.map((v) => v.hash));
+    const orphans = (await this.host.store.listSpecs(this.runId)).filter((h) => !known.has(h));
+    return { versions: out, orphans };
+  }
+
+  /**
+   * Write a version the run has had (the one it is on, by default) into the run's own pipeline file.
+   * A version the run could not be moved to now is refused before anything is written, so the file is
+   * never left in a state that only gets in the way.
+   */
+  async restoreFile(hash?: string): Promise<{ path: string; hash: string }> {
+    const state = await this.state();
+    const target = hash ?? state.specHash;
+    const where = await this.watched(state);
+    if (!where) {
+      throw new KodelError(
+        "INVALID_ARGUMENTS",
+        `run ${this.runId} has no pipeline file of its own`,
+      );
+    }
+    const spec = await this.specFor(target);
+    if (target !== state.specHash) {
+      const diff = diffPipelines(await this.currentSpec(state), spec, state);
+      if (diff.refused !== undefined) throw new KodelError("PIPELINE_CHANGE_REFUSED", diff.refused);
+    }
+    const text = await this.host.store.readSpec(this.runId, target);
+    if (text === undefined) throw new KodelError("UNKNOWN_RUN", `no kept version ${target}`);
+    await this.host.store.replaceFile(where.path, text);
+    return { path: where.relative, hash: target };
   }
 
   private describeChange(

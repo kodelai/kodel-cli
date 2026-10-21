@@ -25,6 +25,7 @@ const report: RunReport = {
   extra_attempts: 1,
   refused: 0,
   refusals: [],
+  pipeline_changes: [],
   nodes: [
     {
       node: "impl",
@@ -61,6 +62,49 @@ describe("formatReport", () => {
   test("a table of nodes marks the ones a person decides", () => {
     expect(text).toContain("impl     2         50 s");
     expect(text).toContain("approve  1         1m 15s  (a person decides)");
+  });
+
+  test("a pipeline changed during the run is listed, and a change of checks is called out", () => {
+    expect(text).not.toContain("the pipeline was changed");
+    const changed = formatReport(
+      {
+        ...report,
+        pipeline_changes: [
+          {
+            at: 0,
+            from: "aaaa",
+            to: "bbbb",
+            source: "proposal",
+            nodes: [{ slug: "impl", changes: ["checks"] }],
+            effect: "recheck",
+            reason: "tests count too",
+          },
+        ],
+        nodes: [
+          {
+            node: "impl",
+            gate: false,
+            seconds: 2,
+            attempts: [
+              { attempt: 1, seconds: 1, definition: { work: "w", checks: "c1", routing: "r" } },
+              {
+                attempt: 2,
+                seconds: 1,
+                definition: { work: "w", checks: "c2", routing: "r" },
+                definition_changed: ["checks"],
+              },
+            ],
+          },
+        ],
+      },
+      (t) => t,
+    );
+    expect(changed).toContain("the pipeline was changed while the run went:");
+    expect(changed).toContain(
+      "the agent's proposal  impl (checks)  then: recheck  (tests count too)",
+    );
+    expect(changed).toContain("NOTE: the checks of impl were changed during this run");
+    expect(changed).toContain("impl #2: checks");
   });
 
   test("what did not pass is listed with the reason, and only when something did not pass", () => {

@@ -9,7 +9,7 @@ import { LocalPipelineHost } from "@kodel-ai/local";
 import { type Decision, KodelError, type RunState } from "@kodel-ai/pipeline-core";
 import { Command, CommanderError } from "commander";
 import pkg from "../package.json" with { type: "json" };
-import { formatReport } from "./format";
+import { formatChange, formatReport } from "./format";
 import { serveStdio } from "./mcp-server";
 
 export interface CliEnv {
@@ -328,6 +328,160 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       await mustConfirm(`Accept the state of run ${runId} as it is now?`);
       failIfRefused(await run.acknowledge(opts.note));
       env.out(`${runId}: accepted\n`);
+    });
+
+  const changes = program
+    .command("pipeline")
+    .description("The pipeline of a run")
+    .command("changes")
+    .description(
+      "Changes of the pipeline of a run: look at the one that waits, accept it, drop it, list the versions, put one back",
+    );
+
+  /** What waits for the person, as the commands show it: where it came from, then the differences. */
+  async function describePending(
+    run: Awaited<ReturnType<typeof openRun>>,
+    found: NonNullable<Awaited<ReturnType<typeof run.pendingChange>>>,
+  ): Promise<string> {
+    const { info } = found;
+    const current = await run.currentSpec();
+    const origin =
+      info.source === "proposal"
+        ? "The agent proposed another version of the pipeline."
+        : `The pipeline file ${plain(info.watched ?? "")} was changed.`;
+    const body = formatChange(current, found.spec, info.changes, info.redo, plain);
+    return info.refused === undefined
+      ? `${origin}\n\n${body}`
+      : `${origin}\n\nIt cannot be accepted: ${plain(info.refused)}\n\n${body}`;
+  }
+
+  changes
+    .command("show <run>", { isDefault: true })
+    .description("The change that waits for you, if there is one")
+    .action(async (runId: string) => {
+      const run = await openRun(host(), runId);
+      const found = await run.pendingChange();
+      if (!found) {
+        env.out(`${runId}: no change of the pipeline waits\n`);
+        return;
+      }
+      env.out(`${await describePending(run, found)}\n\n`);
+      env.out(`To accept it: ${plain(found.info.apply)}\n`);
+      env.out(`To drop it:   kodel pipeline changes discard ${runId}\n`);
+    });
+
+  changes
+    .command("apply <run>")
+    .description("Accept the change that waits: the run goes on with the new pipeline")
+    .option("--reason <text>", "why, if the changes do not say it")
+    .option("--from <source>", "which one to accept if there are two: proposal or file")
+    .action(async (runId: string, opts: { reason?: string; from?: string }) => {
+      requireHuman();
+      if (opts.from !== undefined && opts.from !== "proposal" && opts.from !== "file") {
+        throw new UserError('--from is "proposal" or "file"');
+      }
+      const run = await openRun(host(), runId);
+      const state = await run.state();
+      if (state.status !== "running" && state.status !== "paused") {
+        throw new UserError(`run ${runId} is ${state.status}; its pipeline cannot change now`);
+      }
+      const found = await run.pendingChange(state, opts.from);
+      if (!found) throw new UserError(`no change of the pipeline waits for run ${runId}`);
+      if (found.info.refused !== undefined) {
+        throw new UserError(`this change cannot be accepted: ${plain(found.info.refused)}`);
+      }
+      await mustConfirm(
+        `${await describePending(run, found)}\n\nAccept it for run ${plain(runId)}?`,
+      );
+      // What is accepted is what was shown: if the text moved while the person read, nothing is taken.
+      const again = await run.pendingChange(undefined, found.info.source);
+      if (!again || again.hash !== found.hash) {
+        throw new UserError(
+          `the change was modified while you were looking at it; nothing was accepted. Look at it again: kodel pipeline changes ${runId}`,
+        );
+      }
+      failIfRefused(
+        await run.acceptChange({
+          source: found.info.source,
+          text: found.text,
+          ...(opts.reason === undefined ? {} : { reason: opts.reason }),
+        }),
+      );
+      await afterDecision(run);
+      if ((await run.state()).status === "paused") {
+        env.out(`The run is still paused; carry it on with: kodel resume ${runId}\n`);
+      }
+    });
+
+  changes
+    .command("discard <run>")
+    .description("Drop the agent's proposal, or put the pipeline file back as the run has it")
+    .action(async (runId: string) => {
+      requireHuman();
+      const run = await openRun(host(), runId);
+      const found = await run.pendingChange();
+      if (!found) {
+        env.out(`${runId}: no change of the pipeline waits\n`);
+        return;
+      }
+      if (found.info.source === "proposal") {
+        await mustConfirm(`Drop the agent's proposal for run ${plain(runId)}?`);
+        await run.discardProposal();
+        env.out(`${runId}: the proposal is dropped\n`);
+        return;
+      }
+      await mustConfirm(
+        `The change is in ${plain(found.info.watched ?? "the pipeline file")}. Put the file back as run ${plain(runId)} has it?`,
+      );
+      const restored = await run.restoreFile();
+      env.out(`${runId}: ${plain(restored.path)} is back as it was\n`);
+    });
+
+  changes
+    .command("history <run>")
+    .description("The versions of the pipeline the run has had")
+    .action(async (runId: string) => {
+      const run = await openRun(host(), runId);
+      const { versions, orphans } = await run.history();
+      for (const [i, v] of versions.entries()) {
+        const when = new Date(v.at).toISOString().replace("T", " ").slice(0, 19);
+        const how =
+          v.how === "started"
+            ? "started with"
+            : `accepted (${v.how === "proposal" ? "the agent's proposal" : "a change in the file"})`;
+        const steps = v.nodes.map((n) => `${plain(n.slug)} (${n.changes.map(plain).join(", ")})`);
+        const effect = v.effect && v.effect !== "none" ? `  then: ${plain(v.effect)}` : "";
+        env.out(
+          `${i + 1}  ${plain(v.hash)}  ${when}  ${how}${v.current ? "  <- now" : ""}${
+            steps.length > 0 ? `\n     changed: ${steps.join(", ")}${effect}` : ""
+          }${v.reason ? `\n     reason: ${plain(v.reason)}` : ""}\n`,
+        );
+      }
+      for (const hash of orphans) {
+        env.out(`?  ${plain(hash)}  kept, but the history does not say it was accepted\n`);
+      }
+    });
+
+  changes
+    .command("restore <run> [hash]")
+    .description(
+      "Write a version the run has had into the pipeline file (the one it is on, by default)",
+    )
+    .action(async (runId: string, hash: string | undefined) => {
+      requireHuman();
+      const run = await openRun(host(), runId);
+      const state = await run.state();
+      await mustConfirm(
+        `Write ${hash ? `version ${plain(hash)}` : "the version the run is on"} into ${plain(state.pipelineFile ?? "the pipeline file")}?`,
+      );
+      try {
+        const restored = await run.restoreFile(hash);
+        env.out(`${runId}: ${plain(restored.path)} is now version ${restored.hash}\n`);
+      } catch (error) {
+        if (error instanceof KodelError)
+          throw new UserError(`${error.code}: ${plain(error.message)}`);
+        throw error;
+      }
     });
 
   program
