@@ -131,6 +131,8 @@ export interface RunState {
   seq: number;
   /** How many refused calls were journaled; there is a limit (`MAX_LOGGED_REFUSALS`). */
   refusals?: number;
+  /** How many proposals to change the pipeline were journaled; there is a limit. */
+  proposals?: number;
   /**
    * Where the host runs this run's commands, when not in the repository root; opaque to the core.
    * It lives in the state, which the host checks against its trusted hash, because a command must
@@ -146,6 +148,9 @@ export interface RunState {
 
 /** How many refused calls a run journals: enough to see what was tried, too few to be a way to fill the disk. */
 export const MAX_LOGGED_REFUSALS = 100;
+
+/** How many proposals to change the pipeline a run journals. */
+export const MAX_LOGGED_PROPOSALS = 100;
 
 // ── events in, effects out ──────────────────────────────────────────────────
 
@@ -239,6 +244,11 @@ export type RunEvent =
       message: string;
       suggestion?: string;
     }
+  /**
+   * The agent proposed another version of the pipeline (`withdrawn`: took its proposal back).
+   * Journaled; changes nothing else: only a person's `pipeline_accepted` moves the run.
+   */
+  | { type: "change_proposed"; hash: string; summary: string; withdrawn?: boolean }
   /** A human accepted a change made to the run's files outside kodel. Journaled; changes nothing else. */
   | { type: "acknowledge"; note?: string }
   /**
@@ -601,12 +611,30 @@ class Machine {
     }
     if (event.type === "feedback") {
       if (event.node !== undefined) this.node(event.node);
+      // A note is about the pipeline as it was when it was written, and the pipeline may change
+      // under a run, so it says which version and, when only one step is going, which step.
+      const only = this.s.active.length === 1 ? this.s.active[0]?.node : undefined;
       this.log("feedback_reported", {
-        node: event.node ?? null,
+        node: event.node ?? only ?? null,
         attempt: event.attempt ?? null,
         category: event.category,
         message: event.message,
         suggestion: event.suggestion ?? null,
+        spec: this.s.specHash,
+      });
+      return;
+    }
+    if (event.type === "change_proposed") {
+      // Only the first few are kept, like refused calls: a proposal is one file that is replaced, but
+      // every one of them is a line in the journal.
+      const so_far = this.s.proposals ?? 0;
+      if (so_far >= MAX_LOGGED_PROPOSALS) throw new Repeat();
+      this.s.proposals = so_far + 1;
+      this.log("pipeline_change_proposed", {
+        hash: event.hash,
+        summary: event.summary,
+        from: this.s.specHash,
+        ...(event.withdrawn === true ? { withdrawn: true } : {}),
       });
       return;
     }

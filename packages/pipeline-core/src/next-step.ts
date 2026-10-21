@@ -247,9 +247,11 @@ function baseStep(spec: PipelineSpec, state: RunState, now: number, registry: Re
       out.reentry_feedback =
         failure.source === "human"
           ? `A person sent this back${at}: ${failure.reason}`
-          : failure.from
-            ? `"${failure.from}" failed (${failure.source}): ${failure.reason}`
-            : `The previous attempt failed (${failure.source}): ${failure.reason}`;
+          : failure.source === "pipeline"
+            ? `The pipeline was changed under this run: ${failure.reason}`
+            : failure.from
+              ? `"${failure.from}" failed (${failure.source}): ${failure.reason}`
+              : `The previous attempt failed (${failure.source}): ${failure.reason}`;
     }
     if (resultSpec) out.result_spec = resultSpec;
     const how = handler?.instruction?.(spec_.params);

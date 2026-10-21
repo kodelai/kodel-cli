@@ -235,4 +235,160 @@ describe("a pipeline file edited under a run in its own worktree", () => {
     expect(found?.info.changes).toEqual([{ slug: "write", changes: ["checks"] }]);
     expect(dirname(own)).toContain(".kodel/worktrees");
   });
+
+  test("accepting_a_proposal_writes_the_worktree_copy_not_the_root", async () => {
+    const run = await startRun();
+    const own = await ownFile(run);
+    const text = PIPELINE("node -e 2");
+    expect((await run.proposeChange({ yaml: text, summary: "s" })).ok).toBe(true);
+    const found = await run.pendingChange();
+    expect(found?.info.source).toBe("proposal");
+
+    expect((await run.acceptChange({ source: "proposal", text })).ok).toBe(true);
+    expect(await readFile(own, "utf8")).toBe(text);
+    expect(await readFile(join(dir, FILE), "utf8")).toBe(V1);
+    expect(await run.pendingChange()).toBeUndefined();
+  });
+});
+
+describe("the agent's proposal to change the pipeline", () => {
+  beforeEach(async () => {
+    await makeRepo("worktree:\n  mode: off\n");
+  });
+
+  const proposal = (check = "node -e 2") => PIPELINE(check);
+
+  test("propose_change_writes_no_pipeline_file", async () => {
+    const run = await startRun();
+    const outcome = await run.proposeChange({ yaml: proposal(), summary: "a different check" });
+    expect(outcome).toMatchObject({
+      ok: true,
+      status: "proposed",
+      change: {
+        source: "proposal",
+        changes: [{ slug: "write", changes: ["checks"] }],
+        apply: `kodel pipeline changes apply ${run.runId}`,
+      },
+    });
+    expect(await readFile(join(dir, FILE), "utf8")).toBe(V1);
+    const proposed = join(dir, ".kodel", "runs", run.runId, "pending", "proposal.yaml");
+    expect(await readFile(proposed, "utf8")).toBe(proposal());
+  });
+
+  test("a_proposal_holds_the_step_like_a_change_in_the_file_does", async () => {
+    const run = await startRun();
+    await run.proposeChange({ yaml: proposal(), summary: "s" });
+    const done = await run.completeStep("write", 1);
+    expect(done.ok && done.noop).toBe(true);
+    const held = await run.nextStep({ atCompletion: true });
+    expect(held).toMatchObject({
+      waiting: { reason: "pipeline_changed", pipeline_change: { source: "proposal" } },
+    });
+  });
+
+  test("propose_change_refuses_an_invalid_or_refused_pipeline", async () => {
+    const run = await startRun();
+    expect(await run.proposeChange({ yaml: "name: x\nnodes: [", summary: "s" })).toMatchObject({
+      ok: false,
+      code: "PIPELINE_INVALID",
+    });
+    expect(
+      await run.proposeChange({ yaml: V1.replace("name: demo", "name: other"), summary: "s" }),
+    ).toMatchObject({ ok: false, code: "PIPELINE_CHANGE_REFUSED" });
+    expect(await run.proposeChange({ yaml: V1, summary: "s" })).toMatchObject({
+      ok: false,
+      code: "PIPELINE_CHANGE_REFUSED",
+    });
+    expect(await run.pendingChange()).toBeUndefined();
+  });
+
+  test("propose_change_refuses_a_pipeline_with_a_secret_in_it", async () => {
+    const run = await startRun();
+    const key = ["AKIA", "IOSFODNN7EXAMPLE"].join("");
+    const outcome = await run.proposeChange({ yaml: proposal(`echo ${key}`), summary: "s" });
+    expect(outcome).toMatchObject({ ok: false, code: "INVALID_ARGUMENTS" });
+    expect(await run.pendingChange()).toBeUndefined();
+  });
+
+  test("a_new_proposal_replaces_the_old_and_an_empty_one_takes_it_back", async () => {
+    const run = await startRun();
+    await run.proposeChange({ yaml: proposal("node -e 2"), summary: "first" });
+    await run.proposeChange({ yaml: proposal("node -e 3"), summary: "second" });
+    expect((await run.pendingChange())?.text).toBe(proposal("node -e 3"));
+
+    expect(await run.proposeChange({ yaml: "", summary: "never mind" })).toMatchObject({
+      ok: true,
+      status: "withdrawn",
+    });
+    expect(await run.pendingChange()).toBeUndefined();
+    expect(await run.proposeChange({ yaml: "", summary: "again" })).toMatchObject({
+      status: "none",
+    });
+    const journal = (
+      await readFile(join(dir, ".kodel", "runs", run.runId, "journal.jsonl"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { event: string; summary?: string; withdrawn?: boolean });
+    const proposals = journal.filter((r) => r.event === "pipeline_change_proposed");
+    expect(proposals.map((r) => r.summary)).toEqual(["first", "second", "never mind"]);
+    expect(proposals.at(-1)?.withdrawn).toBe(true);
+  });
+
+  test("a_proposal_equal_to_the_version_the_run_is_on_is_not_pending", async () => {
+    const run = await startRun();
+    await run.proposeChange({ yaml: proposal(), summary: "s" });
+    await run.acceptChange({ source: "proposal", text: proposal() });
+    // the same text proposed again, or left behind: nothing to decide
+    await mkdir(join(dir, ".kodel", "runs", run.runId, "pending"), { recursive: true });
+    await writeFile(join(dir, ".kodel", "runs", run.runId, "pending", "proposal.yaml"), proposal());
+    expect(await run.pendingChange()).toBeUndefined();
+  });
+
+  test("a_proposal_is_taken_when_the_run_is_paused_and_refused_when_it_is_over", async () => {
+    const run = await startRun();
+    await run.cancel();
+    expect(await run.proposeChange({ yaml: proposal(), summary: "s" })).toMatchObject({
+      ok: false,
+      code: "NODE_NOT_RUNNING",
+    });
+  });
+
+  test("resolve_with_a_run_gives_the_pinned_text", async () => {
+    const run = await startRun();
+    await writeFile(join(dir, FILE), PIPELINE("node -e 9")); // the file moved on; the run did not
+    const pinned = await run.pinnedPipeline();
+    expect(pinned.yaml).toBe(V1);
+    expect(pinned.hash).toBe(hashSource(V1));
+  });
+
+  test("a_note_says_which_version_and_step_it_was_about", async () => {
+    const run = await startRun();
+    await run.feedback({ category: "wrong_check", message: "the limit counts tests" });
+    const journal = (
+      await readFile(join(dir, ".kodel", "runs", run.runId, "journal.jsonl"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { event: string; spec?: string; node?: string });
+    expect(journal.find((r) => r.event === "feedback_reported")).toMatchObject({
+      spec: hashSource(V1),
+      node: "write",
+    });
+  });
+
+  test("restart_note_reaches_the_agent", async () => {
+    const run = await startRun();
+    const text = PIPELINE("node -e 0", "write it better");
+    await run.proposeChange({ yaml: text, summary: "s" });
+    await run.acceptChange({ source: "proposal", text });
+    const step = await run.nextStep();
+    expect(step).toMatchObject({
+      node: {
+        slug: "write",
+        attempt: 2,
+        reentry_feedback: expect.stringContaining("The pipeline was changed under this run"),
+      },
+    });
+  });
 });

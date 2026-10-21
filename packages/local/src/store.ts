@@ -227,6 +227,41 @@ export class FileStore {
     return join(this.runDir(runId), "specs");
   }
 
+  // the agent's proposal to change the pipeline: one file, replaced by the next proposal
+
+  private proposalPath(runId: string): string {
+    return join(this.runDir(runId), "pending", "proposal.yaml");
+  }
+
+  async writeProposal(runId: string, source: string): Promise<void> {
+    await mkdir(dirname(this.proposalPath(runId)), { recursive: true });
+    await this.writeAtomic(this.proposalPath(runId), source);
+  }
+
+  async readProposal(runId: string): Promise<string | undefined> {
+    try {
+      return await readFile(this.proposalPath(runId), "utf8");
+    } catch (error) {
+      if (isMissing(error)) return undefined;
+      throw error;
+    }
+  }
+
+  async removeProposal(runId: string): Promise<boolean> {
+    try {
+      await rm(this.proposalPath(runId));
+      return true;
+    } catch (error) {
+      if (isMissing(error)) return false;
+      throw error;
+    }
+  }
+
+  /** Write a file that is not the store's own (a pipeline file the person accepted), all or nothing. */
+  async replaceFile(path: string, content: string): Promise<void> {
+    await this.writeAtomic(path, content);
+  }
+
   /** The newest run of this pipeline and task that has not finished. */
   async findActive(
     pipeline: string,

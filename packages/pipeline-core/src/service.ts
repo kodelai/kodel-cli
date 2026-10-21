@@ -5,7 +5,7 @@
  * every host answers an agent the same way.
  */
 import { type ErrorCode, KodelError } from "./errors";
-import { MAX_WAIT_S, type NextStep } from "./next-step";
+import { MAX_WAIT_S, type NextStep, type PipelineChange } from "./next-step";
 import type { PipelineSpec } from "./pipeline";
 import { defaultRegistry, type Registry } from "./registry";
 import { renderTemplate } from "./render";
@@ -35,6 +35,15 @@ export interface FeedbackInput {
   suggestion?: string;
 }
 
+export type ProposeOutcome =
+  | { ok: false; code: ErrorCode; message: string }
+  | {
+      ok: true;
+      /** `withdrawn`: there was a proposal and it was taken back. `none`: there was none to take back. */
+      status: "proposed" | "withdrawn" | "none";
+      change?: PipelineChange;
+    };
+
 /** One run, as the service sees it. */
 export interface RunHandle {
   readonly runId: string;
@@ -59,6 +68,13 @@ export interface RunHandle {
     options?: { replace?: boolean },
   ): Promise<StepResult>;
   feedback(input: FeedbackInput): Promise<Decision>;
+  /** The pipeline the run is on now: its text as it was kept, parsed, and its hash. */
+  pinnedPipeline(): Promise<{ yaml: string; spec: PipelineSpec; hash: string }>;
+  /**
+   * The agent's proposal to change the run's pipeline; an empty `yaml` takes the proposal back. It
+   * changes nothing about the run: a person decides.
+   */
+  proposeChange(input: { yaml: string; summary: string }): Promise<ProposeOutcome>;
   /** Wait until the engine's work has come to rest, but no longer than `ms`. */
   waitForRest(ms: number): Promise<void>;
 }
@@ -163,8 +179,37 @@ export class PipelineService {
     });
   }
 
-  resolve(input: { pipeline: string }): Promise<ToolResult> {
-    return guarded(async () => ({ ok: true, spec: await this.spec(input.pipeline) }));
+  /**
+   * The definition of a pipeline. With a run, the one that run is on: its text as kept, which is what a
+   * proposal to change it starts from (the file in the project may be another version).
+   */
+  resolve(input: { pipeline: string; run_id?: string }): Promise<ToolResult> {
+    return guarded(async () => {
+      if (input.run_id !== undefined) {
+        const pinned = await (await this.run(input.run_id)).pinnedPipeline();
+        return { ok: true, spec: pinned.spec, yaml: pinned.yaml, version: pinned.hash };
+      }
+      return { ok: true, spec: await this.spec(input.pipeline) };
+    });
+  }
+
+  proposeChange(input: { run_id: string; pipeline: string; summary: string }): Promise<ToolResult> {
+    return guarded(async () => {
+      const run = await this.run(input.run_id);
+      const outcome = await run.proposeChange({ yaml: input.pipeline, summary: input.summary });
+      if (!outcome.ok) return failure(outcome.code, outcome.message);
+      return {
+        ok: true,
+        status: outcome.status,
+        ...(outcome.change ? { pipeline_change: outcome.change } : {}),
+        note:
+          outcome.status === "proposed"
+            ? "The run does not change until the person accepts it. Tell the person what you propose and why, which steps run again (`redo`), and the command in `pipeline_change.apply`; do not run it. Then end your turn, or go on if the next step is not affected."
+            : outcome.status === "withdrawn"
+              ? "The proposal was taken back."
+              : "There was no proposal to take back.",
+      };
+    });
   }
 
   /** A dry run: what would happen, with the task filled in, and nothing started. */

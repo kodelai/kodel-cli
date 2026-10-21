@@ -25,9 +25,10 @@ export const SERVER_INSTRUCTIONS = [
   "2. Follow each answer. Never pick, reorder or skip steps yourself, and never decide that a step is done: after you do a step, call pipeline_complete_step and let the engine's checks decide. If a check fails you get the reason and the same step again.",
   "3. pipeline_next_step tells you what is next: `node` (do it), `waiting` (a person has to decide), `running` (the engine is working: pass wait_s to wait, as the hint says), or `done`.",
   "4. At a `waiting` answer, do what `tell_the_person` says: write the person what they are asked to decide, a summary of what was done and changed, what to look at, and the command to decide with. Then end your turn. You cannot approve, reject or resume anything yourself, and you must not try: those commands are for the person and refuse to run for an agent.",
-  "5. Do not read or edit the run files in .kodel/runs, and do not change the pipeline files while a run is going.",
-  "6. If a step's description or a check looks wrong or unclear, say so with pipeline_feedback; it never blocks the run.",
+  "5. Do not read or edit the run files in .kodel/runs, and do not edit the pipeline files while a run is going: the only way for you to change the pipeline of a run is pipeline_propose_change, and a person accepts it.",
+  "6. If a step's description or a check looks wrong or unclear, say so with pipeline_feedback; it never blocks the run. If you think the pipeline itself should change for this run, first ask the person: change it now (the run stops at the end of the current step until they accept it), or only note it with pipeline_feedback and decide another way. Propose it only if they say now.",
   "7. If the answer to pipeline_start names a `workdir`, do all your work for the run in that directory (read and write files there, not in the directory you started in): the engine runs the commands and checks there.",
+  "8. If an answer tells you that the pipeline of the run was changed and a person has to accept it (a `waiting` answer about the change, or a note about it on a `node` answer), do what `tell_the_person` says. If the change was made by editing the pipeline file and not through pipeline_propose_change, put the file back as it was and propose it instead.",
 ].join("\n");
 
 export interface ToolDescriptor {
@@ -42,7 +43,7 @@ export interface ToolDescriptor {
 }
 
 /** Free text from the agent is bounded: everything is scanned for secrets and kept in the history. */
-const LIMITS = { name: 200, task: 4_000, text: 4_000 } as const;
+const LIMITS = { name: 200, task: 4_000, text: 4_000, proposal: 256 * 1024 } as const;
 
 /** A POSIX path, a drive path or a UNC path: the core has no `node:path` and no file system. */
 const ABSOLUTE_PATH = /^(\/|[A-Za-z]:[\\/]|\\\\)/;
@@ -76,11 +77,17 @@ export const TOOLS: ToolDescriptor[] = [
   {
     name: "pipeline_resolve",
     title: "Read a pipeline",
-    description: "Read the full definition of a pipeline: its nodes, checks and edges.",
-    shape: { pipeline: z.string().min(1).max(LIMITS.name) },
+    description:
+      "Read the full definition of a pipeline: its nodes, checks and edges. With run_id you get the version " +
+      "that run is on, with its YAML text (`yaml`); start from that text when you propose a change with " +
+      "pipeline_propose_change, because the file in the project may be another version.",
+    shape: {
+      pipeline: z.string().min(1).max(LIMITS.name),
+      run_id: runId.optional(),
+    },
     readOnly: true,
     idempotent: true,
-    run: (service, input) => service.resolve(input as { pipeline: string }),
+    run: (service, input) => service.resolve(input as { pipeline: string; run_id?: string }),
   },
   {
     name: "pipeline_plan",
@@ -251,6 +258,33 @@ export const TOOLS: ToolDescriptor[] = [
     readOnly: false,
     idempotent: false,
     run: (service, input) => service.feedback(input as Parameters<PipelineService["feedback"]>[0]),
+  },
+  {
+    name: "pipeline_propose_change",
+    title: "Propose a change of the run's pipeline",
+    description:
+      "Propose another version of the pipeline this run is on, as the full YAML (start from pipeline_resolve " +
+      "with run_id). Ask the person first whether to change it now or only note it with pipeline_feedback. " +
+      "Nothing changes by itself: the engine checks that the change can be taken, keeps it, and stops the run " +
+      "at the end of the current step until the person accepts it with a command they run. Never edit the " +
+      "pipeline file yourself and never run that command. The answer says what differs and which steps run " +
+      "again; tell the person. A proposal that cannot be taken is refused with the reason. A new proposal " +
+      "replaces the previous one; an empty `pipeline` takes your proposal back.",
+    shape: {
+      run_id: runId,
+      pipeline: z
+        .string()
+        .max(LIMITS.proposal)
+        .describe("The whole pipeline as YAML, or an empty string to take the proposal back."),
+      summary: z
+        .string()
+        .max(LIMITS.text)
+        .describe("What you change and why, in a sentence or two, for the person."),
+    },
+    readOnly: false,
+    idempotent: true,
+    run: (service, input) =>
+      service.proposeChange(input as Parameters<PipelineService["proposeChange"]>[0]),
   },
 ];
 

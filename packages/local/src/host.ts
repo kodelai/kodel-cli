@@ -29,7 +29,9 @@ import {
   type NextStep,
   nextStep,
   type PendingChange,
+  type PipelineChange,
   type PipelineSpec,
+  type ProposeOutcome,
   parsePipeline,
   parseSnapshot,
   type RedactRule,
@@ -371,6 +373,17 @@ export class LocalHost {
   }
 }
 
+/** The largest pipeline an agent may propose. */
+const MAX_PROPOSAL_BYTES = 256 * 1024;
+
+/** A change of the pipeline that waits, with the text it came as (for `acceptChange`). */
+export interface PendingFound {
+  info: PendingChange;
+  text: string;
+  hash: string;
+  spec: PipelineSpec;
+}
+
 export class LocalRun {
   private queue: Promise<unknown> = Promise.resolve();
   private readonly tasks = new Map<
@@ -504,11 +517,16 @@ export class LocalRun {
    * is pinned to. Only what the pipeline means counts, not comments or layout, and a file that is
    * not a pipeline is not a change. The text and hash come along for `acceptChange`.
    */
-  async pendingChange(
-    state?: RunState,
-  ): Promise<{ info: PendingChange; text: string; hash: string; spec: PipelineSpec } | undefined> {
+  async pendingChange(state?: RunState): Promise<PendingFound | undefined> {
     const now = state ?? (await this.state());
     if (now.status !== "running" && now.status !== "paused") return undefined;
+    const current = await this.currentSpec(now);
+    // The agent's proposal comes first; a change made in the file is looked at when there is none.
+    const proposal = await this.host.store.readProposal(this.runId);
+    if (proposal !== undefined) {
+      const found = this.describeChange("proposal", proposal, undefined, now, current);
+      if (found) return found;
+    }
     const where = await this.watched(now);
     if (!where) return undefined;
     let text: string;
@@ -517,6 +535,16 @@ export class LocalRun {
     } catch {
       return undefined;
     }
+    return this.describeChange("file", text, where.relative, now, current);
+  }
+
+  private describeChange(
+    source: "file" | "proposal",
+    text: string,
+    watched: string | undefined,
+    now: RunState,
+    current: PipelineSpec,
+  ): PendingFound | undefined {
     const hash = hashSource(text);
     if (hash === now.specHash) return undefined;
     let spec: PipelineSpec;
@@ -526,7 +554,6 @@ export class LocalRun {
       if (error instanceof KodelError) return undefined;
       throw error;
     }
-    const current = await this.currentSpec(now);
     if (canonicalPipeline(spec) === canonicalPipeline(current)) return undefined;
     const diff = diffPipelines(current, spec, now);
     return {
@@ -534,8 +561,8 @@ export class LocalRun {
       hash,
       spec,
       info: {
-        source: "file",
-        watched: where.relative,
+        source,
+        ...(watched === undefined ? {} : { watched }),
         changes: diff.nodes,
         effect: diff.effect,
         redo: describeEffect(diff.effect),
@@ -546,9 +573,95 @@ export class LocalRun {
     };
   }
 
+  /** The pipeline the run is on, as the text it was kept as. */
+  async pinnedPipeline(): Promise<{ yaml: string; spec: PipelineSpec; hash: string }> {
+    const state = await this.state();
+    const spec = await this.currentSpec(state);
+    const yaml = await this.host.store.readSpec(this.runId, state.specHash);
+    if (yaml === undefined) {
+      throw new KodelError("STATE_MODIFIED_EXTERNALLY", `run ${this.runId} has no kept pipeline`);
+    }
+    return { yaml, spec, hash: state.specHash };
+  }
+
+  /**
+   * The agent proposes another version of the pipeline. Nothing about the run changes: the proposal
+   * is checked, kept apart, and journaled, and a person accepts it or not. What would be refused at
+   * the person's command is refused here, so the agent hears it at once.
+   */
+  async proposeChange(input: { yaml: string; summary: string }): Promise<ProposeOutcome> {
+    const { store, rules } = this.host;
+    const state = await this.state();
+    if (state.status !== "running" && state.status !== "paused") {
+      return { ok: false, code: "NODE_NOT_RUNNING", message: `the run is ${state.status}` };
+    }
+    if (input.yaml.trim() === "") {
+      const had = await store.removeProposal(this.runId);
+      if (had) {
+        await this.apply({
+          type: "change_proposed",
+          hash: "",
+          summary: input.summary,
+          withdrawn: true,
+        });
+      }
+      return { ok: true, status: had ? "withdrawn" : "none" };
+    }
+    if (Buffer.byteLength(input.yaml) > MAX_PROPOSAL_BYTES) {
+      return { ok: false, code: "INVALID_ARGUMENTS", message: "the pipeline is too large" };
+    }
+    // A proposal is the agent's text and is kept as it is, so it may not hold what redaction would
+    // take out of anything else the agent writes.
+    if (redactText(input.yaml, rules) !== input.yaml) {
+      return {
+        ok: false,
+        code: "INVALID_ARGUMENTS",
+        message:
+          "the pipeline contains something that looks like a secret (a key, a token, a password); leave it out",
+      };
+    }
+    let spec: PipelineSpec;
+    try {
+      spec = parsePipeline(input.yaml);
+    } catch (error) {
+      if (error instanceof KodelError) {
+        return { ok: false, code: error.code, message: error.message };
+      }
+      throw error;
+    }
+    const current = await this.currentSpec(state);
+    if (canonicalPipeline(spec) === canonicalPipeline(current)) {
+      return {
+        ok: false,
+        code: "PIPELINE_CHANGE_REFUSED",
+        message: "this is what the run is already on; nothing differs",
+      };
+    }
+    const diff = diffPipelines(current, spec, state);
+    if (diff.refused !== undefined) {
+      return { ok: false, code: "PIPELINE_CHANGE_REFUSED", message: diff.refused };
+    }
+    await store.writeProposal(this.runId, input.yaml);
+    const logged = await this.apply({
+      type: "change_proposed",
+      hash: hashSource(input.yaml),
+      summary: input.summary,
+    });
+    if (!logged.ok) return { ok: false, code: logged.error.code, message: logged.error.message };
+    const pending = await this.pendingChange();
+    const { blocking: _blocking, ...change } = pending?.info ?? {};
+    return {
+      ok: true,
+      status: "proposed",
+      ...(pending ? { change: change as PipelineChange } : {}),
+    };
+  }
+
   /**
    * Take another version of the pipeline for this run: keep it with the run, then let the machine
    * move the run onto it. A person decides this (`kodel pipeline changes apply`), never the agent.
+   * A proposal is also written into the run's pipeline file, so the change is in what the person
+   * commits and reaches the next runs with it.
    */
   async acceptChange(input: {
     source: "file" | "proposal";
@@ -565,7 +678,11 @@ export class LocalRun {
       throw error;
     }
     await this.host.store.writeSpec(this.runId, to, input.text);
-    return this.apply({
+    if (input.source === "proposal") {
+      const where = await this.watched(state);
+      if (where) await this.host.store.replaceFile(where.path, input.text);
+    }
+    const decision = await this.apply({
       type: "pipeline_accepted",
       from: state.specHash,
       to,
@@ -573,6 +690,8 @@ export class LocalRun {
       before,
       ...(input.reason === undefined ? {} : { reason: input.reason }),
     });
+    if (decision.ok) await this.host.store.removeProposal(this.runId).catch(() => undefined);
+    return decision;
   }
 
   /**
