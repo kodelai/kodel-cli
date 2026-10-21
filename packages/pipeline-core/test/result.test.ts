@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { evaluateResult, RESULT_LIMITS, type ResultReport, validateReport } from "../src";
+import {
+  evaluateResult,
+  mergeReports,
+  RESULT_LIMITS,
+  type ResultReport,
+  rowsToCsv,
+  validateReport,
+} from "../src";
 
 const params = {
   columns: {
@@ -188,5 +195,112 @@ describe("evaluateResult", () => {
     const verdict = evaluateResult(complete(rows), params);
     expect(verdict.reason).toContain("5 blocking findings:");
     expect(verdict.reason.split("; ")).toHaveLength(3);
+  });
+});
+
+describe("gate_comments: reports that add up", () => {
+  const columns = { place: "text", problem: "longtext" };
+  const comment = (place: string, problem = "wrong") => ({ place, problem });
+  const sent = (
+    rows: Record<string, unknown>[],
+    over: Partial<ResultReport> = {},
+  ): ResultReport => ({ completeness: "complete", rows, ...over });
+
+  test("gate_comments_rows_are_added_not_replaced", () => {
+    const first = mergeReports(undefined, sent([comment("a")]), false);
+    if (!first.ok) throw new Error("first");
+    const second = mergeReports(first.report, sent([comment("b")]), false);
+    expect(second.ok && second.report.rows.map((r) => r.place)).toEqual(["a", "b"]);
+  });
+
+  test("gate_comments_replace_starts_the_list_over", () => {
+    const stored = sent([comment("a"), comment("b")]);
+    const merged = mergeReports(stored, sent([comment("c")]), true);
+    expect(merged.ok && merged.report.rows.map((r) => r.place)).toEqual(["c"]);
+  });
+
+  test("gate_comments_a_row_with_a_known_id_replaces_that_row", () => {
+    const stored = sent([{ id: "x", ...comment("a") }, comment("b")]);
+    const merged = mergeReports(stored, sent([{ id: "x", ...comment("a", "reworded") }]), false);
+    expect(merged.ok && merged.report.rows).toEqual([
+      { id: "x", place: "a", problem: "reworded" },
+      comment("b"),
+    ]);
+  });
+
+  test("gate_comments_sending_a_call_again_adds_nothing", () => {
+    const stored = sent([comment("a")]);
+    // the order of the keys does not matter
+    const again = mergeReports(stored, sent([{ problem: "wrong", place: "a" }]), false);
+    expect(again.ok && again.report.rows).toHaveLength(1);
+  });
+
+  test("gate_comments_the_last_call_decides_completeness_and_metrics_add_up", () => {
+    const stored = sent([], {
+      completeness: "partial",
+      incomplete_reason: "half",
+      metrics: { a: 1 },
+    });
+    const merged = mergeReports(stored, sent([], { metrics: { b: 2 } }), false);
+    expect(merged.ok && merged.report).toEqual({
+      completeness: "complete",
+      rows: [],
+      metrics: { a: 1, b: 2 },
+    });
+  });
+
+  test("gate_comments_limits_refuse_instead_of_cutting", () => {
+    const many = Array.from({ length: RESULT_LIMITS.maxRows }, (_, i) => comment(`p${i}`));
+    const full = mergeReports(undefined, sent(many), false);
+    if (!full.ok) throw new Error("full");
+    expect(mergeReports(full.report, sent([comment("one more")]), false)).toMatchObject({
+      ok: false,
+      code: "RESULT_TOO_LARGE",
+    });
+    // starting over is always possible
+    expect(mergeReports(full.report, sent([comment("one more")]), true).ok).toBe(true);
+
+    const big = "x".repeat(RESULT_LIMITS.maxRowBytes - 100);
+    const bytes = Array.from({ length: 40 }, (_, i) => comment(`p${i}`, big));
+    const first = mergeReports(undefined, sent(bytes.slice(0, 30)), false);
+    if (!first.ok) throw new Error("first");
+    expect(mergeReports(first.report, sent(bytes.slice(30)), false)).toMatchObject({
+      ok: false,
+      code: "RESULT_TOO_LARGE",
+    });
+  });
+
+  test("gate_comments_completeness_may_be_left_out_only_when_asked", () => {
+    const rows = [comment("a")];
+    expect(validateReport({ rows }, { columns }, false)).toMatchObject({
+      ok: true,
+      report: { completeness: "complete" },
+    });
+    expect(validateReport({ rows }, { columns })).toMatchObject({
+      ok: false,
+      code: "MISSING_REQUIRED_VALUE",
+    });
+  });
+
+  test("gate_comments_an_id_is_allowed_beside_the_columns_and_must_be_short_text", () => {
+    expect(validateReport({ rows: [{ id: "a1", ...comment("a") }] }, { columns }, false).ok).toBe(
+      true,
+    );
+    for (const id of ["", "x".repeat(65), 7]) {
+      expect(validateReport({ rows: [{ id, ...comment("a") }] }, { columns }, false)).toMatchObject(
+        { ok: false, code: "INVALID_RESULT_ROWS" },
+      );
+    }
+  });
+
+  test("gate_comments_csv_quotes_what_needs_it", () => {
+    const csv = rowsToCsv(
+      ["place", "problem"],
+      [
+        { place: "plan.md:3", problem: 'says "fast", means slow' },
+        { place: "a", problem: "two\nlines" },
+      ],
+    );
+    expect(csv).toBe('place,problem\nplan.md:3,"says ""fast"", means slow"\na,"two\nlines"');
   });
 });

@@ -160,15 +160,21 @@ export const TOOLS: ToolDescriptor[] = [
     name: "pipeline_report_result",
     title: "Report findings",
     description:
-      "Send the findings a node asked for, before you complete it. Send the whole list for this attempt every " +
-      "time. If the answer is an error the report was not accepted: fix it and send it again.",
+      "Send the findings a step asked for (before you complete it), or the comments a person makes at a gate. " +
+      "Rows are added to what is already reported for this attempt; a row with an `id` that is there replaces " +
+      "that row, and a row identical to one there is not added twice. Pass `replace: true` to start the list " +
+      "over. The last call decides completeness. If the answer is an error the report was not accepted: fix " +
+      "it and send it again.",
     shape: {
       run_id: runId,
       node_slug: nodeSlug,
       attempt,
       completeness: z
         .enum(["complete", "partial", "not_run", "tool_error"])
-        .describe('"complete" only if you looked at everything. "Not checked" is not "clean".'),
+        .optional()
+        .describe(
+          '"complete" only if you looked at everything. "Not checked" is not "clean". Required for a step\'s findings, not for a person\'s comments at a gate.',
+        ),
       incomplete_reason: z
         .string()
         .max(2_000)
@@ -176,14 +182,21 @@ export const TOOLS: ToolDescriptor[] = [
         .describe("Required unless completeness is complete."),
       rows: z
         .array(z.record(z.unknown()))
-        .describe("One object per finding, with the columns the step asked for."),
+        .describe(
+          "One object per finding, with the columns the step asked for, and optionally an `id` (up to 64 characters) so a later call can replace the row.",
+        ),
+      replace: z
+        .boolean()
+        .optional()
+        .describe("Start the list over with these rows instead of adding to it."),
       metrics: z
         .record(z.string().regex(/^[A-Za-z0-9_.-]{1,64}$/), z.number())
         .optional()
         .describe("Counts by short name, such as files_checked."),
     },
     readOnly: false,
-    idempotent: true,
+    // Rows are added, so a repeated call is not harmless to a client that retries on its own.
+    idempotent: false,
     run: (service, input) =>
       service.reportResult(input as Parameters<PipelineService["reportResult"]>[0]),
   },

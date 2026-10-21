@@ -31,7 +31,13 @@ export interface Labels {
 export type Begin =
   | { needs: "agent"; prompt: string }
   | { needs: "engine"; command: string; expect: { exit: number } }
-  | { needs: "human"; prompt: string; files: string[] };
+  | {
+      needs: "human";
+      prompt: string;
+      files: string[];
+      /** The columns of the comments recorded while the person talks to the agent, when the node takes them. */
+      results?: Record<string, unknown>;
+    };
 
 export interface NodeHandler {
   kind: string;
@@ -48,6 +54,8 @@ export interface NodeHandler {
   begin(params: Record<string, unknown>, render: (text: string) => string): Begin;
   /** Extra guidance on *how* the agent does this node (not what), shown with the step. */
   instruction?(params: Record<string, unknown>): string | undefined;
+  /** The columns of the report this node takes through `pipeline_report_result`, when it takes one. */
+  resultsSpec?(params: Record<string, unknown>): Record<string, unknown> | undefined;
 }
 
 export type Baseline = "run" | "node" | "attempt";
@@ -162,20 +170,6 @@ const commandNode: NodeHandler = {
   }),
 };
 
-const humanNode: NodeHandler = {
-  kind: "human",
-  shape: { prompt: nonEmpty, files: z.array(nonEmpty).optional() },
-  allowsChecks: false,
-  requiresRoutes: true,
-  automaticFailures: false,
-  labels: () => ({ success: ["approved"], failure: ["rejected"] }),
-  begin: (params, render) => ({
-    needs: "human",
-    prompt: render(String(params.prompt)),
-    files: ((params.files as string[] | undefined) ?? []).map(render),
-  }),
-};
-
 export const COLUMN_SCALARS = [
   "text",
   "longtext",
@@ -194,6 +188,31 @@ const columnType = z.union(
     }),
   },
 );
+
+const columnsSchema = z.record(nonEmpty, columnType).refine((c) => Object.keys(c).length > 0, {
+  message: "at least one column is required",
+});
+
+const humanNode: NodeHandler = {
+  kind: "human",
+  shape: {
+    prompt: nonEmpty,
+    files: z.array(nonEmpty).optional(),
+    // Where the person's comments are recorded while they talk to the agent; sent back on a rejection.
+    results: z.object({ columns: columnsSchema }).strict().optional(),
+  },
+  allowsChecks: false,
+  requiresRoutes: true,
+  automaticFailures: false,
+  labels: () => ({ success: ["approved"], failure: ["rejected"] }),
+  begin: (params, render) => ({
+    needs: "human",
+    prompt: render(String(params.prompt)),
+    files: ((params.files as string[] | undefined) ?? []).map(render),
+    ...(params.results === undefined ? {} : { results: params.results as Record<string, unknown> }),
+  }),
+  resultsSpec: (params) => params.results as Record<string, unknown> | undefined,
+};
 
 const diffCheck: CheckHandler = {
   kind: "diff",
@@ -238,9 +257,7 @@ const resultCheck: CheckHandler = {
   instruction: resultInstruction,
   exposeSpec: true,
   shape: {
-    columns: z.record(nonEmpty, columnType).refine((c) => Object.keys(c).length > 0, {
-      message: "at least one column is required",
-    }),
+    columns: columnsSchema,
     metrics: z.record(nonEmpty, z.literal("number")).optional(),
     fail_when: z.record(nonEmpty, z.array(z.union([z.string(), z.boolean()])).min(1)).optional(),
   },

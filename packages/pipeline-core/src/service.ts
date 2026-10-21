@@ -47,7 +47,13 @@ export interface RunHandle {
     summary?: string,
     outcome?: string,
   ): Promise<Decision>;
-  reportResult(node: string, attempt: number, raw: unknown): Promise<StepResult>;
+  /** `replace` starts the stored report over instead of adding the rows to it. */
+  reportResult(
+    node: string,
+    attempt: number,
+    raw: unknown,
+    options?: { replace?: boolean },
+  ): Promise<StepResult>;
   feedback(input: FeedbackInput): Promise<Decision>;
   /** Wait until the engine's work has come to rest, but no longer than `ms`. */
   waitForRest(ms: number): Promise<void>;
@@ -251,15 +257,18 @@ export class PipelineService {
     run_id: string;
     node_slug: string;
     attempt: number;
-    completeness: string;
+    completeness?: string;
     incomplete_reason?: string;
     rows: unknown[];
     metrics?: Record<string, number>;
+    replace?: boolean;
   }): Promise<ToolResult> {
     return guarded(async () => {
       const run = await this.run(input.run_id);
-      const { run_id: _run, node_slug: _node, attempt: _attempt, ...report } = input;
-      const result = await run.reportResult(input.node_slug, input.attempt, report);
+      const { run_id: _run, node_slug: _node, attempt: _attempt, replace, ...report } = input;
+      const result = await run.reportResult(input.node_slug, input.attempt, report, {
+        replace: replace === true,
+      });
       return result.ok ? { ok: true } : failure(result.code, result.message);
     });
   }

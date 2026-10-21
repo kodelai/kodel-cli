@@ -20,6 +20,7 @@ import {
   evaluateDiff,
   evaluateResult,
   KodelError,
+  mergeReports,
   type NextStep,
   nextStep,
   type PipelineSpec,
@@ -29,6 +30,7 @@ import {
   type RunState,
   redactText,
   renderDeep,
+  rowsToCsv,
   type StepResult,
   summarizeRun,
   validateReport,
@@ -880,6 +882,8 @@ export class LocalRun {
       }
     }
     if ("waiting" in step && step.waiting.reason === "gate") {
+      const comments = await this.gateResults(step.waiting.node_slug);
+      if (comments) step.waiting.results = comments.csv;
       const found = await this.changesSinceStart();
       if (found.kind === "unavailable") {
         step.waiting.changes_unavailable = found.reason;
@@ -975,12 +979,40 @@ export class LocalRun {
     }
   }
 
-  decideHuman(node: string, decision: "approved" | "rejected", reason?: string) {
+  /**
+   * The comments recorded at a human step while the person talked to the agent, as CSV, or
+   * nothing when the step takes none or none were made.
+   */
+  async gateResults(node: string): Promise<{ csv: string; count: number } | undefined> {
+    const { spec, engine, store } = this.host;
+    const nodeSpec = spec.nodes.find((n) => n.slug === node);
+    const columns = (
+      (engine.registry ?? defaultRegistry())
+        .node(nodeSpec?.kind ?? "")
+        ?.resultsSpec?.(nodeSpec?.params ?? {}) as { columns?: Record<string, unknown> } | undefined
+    )?.columns;
+    const visit = (await this.state()).active.find((v) => v.node === node && v.phase === "human");
+    if (!columns || !visit) return undefined;
+    const report = await store.readReport(this.runId, node, visit.attempt);
+    if (!report || report.rows.length === 0) return undefined;
+    return { csv: rowsToCsv(Object.keys(columns), report.rows), count: report.rows.length };
+  }
+
+  /**
+   * A rejection without a reason of its own carries the comments recorded at the step, so the step
+   * it returns to sees them; with both, the person's reason comes first.
+   */
+  async decideHuman(node: string, decision: "approved" | "rejected", reason?: string) {
+    const comments = decision === "rejected" ? await this.gateResults(node) : undefined;
+    const parts = [reason, comments ? `Comments (CSV):\n${comments.csv}` : undefined].filter(
+      (part): part is string => part !== undefined && part !== "",
+    );
+    const full = parts.length > 0 ? parts.join("\n\n") : undefined;
     return this.apply({
       type: "human_decided",
       node,
       decision,
-      ...(reason === undefined ? {} : { reason }),
+      ...(full === undefined ? {} : { reason: full }),
     });
   }
 
@@ -1008,14 +1040,28 @@ export class LocalRun {
     return decision;
   }
 
-  /** Check a result report the agent sent and keep it for the node's `result` check. */
-  async reportResult(node: string, attempt: number, raw: unknown): Promise<StepResult> {
-    const result = await this.acceptReport(node, attempt, raw);
+  /**
+   * Check a result report the agent sent and keep it: for the node's `result` check, or, at a
+   * human step that takes them, as the comments the person makes. Rows are added to what is
+   * stored for the attempt unless `replace` is set.
+   */
+  async reportResult(
+    node: string,
+    attempt: number,
+    raw: unknown,
+    options: { replace?: boolean } = {},
+  ): Promise<StepResult> {
+    const result = await this.acceptReport(node, attempt, raw, options.replace === true);
     if (!result.ok) await this.recordRefusal("report_result", node, attempt, result);
     return result;
   }
 
-  private async acceptReport(node: string, attempt: number, raw: unknown): Promise<StepResult> {
+  private async acceptReport(
+    node: string,
+    attempt: number,
+    raw: unknown,
+    replace: boolean,
+  ): Promise<StepResult> {
     const { spec, engine, store } = this.host;
     const registry = engine.registry ?? defaultRegistry();
     const nodeSpec = spec.nodes.find((n) => n.slug === node);
@@ -1033,21 +1079,38 @@ export class LocalRun {
       };
     }
     const check = nodeSpec.checks.find((c) => registry.check(c.kind)?.exposeSpec);
-    if (!check)
+    // A human step has no verdict to give: its report is the person's comments, which need no
+    // completeness, and only while the step waits for them.
+    const gateSpec =
+      check || visit.phase !== "human"
+        ? undefined
+        : registry.node(nodeSpec.kind)?.resultsSpec?.(nodeSpec.params);
+    const params = check?.params ?? gateSpec;
+    if (!params)
       return {
         ok: false,
         code: "PIPELINE_INVALID",
         message: `node "${node}" does not take a result report`,
       };
-    const valid = validateReport(raw, renderDeep(check.params, { task: state.task }));
+    const valid = validateReport(
+      raw,
+      renderDeep(params, { task: state.task }),
+      check !== undefined,
+    );
     if (!valid.ok) return { ok: false, code: valid.code, message: valid.message };
-    await store.writeReport(this.runId, node, attempt, valid.report);
+    const merged = mergeReports(
+      replace ? undefined : await store.readReport(this.runId, node, attempt),
+      valid.report,
+      replace,
+    );
+    if (!merged.ok) return { ok: false, code: merged.code, message: merged.message };
+    await store.writeReport(this.runId, node, attempt, merged.report);
     await this.apply({
       type: "report_accepted",
       node,
       attempt,
-      completeness: valid.report.completeness,
-      rows: valid.report.rows.length,
+      completeness: merged.report.completeness,
+      rows: merged.report.rows.length,
     });
     return { ok: true };
   }

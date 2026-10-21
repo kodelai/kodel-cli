@@ -676,6 +676,7 @@ describe("the tool surface", () => {
         "completeness",
         "incomplete_reason",
         "rows",
+        "replace",
         "metrics",
       ],
       pipeline_complete_step: ["run_id", "node_slug", "attempt", "summary", "outcome"],

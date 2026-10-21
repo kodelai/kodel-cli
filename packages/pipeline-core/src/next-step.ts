@@ -36,6 +36,12 @@ export type NextStep =
         node_slug: string;
         prompt: string;
         files?: string[];
+        /** The attempt of the waiting step; `pipeline_report_result` needs it. */
+        attempt?: number;
+        /** Columns of the comments the person's words are recorded in, when the step takes them. */
+        result_spec?: Record<string, unknown>;
+        /** The comments recorded so far, as CSV; added by the host. */
+        results?: string;
         how_to_decide: { cli: string };
         /** What the agent has to write to the person before it ends its turn. */
         tell_the_person: string;
@@ -86,6 +92,13 @@ const TELL_AT_GATE =
   "(3) what to look at: the files listed " +
   "and anything else they should check; (4) how to decide, with the command in " +
   "`how_to_decide`. Do not decide for them and do not run that command. Then end your turn.";
+
+const TELL_RESULTS =
+  "This step records the person's comments. While you talk, each time they name a problem, " +
+  "add it with pipeline_report_result (node_slug and `attempt` from this answer, one row per " +
+  "comment with the columns in `result_spec`, in their words, never your own findings); it adds to " +
+  "what is there, `results` shows what is recorded, and `replace: true` starts the list over. " +
+  "If they reject without writing anything, the comments go back to the step as the reason.";
 
 const TELL_WHEN_PAUSED =
   "Tell the person, in the language they use: that the run is paused and why (the prompt), what " +
@@ -171,8 +184,14 @@ export function nextStep(
         node_slug: spec_.slug,
         prompt: begin?.needs === "human" ? begin.prompt : "A decision is needed.",
         ...(begin?.needs === "human" && begin.files.length > 0 ? { files: begin.files } : {}),
+        ...(begin?.needs === "human" && begin.results
+          ? { attempt: humanVisit.attempt, result_spec: begin.results }
+          : {}),
         how_to_decide: { cli: `kodel gate approve|reject ${state.runId} --reason "..."` },
-        tell_the_person: TELL_AT_GATE,
+        tell_the_person:
+          begin?.needs === "human" && begin.results
+            ? `${TELL_AT_GATE} ${TELL_RESULTS}`
+            : TELL_AT_GATE,
       },
     };
   }

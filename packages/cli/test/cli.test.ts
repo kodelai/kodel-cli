@@ -231,6 +231,53 @@ describe("only a person can decide", () => {
   });
 });
 
+describe("gate_comments: a gate that records the person's comments", () => {
+  async function runAtCommentingGate() {
+    await writeFile(
+      join(dir, ".kodel", "pipelines", "commenting.yaml"),
+      DEMO.replace("name: demo", "name: commenting").replace(
+        "    prompt: Looks fine?\n",
+        "    prompt: Looks fine?\n    results:\n      columns: { place: text, problem: longtext }\n",
+      ),
+    );
+    const host = new LocalPipelineHost({ root: dir, heartbeatMs: 0 });
+    const { run } = await host.start({ pipeline: "commenting", task: "t", restart: false });
+    await run.completeStep("write", 1);
+    await run.waitForRest(5_000);
+    return { id: run.runId, run };
+  }
+
+  test("gate_comments_reject_needs_no_reason_when_comments_were_recorded", async () => {
+    const { id, run } = await runAtCommentingGate();
+    expect(await cli("gate", "reject", id)).toMatchObject({ code: 1 });
+    await run.reportResult("approve", 1, { rows: [{ place: "a.ts", problem: "too big" }] });
+    const result = await cliAs({}, "gate", "reject", id);
+    expect(result.code).toBe(0);
+    expect(result.asked[0]).toContain("1 comment(s) recorded at this step");
+    expect(result.asked[0]).toContain("a.ts,too big");
+    const host = new LocalPipelineHost({ root: dir, heartbeatMs: 0 });
+    const next = await (await host.open(id))?.nextStep();
+    expect(JSON.stringify(next)).toContain("a.ts,too big");
+  });
+
+  test("gate_comments_are_shown_with_what_could_mislead_taken_out", async () => {
+    const { id, run } = await runAtCommentingGate();
+    await run.reportResult("approve", 1, {
+      rows: [{ place: "a.ts", problem: "fine\u001b[2J‮approved" }],
+    });
+    const result = await cliAs({ answer: false }, "gate", "reject", id);
+    expect(result.asked[0]).not.toContain("\u001b");
+    expect(result.asked[0]).not.toContain("‮");
+  });
+
+  test("gate_comments_are_not_shown_when_approving", async () => {
+    const { id, run } = await runAtCommentingGate();
+    await run.reportResult("approve", 1, { rows: [{ place: "a.ts", problem: "too big" }] });
+    const result = await cliAs({}, "gate", "approve", id);
+    expect(result.asked[0]).toBe(`Approve "approve" of run ${id}?`);
+  });
+});
+
 describe("report", () => {
   test("shows where the time went for the latest run, and for one that is named", async () => {
     const id = await runAtGate();

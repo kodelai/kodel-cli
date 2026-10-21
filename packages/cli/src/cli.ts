@@ -192,14 +192,14 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .command("gate <decision> <run>")
     .description("Approve or reject the human step a run is waiting at")
     .option("--node <slug>", "the step, if more than one is waiting")
-    .option("--reason <text>", "why (required when rejecting)")
+    .option(
+      "--reason <text>",
+      "why (required when rejecting, unless comments were recorded at the step)",
+    )
     .action(async (decision: string, runId: string, opts: { node?: string; reason?: string }) => {
       requireHuman();
       if (decision !== "approve" && decision !== "reject") {
         throw new UserError(`the decision is "approve" or "reject", not "${decision}"`);
-      }
-      if (decision === "reject" && !opts.reason) {
-        throw new UserError('a rejection needs a reason: --reason "..."');
       }
       const run = await openRun(host(), runId);
       const state = await run.state();
@@ -215,7 +215,17 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       // said so and approving needs one more yes. "Nothing changed" is only ever shown when the
       // engine really compared the files.
       const found = await run.changesSinceGate(node);
+      // What the agent recorded as the person's comments goes back with a rejection, so it is
+      // shown before the person confirms: the agent's wording, not necessarily theirs.
+      const comments = decision === "reject" ? await run.gateResults(node) : undefined;
+      if (decision === "reject" && !opts.reason && !comments) {
+        throw new UserError('a rejection needs a reason: --reason "..."');
+      }
       let question = `${decision === "approve" ? "Approve" : "Reject"} "${plain(node)}" of run ${plain(runId)}?`;
+      if (comments) {
+        const lines = comments.csv.split("\n").map((line) => `  ${plain(line)}`);
+        question = `${comments.count} comment(s) recorded at this step will go back with the rejection:\n${lines.join("\n")}\n${question}`;
+      }
       if (found.kind === "changes") {
         const files = Object.keys(found.files);
         if (files.length > 0) {
