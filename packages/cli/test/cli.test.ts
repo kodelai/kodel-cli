@@ -145,6 +145,28 @@ describe("pipeline changes", () => {
       .split("\n")
       .map((line) => JSON.parse(line) as Record<string, unknown>);
 
+  test("the real program, run by an agent's shell with no terminal, refuses to accept, discard or restore", async () => {
+    const id = await runAtGate();
+    await editPipeline();
+    const main = join(import.meta.dir, "../src/main.ts");
+    for (const sub of ["apply", "discard", "restore"]) {
+      const result = await new Promise<{ code: number | null; err: string }>((done) => {
+        const child = spawn("bun", [main, "--root", dir, "pipeline", "changes", sub, id], {
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let err = "";
+        child.stderr?.on("data", (d: Buffer) => {
+          err += d.toString();
+        });
+        child.on("close", (code) => done({ code, err }));
+      });
+      expect(result.code, sub).toBe(1);
+      expect(result.err, sub).toContain("for a person at a terminal");
+    }
+    expect((await journalOf(id)).some((r) => r.event === "pipeline_accepted")).toBe(false);
+    expect((await cli("status", id)).out).toContain("pipeline_changed");
+  });
+
   test("show says what differs, with the command to accept it", async () => {
     const id = await runAtGate();
     expect((await cli("pipeline", "changes", id)).out).toContain("no change of the pipeline waits");
