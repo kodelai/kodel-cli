@@ -1,5 +1,23 @@
 # Plan: changing a pipeline under a live run (`kodel pipeline changes`)
 
+## Status
+
+Steps 1 to 7 are built (see `git log`). Where the code differs from what is written below:
+
+- A start that needs the person's choice makes nothing and throws `ChoiceNeeded` from the host's `start`;
+  the service turns it into the `choice` answer. `StartOutcome` keeps its shape.
+- A pipeline that is not in the last commit (a new file) is copied into the worktree **without a
+  question**: there is only one version to choose. The note about the file riding into the branch is
+  only given when the person chose `working` for a file that differs from the commit.
+- A change that cannot be accepted holds nothing back (it is told in `pipeline_change.refused`).
+- `kodel pipeline changes` with a run id alone is `show`; `apply` re-reads the text after the
+  confirmation and takes nothing if it moved (it does not show the diff again).
+- Not built: a test that a failed copy into the worktree rolls the start back; the Bash deny rules
+  for `pipeline changes apply|discard|restore` in `.claude/settings.json` (a person edits that file);
+  the shared-file mode (out of scope, above).
+- The error code `PIPELINE_CHANGE_REFUSED` is new; the error codes section of the contract (local
+  notes) has to list it.
+
 ## Goal
 
 A person (or the agent, through the engine) can change the pipeline of a run that is already going,

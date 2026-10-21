@@ -22,12 +22,20 @@ those notes once the first working version is done. Reference pipeline: `example
 `.kodel/pipelines/dev.yaml` is the pipeline. When the user asks for a change "through the pipeline",
 work only through the `pipeline_*` tools: the server's own instructions (sent when it connects) say how.
 
-This repository adds two rules: do not edit `.kodel/pipelines/`, `.mcp.json` or `.claude/settings*.json`
-(the person decides what pipeline runs), and do not run `gate`, `ack`, `seal` or `resume`: they refuse to
-run without a terminal and ask for a confirmation, so trying them only fails.
+This repository adds these rules:
+
+- Do not edit `.mcp.json` or `.claude/settings*.json` (the person decides how the server starts and what
+  the agent may do).
+- Do not edit the files in `.kodel/pipelines/` while a run is going. To change the pipeline of a run, ask
+  the person whether to change it now, and then use `pipeline_propose_change`; the run stops at the end of
+  its current step until the person accepts the change. A pipeline file edited by hand is noticed all the
+  same and waits for the person in the same way, but the tool is the way to do it.
+- Do not run `gate`, `ack`, `seal`, `resume` or `pipeline changes apply|discard|restore`: they refuse to run
+  without a terminal and ask for a confirmation, so trying them only fails.
 
 Humans: `bun packages/cli/src/main.ts status` lists runs, `report` shows where the time went; the same
-binary has `gate`, `resume`, `ack`, `seal`.
+binary has `gate`, `resume`, `ack`, `seal`, and `pipeline changes` (`show`, `apply`, `discard`, `history`,
+`restore`) for a change of the pipeline of a run that is going.
 
 ## Language
 
@@ -43,7 +51,7 @@ Bun workspace (TypeScript, ESM). Runtime target: Node >= 22.19; Bun is the devel
 
 - `packages/pipeline-core` (`@kodel-ai/pipeline-core`): pure engine (pipeline spec, result checks, run state machine, routing, redaction, error codes, format versions), the `PipelineService` and the adapter interfaces. No file system, process, network or clock access. The subpath `@kodel-ai/pipeline-core/mcp` holds the MCP tool definitions bound to the service (it depends on the MCP SDK; the main entry does not import it). Transport-free: the CLI adds stdio, the server adds HTTP and auth.
 - `packages/local` (`@kodel-ai/local`): local adapters (file state store, process executor, git snapshots, system clock).
-- `packages/cli` (`kodel`): the CLI, built to a single JS file (`dist/kodel.js`), including human-only commands (`gate`, `resume`, `ack`, `seal`).
+- `packages/cli` (`kodel`): the CLI, built to a single JS file (`dist/kodel.js`), including human-only commands (`gate`, `resume`, `ack`, `seal`, `pipeline changes apply|discard|restore`).
 - `packages/testkit` (`@kodel-ai/testkit`, private): scripted and adversarial fake agents, fixture helpers.
 - `adapters/`: per-agent pieces (MCP config writers, deny rules, driver prompts). `skills/`: agent-facing skills.
 - `tests/e2e`, `tests/agents`: end-to-end and real-agent scenarios. `fixtures/formats/`: golden fixtures per format version.
@@ -58,7 +66,7 @@ The engine is meant to be shared with Kodel Server: the server implements the sa
 3. **Redact at every write path.** Nothing reaches history without going through `redact`.
 4. **The engine knows nothing about transport or I/O.** Keep `@kodel-ai/pipeline-core` free of MCP, CLI, `node:fs`, `node:child_process` and clock access; those come in through adapters.
 5. **Side effects behind traits** (clock, filesystem, process execution) so tests can fake them.
-6. **Humans decide trust.** Trust, gate decisions, `ack` and `seal` are never available as agent-callable MCP tools.
+6. **Humans decide trust.** Trust, gate decisions, `ack`, `seal` and accepting a change of a run's pipeline are never available as agent-callable MCP tools. The agent may propose a change (`pipeline_propose_change`); only a person's command moves the run onto it.
 7. **Node kinds and check kinds are adapters.** Handlers sit behind traits and are registered by `kind`; the engine never matches on concrete kinds, so a plugin system can be added later without engine changes.
 8. **Formats are versioned** (`version` cascade for user files, `v` on every machine-written record). Never rewrite history on disk.
 
