@@ -28,7 +28,8 @@ export const SERVER_INSTRUCTIONS = [
   "5. Do not read or edit the run files in .kodel/runs, and do not edit the pipeline files while a run is going: the only way for you to change the pipeline of a run is pipeline_propose_change, and a person accepts it.",
   "6. If a step's description or a check looks wrong or unclear, say so with pipeline_feedback; it never blocks the run. If you think the pipeline itself should change for this run, first ask the person: change it now (the run stops at the end of the current step until they accept it), or only note it with pipeline_feedback and decide another way. Propose it only if they say now.",
   "7. If the answer to pipeline_start names a `workdir`, do all your work for the run in that directory (read and write files there, not in the directory you started in): the engine runs the commands and checks there.",
-  "8. If an answer tells you that the pipeline of the run was changed and a person has to accept it (a `waiting` answer about the change, or a note about it on a `node` answer), do what `tell_the_person` says. If the change was made by editing the pipeline file and not through pipeline_propose_change, put the file back as it was and propose it instead.",
+  "8. If you are asked to write or change a pipeline, read pipeline_docs first: it is the reference for this engine version.",
+  "9. If an answer tells you that the pipeline of the run was changed and a person has to accept it (a `waiting` answer about the change, or a note about it on a `node` answer), do what `tell_the_person` says. If the change was made by editing the pipeline file and not through pipeline_propose_change, put the file back as it was and propose it instead.",
 ].join("\n");
 
 export interface ToolDescriptor {
@@ -73,6 +74,30 @@ export const TOOLS: ToolDescriptor[] = [
     readOnly: true,
     idempotent: true,
     run: (service) => service.list(),
+  },
+  {
+    name: "pipeline_docs",
+    title: "Read the documentation",
+    description:
+      "Read the engine's documentation for the version that serves you. Without `topic` you get an index of " +
+      "the topics; with one you get its text. Call it before you write or change a pipeline file. It needs " +
+      "no run and changes nothing.",
+    shape: {
+      topic: z
+        .string()
+        .min(1)
+        .max(LIMITS.name)
+        .optional()
+        .describe("A topic from the index; leave it out to get the index."),
+    },
+    readOnly: true,
+    idempotent: true,
+    run: async (service, input) => {
+      const answer = await service.docs(input as { topic?: string });
+      return answer.ok && input.topic === undefined
+        ? { ...answer, contract_version: CONTRACT_VERSION }
+        : answer;
+    },
   },
   {
     name: "pipeline_resolve",

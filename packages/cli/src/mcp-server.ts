@@ -10,7 +10,7 @@ export type StoppableHost = PipelineHost & { stop?(): number };
 /** Build the MCP server for a host; the transport is the caller's. */
 export function createServer(host: PipelineHost, version: string): McpServer {
   const server = new McpServer({ name: "kodel", version }, { instructions: SERVER_INSTRUCTIONS });
-  registerPipelineTools(server, new PipelineService(host));
+  registerPipelineTools(server, new PipelineService(host, { engineVersion: version }));
   return server;
 }
 

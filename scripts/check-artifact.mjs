@@ -25,4 +25,16 @@ if (version !== pkg.version) fail(`--version printed "${version}", expected "${p
 
 if (!run(["--help"]).includes("kodel")) fail("--help output does not mention kodel");
 
+// The documentation the agent reads (`pipeline_docs`) is embedded text: a build that dropped it would
+// only show when an agent asks.
+const built = readFileSync(artifact, "utf8");
+for (const line of [
+  "Build the pipeline from what the project already does",
+  "A pipeline is one YAML file",
+  "Which check for which job",
+  "Complete pipelines. Replace the commands",
+]) {
+  if (!built.includes(line)) fail(`the documentation line "${line}" is not in the artifact`);
+}
+
 console.log(`artifact ok under node ${process.version}: ${size} bytes, version ${version}`);

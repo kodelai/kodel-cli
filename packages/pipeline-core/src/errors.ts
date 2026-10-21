@@ -26,6 +26,7 @@ export const ERROR_CODES = [
   "WORKDIR_CREATE_FAILED",
   "CONFIG_INVALID",
   "PIPELINE_CHANGE_REFUSED",
+  "UNKNOWN_TOPIC",
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];

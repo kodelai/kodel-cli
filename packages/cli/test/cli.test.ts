@@ -149,10 +149,13 @@ describe("pipeline changes", () => {
     const id = await runAtGate();
     await editPipeline();
     const main = join(import.meta.dir, "../src/main.ts");
+    // Run by the engine (as `bun test` is in a pipeline), the program is refused for that reason first.
+    const { KODEL_ENGINE: _engine, ...outsideEngine } = process.env;
     for (const sub of ["apply", "discard", "restore"]) {
       const result = await new Promise<{ code: number | null; err: string }>((done) => {
         const child = spawn("bun", [main, "--root", dir, "pipeline", "changes", sub, id], {
           stdio: ["ignore", "pipe", "pipe"],
+          env: outsideEngine,
         });
         let err = "";
         child.stderr?.on("data", (d: Buffer) => {

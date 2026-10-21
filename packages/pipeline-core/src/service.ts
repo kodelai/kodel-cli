@@ -4,6 +4,7 @@
  * The agent protocol (what the tools return, what they refuse, how long they wait) lives here, so
  * every host answers an agent the same way.
  */
+import { docTopics } from "./docs";
 import { type ErrorCode, KodelError } from "./errors";
 import { MAX_WAIT_S, type NextStep, type PipelineChange } from "./next-step";
 import type { PipelineSpec } from "./pipeline";
@@ -11,6 +12,7 @@ import type { NodeDiff } from "./pipeline-diff";
 import { defaultRegistry, type Registry } from "./registry";
 import { renderTemplate } from "./render";
 import type { Decision, RunState } from "./run";
+import { BASELINE_VERSION, MAX_SUPPORTED_MAJOR } from "./version";
 
 // ── what a host provides ────────────────────────────────────────────────────
 
@@ -164,6 +166,8 @@ export interface ServiceOptions {
   /** How long `complete_step` waits for the engine's work before answering "still running". */
   waitBudgetMs?: number;
   registry?: Registry;
+  /** The version of the program that serves the tools, shown by `pipeline_docs`. */
+  engineVersion?: string;
 }
 
 export const DEFAULT_WAIT_BUDGET_MS = 20_000;
@@ -171,6 +175,7 @@ export const DEFAULT_WAIT_BUDGET_MS = 20_000;
 export class PipelineService {
   private readonly budget: number;
   private readonly registry: Registry;
+  private readonly engineVersion: string;
 
   constructor(
     private readonly host: PipelineHost,
@@ -178,6 +183,7 @@ export class PipelineService {
   ) {
     this.budget = options.waitBudgetMs ?? DEFAULT_WAIT_BUDGET_MS;
     this.registry = options.registry ?? defaultRegistry();
+    this.engineVersion = options.engineVersion ?? "unknown";
   }
 
   private async run(runId: string): Promise<RunHandle> {
@@ -197,10 +203,45 @@ export class PipelineService {
     );
   }
 
+  /** The engine's documentation for the agent: an index, or one topic. Needs no host and no run. */
+  docs(input: { topic?: string }): Promise<ToolResult> {
+    return guarded(async () => {
+      const topics = docTopics(this.registry);
+      if (input.topic === undefined) {
+        return {
+          ok: true,
+          kodel: "Spec-driven pipelines that the engine, not the agent, checks.",
+          engine_version: this.engineVersion,
+          pipeline_file_version: { baseline: BASELINE_VERSION, max_major: MAX_SUPPORTED_MAJOR },
+          topics: topics.map(({ topic, summary }) => ({ topic, summary })),
+          note: "Call pipeline_docs again with `topic` to read one.",
+        };
+      }
+      const found = topics.find((t) => t.topic === input.topic);
+      if (!found) {
+        const known = topics.map((t) => t.topic).join(", ");
+        throw new KodelError(
+          "UNKNOWN_TOPIC",
+          `there is no topic "${input.topic}" (topics: ${known})`,
+        );
+      }
+      return { ok: true, topic: found.topic, text: found.text };
+    });
+  }
+
   list(): Promise<ToolResult> {
     return guarded(async () => {
       const { pipelines, problems } = await this.host.list();
-      return { ok: true, pipelines, ...(problems.length > 0 ? { problems } : {}) };
+      return {
+        ok: true,
+        pipelines,
+        ...(problems.length > 0 ? { problems } : {}),
+        ...(pipelines.length === 0
+          ? {
+              note: "There are no pipelines. To write one, read pipeline_docs (topic pipeline-design).",
+            }
+          : {}),
+      };
     });
   }
 
@@ -279,7 +320,7 @@ export class PipelineService {
         if (pipelines.length === 0) {
           throw new KodelError(
             "UNKNOWN_PIPELINE",
-            "there are no pipelines; add one to .kodel/pipelines",
+            "there are no pipelines; add one to .kodel/pipelines (pipeline_docs, topic pipeline-design, says how)",
           );
         }
         if (pipelines.length > 1) {

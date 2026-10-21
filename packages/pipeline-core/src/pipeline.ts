@@ -99,12 +99,17 @@ const GENERIC_NODE_FIELDS = new Set([
 const nonEmpty = z.string().min(1);
 const positiveInt = z.number().int().positive();
 
-const topSchema = z
+export const topSchema = z
   .object({
     // Validated by `resolveVersion`, so every bad value gets the same message with the accepted forms.
-    version: z.unknown().optional(),
-    name: nonEmpty,
-    description: z.string().optional(),
+    version: z
+      .unknown()
+      .optional()
+      .describe(
+        'A positive integer (1) or a quoted semver string ("1.0.0"); if absent, the project config\'s, then 1.',
+      ),
+    name: nonEmpty.describe("The pipeline's name; what the user asks to run."),
+    description: z.string().optional().describe("One line on what the pipeline is for."),
     defaults: z
       .object({
         timeout: positiveInt.optional(),
@@ -112,26 +117,47 @@ const topSchema = z
         max_attempts: positiveInt.optional(),
       })
       .strict()
-      .optional(),
-    nodes: z.array(z.unknown()).min(1),
+      .optional()
+      .describe(
+        "Values for timeout, max_consecutive_failures and max_attempts that a node does not set.",
+      ),
+    nodes: z.array(z.unknown()).min(1).describe("The steps; the first one is where a run starts."),
     // `edges:` with nothing under it reads as null; that means no edges.
-    edges: z.array(z.unknown()).nullish(),
+    edges: z
+      .array(z.unknown())
+      .nullish()
+      .describe("Where a run goes after a node: { from, to, when }."),
   })
   .strict();
 
-const commonNodeShape = {
+export const commonNodeShape = {
   slug: z
     .string()
-    .regex(/^[a-z0-9][a-z0-9-]{0,62}$/, "slug must be lowercase letters, digits and dashes"),
-  name: nonEmpty.optional(),
-  kind: nonEmpty,
-  timeout: positiveInt.optional(),
-  expected_duration: positiveInt.optional(),
-  max_consecutive_failures: positiveInt.optional(),
-  max_attempts: positiveInt.optional(),
+    .regex(/^[a-z0-9][a-z0-9-]{0,62}$/, "slug must be lowercase letters, digits and dashes")
+    .describe("The step's id: lowercase letters, digits and dashes. Edges and reports use it."),
+  name: nonEmpty.optional().describe("A title for people; the slug is used if absent."),
+  kind: nonEmpty.describe("What the step does; the node kinds are listed below."),
+  timeout: positiveInt.optional().describe("Seconds an attempt may take; the limit."),
+  expected_duration: positiveInt
+    .optional()
+    .describe("Seconds a step usually takes; a hint, not a limit."),
+  max_consecutive_failures: positiveInt
+    .optional()
+    .describe("Automatic failures in a row before the run pauses."),
+  max_attempts: positiveInt
+    .optional()
+    .describe("All attempts of the step in a run, rejections included."),
 };
 
-const edgeSchema = z.object({ from: nonEmpty, to: nonEmpty, when: nonEmpty.optional() }).strict();
+export const edgeSchema = z
+  .object({
+    from: nonEmpty.describe("The slug of the node the edge leaves."),
+    to: nonEmpty.describe("The slug of the node it goes to."),
+    when: nonEmpty
+      .optional()
+      .describe("The label that takes the edge; the node's success label if absent."),
+  })
+  .strict();
 
 // ── locations ───────────────────────────────────────────────────────────────
 

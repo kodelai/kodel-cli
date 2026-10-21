@@ -225,6 +225,12 @@ describe("reading pipelines", () => {
     expect((result.pipelines as PipelineInfo[]).map((p) => p.name)).toEqual(["feature", "other"]);
   });
 
+  test("a project with no pipelines is pointed to the docs on writing one", async () => {
+    const empty = asOk(await service([]).svc.list());
+    expect(empty.note).toContain("pipeline_docs");
+    expect(asOk(await service([feature]).svc.list()).note).toBeUndefined();
+  });
+
   test("resolve returns the spec; an unknown name says what exists", async () => {
     const { svc } = service([feature, other]);
     expect(asOk(await svc.resolve({ pipeline: "feature" })).spec).toMatchObject({
@@ -655,6 +661,7 @@ describe("the tool surface", () => {
     expect(CONTRACT_VERSION).toBe(1);
     expect(TOOLS.map((t) => t.name)).toEqual([
       "pipeline_list",
+      "pipeline_docs",
       "pipeline_resolve",
       "pipeline_plan",
       "pipeline_start",
@@ -681,6 +688,7 @@ describe("the tool surface", () => {
     const shapes = Object.fromEntries(TOOLS.map((t) => [t.name, Object.keys(t.shape)]));
     expect(shapes).toEqual({
       pipeline_list: [],
+      pipeline_docs: ["topic"],
       pipeline_resolve: ["pipeline", "run_id"],
       pipeline_plan: ["pipeline", "task"],
       pipeline_start: ["task", "pipeline", "restart", "pipeline_version", "cwd"],
@@ -712,6 +720,7 @@ describe("the tool surface", () => {
   test("tools that only read are marked read-only", () => {
     expect(TOOLS.filter((t) => t.readOnly).map((t) => t.name)).toEqual([
       "pipeline_list",
+      "pipeline_docs",
       "pipeline_resolve",
       "pipeline_plan",
       "pipeline_next_step",
@@ -856,6 +865,17 @@ describe("over a real MCP connection", () => {
     expect(next?.annotations).toMatchObject({ readOnlyHint: true });
     expect(next?.description).toContain("end your turn");
     expect(next?.inputSchema.required).toEqual(["run_id"]);
+    await close();
+  });
+
+  test("the agent reads the docs over the connection, with no run", async () => {
+    const { client, close } = await connect();
+    const index = text(await client.callTool({ name: "pipeline_docs", arguments: {} }));
+    expect(index).toMatchObject({ ok: true, contract_version: CONTRACT_VERSION });
+    const topic = text(
+      await client.callTool({ name: "pipeline_docs", arguments: { topic: "examples" } }),
+    );
+    expect(topic.text).toContain("```yaml");
     await close();
   });
 

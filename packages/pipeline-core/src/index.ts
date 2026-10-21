@@ -4,6 +4,7 @@
  */
 export * from "./canonical";
 export * from "./checks";
+export * from "./docs";
 export * from "./errors";
 export * from "./next-step";
 export * from "./pipeline";

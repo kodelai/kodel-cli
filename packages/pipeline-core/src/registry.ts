@@ -133,14 +133,18 @@ export const agentOutcomes = (params: Record<string, unknown> | undefined): stri
 const agentNode: NodeHandler = {
   kind: "agent",
   shape: {
-    prompt: nonEmpty,
-    fresh_context: z.boolean().optional(),
+    prompt: nonEmpty.describe("What to do; {{task}} and {{task.slug}} are filled in."),
+    fresh_context: z
+      .boolean()
+      .optional()
+      .describe("Do the step in a subagent that has not seen the work so far."),
     // Other ways the step may end well, such as "nothing needs changing". The agent says which one
     // when it completes the step; the node's checks still decide, and each needs an edge.
     outcomes: z
       .array(outcomeLabel)
       .refine((all) => new Set(all).size === all.length, "an outcome is listed twice")
-      .optional(),
+      .optional()
+      .describe("Other labels the step may finish with; each needs an edge `when` it."),
   },
   allowsChecks: true,
   requiresRoutes: false,
@@ -155,7 +159,15 @@ const agentNode: NodeHandler = {
 
 const commandNode: NodeHandler = {
   kind: "command",
-  shape: { command: nonEmpty, expect: expect.optional(), on_fail: nonEmpty.optional() },
+  shape: {
+    command: nonEmpty.describe(
+      "A shell command the engine runs; {{task}} is not allowed, {{task.slug}} is.",
+    ),
+    expect: expect.optional().describe("The exit code that counts as success; 0 if absent."),
+    on_fail: nonEmpty
+      .optional()
+      .describe("The edge label when the command fails; failed if absent."),
+  },
   allowsChecks: true,
   requiresRoutes: true,
   automaticFailures: true,
@@ -196,10 +208,14 @@ const columnsSchema = z.record(nonEmpty, columnType).refine((c) => Object.keys(c
 const humanNode: NodeHandler = {
   kind: "human",
   shape: {
-    prompt: nonEmpty,
-    files: z.array(nonEmpty).optional(),
+    prompt: nonEmpty.describe("What the person is asked to decide."),
+    files: z.array(nonEmpty).optional().describe("Files the person should look at."),
     // Where the person's comments are recorded while they talk to the agent; sent back on a rejection.
-    results: z.object({ columns: columnsSchema }).strict().optional(),
+    results: z
+      .object({ columns: columnsSchema })
+      .strict()
+      .optional()
+      .describe("Columns for the comments the person makes to the agent."),
   },
   allowsChecks: false,
   requiresRoutes: true,
@@ -217,11 +233,29 @@ const humanNode: NodeHandler = {
 const diffCheck: CheckHandler = {
   kind: "diff",
   shape: {
-    paths: z.array(nonEmpty).min(1),
-    mode: z.enum(["changed", "changed_only", "only", "unchanged"]).optional(),
-    since: z.enum(["run", "node", "attempt"]).optional(),
-    min_lines: z.number().int().nonnegative().optional(),
-    max_lines: z.number().int().nonnegative().optional(),
+    paths: z.array(nonEmpty).min(1).describe("Glob patterns of the files the check looks at."),
+    mode: z
+      .enum(["changed", "changed_only", "only", "unchanged"])
+      .optional()
+      .describe(
+        "changed: something in paths changed. changed_only: and nothing else did. only: only paths changed. unchanged: nothing in paths changed.",
+      ),
+    since: z
+      .enum(["run", "node", "attempt"])
+      .optional()
+      .describe("What to compare with; node if absent."),
+    min_lines: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe("Fewest lines that must change in paths."),
+    max_lines: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe("Most lines that may change in paths; tests count too."),
   },
   validate: (p) => {
     const min = p.min_lines;
@@ -235,7 +269,11 @@ const diffCheck: CheckHandler = {
 
 const commandCheck: CheckHandler = {
   kind: "command",
-  shape: { command: nonEmpty, timeout: positiveInt.optional(), expect: expect.optional() },
+  shape: {
+    command: nonEmpty.describe("A shell command the engine runs; it must exit as expected."),
+    timeout: positiveInt.optional().describe("Seconds the command may take."),
+    expect: expect.optional().describe("The exit code that counts as success; 0 if absent."),
+  },
 };
 
 function resultInstruction(p: Record<string, unknown>): string {
@@ -257,9 +295,17 @@ const resultCheck: CheckHandler = {
   instruction: resultInstruction,
   exposeSpec: true,
   shape: {
-    columns: columnsSchema,
-    metrics: z.record(nonEmpty, z.literal("number")).optional(),
-    fail_when: z.record(nonEmpty, z.array(z.union([z.string(), z.boolean()])).min(1)).optional(),
+    columns: columnsSchema.describe(
+      "The columns of each reported row: text, longtext, number, date, location, link, boolean or { enum: [...] }.",
+    ),
+    metrics: z
+      .record(nonEmpty, z.literal("number"))
+      .optional()
+      .describe("Named counts the agent also reports."),
+    fail_when: z
+      .record(nonEmpty, z.array(z.union([z.string(), z.boolean()])).min(1))
+      .optional()
+      .describe("A row with one of these values in an enum or boolean column fails the check."),
   },
   validate: (p) => {
     const columns = (p.columns ?? {}) as Record<string, unknown>;

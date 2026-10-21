@@ -9,9 +9,9 @@ describe("error codes", () => {
     }
   });
 
-  test("list matches the contract (23 codes)", () => {
+  test("list matches the contract (24 codes)", () => {
     // A new code must be added to the contract (error codes section) and to this count.
-    expect(ERROR_CODES.length).toBe(23);
+    expect(ERROR_CODES.length).toBe(24);
   });
 
   test("KodelError renders the code first", () => {
