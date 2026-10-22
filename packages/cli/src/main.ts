@@ -18,5 +18,10 @@ const code = await runCli(process.argv.slice(2), {
   interactive: process.stdin.isTTY === true && process.stdout.isTTY === true,
   confirm,
   environment: process.env,
+  readStdin: async () => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+    return Buffer.concat(chunks).toString("utf8");
+  },
 });
 process.exit(code);
