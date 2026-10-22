@@ -12,6 +12,7 @@ import {
   KodelError,
   type NewTask,
   type RunState,
+  redactText,
   type SubtaskRef,
   type Task,
   type TaskFilter,
@@ -24,6 +25,7 @@ import { Command, CommanderError } from "commander";
 import pkg from "../package.json" with { type: "json" };
 import {
   FEEDBACK_ENDPOINT,
+  FEEDBACK_MESSAGE_MAX,
   type Fetch,
   feedbackContext,
   isFeedbackType,
@@ -712,19 +714,32 @@ Examples:
         if (!isFeedbackType(opts.type)) {
           throw new UserError(`--type is bug, feature or feedback, not "${plain(opts.type)}"`);
         }
+        if (opts.message !== undefined && arg !== undefined) {
+          throw new UserError("give the text as the argument or as --message, not both");
+        }
         let text = opts.message ?? arg;
-        if (text === "-") text = await (env.readStdin?.() ?? Promise.resolve(""));
-        text = text?.trim();
+        if (text === "-") {
+          // Both are a terminal only when a person typed the command, and then nothing is piped in.
+          if (env.interactive)
+            throw new UserError('"-" reads a pipe: echo "text" | kodel feedback -');
+          text = await (env.readStdin?.() ?? Promise.resolve(""));
+        }
+        // The person or the agent may have pasted a log; what looks like a secret does not leave.
+        text = text === undefined ? undefined : redactText(text.trim());
         if (!text) throw new UserError('a text is needed: kodel feedback "what went wrong"');
+        if (text.length > FEEDBACK_MESSAGE_MAX) {
+          throw new UserError(
+            `the text is ${text.length} characters, the most is ${FEEDBACK_MESSAGE_MAX}`,
+          );
+        }
         const input = {
           type: opts.type,
           message: text,
           ...(opts.context ? { context: feedbackContext(pkg.version) } : {}),
         };
-        // What leaves the machine is shown before it leaves, and again to an agent that passes --yes.
-        if (!opts.json) {
-          env.out(`To ${FEEDBACK_ENDPOINT}:\n${safeJson(input)}\n`);
-        }
+        // What leaves the machine is shown before it leaves, and again to an agent that passes --yes;
+        // with --json it goes to stderr so the answer on stdout stays one JSON document.
+        (opts.json ? env.err : env.out)(`To ${FEEDBACK_ENDPOINT}:\n${safeJson(input)}\n`);
         if (!opts.yes) {
           if (!env.interactive) {
             throw new UserError("nothing was sent: no terminal to ask on, pass --yes to send it");
@@ -734,7 +749,8 @@ Examples:
         const id = await submitFeedback(env.fetch ?? fetch, input).catch((error: unknown) => {
           throw new UserError(error instanceof Error ? error.message : String(error));
         });
-        env.out(opts.json ? `${JSON.stringify({ id })}\n` : `sent: ${id}\n`);
+        // The id comes from the server, so it is cleaned like anything else shown to a person.
+        env.out(opts.json ? `${safeJson({ id })}\n` : `sent: ${plain(id)}\n`);
       },
     );
 

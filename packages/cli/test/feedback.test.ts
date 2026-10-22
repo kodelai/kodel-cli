@@ -94,6 +94,67 @@ describe("feedback", () => {
     expect([...none.calls, ...wrong.calls]).toEqual([]);
   });
 
+  test("with --json the person still sees what is sent, on stderr", async () => {
+    const r = await cli(["feedback", "boom", "--json"], SENT, "", { interactive: true });
+    expect(r.err).toContain("boom");
+    expect(JSON.parse(r.out)).toEqual({ id: "fb_0123456789abcdef" });
+  });
+
+  test("a text over the limit is refused before anything is shown or sent", async () => {
+    const r = await cli(["feedback", "x".repeat(8001), "--yes"]);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("the most is 8000");
+    expect(r.out).toBe("");
+    expect(r.calls).toEqual([]);
+  });
+
+  test("the request does not follow a redirect and does not wait for ever", async () => {
+    const r = await cli(["feedback", "x", "--yes"]);
+    expect(r.calls[0]?.init?.redirect).toBe("error");
+    expect(r.calls[0]?.init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  test("an id with control characters is cleaned before it is shown", async () => {
+    const r = await cli(["feedback", "x", "--yes"], () => Response.json({ id: "fb_1\u001b[2J" }));
+    expect(r.out).not.toContain("\u001b");
+  });
+
+  test("a secret in the text does not leave", async () => {
+    const r = await cli(["feedback", "my key is sk-abcdefghijklmnopqrstuvwxyz0123", "--yes"]);
+    expect(bodyOf(r.calls[0]).message).toContain("[REDACTED:api-key]");
+    expect(r.out).not.toContain("sk-abcdef");
+  });
+
+  test("the argument and --message together are refused", async () => {
+    const r = await cli(["feedback", "A", "-m", "B", "--yes"]);
+    expect(r.code).toBe(1);
+    expect(r.calls).toEqual([]);
+  });
+
+  test("- on a terminal says to pipe the text instead of waiting", async () => {
+    const r = await cli(["feedback", "-"], SENT, "", { interactive: true });
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("reads a pipe");
+  });
+
+  test("a network failure says why, and sends nothing more", async () => {
+    let err = "";
+    const r = await runCli(["feedback", "x", "--yes"], {
+      cwd: "/nonexistent",
+      out: () => {},
+      err: (t) => {
+        err += t;
+      },
+      interactive: false,
+      confirm: async () => true,
+      fetch: async () => {
+        throw new TypeError("fetch failed", { cause: new Error("getaddrinfo ENOTFOUND kodel.ai") });
+      },
+    });
+    expect(r).toBe(1);
+    expect(err).toContain("could not reach the feedback inbox: getaddrinfo ENOTFOUND kodel.ai");
+  });
+
   test("the inbox cannot be redirected", async () => {
     const r = await cli(["feedback", "x", "--url", "http://evil", "--yes"]);
     expect(r.code).toBe(1);
