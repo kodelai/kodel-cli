@@ -68,6 +68,11 @@ const UNSAFE_CODES: [from: number, to: number][] = [
   [0x2066, 0x2069], // isolates
 ];
 
+/** Gives a command group its plural alias (`task` -> `tasks`); use it for every new group. */
+export function withPlural(group: Command): Command {
+  return group.alias(`${group.name()}s`);
+}
+
 export function plain(text: string): string {
   let out = "";
   let skipped = false;
@@ -376,8 +381,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       env.out(`${runId}: accepted\n`);
     });
 
-  const changes = program
-    .command("pipeline")
+  const changes = withPlural(program.command("pipeline"))
     .description("The pipeline of a run")
     .command("changes")
     .description(
@@ -607,11 +611,9 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     return fields;
   }
 
-  const task = program
-    .command("task")
-    .description(
-      "The tasks of this repository (they are off until tasks.enabled is set in the config)",
-    );
+  const task = withPlural(program.command("task")).description(
+    "The tasks of this repository (they are off until tasks.enabled is set in the config)",
+  );
 
   task
     .command("add <title>")

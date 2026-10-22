@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { runCli } from "../src/cli";
+import { Command } from "commander";
+import { runCli, withPlural } from "../src/cli";
 
 let dir: string;
 beforeEach(async () => {
@@ -420,5 +421,30 @@ describe("tasks over MCP", () => {
     expect(message).toContain("the task tools are not served");
     expect(message).toContain("trello");
     await client.close();
+  });
+});
+
+describe("plural aliases of the command groups", () => {
+  test("kodel tasks works like kodel task", async () => {
+    await config(ENABLED);
+    const added = await cli("tasks", "add", "Aliased");
+    expect(added.code).toBe(0);
+    const listed = await cli("tasks", "list");
+    expect(listed.out).toContain("Aliased");
+    expect((await cli("task", "list")).out).toBe(listed.out);
+  });
+
+  test("kodel pipelines is accepted like kodel pipeline", async () => {
+    const r = await cli("pipelines", "changes", "r_000000000_0000");
+    expect(r.err).not.toContain("unknown command");
+  });
+
+  test("the alias is not a second entry in the help and a new group gets it from the helper", async () => {
+    const help = await cli("--help");
+    const text = help.out + help.err;
+    expect(text).toContain("task|tasks");
+    expect(text.match(/\btasks\b(?!\.)/g)?.length ?? 0).toBeLessThan(3);
+    const group = withPlural(new Command("widget"));
+    expect(group.aliases()).toEqual(["widgets"]);
   });
 });
