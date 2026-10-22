@@ -23,10 +23,10 @@ import {
 import { Command, CommanderError } from "commander";
 import pkg from "../package.json" with { type: "json" };
 import {
+  FEEDBACK_ENDPOINT,
   type Fetch,
   feedbackContext,
   isFeedbackType,
-  resolveFeedbackUrl,
   submitFeedback,
 } from "./feedback";
 import { formatChange, formatProposal, formatReport } from "./format";
@@ -692,19 +692,22 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .option("--type <type>", "bug, feature or feedback", "feedback")
     .option("-m, --message <text>", 'the text (or pass it as the argument, or "-" for stdin)')
     .option("--no-context", "do not attach the version, the OS and the runtime")
-    .option("--url <url>", "the inbox (default $KODEL_FEEDBACK_URL or https://kodel.ai)")
+    .option(
+      "-y, --yes",
+      "send without asking (a person is asked first; a script or an agent must pass this)",
+    )
     .option("--json", "print the answer as JSON")
     .addHelpText(
       "after",
       `
 Examples:
   kodel feedback "gate refuses to run in tmux" --type bug
-  echo "long description" | kodel feedback - --type feature`,
+  echo "long description" | kodel feedback - --type feature --yes`,
     )
     .action(
       async (
         arg: string | undefined,
-        opts: { type: string; message?: string; context: boolean; url?: string; json?: boolean },
+        opts: { type: string; message?: string; context: boolean; yes?: boolean; json?: boolean },
       ) => {
         if (!isFeedbackType(opts.type)) {
           throw new UserError(`--type is bug, feature or feedback, not "${plain(opts.type)}"`);
@@ -713,15 +716,22 @@ Examples:
         if (text === "-") text = await (env.readStdin?.() ?? Promise.resolve(""));
         text = text?.trim();
         if (!text) throw new UserError('a text is needed: kodel feedback "what went wrong"');
-        const id = await submitFeedback(
-          env.fetch ?? fetch,
-          resolveFeedbackUrl(opts.url, env.environment),
-          {
-            type: opts.type,
-            message: text,
-            ...(opts.context ? { context: feedbackContext(pkg.version) } : {}),
-          },
-        ).catch((error: unknown) => {
+        const input = {
+          type: opts.type,
+          message: text,
+          ...(opts.context ? { context: feedbackContext(pkg.version) } : {}),
+        };
+        // What leaves the machine is shown before it leaves, and again to an agent that passes --yes.
+        if (!opts.json) {
+          env.out(`To ${FEEDBACK_ENDPOINT}:\n${safeJson(input)}\n`);
+        }
+        if (!opts.yes) {
+          if (!env.interactive) {
+            throw new UserError("nothing was sent: no terminal to ask on, pass --yes to send it");
+          }
+          await mustConfirm("Send this?");
+        }
+        const id = await submitFeedback(env.fetch ?? fetch, input).catch((error: unknown) => {
           throw new UserError(error instanceof Error ? error.message : String(error));
         });
         env.out(opts.json ? `${JSON.stringify({ id })}\n` : `sent: ${id}\n`);

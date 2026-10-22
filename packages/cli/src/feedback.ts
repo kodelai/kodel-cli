@@ -9,20 +9,13 @@ import { arch, platform, release } from "node:os";
 export const FEEDBACK_TYPES = ["bug", "feature", "feedback"] as const;
 export type FeedbackType = (typeof FEEDBACK_TYPES)[number];
 
-export const DEFAULT_FEEDBACK_URL = "https://kodel.ai";
+/** Fixed on purpose: text and context must not be redirected elsewhere by a flag or a variable. */
+export const FEEDBACK_ENDPOINT = "https://kodel.ai/api/feedback";
 
 export type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 
 export function isFeedbackType(value: string): value is FeedbackType {
   return (FEEDBACK_TYPES as readonly string[]).includes(value);
-}
-
-export function resolveFeedbackUrl(
-  flag: string | undefined,
-  environment: Record<string, string | undefined> | undefined,
-): string {
-  const url = flag ?? environment?.KODEL_FEEDBACK_URL ?? DEFAULT_FEEDBACK_URL;
-  return url.replace(/\/+$/, "");
 }
 
 /** What the person is running; nothing from the repository, the run or the environment variables. */
@@ -45,10 +38,9 @@ async function failure(response: Response): Promise<string> {
 
 export async function submitFeedback(
   fetcher: Fetch,
-  baseUrl: string,
   input: { type: FeedbackType; message: string; context?: Record<string, string> },
 ): Promise<string> {
-  const response = await fetcher(`${baseUrl}/api/feedback`, {
+  const response = await fetcher(FEEDBACK_ENDPOINT, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
