@@ -52,6 +52,7 @@ describe("feedback", () => {
     expect(r.calls[0]?.url).toBe("https://kodel.ai/api/feedback");
     expect(body.type).toBe("feedback");
     expect(typeof body.context.kodelVersion).toBe("string");
+    expect(body.context.client).toBe("kodel");
   });
 
   test("a no from the person sends nothing", async () => {
