@@ -12,6 +12,10 @@
 #     `diff` takes `paths` and a `mode` (changed | changed_only | only | unchanged).
 #   * Edges are taken when `when` equals the node's outcome label (default `passed`).
 #     A failed agent node with no matching edge is re-entered with the failure reason.
+#   * Text fields may use {{task}}, {{task.slug}}, {{run.slug}} (the name the agent gave the run, or one
+#     made from the task) and {{run.start_date}} (UTC, YYYY-MM-DD), e.g.
+#     docs/plans/{{run.start_date}}-{{run.slug}}.md. A run slug is not unique: two runs with the same
+#     slug and the same path write the same file, so add the date, or let the agent pick another title.
 #   * When a node is re-entered, the engine adds the reason (command output tail, blocking
 #     findings, the human's rejection reason) to the next_step prompt.
 

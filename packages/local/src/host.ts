@@ -39,8 +39,10 @@ import {
   type RunReport,
   type RunState,
   redactText,
+  renderContextOf,
   renderDeep,
   rowsToCsv,
+  runSlug,
   type StepResult,
   summarizeRun,
   validateReport,
@@ -258,6 +260,8 @@ export class LocalHost {
     task: string,
     options: {
       restart?: boolean;
+      /** The run's slug, validated by the service; absent: made from the task text. */
+      title?: string;
       cwd?: string;
       worktree?: WorktreeConfig;
       /** A pipeline file to put into the run's directory, when the last commit does not have it as it should be. */
@@ -276,6 +280,14 @@ export class LocalHost {
     // Spaces at the ends or doubled are not a different task; otherwise a changed space would
     // slip past the run that is waiting for a person.
     const redactedTask = normalizeTask(task, this.rules);
+    // A title is stored and put into paths like the task, so it goes through the same redaction; one
+    // that redaction would change is refused, otherwise the slug would not be what the agent chose.
+    if (options.title !== undefined && redactText(options.title, this.rules) !== options.title) {
+      throw new KodelError("INVALID_ARGUMENTS", "title looks like a secret and cannot be used", [
+        { path: ["title"], message: "looks like a secret" },
+      ]);
+    }
+    const slug = runSlug(options.title, redactedTask);
     const started = await this.store.withStartLock(async () => {
       const existing = await this.store.findActive(this.spec.name, redactedTask);
       if (existing) {
@@ -316,6 +328,7 @@ export class LocalHost {
           runId,
           pipeline: this.spec.name,
           task: redactedTask,
+          slug,
           specHash,
           createdAt: now,
           ...(workdir ? { workdir: workdir.path } : {}),
@@ -330,6 +343,7 @@ export class LocalHost {
           type: "start",
           runId,
           task: redactedTask,
+          slug,
           specHash,
           ...(workdir ? { workdir: workdir.path } : {}),
           ...(workdir?.branch === undefined ? {} : { branch: workdir.branch }),
@@ -1504,7 +1518,7 @@ export class LocalRun {
       };
     const valid = validateReport(
       raw,
-      renderDeep(params, { task: state.task }),
+      renderDeep(params, renderContextOf(state)),
       check !== undefined,
     );
     if (!valid.ok) return { ok: false, code: valid.code, message: valid.message };

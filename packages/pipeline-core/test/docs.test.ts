@@ -7,6 +7,7 @@ import {
   edgeSchema,
   type PipelineHost,
   PipelineService,
+  PLACEHOLDERS,
   parsePipeline,
   Registry,
   topSchema,
@@ -37,6 +38,12 @@ describe("pipeline_docs", () => {
     expect(read).toMatchObject({ ok: true, topic: "checks" });
     const tool = TOOLS.find((t) => t.name === "pipeline_docs");
     expect([tool?.readOnly, tool?.idempotent]).toEqual([true, true]);
+  });
+
+  test("the pipeline spec topic names every placeholder the parser accepts", async () => {
+    const read = await invokeTool(service(), "pipeline_docs", { topic: "pipeline-spec" });
+    const text = String((read as Record<string, unknown>).text);
+    for (const name of PLACEHOLDERS) expect(text).toContain(`{{${name}}}`);
   });
 
   test("tNN_the_index_from_the_tool_names_the_contract_version", async () => {

@@ -358,6 +358,22 @@ describe("placeholders", () => {
     expectIssue(text, '"{{task}}" is not allowed in a command');
   });
 
+  test("{{run.slug}} and {{run.start_date}} are known placeholders, also in a command", () => {
+    const text = VALID.replace(
+      "command: make",
+      "command: make plan SLUG={{run.slug}} DAY={{run.start_date}}",
+    );
+    expect(validatePipeline(text).ok).toBe(true);
+    expectIssue(text.replace("{{run.slug}}", "{{run.nope}}"), 'unknown placeholder "{{run.nope}}"');
+  });
+
+  test("the refusal of {{task}} in a command points to the safe placeholders", () => {
+    expectIssue(
+      VALID.replace("command: make", "command: make {{task}}"),
+      '"{{task.slug}}" or "{{run.slug}}"',
+    );
+  });
+
   test("{{task.slug}} is fine in a command, and {{task}} is fine in a prompt", () => {
     const text = VALID.replace("command: make", "command: make plan SLUG={{task.slug}}");
     expect(validatePipeline(text).ok).toBe(true);

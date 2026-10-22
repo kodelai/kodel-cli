@@ -79,7 +79,7 @@ export interface ParseOptions {
 }
 
 /** Placeholders a pipeline may use in its strings. */
-export const PLACEHOLDERS = ["task", "task.slug"] as const;
+export const PLACEHOLDERS = ["task", "task.slug", "run.slug", "run.start_date"] as const;
 
 const DEFAULT_ON_FAIL = "failed";
 export const DEFAULT_MAX_CONSECUTIVE_FAILURES = 3;
@@ -256,7 +256,7 @@ function checkPlaceholders(c: Collector, text: string, path: Path) {
       c.add(
         path,
         '"{{task}}" is not allowed in a command: the task text is free input and would be ' +
-          'injected into the shell; use "{{task.slug}}" instead',
+          'injected into the shell; use "{{task.slug}}" or "{{run.slug}}" instead',
       );
     }
   }

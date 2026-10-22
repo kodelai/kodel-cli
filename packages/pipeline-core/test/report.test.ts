@@ -40,6 +40,18 @@ function play(steps: [number, RunEvent][]) {
 
 const START: RunEvent = { type: "start", runId: "r1", task: "t", specHash: "h" };
 
+describe("the slug of a run in its report", () => {
+  test("is the one the run started with, or the name the task text gives a run that has none", () => {
+    const titled = play([[0, { ...START, task: "Fix login", slug: "login-fix" }]]);
+    expect(summarizeRun(titled.state, titled.journal).slug).toBe("login-fix");
+    expect(titled.journal[0]).toMatchObject({ event: "run_started", slug: "login-fix" });
+
+    // A run written before slugs existed: no `slug` in its state.
+    const { slug: _slug, ...older } = titled.state;
+    expect(summarizeRun(older, []).slug).toBe("fix-login");
+  });
+});
+
 describe("summarizeRun", () => {
   const { state, journal } = play([
     [0, START],

@@ -13,6 +13,7 @@ import {
   type NewTask,
   type RunState,
   redactText,
+  runSlug,
   type SubtaskRef,
   type Task,
   type TaskFilter,
@@ -137,6 +138,11 @@ function describeRun(state: RunState | undefined): string {
   return at ? `${status} at ${at}` : status;
 }
 
+/** The run's slug: the one it was started with, or the name its task text would have given an older run. */
+function slugOf(meta: { slug?: string; task: string }, state: RunState | undefined): string {
+  return meta.slug ?? state?.slug ?? runSlug(undefined, meta.task);
+}
+
 function failIfRefused(decision: Decision): void {
   if (!decision.ok) {
     throw new UserError(`${decision.error.code}: ${plain(decision.error.message)}`);
@@ -250,6 +256,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
             runId: meta.runId,
             pipeline: meta.pipeline,
             status: state?.status ?? "unreadable",
+            slug: slugOf(meta, state),
             task: meta.task,
             ...(state?.workdir === undefined ? {} : { workdir: state.workdir }),
           }));
@@ -272,10 +279,11 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
             plain(meta.pipeline),
             `${describeRun(state)}${note}`,
             where,
+            plain(slugOf(meta, state)),
             plain(meta.task),
           ]);
         }
-        const header = ["RUN", "PIPELINE", "STATUS", "WORKDIR", "TASK"];
+        const header = ["RUN", "PIPELINE", "STATUS", "WORKDIR", "SLUG", "TASK"];
         if (rows.length > 0) {
           for (const line of formatTable(header, rows, opts.headers !== false))
             env.out(`${line}\n`);
@@ -285,7 +293,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const run = await openRun(h, runId);
       const state = await run.state();
       env.out(
-        `run:       ${plain(state.runId)}\ntask:      ${plain(state.task)}\nstatus:    ${describeRun(state)}\n`,
+        `run:       ${plain(state.runId)}\nslug:      ${plain(state.slug ?? runSlug(undefined, state.task))}\ntask:      ${plain(state.task)}\nstatus:    ${describeRun(state)}\n`,
       );
       // A state that is not as kodel left it is said below (integrity); the place is not guessed.
       const where = await run.location().catch(() => undefined);

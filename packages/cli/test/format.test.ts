@@ -15,6 +15,7 @@ describe("formatDuration", () => {
 const report: RunReport = {
   runId: "r_000000001_aaaa",
   task: "add a limit",
+  slug: "add-a-limit",
   status: "completed",
   total_s: 125,
   work_s: 50,
@@ -55,7 +56,7 @@ describe("formatReport", () => {
 
   test("opens with the run, then the time split in two", () => {
     const [first, second] = text.split("\n");
-    expect(first).toBe("run r_000000001_aaaa  completed  add a limit");
+    expect(first).toBe("run r_000000001_aaaa  completed  add-a-limit  add a limit");
     expect(second).toBe("total 2m 05s: work 50 s, waiting for a person 1m 15s");
   });
 
@@ -115,7 +116,12 @@ describe("formatReport", () => {
 
   test("everything that came from outside goes through the filter", () => {
     const loud = formatReport(
-      { ...report, task: "x\u001b[2J", nodes: [{ ...report.nodes[0], node: "n\u0007" } as never] },
+      {
+        ...report,
+        task: "x\u001b[2J",
+        slug: "s\u001b[2J",
+        nodes: [{ ...report.nodes[0], node: "n\u0007" } as never],
+      },
       (t) => [...t].map((c) => (c.charCodeAt(0) < 32 ? "?" : c)).join(""),
     );
     expect(loud).not.toContain("\u001b");

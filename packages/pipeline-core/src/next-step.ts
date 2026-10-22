@@ -5,7 +5,7 @@
 import type { PipelineSpec } from "./pipeline";
 import type { AcceptEffect, NodeDiff } from "./pipeline-diff";
 import { defaultRegistry, type Registry } from "./registry";
-import { renderTemplate } from "./render";
+import { renderContextOf, renderTemplate } from "./render";
 import type { RunState, RunStatus, Visit } from "./run";
 
 /** Longest a single `pipeline_next_step` may wait, so a call never hangs for minutes. */
@@ -219,7 +219,7 @@ function baseStep(spec: PipelineSpec, state: RunState, now: number, registry: Re
     if (!found) throw new Error(`unknown node ${slug}`);
     return found;
   };
-  const render = (text: string) => renderTemplate(text, { task: state.task });
+  const render = (text: string) => renderTemplate(text, renderContextOf(state));
 
   if (state.status === "paused" && state.pause) {
     const failure = state.nodes[state.pause.node]?.lastFailure;
