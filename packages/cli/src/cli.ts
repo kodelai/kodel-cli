@@ -5,12 +5,32 @@
  * type them; the deny rules in the agent's settings are a second line, not the only one.
  */
 
-import { LocalPipelineHost } from "@kodel-ai/local";
-import { type Decision, KodelError, type RunState } from "@kodel-ai/pipeline-core";
+import { join } from "node:path";
+import { LocalPipelineHost, openTaskService } from "@kodel-ai/local";
+import {
+  type Decision,
+  KodelError,
+  type NewTask,
+  type RunState,
+  type SubtaskRef,
+  type Task,
+  type TaskFilter,
+  type TaskPatch,
+  type TaskService,
+  type TaskSummary,
+  type ToolResult,
+} from "@kodel-ai/pipeline-core";
 import { Command, CommanderError } from "commander";
 import pkg from "../package.json" with { type: "json" };
 import { formatChange, formatReport } from "./format";
 import { serveStdio } from "./mcp-server";
+import {
+  formatFailure,
+  formatProblems,
+  formatSchema,
+  formatTask,
+  formatTaskLine,
+} from "./task-format";
 
 export interface CliEnv {
   cwd: string;
@@ -90,6 +110,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .configureOutput({ writeOut: env.out, writeErr: env.err });
 
   const host = () => new LocalPipelineHost({ root: program.opts<{ root: string }>().root });
+  const storeRoot = () => join(program.opts<{ root: string }>().root, ".kodel");
 
   async function openRun(host_: LocalPipelineHost, runId: string) {
     const run = await host_.open(runId);
@@ -158,7 +179,16 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .command("mcp")
     .description("Serve the pipeline tools to a coding agent over stdio")
     .action(async () => {
-      await serveStdio(host(), pkg.version);
+      // A config that cannot be used for the tasks must not take the pipelines down with it: the
+      // server starts without the task tools and says why on stderr (stdout is the protocol).
+      let tasks: TaskService | undefined;
+      try {
+        tasks = (await openTaskService({ storeRoot: storeRoot() }))?.service;
+      } catch (error) {
+        if (!(error instanceof KodelError)) throw error;
+        env.err(`kodel: the task tools are not served: ${plain(error.message)}\n`);
+      }
+      await serveStdio(host(), pkg.version, tasks);
     });
 
   program
@@ -517,6 +547,208 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           throw new UserError(error instanceof Error ? error.message : String(error));
         });
       env.out(`${runId}: sealed\n`);
+    });
+
+  // ── tasks ───────────────────────────────────────────────────────────────────
+  // The same service the MCP tools use, so a person and an agent get the same rules. Tasks carry no
+  // trust decision, so (unlike `gate`) nothing here needs a terminal.
+
+  async function tasksService(): Promise<TaskService> {
+    let opened: Awaited<ReturnType<typeof openTaskService>>;
+    try {
+      opened = await openTaskService({ storeRoot: storeRoot() });
+    } catch (error) {
+      if (error instanceof KodelError) {
+        throw new UserError(`${error.code}: ${plain(error.message)}`);
+      }
+      throw error;
+    }
+    if (!opened) {
+      throw new KodelError(
+        "TASKS_DISABLED",
+        "tasks are off: set tasks.enabled to true in .kodel/config.yaml (restart the MCP server to give the agent the tools)",
+      );
+    }
+    return opened.service;
+  }
+
+  /** The answer of the service, or a refusal as an error of the command. */
+  function answered(result: ToolResult): Record<string, unknown> {
+    if (!result.ok) throw new UserError(formatFailure(result, plain));
+    return result;
+  }
+
+  const collect = (value: string, previous: string[] = []) => [...previous, value];
+
+  function fieldsOf(pairs: string[] | undefined): Record<string, string> | undefined {
+    if (!pairs?.length) return undefined;
+    const fields: Record<string, string> = {};
+    for (const pair of pairs) {
+      const at = pair.indexOf("=");
+      if (at < 1) throw new UserError(`--field takes name=value, not "${plain(pair)}"`);
+      fields[pair.slice(0, at)] = pair.slice(at + 1);
+    }
+    return fields;
+  }
+
+  const task = program
+    .command("task")
+    .description(
+      "The tasks of this repository (they are off until tasks.enabled is set in the config)",
+    );
+
+  task
+    .command("add <title>")
+    .description("Create a task")
+    .option("--body <text>", "what the problem is")
+    .option("--priority <name>", "a priority of the tracker (see: task schema)")
+    .option("--type <name>", "a task type of the tracker")
+    .option("--comment <text>", "a note to add")
+    .option("--run <id>", "the pipeline run the task was found in")
+    .option("--parent <key>", "make it a subtask of this task")
+    .option("--field <name=value>", "a tracker field; repeat for more", collect)
+    .action(async (title: string, opts: Record<string, string | string[] | undefined>) => {
+      const service = await tasksService();
+      const input: NewTask = { title };
+      if (typeof opts.body === "string") input.body = opts.body;
+      if (typeof opts.priority === "string") input.priority = opts.priority;
+      if (typeof opts.type === "string") input.type = opts.type;
+      if (typeof opts.comment === "string") input.comment = opts.comment;
+      if (typeof opts.run === "string") input.run = opts.run;
+      if (typeof opts.parent === "string") input.parent = opts.parent;
+      const fields = fieldsOf(opts.field as string[] | undefined);
+      if (fields) input.fields = fields;
+      const made = answered(await service.create(input)).task as Task;
+      env.out(`created ${plain(made.key)}: ${plain(made.title)}\n`);
+    });
+
+  task
+    .command("list")
+    .description("List the tasks; the unfinished ones unless --state says otherwise")
+    .option("--state <states...>", "todo, progress, done (a list, or comma separated)")
+    .option("--status <name>", "an exact status of the tracker")
+    .option("--priority <name>", "a priority of the tracker")
+    .option("--parent <key>", "only the subtasks of this task")
+    .option("--top-level", "leave subtasks out")
+    .option("--run <id>", "only tasks attached to this run")
+    .option("--limit <n>", "how many (default 50, at most 200)", (v) => Number.parseInt(v, 10))
+    .option("--cursor <text>", "the `next` of a previous page")
+    .option("--json", "print the answer as JSON")
+    .action(async (opts: Record<string, unknown>) => {
+      const service = await tasksService();
+      const filter: Partial<TaskFilter> = {};
+      if (Array.isArray(opts.state)) {
+        filter.state = opts.state.flatMap((s: string) =>
+          s.split(",").map((x) => x.trim()),
+        ) as TaskFilter["state"];
+      }
+      if (typeof opts.status === "string") filter.status = opts.status;
+      if (typeof opts.priority === "string") filter.priority = opts.priority;
+      if (typeof opts.parent === "string") filter.parent = opts.parent;
+      if (opts.topLevel === true) filter.top_level = true;
+      if (typeof opts.run === "string") filter.run = opts.run;
+      if (typeof opts.limit === "number") filter.limit = opts.limit;
+      if (typeof opts.cursor === "string") filter.cursor = opts.cursor;
+      const answer = answered(await service.list(filter));
+      if (opts.json) {
+        env.out(`${JSON.stringify(answer, null, 2)}\n`);
+        return;
+      }
+      const tasks = answer.tasks as TaskSummary[];
+      if (tasks.length === 0) env.out("no tasks\n");
+      for (const t of tasks) env.out(`${formatTaskLine(t, plain)}\n`);
+      if (typeof answer.next === "string") {
+        env.out(`more: kodel task list --cursor ${answer.next}\n`);
+      }
+      if (answer.truncated === true) env.out("the list may be incomplete\n");
+      env.err(formatProblems(answer.problems as { message: string }[], plain));
+    });
+
+  task
+    .command("show <key>")
+    .description("Show a task in full")
+    .option("--json", "print the answer as JSON")
+    .action(async (key: string, opts: { json?: boolean }) => {
+      const service = await tasksService();
+      const answer = answered(await service.get({ key }));
+      if (opts.json) {
+        env.out(`${JSON.stringify(answer, null, 2)}\n`);
+        return;
+      }
+      env.out(formatTask(answer.task as Task, answer.subtasks as SubtaskRef[], plain));
+    });
+
+  task
+    .command("set <key>")
+    .description("Change a task")
+    .option("--status <name>", "the status to move it to")
+    .option("--priority <name>", "a priority of the tracker")
+    .option("--type <name>", "a task type of the tracker")
+    .option("--title <text>", "a new title")
+    .option("--body <text>", "a new text")
+    .option("--comment <text>", "a note to add (it never replaces an earlier one)")
+    .option("--add-run <id>", "attach a pipeline run")
+    .option("--parent <key>", "move it under another task")
+    .option(
+      "--clear <name>",
+      "empty a field: body, priority, type, parent or fields.<name>",
+      collect,
+    )
+    .option("--field <name=value>", "a tracker field; repeat for more", collect)
+    .action(async (key: string, opts: Record<string, string | string[] | undefined>) => {
+      const service = await tasksService();
+      const patch: TaskPatch = {};
+      if (typeof opts.status === "string") patch.status = opts.status;
+      if (typeof opts.priority === "string") patch.priority = opts.priority;
+      if (typeof opts.type === "string") patch.type = opts.type;
+      if (typeof opts.title === "string") patch.title = opts.title;
+      if (typeof opts.body === "string") patch.body = opts.body;
+      if (typeof opts.comment === "string") patch.comment = opts.comment;
+      if (typeof opts.addRun === "string") patch.add_run = opts.addRun;
+      if (typeof opts.parent === "string") patch.parent = opts.parent;
+      if (Array.isArray(opts.clear)) patch.clear = opts.clear;
+      const fields = fieldsOf(opts.field as string[] | undefined);
+      if (fields) patch.fields = fields;
+      const answer = answered(await service.update({ key, ...patch }));
+      const changed = answer.task as Task;
+      env.out(`updated ${plain(changed.key)}: ${plain(changed.status)}\n`);
+      if (typeof answer.open_subtasks === "number") {
+        env.out(`note: ${answer.open_subtasks} subtask(s) are still open\n`);
+      }
+    });
+
+  task
+    .command("schema [key]")
+    .description("Show the statuses, priorities, types and fields of the tracker")
+    .option("--type <name>", "the fields for creating this type")
+    .option("--json", "print the answer as JSON")
+    .action(async (key: string | undefined, opts: { type?: string; json?: boolean }) => {
+      const service = await tasksService();
+      const query: { key?: string; type?: string } = {};
+      if (key !== undefined) query.key = key;
+      if (opts.type !== undefined) query.type = opts.type;
+      const answer = answered(await service.schema(query));
+      env.out(
+        opts.json
+          ? `${JSON.stringify(answer, null, 2)}\n`
+          : formatSchema(answer as unknown as Parameters<typeof formatSchema>[0], plain),
+      );
+    });
+
+  task
+    .command("doctor")
+    .description("Check that the task adapter is set up and can be reached")
+    .action(async () => {
+      const service = await tasksService();
+      const answer = answered(await service.verify());
+      const problems = answer.problems as { message: string }[];
+      env.out(`adapter: ${plain(String(answer.adapter))}\n`);
+      if (problems.length === 0) {
+        env.out("ok\n");
+        return;
+      }
+      for (const p of problems) env.out(`problem: ${plain(p.message)}\n`);
+      throw new UserError(`${problems.length} problem(s) found`);
     });
 
   try {

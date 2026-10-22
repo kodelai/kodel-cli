@@ -51,11 +51,16 @@ compatibility review whose findings are reflected in decisions 2, 5, 6 and 14-22
    typos), but the message says what to do: "unknown key `tasks`: is the file written for a newer kodel?
    upgrade kodel or remove the key". Inside `tasks` the core keys are strict and inactive adapter blocks are
    skipped.
-6. **Tool surface is dynamic by capability.** A parameter the adapter cannot honour (`parent`, `run`, `comment`,
-   `fields`, `priority`, `type`) is not in the tool's schema. Argument parsing of `task_*` is **strict**: an
-   extra parameter is `INVALID_ARGUMENTS` listing what the tool accepts (today `z.object(...)` strips unknown
-   keys silently, which would lose a `parent` unnoticed). The surface snapshot test pins each capability
-   profile (full and minimal). Moving to a static surface later would only add optional parameters.
+6. **Tool surface is dynamic by capability.** A parameter the adapter cannot honour (`parent`, `run` / `add_run`,
+   `comment`, `fields`; the run filter needs `runs: "full"`) is not in the tool's schema. `priority` and `type`
+   are always there: whether a tracker has them is learned through `task_schema`, not known without the
+   network, so an adapter without them refuses with `TASK_UNSUPPORTED`. Argument parsing of `task_*` is
+   **strict**: an extra parameter is `INVALID_ARGUMENTS` listing what the tool accepts (a bare Zod shape strips
+   unknown keys silently, which would lose a `parent` unnoticed). Verified with the SDK in use (1.32): it
+   accepts a strict `z.object(...)` as `inputSchema`, refuses an unknown key before the handler runs, and
+   advertises `additionalProperties: false`; the dispatcher checks strictly too, for the CLI and direct callers.
+   The surface snapshot test pins each capability profile (full and minimal). Moving to a static surface later
+   would only add optional parameters.
 7. **Statuses, priorities, types and fields are learned lazily** through `task_schema` and cached in memory
    with a short TTL (refreshed once on a miss). Nothing needs the network at server start.
 8. **Subtasks have no depth limit in the core.** `parent` is stored on the child (local). The local adapter walks
@@ -375,9 +380,9 @@ Names carry the decision number of this plan until the decision log has ids.
   capabilities, an opaque key plus `id`, adapter-owned times and allocation, `url`, `details`, the versioned
   `contract`, the experimental marks of decision 22. Before the first release at least one real tracker adapter
   (Linear or GitHub first, Jira after) should be written against it and pass the suite.
-- **Argument parsing and the SDK.** The plan relies on passing a strict schema to the MCP SDK (decision 6). If the
-  SDK strips unknown keys before our handler, the fallback is a static surface: all capability-gated
-  parameters always in the schema, refused with `TASK_UNSUPPORTED`. Step 0 of the work settles it.
+- **Argument parsing and the SDK** (settled by step 0): the SDK accepts a strict schema, so no fallback is
+  needed. If a later SDK version stops doing so, the fallback is a static surface (all capability-gated
+  parameters always in the schema, refused with `TASK_UNSUPPORTED`); the surface tests would catch the change.
 - **A dynamic surface vs. a future server** that serves many projects over one connection: it can serve one MCP
   endpoint per project, or switch to the static surface, which only adds optional parameters.
 - **Text from a tracker is untrusted** (other people write it): data, never instructions, never rendered into a
@@ -402,7 +407,7 @@ Names carry the decision number of this plan until the decision log has ids.
 
 ## Order of work
 
-0. Spike: does the MCP SDK accept a strict argument schema (decision 6)? Decide the fallback if not.
+0. Spike (done): the MCP SDK accepts a strict argument schema; the result is recorded in decision 6.
 1. Core: `tasks.ts` (types, interface, registry, validation), error codes and `details`, `TaskService`, unit
    tests.
 2. Testkit: the in-memory adapter and the conformance suite; service and tool tests on top.
