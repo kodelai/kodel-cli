@@ -12,6 +12,7 @@ import type { NodeDiff } from "./pipeline-diff";
 import { defaultRegistry, type Registry } from "./registry";
 import { renderTemplate } from "./render";
 import type { Decision, RunState } from "./run";
+import { runSlug, validateTitle } from "./slug";
 import { BASELINE_VERSION, MAX_SUPPORTED_MAJOR } from "./version";
 
 // ── what a host provides ────────────────────────────────────────────────────
@@ -165,6 +166,8 @@ export interface PipelineHost {
     cwd?: string;
     /** Which version to use when the pipeline file has uncommitted changes; asked, never guessed. */
     pipeline_version?: "working" | "committed";
+    /** The run's slug, as the agent gave it and the service validated it; absent: made from the task. */
+    title?: string;
   }): Promise<StartOutcome>;
   open(runId: string): Promise<RunHandle | undefined>;
 }
@@ -372,7 +375,12 @@ export class PipelineService {
   plan(input: { pipeline: string; task: string }): Promise<ToolResult> {
     return guarded(async () => {
       const spec = await this.spec(input.pipeline);
-      const render = (text: string) => renderTemplate(text, { task: input.task });
+      // No run exists, so there is no start date to give: the placeholder shows its form.
+      const render = (text: string) =>
+        renderTemplate(text, {
+          task: input.task,
+          run: { slug: runSlug(undefined, input.task), startDate: "YYYY-MM-DD" },
+        });
       const nodes = spec.nodes.map((node) => {
         const begin = this.registry.node(node.kind)?.begin(node.params, render);
         return {
@@ -402,8 +410,12 @@ export class PipelineService {
     restart?: boolean;
     cwd?: string;
     pipeline_version?: "working" | "committed";
+    title?: string;
   }): Promise<ToolResult> {
     return guarded(async () => {
+      // First of all: the host makes a worktree and a branch before it writes the run, and a title
+      // that is refused must leave nothing of either behind.
+      if (input.title !== undefined) validateTitle(input.title);
       let name = input.pipeline;
       if (!name) {
         const { pipelines } = await this.host.list();
@@ -433,6 +445,7 @@ export class PipelineService {
           ...(input.pipeline_version === undefined
             ? {}
             : { pipeline_version: input.pipeline_version }),
+          ...(input.title === undefined ? {} : { title: input.title }),
         });
       } catch (error) {
         // No run exists yet: the answer has no run_id, only what the person has to decide.

@@ -46,6 +46,8 @@ export interface RunMeta {
   runId: string;
   pipeline: string;
   task: string;
+  /** The run's slug; runs from before it existed have none. */
+  slug?: string;
   specHash: string;
   createdAt: number;
   /** Where the run works, when not in the repository root. Runs from before this read as the root. */

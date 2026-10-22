@@ -289,12 +289,14 @@ describe("status", () => {
     expect(list.out).toContain(id);
     expect(list.out).toContain("demo");
     const [header, row] = list.out.split("\n");
-    expect(header).toMatch(/^RUN\s+PIPELINE\s+STATUS\s+WORKDIR\s+TASK$/);
+    expect(header).toMatch(/^RUN\s+PIPELINE\s+STATUS\s+WORKDIR\s+SLUG\s+TASK$/);
     expect(row?.indexOf("demo")).toBe(header?.indexOf("PIPELINE"));
     const bare = await cli("status", "--no-headers");
     expect(bare.out.split("\n").length).toBe(list.out.split("\n").length - 1);
     expect(bare.out).toStartWith(id);
     const one = await cli("status", id);
+    expect(one.out).toContain("slug:      t\n");
+    expect(row).toMatch(/ - +t +t$/);
     expect(one.out).toContain("waiting:   approve (gate)");
     expect(one.out).toContain("integrity: ok");
   });
@@ -304,7 +306,7 @@ describe("status", () => {
     const result = await cli("status", "--json");
     expect(result.code).toBe(0);
     expect(JSON.parse(result.out)).toEqual([
-      { runId: id, pipeline: "demo", status: "running", task: "t" },
+      { runId: id, pipeline: "demo", status: "running", slug: "t", task: "t" },
     ]);
   });
 
@@ -481,6 +483,7 @@ describe("report", () => {
     const latest = await cli("report");
     expect(latest.code).toBe(0);
     expect(latest.out).toContain(`run ${id}`);
+    expect(latest.out.split("\n")[0]).toMatch(/^run \S+ {2}running {2}t {2}t$/);
     expect(latest.out).toContain("waiting for a person");
     expect(latest.out).toContain("write");
     expect(latest.out).toContain("(a person decides)");
@@ -686,7 +689,7 @@ describe("what status shows and does", () => {
     const one = await cli("status", run.runId);
     for (const text of [list.out, one.out]) {
       expect(text).not.toContain("\u001b");
-      expect(text.split("\n").filter(Boolean).length).toBeLessThanOrEqual(6);
+      expect(text.split("\n").filter(Boolean).length).toBeLessThanOrEqual(7);
     }
   });
 

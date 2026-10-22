@@ -438,6 +438,7 @@ export class LocalPipelineHost implements PipelineHost {
     restart: boolean;
     cwd?: string;
     pipeline_version?: "working" | "committed";
+    title?: string;
   }): Promise<StartOutcome> {
     let found = await this.find(input.pipeline);
     if (!found)
@@ -482,6 +483,7 @@ export class LocalPipelineHost implements PipelineHost {
       found.file,
     ).start(input.task, {
       restart: input.restart,
+      ...(input.title === undefined ? {} : { title: input.title }),
       worktree,
       ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
       ...(pipelineCopy === undefined ? {} : { pipelineCopy }),

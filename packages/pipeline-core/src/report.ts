@@ -3,6 +3,7 @@
  * each node took, what failed and why. Pure, so a host (a CLI, a server) only has to print it.
  */
 import type { JournalRecord, RunState } from "./run";
+import { runSlug } from "./slug";
 
 export interface AttemptReport {
   attempt: number;
@@ -48,6 +49,8 @@ export interface NodeReport {
 export interface RunReport {
   runId: string;
   task: string;
+  /** The run's name (`{{run.slug}}`); not unique, told apart by `runId`. */
+  slug: string;
   status: string;
   /** Seconds from the start to the end (to the last record, for a run still going). */
   total_s: number;
@@ -244,6 +247,7 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
   return {
     runId: state.runId,
     task: state.task,
+    slug: state.slug ?? runSlug(undefined, state.task),
     status: state.status,
     total_s: seconds(first, state.finishedAt ?? last),
     work_s: sum(all.filter((n) => !n.gate)),

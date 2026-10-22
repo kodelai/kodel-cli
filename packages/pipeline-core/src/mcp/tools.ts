@@ -21,7 +21,7 @@ export const SERVER_INSTRUCTIONS = [
   "This server runs the project's pipelines: fixed sequences of steps that the engine, not you, checks.",
   "",
   "When the user asks you to do something through a pipeline (or to run one), work only through the pipeline_* tools:",
-  "1. If you do not know the pipeline's name, call pipeline_list. Then call pipeline_start with the task in the user's words.",
+  "1. If you do not know the pipeline's name, call pipeline_list. Then call pipeline_start with the task in the user's words and a title for the run: English, 2-5 words, kebab-case (for example fix-login-timeout).",
   "2. Follow each answer. Never pick, reorder or skip steps yourself, and never decide that a step is done: after you do a step, call pipeline_complete_step and let the engine's checks decide. If a check fails you get the reason and the same step again.",
   "3. pipeline_next_step tells you what is next: `node` (do it), `waiting` (a person has to decide), `running` (the engine is working: pass wait_s to wait, as the hint says), or `done`.",
   "4. At a `waiting` answer, do what `tell_the_person` says: write the person what they are asked to decide, a summary of what was done and changed, what to look at, and the command to decide with. Then end your turn. You cannot approve, reject or resume anything yourself, and you must not try: those commands are for the person and refuse to run for an agent.",
@@ -154,6 +154,13 @@ export const TOOLS: ToolDescriptor[] = [
         .optional()
         .describe("Omit it if the project has only one pipeline."),
       restart: z.boolean().optional(),
+      title: z
+        .string()
+        .max(LIMITS.name)
+        .optional()
+        .describe(
+          "A name for the run: English, 2-5 words, kebab-case, e.g. fix-login-timeout (lowercase letters, digits and single dashes, at most 40 characters). It is not checked by the schema but by the engine, which refuses a bad one with the reason. Ignored when an active run for this task is picked up again.",
+        ),
       pipeline_version: z
         .enum(["working", "committed"])
         .optional()

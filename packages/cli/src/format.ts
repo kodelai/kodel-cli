@@ -136,7 +136,9 @@ export function formatReport(
   trust?: { integrity: string; seal: string },
 ): string {
   const lines: string[] = [];
-  lines.push(`run ${plain(report.runId)}  ${plain(report.status)}  ${plain(report.task)}`);
+  lines.push(
+    `run ${plain(report.runId)}  ${plain(report.status)}  ${plain(report.slug)}  ${plain(report.task)}`,
+  );
   if (trust) {
     const fine = trust.integrity !== "modified" && trust.seal !== "modified";
     lines.push(

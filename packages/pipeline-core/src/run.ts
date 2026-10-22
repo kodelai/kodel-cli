@@ -12,7 +12,8 @@ import { type ErrorCode, KodelError } from "./errors";
 import type { NodeSpec, PipelineSpec } from "./pipeline";
 import { diffPipelines } from "./pipeline-diff";
 import { defaultRegistry, type Registry } from "./registry";
-import { renderDeep, renderTemplate } from "./render";
+import { renderContextOf, renderDeep, renderTemplate } from "./render";
+import { runSlug } from "./slug";
 
 export const DEFAULT_STALE_MS = 30_000;
 export const DEFAULT_MAX_RESTARTS = 3;
@@ -116,6 +117,11 @@ export interface RunState {
   v: 1;
   runId: string;
   task: string;
+  /**
+   * The run's name for `{{run.slug}}`: a label that is not unique (the id is the identity). Runs
+   * from before it existed have none, and read as the name their task text would have given.
+   */
+  slug?: string;
   /** Hash of the pipeline spec this run started with. */
   specHash: string;
   status: RunStatus;
@@ -159,6 +165,8 @@ export type RunEvent =
       type: "start";
       runId: string;
       task: string;
+      /** The run's slug, already validated by the host; absent: made from the task text. */
+      slug?: string;
       specHash: string;
       /** Where the host runs this run's commands, when not in the repository root. Opaque to the core. */
       workdir?: string;
@@ -346,7 +354,7 @@ class Machine {
     return handler;
   }
 
-  private render = (text: string) => renderTemplate(text, { task: this.s.task });
+  private render = (text: string) => renderTemplate(text, renderContextOf(this.s));
 
   private log(event: string, data: Record<string, unknown> = {}) {
     this.s.seq += 1;
@@ -491,7 +499,7 @@ class Machine {
       this.finish(visit, visit.declared ?? "passed", undefined);
       return;
     }
-    const params = renderDeep(check.params, { task: this.s.task });
+    const params = renderDeep(check.params, renderContextOf(this.s));
     const kind = this.registry.check(check.kind)?.baseline?.(params);
     const baseline =
       kind === "run"
@@ -821,6 +829,7 @@ class Machine {
     this.log("run_started", {
       run: event.runId,
       task: event.task,
+      slug: event.slug ?? runSlug(undefined, event.task),
       spec: event.specHash,
       ...(event.workdir === undefined ? {} : { workdir: event.workdir }),
       ...(event.branch === undefined ? {} : { branch: event.branch }),
@@ -1036,6 +1045,7 @@ export function decide(
   if (event.type === "start") {
     draft.runId = event.runId;
     draft.task = event.task;
+    draft.slug = event.slug ?? runSlug(undefined, event.task);
     draft.specHash = event.specHash;
     if (event.workdir !== undefined) draft.workdir = event.workdir;
     if (event.pipelineFile !== undefined) draft.pipelineFile = event.pipelineFile;
