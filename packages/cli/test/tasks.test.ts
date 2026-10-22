@@ -141,7 +141,7 @@ describe("the commands", () => {
     const kids = await cli("task", "list", "--parent", parent);
     expect(kids.out).toContain("Child");
     expect(kids.out).not.toContain("Parent");
-    expect((await cli("task", "list")).out).toContain("[0/1 subtasks done]");
+    expect((await cli("task", "list")).out).toContain("0/1");
     expect((await cli("task", "set", parent, "--status", "done")).out).toContain(
       "1 subtask(s) are still open",
     );
@@ -273,6 +273,65 @@ describe("the commands", () => {
     expect(listed.code).toBe(0);
     expect(listed.out).toContain("Fine");
     expect(listed.err).toContain("problem:");
+  });
+});
+
+describe("the header of the list", () => {
+  test("task list starts with a header and aligns the columns", async () => {
+    await config(ENABLED);
+    const a = await add("Short", "--priority", "high");
+    const b = await add("A much longer title", "--priority", "low");
+    await cli("task", "set", b, "--comment", "the latest note");
+    const lines = (await cli("task", "list")).out.split("\n").filter((l) => !l.startsWith("    "));
+    const header = lines[0] ?? "";
+    expect(header).toMatch(/^KEY\s+STATUS\s+PRIORITY\s+TITLE\s+SUBTASKS\s+PARENT$/);
+    const rows = lines.filter((l) => l.startsWith("KDL-"));
+    expect(rows.length).toBe(2);
+    for (const col of ["STATUS", "PRIORITY", "TITLE", "SUBTASKS", "PARENT"]) {
+      const at = header.indexOf(col);
+      for (const row of rows) expect(row[at - 1], `${col} in ${row}`).toBe(" ");
+    }
+    const row = rows.find((r) => r.startsWith(a)) ?? "";
+    expect(row.indexOf("high")).toBe(header.indexOf("PRIORITY"));
+    expect(row.indexOf("Short")).toBe(header.indexOf("TITLE"));
+  });
+
+  test("the latest comment stays under its row, and subtasks and parent are columns", async () => {
+    await config(ENABLED);
+    const parent = await add("Parent");
+    const child = await add("Child", "--parent", parent);
+    await cli("task", "set", child, "--comment", "note here");
+    const out = (await cli("task", "list")).out.split("\n");
+    const at = out.findIndex((l) => l.startsWith(child));
+    expect(out[at]).toMatch(new RegExp(`Child\\s+-\\s+${parent}$`));
+    expect(out[at + 1]).toBe('    "note here"');
+    expect(out.find((l) => l.startsWith(parent))).toMatch(/\s0\/1\s/);
+  });
+
+  test("--no-headers drops the header and nothing else; --json is the same either way", async () => {
+    await config(ENABLED);
+    await add("Only");
+    const withHeader = (await cli("task", "list")).out.split("\n");
+    const without = (await cli("task", "list", "--no-headers")).out.split("\n");
+    expect(withHeader[0]).toStartWith("KEY");
+    expect(without[0]).toStartWith("KDL-");
+    expect(without.length).toBe(withHeader.length - 1);
+    expect((await cli("task", "list", "--json", "--no-headers")).out).toBe(
+      (await cli("task", "list", "--json")).out,
+    );
+  });
+
+  test("an empty list prints no header", async () => {
+    await config(ENABLED);
+    expect((await cli("task", "list")).out).toBe("no tasks\n");
+  });
+
+  test("control characters in a title cannot break the table", async () => {
+    await config(ENABLED);
+    await add("bad\u001b[2Jtitle");
+    const out = (await cli("task", "list")).out;
+    expect(out).not.toContain("\u001b");
+    expect(out.split("\n").filter(Boolean).length).toBe(2);
   });
 });
 

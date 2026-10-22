@@ -24,12 +24,13 @@ import { Command, CommanderError } from "commander";
 import pkg from "../package.json" with { type: "json" };
 import { formatChange, formatReport } from "./format";
 import { serveStdio } from "./mcp-server";
+import { formatTable } from "./table";
 import {
   formatFailure,
   formatProblems,
   formatSchema,
   formatTask,
-  formatTaskLine,
+  formatTaskTable,
 } from "./task-format";
 
 export interface CliEnv {
@@ -216,7 +217,8 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .command("status [run]")
     .description("List the runs, or show one")
     .option("--json", "print the run list as JSON")
-    .action(async (runId: string | undefined, opts: { json?: boolean }) => {
+    .option("--no-headers", "do not print the header row of the run list")
+    .action(async (runId: string | undefined, opts: { json?: boolean; headers?: boolean }) => {
       const h = host();
       if (!runId) {
         const runs = await h.runSummaries();
@@ -232,18 +234,28 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           return;
         }
         if (runs.length === 0) env.out("no runs yet\n");
+        const rows: string[][] = [];
         for (const { meta, state } of runs) {
           // Only a run that works somewhere other than the root says where.
-          const where = state?.workdir === undefined ? "" : `  in ${plain(state.workdir)}`;
+          const where = state?.workdir === undefined ? "-" : plain(state.workdir);
           const open =
             state?.status === "running" || state?.status === "paused"
               ? await h.open(meta.runId).catch(() => undefined)
               : undefined;
           const pending = open && (await open.pendingChange().catch(() => undefined));
           const note = pending ? "  [pipeline change waiting]" : "";
-          env.out(
-            `${plain(meta.runId)}  ${plain(meta.pipeline)}  ${describeRun(state)}${note}${where}  ${plain(meta.task)}\n`,
-          );
+          rows.push([
+            plain(meta.runId),
+            plain(meta.pipeline),
+            `${describeRun(state)}${note}`,
+            where,
+            plain(meta.task),
+          ]);
+        }
+        const header = ["RUN", "PIPELINE", "STATUS", "WORKDIR", "TASK"];
+        if (rows.length > 0) {
+          for (const line of formatTable(header, rows, opts.headers !== false))
+            env.out(`${line}\n`);
         }
         return;
       }
@@ -652,6 +664,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .option("--limit <n>", "how many (default 50, at most 200)", (v) => Number.parseInt(v, 10))
     .option("--cursor <text>", "the `next` of a previous page")
     .option("--json", "print the answer as JSON")
+    .option("--no-headers", "do not print the header row")
     .action(async (opts: Record<string, unknown>) => {
       const service = await tasksService();
       const filter: Partial<TaskFilter> = {};
@@ -674,7 +687,10 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       }
       const tasks = answer.tasks as TaskSummary[];
       if (tasks.length === 0) env.out("no tasks\n");
-      for (const t of tasks) env.out(`${formatTaskLine(t, plain)}\n`);
+      if (tasks.length > 0) {
+        for (const line of formatTaskTable(tasks, plain, opts.headers !== false))
+          env.out(`${line}\n`);
+      }
       if (typeof answer.next === "string") {
         // A cursor belongs to the filter it came from, so the hint repeats the filter.
         const again = [

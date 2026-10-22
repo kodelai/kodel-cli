@@ -12,23 +12,39 @@ import type {
   TaskSummary,
   ToolFailure,
 } from "@kodel-ai/pipeline-core";
+import { formatTable } from "./table";
 
 type Plain = (text: string) => string;
 
 const SHOWN_COMMENTS = 5;
 
-export function formatTaskLine(t: TaskSummary, plain: Plain): string {
-  const parts = [
+export const TASK_HEADER = ["KEY", "STATUS", "PRIORITY", "TITLE", "SUBTASKS", "PARENT"];
+
+/** One row of cells per task; the latest comment is not a cell, it goes under the row (`formatTaskTable`). */
+function taskCells(t: TaskSummary, plain: Plain): string[] {
+  return [
     plain(t.key),
     `${plain(t.status)}${t.state === t.status ? "" : ` (${t.state})`}`,
     t.priority === undefined ? "-" : plain(t.priority),
     plain(t.title),
+    t.subtasks ? `${t.subtasks.done}/${t.subtasks.total}` : "-",
+    t.parent === undefined ? "-" : plain(t.parent),
   ];
-  let line = parts.join("  ");
-  if (t.parent !== undefined) line += `  ↳ ${plain(t.parent)}`;
-  if (t.subtasks) line += `  [${t.subtasks.done}/${t.subtasks.total} subtasks done]`;
-  if (t.comment !== undefined) line += `\n    "${plain(t.comment)}"`;
-  return line;
+}
+
+export function formatTaskTable(tasks: TaskSummary[], plain: Plain, withHeader: boolean): string[] {
+  const lines = formatTable(
+    TASK_HEADER,
+    tasks.map((t) => taskCells(t, plain)),
+    withHeader,
+  );
+  const offset = withHeader ? 1 : 0;
+  const out: string[] = withHeader ? [lines[0] ?? ""] : [];
+  tasks.forEach((t, i) => {
+    out.push(lines[i + offset] ?? "");
+    if (t.comment !== undefined) out.push(`    "${plain(t.comment)}"`);
+  });
+  return out;
 }
 
 export function formatProblems(problems: TaskProblem[], plain: Plain): string {

@@ -288,6 +288,12 @@ describe("status", () => {
     const list = await cli("status");
     expect(list.out).toContain(id);
     expect(list.out).toContain("demo");
+    const [header, row] = list.out.split("\n");
+    expect(header).toMatch(/^RUN\s+PIPELINE\s+STATUS\s+WORKDIR\s+TASK$/);
+    expect(row?.indexOf("demo")).toBe(header?.indexOf("PIPELINE"));
+    const bare = await cli("status", "--no-headers");
+    expect(bare.out.split("\n").length).toBe(list.out.split("\n").length - 1);
+    expect(bare.out).toStartWith(id);
     const one = await cli("status", id);
     expect(one.out).toContain("waiting:   approve (gate)");
     expect(one.out).toContain("integrity: ok");
@@ -825,7 +831,7 @@ describe("a run in its own worktree", () => {
 
   test("tNN_status_and_report_show_where_the_run_works", async () => {
     const { id, workdir, branch } = await runInWorktree();
-    expect((await cli("status")).out).toContain(`in ${workdir}`);
+    expect((await cli("status")).out).toContain(workdir);
     const one = (await cli("status", id)).out;
     expect(one).toContain(`workdir:   ${workdir}`);
     expect(one).toContain(`branch:    ${branch}`);
