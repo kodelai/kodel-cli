@@ -414,6 +414,85 @@ describe("doctor", () => {
   });
 });
 
+describe("t6_priority_and_type_belong_to_trackers_that_have_them", () => {
+  test("without priorities or types a call that names one is refused before the adapter", async () => {
+    const { svc, calls } = setup({ capabilities: { priority: false, types: false } });
+    const { task } = ok(await svc.create({ title: "t" }));
+    expect(task.priority).toBeUndefined();
+    calls.length = 0;
+    const asks = [
+      await svc.create({ title: "t", priority: "High" }),
+      await svc.create({ title: "t", type: "Bug" }),
+      await svc.update({ key: task.key, priority: "High" }),
+      await svc.update({ key: task.key, type: "Bug" }),
+      await svc.update({ key: task.key, clear: ["priority"] }),
+      await svc.update({ key: task.key, clear: ["type"] }),
+      await svc.list({ priority: "High" }),
+      await svc.schema({ type: "Bug" }),
+    ];
+    for (const answer of asks) expect(fail(answer).code).toBe("TASK_UNSUPPORTED");
+    expect(calls.filter((c) => c !== "resolveKey")).toEqual([]);
+  });
+
+  test("the schema of such a tracker has no priorities", async () => {
+    const { svc } = setup({ capabilities: { priority: false } });
+    expect(ok(await svc.schema()).priorities).toBeUndefined();
+  });
+});
+
+describe("what an adapter reports as wrong is bounded and redacted", () => {
+  test("problems are redacted, cut, and counted past fifty", async () => {
+    class Loud extends MemoryTaskAdapter {
+      override async list(filter: TaskFilter, o: CallOptions) {
+        const answer = await super.list(filter, o);
+        answer.problems = Array.from({ length: 80 }, (_, i) => ({
+          key: `MEM-${i}`,
+          message: `file ${i} holds ${SECRET} ${"x".repeat(1000)}`,
+        }));
+        return answer;
+      }
+      override async verify(): Promise<TaskProblem[]> {
+        return [{ message: `bad ${SECRET}` }];
+      }
+    }
+    const svc = new TaskService(new Loud());
+    const listed = ok(await svc.list());
+    expect(listed.problems.length).toBe(51);
+    expect(listed.problems.at(-1)?.message).toBe("and 30 more problems");
+    expect(JSON.stringify(listed.problems)).not.toContain(SECRET);
+    expect(listed.problems[0]?.message.length).toBeLessThanOrEqual(300);
+    expect(JSON.stringify(ok(await svc.verify()).problems)).not.toContain(SECRET);
+  });
+
+  test("the issues of an adapter's refusal are redacted too", async () => {
+    const { svc } = setup({
+      before: (method) => {
+        if (method === "get") {
+          throw new KodelError("INVALID_TASK", "bad", [{ message: `echoed ${SECRET}` }]);
+        }
+      },
+    });
+    expect(JSON.stringify(await svc.get({ key: "MEM-1" }))).not.toContain(SECRET);
+  });
+});
+
+describe("field names are names", () => {
+  test("a name that is a secret, or could reach a prototype, is refused", async () => {
+    const { svc, calls } = setup();
+    for (const fields of [
+      { [SECRET]: "x" },
+      JSON.parse('{"__proto__": "x"}'),
+      { constructor: "x" },
+      { prototype: "x" },
+    ]) {
+      const answer = fail(await svc.create({ title: "t", fields }));
+      expect(answer.code).toBe("INVALID_TASK");
+      expect(answer.message).not.toContain(SECRET);
+    }
+    expect(calls.filter((c) => c === "create")).toEqual([]);
+  });
+});
+
 describe("the conformance suite can fail", () => {
   const caseNamed = (cases: ReturnType<typeof taskAdapterContract>, part: string) => {
     const found = cases.find((c) => c.name.includes(part));

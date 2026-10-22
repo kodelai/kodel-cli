@@ -84,6 +84,21 @@ export function plain(text: string): string {
   return out;
 }
 
+/**
+ * JSON for a terminal. `JSON.stringify` escapes the C0 controls but not the delete and C1 controls,
+ * the characters that reorder text, or the line and paragraph separators: they are escaped here,
+ * so `--json` of a task cannot move the cursor or reorder what a person reads.
+ */
+export function safeJson(value: unknown): string {
+  let out = "";
+  for (const char of JSON.stringify(value, null, 2)) {
+    const code = char.codePointAt(0) ?? 0;
+    const unsafe = code >= 0x7f && UNSAFE_CODES.some(([from, to]) => code >= from && code <= to);
+    out += unsafe ? `\\u${code.toString(16).padStart(4, "0")}` : char;
+  }
+  return out;
+}
+
 function describeRun(state: RunState | undefined): string {
   if (!state) return "unreadable";
   const status = plain(String(state.status));
@@ -185,8 +200,9 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       try {
         tasks = (await openTaskService({ storeRoot: storeRoot() }))?.service;
       } catch (error) {
-        if (!(error instanceof KodelError)) throw error;
-        env.err(`kodel: the task tools are not served: ${plain(error.message)}\n`);
+        // Any failure (an unreadable config included) leaves the pipeline tools running.
+        const why = error instanceof Error ? error.message : String(error);
+        env.err(`kodel: the task tools are not served: ${plain(why)}\n`);
       }
       await serveStdio(host(), pkg.version, tasks);
     });
@@ -651,14 +667,26 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       if (typeof opts.cursor === "string") filter.cursor = opts.cursor;
       const answer = answered(await service.list(filter));
       if (opts.json) {
-        env.out(`${JSON.stringify(answer, null, 2)}\n`);
+        env.out(`${safeJson(answer)}\n`);
         return;
       }
       const tasks = answer.tasks as TaskSummary[];
       if (tasks.length === 0) env.out("no tasks\n");
       for (const t of tasks) env.out(`${formatTaskLine(t, plain)}\n`);
       if (typeof answer.next === "string") {
-        env.out(`more: kodel task list --cursor ${answer.next}\n`);
+        // A cursor belongs to the filter it came from, so the hint repeats the filter.
+        const again = [
+          ...(Array.isArray(opts.state) ? ["--state", opts.state.join(",")] : []),
+          ...(typeof opts.status === "string" ? ["--status", opts.status] : []),
+          ...(typeof opts.priority === "string" ? ["--priority", opts.priority] : []),
+          ...(typeof opts.parent === "string" ? ["--parent", opts.parent] : []),
+          ...(opts.topLevel === true ? ["--top-level"] : []),
+          ...(typeof opts.run === "string" ? ["--run", opts.run] : []),
+          ...(typeof opts.limit === "number" ? ["--limit", String(opts.limit)] : []),
+          "--cursor",
+          answer.next,
+        ].map((a) => (/^[\w.,=-]+$/.test(a) ? a : `'${a.replaceAll("'", "'\\''")}'`));
+        env.out(`more: kodel task list ${again.join(" ")}\n`);
       }
       if (answer.truncated === true) env.out("the list may be incomplete\n");
       env.err(formatProblems(answer.problems as { message: string }[], plain));
@@ -672,7 +700,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const service = await tasksService();
       const answer = answered(await service.get({ key }));
       if (opts.json) {
-        env.out(`${JSON.stringify(answer, null, 2)}\n`);
+        env.out(`${safeJson(answer)}\n`);
         return;
       }
       env.out(formatTask(answer.task as Task, answer.subtasks as SubtaskRef[], plain));
@@ -730,7 +758,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const answer = answered(await service.schema(query));
       env.out(
         opts.json
-          ? `${JSON.stringify(answer, null, 2)}\n`
+          ? `${safeJson(answer)}\n`
           : formatSchema(answer as unknown as Parameters<typeof formatSchema>[0], plain),
       );
     });

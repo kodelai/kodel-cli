@@ -52,9 +52,11 @@ compatibility review whose findings are reflected in decisions 2, 5, 6 and 14-22
    upgrade kodel or remove the key". Inside `tasks` the core keys are strict and inactive adapter blocks are
    skipped.
 6. **Tool surface is dynamic by capability.** A parameter the adapter cannot honour (`parent`, `run` / `add_run`,
-   `comment`, `fields`; the run filter needs `runs: "full"`) is not in the tool's schema. `priority` and `type`
-   are always there: whether a tracker has them is learned through `task_schema`, not known without the
-   network, so an adapter without them refuses with `TASK_UNSUPPORTED`. Argument parsing of `task_*` is
+   `comment`, `fields`, `priority`, `type`; the run filter needs `runs: "full"`) is not in the tool's schema.
+   Whether a tracker has priorities or task types is a structural fact an adapter declares
+   (`capabilities.priority`, `capabilities.types`), so it is known without the network; the values themselves
+   are learned through `task_schema`. A call that names such a parameter anyway is refused by the service
+   (`TASK_UNSUPPORTED`) before the adapter is asked. Argument parsing of `task_*` is
    **strict**: an extra parameter is `INVALID_ARGUMENTS` listing what the tool accepts (a bare Zod shape strips
    unknown keys silently, which would lose a `parent` unnoticed). Verified with the SDK in use (1.32): it
    accepts a strict `z.object(...)` as `inputSchema`, refuses an unknown key before the handler runs, and
@@ -148,7 +150,8 @@ updated_at: 2026-10-23T10:02:41Z
 
 What `local` tells the agent in `task_schema`: statuses `todo` (state `todo`), `progress` (`progress`), `done`
 (`done`), `declined` (`done`); priorities `high`, `normal` (default), `low`; no types, no fields; capabilities
-`{ subtasks: true, runs: "full", comment: "append", fields: false }`; any status can move to any other.
+`{ subtasks: true, runs: "full", comment: "append", fields: false, priority: true, types: false }`; any status can
+move to any other.
 
 ## Tools (only when `tasks.enabled`)
 
@@ -249,6 +252,8 @@ export interface TaskAdapterCapabilities {
   runs: "none" | "attach" | "full";           // attach: add_run works, filtering by run does not
   comment: "none" | "append";                 // other values may come; unknown reads as "none"
   fields: boolean;
+  priority: boolean;                          // the tracker has priorities (task_schema lists them)
+  types: boolean;                             // the tracker has task types
 }
 export interface CallOptions { signal: AbortSignal }
 
@@ -400,8 +405,14 @@ Names carry the decision number of this plan until the decision log has ids.
   repository, kept by the configured adapter".
 - **Tasks in worktrees (local)**: the store root is the main repository's `.kodel`, so tasks made inside a run
   land there, not in the run's branch. Intended: a task is about the project, not the run.
-- **Growth and concurrency (local)**: `list` reads one file per task (slow for thousands; an index file can be
-  added without changing the record); concurrent updates of one task are last-write-wins.
+- **Growth and concurrency (local)**: `list` reads one file per task (an index file can be added without
+  changing the record); at most 5 000 files are read and created. Updates of one task are serialized by a lock
+  file (`<KEY>.yaml.lock`, taken over when 15 s old), so the agent's server and the CLI cannot lose each
+  other's comments.
+- **A repository that is not one's own (local)**: the folder's files are untrusted. Links (a file or the
+  folder) are not followed, a file over 64 KB is not read, texts are cut when shown, `problems` never quote a
+  file, the chain of parents is walked once (linear), and a task cannot grow past the file limit. These
+  limits are in the adapter, not the core; a tracker adapter has its own (rate limits, page sizes).
 - **Stored data from day one**: `v: 1` is set now, but the format may break before the first release
   (AGENTS.md, rule 4); the golden fixture comes when v1 is frozen.
 

@@ -165,7 +165,8 @@ describe("the commands", () => {
   test("t18_--limit and --cursor page through the list", async () => {
     for (const title of ["a", "b", "c"]) await add(title);
     const first = await cli("task", "list", "--limit", "2");
-    expect(first.out).toContain("more: kodel task list --cursor ");
+    // The hint repeats the filter the cursor belongs to.
+    expect(first.out).toContain("more: kodel task list --limit 2 --cursor ");
     const cursor = /--cursor (\S+)/.exec(first.out)?.[1] as string;
     const second = await cli("task", "list", "--limit", "2", "--cursor", cursor);
     expect(second.out).not.toContain("more:");
@@ -180,6 +181,19 @@ describe("the commands", () => {
     expect(answer.tasks[0]).toMatchObject({ key, title: "Json", status: "todo", state: "todo" });
     const shown = JSON.parse((await cli("task", "show", key, "--json")).out);
     expect(shown.task.key).toBe(key);
+  });
+
+  test("t13_--json does not carry characters that reorder or fake a line either", async () => {
+    const key = await add("evil ‮title next\u007f");
+    for (const args of [
+      ["task", "list", "--json"],
+      ["task", "show", key, "--json"],
+    ]) {
+      const out = (await cli(...args)).out;
+      for (const raw of ["‮", " ", "\u007f"]) expect(out).not.toContain(raw);
+      expect(out).toContain("\\u202e");
+      expect(JSON.parse(out)).toBeDefined();
+    }
   });
 
   test("schema lists the statuses, the priorities and what the adapter can do", async () => {

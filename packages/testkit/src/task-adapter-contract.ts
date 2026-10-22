@@ -121,6 +121,14 @@ export function taskAdapterContract(
         const p = schema.priorities.map((x) => x.name);
         assert(new Set(p).size === p.length, "priority names are not unique");
       }
+      assert(
+        Boolean(schema.priorities?.length) === adapter.capabilities.priority,
+        "capabilities.priority does not match whether the schema lists priorities",
+      );
+      assert(
+        Boolean(schema.types?.length) === adapter.capabilities.types,
+        "capabilities.types does not match whether the schema lists types",
+      );
       const summary = schema.fields.filter((f) => f.summary);
       assert(summary.length <= TASK_LIMITS.summaryFields, "more than five summary fields");
       assert(

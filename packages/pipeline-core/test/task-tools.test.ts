@@ -22,12 +22,16 @@ const FULL: TaskAdapterCapabilities = {
   runs: "full",
   comment: "append",
   fields: true,
+  priority: true,
+  types: true,
 };
 const MINIMAL: TaskAdapterCapabilities = {
   subtasks: false,
   runs: "none",
   comment: "none",
   fields: false,
+  priority: false,
+  types: false,
 };
 
 const TASK: Task = {
@@ -94,12 +98,21 @@ describe("the task tool surface", () => {
 
   test("t6_the_arguments_of_each_tool_are_pinned_for_a_minimal_profile", () => {
     expect(shapes(MINIMAL)).toEqual({
-      task_schema: ["key", "type"],
-      task_create: ["title", "body", "priority", "type"],
-      task_list: ["state", "status", "priority", "limit", "cursor"],
+      task_schema: ["key"],
+      task_create: ["title", "body"],
+      task_list: ["state", "status", "limit", "cursor"],
       task_get: ["key"],
-      task_update: ["key", "status", "priority", "type", "title", "body", "clear"],
+      task_update: ["key", "status", "title", "body", "clear"],
     });
+  });
+
+  test("priority and type are offered only by a tracker that has them", () => {
+    const priorityOnly = shapes({ ...MINIMAL, priority: true });
+    expect(priorityOnly.task_create).toEqual(["title", "body", "priority"]);
+    expect(priorityOnly.task_schema).toEqual(["key"]);
+    const typesOnly = shapes({ ...MINIMAL, types: true });
+    expect(typesOnly.task_create).toEqual(["title", "body", "type"]);
+    expect(typesOnly.task_schema).toEqual(["key", "type"]);
   });
 
   test("an adapter that can attach runs but not search them has no run filter", () => {
@@ -156,7 +169,7 @@ describe("a call is checked strictly", () => {
     expect(answer).toMatchObject({ ok: false, code: "INVALID_ARGUMENTS" });
     if (answer.ok) throw new Error("unreachable");
     expect(answer.message).toContain("does not take parent");
-    expect(answer.message).toContain("title, body, priority, type");
+    expect(answer.message).toContain("it takes: title, body");
     expect(calls).toEqual([]);
   });
 
@@ -222,12 +235,7 @@ describe("over MCP", () => {
     ]);
     const create = tools.find((t) => t.name === "task_create");
     expect(create?.inputSchema.additionalProperties).toBe(false);
-    expect(Object.keys(create?.inputSchema.properties ?? {})).toEqual([
-      "title",
-      "body",
-      "priority",
-      "type",
-    ]);
+    expect(Object.keys(create?.inputSchema.properties ?? {})).toEqual(["title", "body"]);
     expect(tools.find((t) => t.name === "task_update")?.annotations?.idempotentHint).toBe(false);
     expect(tools.find((t) => t.name === "task_list")?.annotations?.readOnlyHint).toBe(true);
   });

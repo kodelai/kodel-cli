@@ -234,6 +234,10 @@ export interface TaskAdapterCapabilities {
   /** Other values may come later; a value the core does not know reads as "none". */
   comment: "none" | "append";
   fields: boolean;
+  /** The tracker has priorities (`task_schema` lists them); without them the parameters are not offered. */
+  priority: boolean;
+  /** The tracker has task types. */
+  types: boolean;
 }
 
 export interface CallOptions {
@@ -376,12 +380,16 @@ export function checkFields(value: unknown): Record<string, FieldValue> {
   if (entries.length > TASK_LIMITS.fields) {
     throw invalid(`fields has more than ${TASK_LIMITS.fields} entries`);
   }
-  const out: Record<string, FieldValue> = {};
+  // A plain object made with no prototype and no name that could reach one.
+  const out: Record<string, FieldValue> = Object.create(null) as Record<string, FieldValue>;
   for (const [name, raw] of entries) {
     checkName("a field name", name, TASK_LIMITS.fieldName);
+    if (name === "__proto__" || name === "constructor" || name === "prototype") {
+      throw invalid(`"${name}" is not a field name`);
+    }
     out[name] = fieldValue(name, raw);
   }
-  return out;
+  return { ...out };
 }
 
 function fieldValue(name: string, raw: unknown): FieldValue {
@@ -475,6 +483,13 @@ export function validatePatch(patch: TaskPatch): void {
                 ? patch.parent
                 : undefined;
       if (set !== undefined) throw invalid(`"${name}" is both set and cleared`);
+      if (
+        name.startsWith("fields.") &&
+        patch.fields &&
+        name.slice("fields.".length) in patch.fields
+      ) {
+        throw invalid(`"${name}" is both set and cleared`);
+      }
     }
   }
 }

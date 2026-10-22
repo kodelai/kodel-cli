@@ -55,9 +55,8 @@ export function formatTask(task: Task, subtasks: SubtaskRef[], plain: Plain): st
   if (task.body !== undefined && task.body !== "") {
     lines.push(
       "",
-      ...plain(task.body)
-        .split("\n")
-        .map((l) => `  ${l}`),
+      // `plain` turns a line break into a space, so each line is cleaned on its own.
+      ...task.body.split(/\r?\n/).map((l) => `  ${plain(l)}`),
     );
   }
   const comments = task.comments ?? [];

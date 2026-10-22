@@ -9,7 +9,8 @@
  * Stored data (AGENTS.md): `v: 1` on every record; a file written in a format this engine does not
  * know is reported, not hidden and not rewritten.
  */
-import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { lstat, mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   type CallOptions,
@@ -48,6 +49,24 @@ const SUFFIX_ONLY = new RegExp(`^${SUFFIX_CLASS}$`);
 const FILE = new RegExp(`^([A-Z][A-Z0-9]{1,9}-${SUFFIX_CLASS})\\.yaml$`);
 const ATTEMPTS = 10;
 
+// The files of a repository are not trusted (a repository may be somebody else's): what is read from
+// them is bounded, so a hostile folder cannot freeze the server or flood the agent.
+/** A task file is a few hundred bytes; one bigger than this is not read. */
+export const MAX_FILE_BYTES = 64 * 1024;
+/** The most task files the adapter reads or creates. */
+export const MAX_TASKS = 5_000;
+/** The most `problems` an answer carries (the rest are counted), and the longest quoted value. */
+const MAX_PROBLEMS = 50;
+const QUOTE = 40;
+/** How long an update waits for another writer of the same task, and when a lock is stale. */
+const LOCK_WAIT_MS = 3_000;
+const LOCK_STALE_MS = 15_000;
+
+const clip = (text: string, max: number): string =>
+  text.length > max ? `${text.slice(0, max - 1)}…` : text;
+/** A value taken from a file, as a short quoted string for a message. */
+const quoted = (value: unknown): string => JSON.stringify(clip(String(value), QUOTE));
+
 const STATUS_NAMES = ["todo", "progress", "done", "declined"] as const;
 type StatusName = (typeof STATUS_NAMES)[number];
 const STATUSES: (StatusInfo & { name: StatusName })[] = [
@@ -74,6 +93,8 @@ const CAPABILITIES: TaskAdapterCapabilities = {
   runs: "full",
   comment: "append",
   fields: false,
+  priority: true,
+  types: false,
 };
 
 const optionsSchema = z
@@ -169,6 +190,8 @@ export interface LocalTaskAdapterOptions {
   prefix?: string;
   clock: () => number;
   random: () => number;
+  /** The most tasks it reads or creates; `MAX_TASKS` unless a test says less. */
+  maxTasks?: number;
 }
 
 export class LocalTaskAdapter implements TaskAdapter {
@@ -177,10 +200,12 @@ export class LocalTaskAdapter implements TaskAdapter {
   readonly capabilities = CAPABILITIES;
   private readonly dir: string;
   private readonly prefix: string;
+  private readonly maxTasks: number;
 
   constructor(private readonly options: LocalTaskAdapterOptions) {
     this.dir = join(options.storeRoot, TASKS_DIR);
     this.prefix = options.prefix ?? DEFAULT_PREFIX;
+    this.maxTasks = options.maxTasks ?? MAX_TASKS;
   }
 
   // ── keys ──────────────────────────────────────────────────────────────────
@@ -190,13 +215,37 @@ export class LocalTaskAdapter implements TaskAdapter {
     return join(this.dir, `${key}.yaml`);
   }
 
-  private async names(): Promise<string[]> {
+  /**
+   * The folder must be a real folder: one that is a link (a repository can commit one) would send
+   * every read and write somewhere else. `undefined` when it is not there yet.
+   */
+  private async checkDir(): Promise<boolean> {
+    let info: Awaited<ReturnType<typeof lstat>>;
     try {
-      return (await readdir(this.dir)).filter((n) => FILE.test(n));
+      info = await lstat(this.dir);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-      throw error;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw new KodelError(
+        "TASK_ADAPTER_FAILED",
+        `the tasks folder cannot be read (${(error as NodeJS.ErrnoException).code ?? "error"})`,
+      );
     }
+    if (!info.isDirectory()) {
+      throw new KodelError(
+        "TASK_ADAPTER_FAILED",
+        `the tasks folder (${TASKS_DIR}) is not a plain folder (a link, say); Kodel does not follow it`,
+      );
+    }
+    return true;
+  }
+
+  private async ensureDir(): Promise<void> {
+    if (!(await this.checkDir())) await mkdir(this.dir, { recursive: true });
+  }
+
+  private async names(): Promise<string[]> {
+    if (!(await this.checkDir())) return [];
+    return (await readdir(this.dir)).filter((n) => FILE.test(n)).sort();
   }
 
   // The files are local and quick: the call options (a timeout signal) are accepted and unused.
@@ -238,35 +287,51 @@ export class LocalTaskAdapter implements TaskAdapter {
   private async readFileRecord(
     key: string,
   ): Promise<{ record: Rec } | { problem: string } | undefined> {
-    let text: string;
+    // What is said about a file here never quotes its content: a problem is reported to the agent
+    // and the terminal, and a hostile file must not be able to put its own words there.
+    const path = this.file(key);
+    let info: Awaited<ReturnType<typeof lstat>>;
     try {
-      text = await readFile(this.file(key), "utf8");
+      info = await lstat(path);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-      return { problem: `cannot be read: ${(error as Error).message}` };
+      return { problem: `cannot be read (${(error as NodeJS.ErrnoException).code ?? "error"})` };
+    }
+    // `lstat`, not `stat`: a link (a repository can commit one) is not followed to a file outside it.
+    if (!info.isFile()) return { problem: "is not a plain file (a link, say); it is ignored" };
+    if (info.size > MAX_FILE_BYTES) {
+      return { problem: `is larger than ${MAX_FILE_BYTES / 1024} KB; it is ignored` };
+    }
+    let text: string;
+    try {
+      text = await readFile(path, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      return { problem: `cannot be read (${(error as NodeJS.ErrnoException).code ?? "error"})` };
     }
     let raw: unknown;
     try {
       raw = parse(text);
     } catch (error) {
-      return { problem: `is not valid YAML: ${(error as Error).message.split("\n")[0]}` };
+      const code = (error as { code?: unknown }).code;
+      return { problem: `is not valid YAML (${typeof code === "string" ? code : "syntax error"})` };
     }
-    if (typeof raw !== "object" || raw === null) return { problem: "is not a task record" };
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      return { problem: "is not a task record" };
+    }
     const v = (raw as { v?: unknown }).v;
     if (typeof v === "number" && v > LOCAL_TASK_FORMAT) {
-      return { problem: `was written in task format ${v}; upgrade kodel` };
+      return { problem: `was written in task format ${clip(String(v), 12)}; upgrade kodel` };
     }
     const parsed = recordSchema.safeParse(raw);
     if (!parsed.success) {
       const first = parsed.error.issues[0];
-      return {
-        problem: `is not a valid task: ${first?.path.join(".") || "record"}: ${first?.message}`,
-      };
+      return { problem: `is not a valid task (${first?.path.join(".") || "record"})` };
     }
     const record = parsed.data;
     const suffix = key.slice(key.lastIndexOf("-") + 1);
-    if (record.key !== key) return { problem: `holds the key ${record.key}, not ${key}` };
-    if (record.id !== suffix) return { problem: `holds the id ${record.id}, not ${suffix}` };
+    if (record.key !== key) return { problem: "holds another key than its name says" };
+    if (record.id !== suffix) return { problem: "holds another id than its name says" };
     return { record };
   }
 
@@ -274,33 +339,47 @@ export class LocalTaskAdapter implements TaskAdapter {
   private async load(): Promise<Loaded> {
     const records = new Map<string, Rec>();
     const problems: TaskProblem[] = [];
-    for (const name of await this.names()) {
+    const names = await this.names();
+    if (names.length > this.maxTasks) {
+      problems.push({
+        message: `there are more than ${this.maxTasks} task files; only the first ${this.maxTasks} are read`,
+      });
+    }
+    for (const name of names.slice(0, this.maxTasks)) {
       const key = name.replace(/\.yaml$/, "");
       const read = await this.readFileRecord(key);
       if (!read) continue;
       if ("problem" in read) problems.push({ key, message: `${name} ${read.problem}` });
       else records.set(key, read.record);
     }
+
+    // Every chain of parents is walked once, so a long chain costs what it is long: a hostile
+    // folder of thousands of files that name each other must not be able to freeze the server.
     const parentOf = new Map<string, string | undefined>();
     const cyclic = new Set<string>();
+    const walked = new Set<string>();
     for (const start of records.keys()) {
+      if (walked.has(start)) continue;
       const path: string[] = [];
-      for (let at: string | undefined = start; at !== undefined; at = records.get(at)?.parent) {
-        const seen = path.indexOf(at);
-        if (seen >= 0) {
-          for (const member of path.slice(seen)) cyclic.add(member);
+      const onPath = new Set<string>();
+      let at: string | undefined = start;
+      while (at !== undefined && records.has(at) && !walked.has(at)) {
+        if (onPath.has(at)) {
+          for (const member of path.slice(path.indexOf(at))) cyclic.add(member);
           break;
         }
-        if (!records.has(at)) break;
+        onPath.add(at);
         path.push(at);
+        at = records.get(at)?.parent;
       }
+      for (const key of path) walked.add(key);
     }
     for (const [key, record] of records) {
       let parent = record.parent;
       if (parent !== undefined && !records.has(parent)) {
         problems.push({
           key,
-          message: `${key} names the parent ${parent}, which is not here (is its branch merged?); it is shown as a top-level task`,
+          message: `${key} names the parent ${quoted(parent)}, which is not here (is its branch merged?); it is shown as a top-level task`,
         });
         parent = undefined;
       } else if (cyclic.has(key)) {
@@ -316,7 +395,14 @@ export class LocalTaskAdapter implements TaskAdapter {
     for (const [key, record] of records) {
       const parent = parentOf.get(key);
       if (parent === undefined) continue;
-      children.set(parent, [...(children.get(parent) ?? []), record]);
+      const kids = children.get(parent);
+      if (kids) kids.push(record);
+      else children.set(parent, [record]);
+    }
+    if (problems.length > MAX_PROBLEMS) {
+      const more = problems.length - MAX_PROBLEMS;
+      problems.length = MAX_PROBLEMS;
+      problems.push({ message: `and ${more} more problems` });
     }
     return { records, problems, parentOf, children };
   }
@@ -327,22 +413,27 @@ export class LocalTaskAdapter implements TaskAdapter {
     (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
 
   private toTask(record: Rec, parent: string | undefined): Task {
-    const comments: Comment[] = (record.comments ?? []).map((c) =>
-      c.by === undefined ? { text: c.text, at: c.at } : { text: c.text, at: c.at, by: c.by },
-    );
+    // Writes are bounded by the core's limits; what is read is bounded again, because a file a
+    // person did not write through the tools may say anything.
+    const comments: Comment[] = (record.comments ?? []).map((c) => {
+      const text = clip(c.text, TASK_LIMITS.comment);
+      return c.by === undefined
+        ? { text, at: clip(c.at, 40) }
+        : { text, at: clip(c.at, 40), by: clip(c.by, 80) };
+    });
     const last = comments[comments.length - 1];
     const task: Task = {
       id: record.id,
       key: record.key,
-      title: record.title,
+      title: clip(record.title, TASK_LIMITS.title),
       status: record.status,
       state: stateOf(record.status),
       priority: record.priority,
-      runs: [...(record.runs ?? [])],
-      created_at: record.created_at,
-      updated_at: record.updated_at,
+      runs: (record.runs ?? []).slice(0, TASK_LIMITS.runs).map((r) => clip(r, 40)),
+      created_at: clip(record.created_at, 40),
+      updated_at: clip(record.updated_at, 40),
     };
-    if (record.body !== undefined) task.body = record.body;
+    if (record.body !== undefined) task.body = clip(record.body, TASK_LIMITS.body);
     if (last) {
       task.comment = last.text;
       task.comments = comments;
@@ -356,14 +447,14 @@ export class LocalTaskAdapter implements TaskAdapter {
     const s: TaskSummary = {
       id: record.id,
       key: record.key,
-      title: record.title,
+      title: clip(record.title, TASK_LIMITS.title),
       status: record.status,
       state: stateOf(record.status),
       priority: record.priority,
       run_count: (record.runs ?? []).length,
     };
     const last = comments[comments.length - 1];
-    if (last) s.comment = last.text;
+    if (last) s.comment = clip(last.text, TASK_LIMITS.comment);
     const parent = loaded.parentOf.get(record.key);
     if (parent !== undefined) s.parent = parent;
     const kids = loaded.children.get(record.key) ?? [];
@@ -418,18 +509,24 @@ export class LocalTaskAdapter implements TaskAdapter {
     if (input.fields !== undefined) throw this.unsupported("fields");
     const priority =
       input.priority === undefined ? DEFAULT_PRIORITY : this.checkPriority(input.priority);
+    let parentKey: string | undefined;
     if (input.parent !== undefined) {
-      const parent = await this.resolveKey(input.parent);
-      const read = parent === undefined ? undefined : await this.readFileRecord(parent);
+      parentKey = await this.resolveKey(input.parent);
+      const read = parentKey === undefined ? undefined : await this.readFileRecord(parentKey);
       if (!read || "problem" in read) {
         throw new KodelError("TASK_NOT_FOUND", `there is no parent task "${input.parent}"`);
       }
     }
     const at = this.now();
-    await mkdir(this.dir, { recursive: true });
-    const taken = new Set(
-      (await this.names()).map((n) => n.slice(-"XXXX.yaml".length, -".yaml".length)),
-    );
+    await this.ensureDir();
+    const existing = await this.names();
+    // A steered or runaway agent must not be able to fill the repository with tasks.
+    if (existing.length >= this.maxTasks) {
+      throw invalid(
+        `the backlog already has ${this.maxTasks} tasks, the most the local adapter keeps; finish or decline some first`,
+      );
+    }
+    const taken = new Set(existing.map((n) => n.slice(-"XXXX.yaml".length, -".yaml".length)));
     for (let attempt = 0; attempt < ATTEMPTS; attempt += 1) {
       const suffix = this.newSuffix(taken);
       const key = `${this.prefix}-${suffix}`;
@@ -445,8 +542,7 @@ export class LocalTaskAdapter implements TaskAdapter {
       };
       if (input.body !== undefined) record.body = input.body;
       if (input.comment !== undefined) record.comments = [{ at, text: input.comment }];
-      if (input.parent !== undefined)
-        record.parent = (await this.resolveKey(input.parent)) as string;
+      if (parentKey !== undefined) record.parent = parentKey;
       if (input.run !== undefined) record.runs = [input.run];
       try {
         // `wx`: a key somebody took meanwhile is never overwritten.
@@ -549,6 +645,42 @@ export class LocalTaskAdapter implements TaskAdapter {
     return out;
   }
 
+  /**
+   * One writer of a task at a time: an update reads the file, changes it and writes it back, so two
+   * at once (the agent's server and `kodel task set`, say) would lose one of the changes, and a
+   * comment is never to be lost. The lock is a file made with `wx` next to the task; a lock a crashed
+   * process left is taken over once it is old.
+   */
+  private async withLock<T>(key: string, work: () => Promise<T>): Promise<T> {
+    const lock = `${this.file(key)}.lock`;
+    const deadline = Date.now() + LOCK_WAIT_MS;
+    for (;;) {
+      try {
+        await writeFile(lock, String(process.pid), { flag: "wx" });
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const held = await lstat(lock).catch(() => undefined);
+        if (!held || Date.now() - held.mtimeMs > LOCK_STALE_MS) {
+          await unlink(lock).catch(() => undefined);
+          continue;
+        }
+        if (Date.now() > deadline) {
+          throw new KodelError(
+            "TASK_ADAPTER_FAILED",
+            `${key} is being changed by another process; try again in a moment`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    }
+    try {
+      return await work();
+    } finally {
+      await unlink(lock).catch(() => undefined);
+    }
+  }
+
   async update(
     input: string,
     patch: TaskPatch,
@@ -556,6 +688,21 @@ export class LocalTaskAdapter implements TaskAdapter {
   ): Promise<{ task: Task; open_subtasks?: number } | undefined> {
     const key = await this.resolveKey(input);
     if (key === undefined) return undefined;
+    // No lock (and no file) for a task that is not there.
+    if (
+      !(await lstat(this.file(key)).then(
+        () => true,
+        () => false,
+      ))
+    )
+      return undefined;
+    return this.withLock(key, () => this.applyUpdate(key, patch));
+  }
+
+  private async applyUpdate(
+    key: string,
+    patch: TaskPatch,
+  ): Promise<{ task: Task; open_subtasks?: number } | undefined> {
     const read = await this.readFileRecord(key);
     if (!read) return undefined;
     if ("problem" in read) {
@@ -605,9 +752,16 @@ export class LocalTaskAdapter implements TaskAdapter {
 
     // Through a temp file: a reader never sees half of a task. The name does not match FILE, so a
     // listing ignores it.
-    const temp = `${this.file(key)}.${Math.floor(this.options.random() * 1e9)}.tmp`;
+    const text = serialize(record);
+    // A task that outgrew what is read back would silently turn into a problem: refuse the change.
+    if (Buffer.byteLength(text) > MAX_FILE_BYTES) {
+      throw invalid(
+        `${key} has reached the size limit of ${MAX_FILE_BYTES / 1024} KB (too many comments?); nothing more can be added to it`,
+      );
+    }
+    const temp = `${this.file(key)}.${randomUUID()}.tmp`;
     try {
-      await writeFile(temp, serialize(record));
+      await writeFile(temp, text, { flag: "wx" });
       await rename(temp, this.file(key));
     } catch (error) {
       await unlink(temp).catch(() => undefined);
@@ -628,16 +782,16 @@ export class LocalTaskAdapter implements TaskAdapter {
   }
 
   async verify(_o?: CallOptions): Promise<TaskProblem[]> {
-    const problems: TaskProblem[] = [];
     try {
-      await mkdir(this.dir, { recursive: true });
+      await this.ensureDir();
     } catch (error) {
-      return [
-        { message: `the tasks folder ${this.dir} cannot be created: ${(error as Error).message}` },
-      ];
+      const why =
+        error instanceof KodelError
+          ? error.message
+          : `the tasks folder cannot be created (${(error as NodeJS.ErrnoException).code ?? "error"})`;
+      return [{ message: why }];
     }
-    problems.push(...(await this.load()).problems);
-    return problems;
+    return (await this.load()).problems;
   }
 }
 

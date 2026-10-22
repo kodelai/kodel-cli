@@ -202,8 +202,11 @@ describe("what is wrong with a file is reported and hides nothing", () => {
     ]);
     const messages = listed.problems.map((p) => p.message).join("\n");
     expect(messages).toContain("not valid YAML");
-    expect(messages).toContain("holds the key KDL-5555");
-    expect(messages).toContain("holds the id 7777");
+    expect(messages).toContain("KDL-4444.yaml holds another key");
+    expect(messages).toContain("KDL-6666.yaml holds another id");
+    // What the file says is never quoted back.
+    expect(messages).not.toContain("KDL-5555");
+    expect(messages).not.toContain("7777");
   });
 
   test("t19_a_task_written_in_a_newer_format_is_reported_and_never_rewritten", async () => {
@@ -471,6 +474,8 @@ describe("the list", () => {
       runs: "full",
       comment: "append",
       fields: false,
+      priority: true,
+      types: false,
     });
   });
 

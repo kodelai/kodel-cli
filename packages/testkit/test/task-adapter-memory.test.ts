@@ -9,6 +9,7 @@ const PROFILES: [string, MemoryTaskOptions][] = [
       workflow: { Backlog: ["In Progress"], "In Progress": ["Backlog", "Done"], Done: ["Backlog"] },
     },
   ],
+  ["a tracker without priorities", { capabilities: { priority: false } }],
   [
     "no subtasks, no fields, runs only attachable, no comments",
     { capabilities: { subtasks: false, fields: false, runs: "attach", comment: "none" } },

@@ -92,6 +92,8 @@ export class MemoryTaskAdapter implements TaskAdapter {
       runs: "full",
       comment: "append",
       fields: true,
+      priority: true,
+      types: false,
       ...options.capabilities,
     };
   }
@@ -124,9 +126,9 @@ export class MemoryTaskAdapter implements TaskAdapter {
     await this.enter("schema", o);
     const schema: TaskSchema = {
       statuses: STATUSES,
-      priorities: PRIORITIES,
       fields: this.capabilities.fields ? FIELDS : [],
     };
+    if (this.capabilities.priority) schema.priorities = PRIORITIES;
     if (query.key !== undefined) {
       const row = this.find(query.key);
       if (!row) throw new KodelError("TASK_NOT_FOUND", `there is no task "${query.key}"`);
@@ -161,6 +163,9 @@ export class MemoryTaskAdapter implements TaskAdapter {
   }
 
   private checkPriority(name: string): void {
+    if (!this.capabilities.priority) {
+      throw new KodelError("TASK_UNSUPPORTED", "this tracker has no priorities");
+    }
     if (!PRIORITIES.some((p) => p.name === name)) {
       throw invalid(
         `there is no priority "${name}"; the priorities are: ${PRIORITIES.map((p) => p.name).join(", ")}`,
@@ -271,7 +276,7 @@ export class MemoryTaskAdapter implements TaskAdapter {
     };
     if (input.body !== undefined) row.body = input.body;
     if (input.priority !== undefined) row.priority = input.priority;
-    else row.priority = DEFAULT_PRIORITY;
+    else if (this.capabilities.priority) row.priority = DEFAULT_PRIORITY;
     if (input.parent !== undefined) row.parent = this.parentOf(input.parent).key;
     this.rows.set(row.key, row);
     return this.toTask(row);

@@ -10,16 +10,17 @@ import { redactDeep, redactText } from "./redact";
 import { failure, type ToolResult } from "./service";
 import {
   type CallOptions,
-  checkFields,
   checkKeyInput,
   checkName,
   checkResolvedKey,
+  type FieldValue,
   type NewTask,
   OPEN_STATES,
   TASK_LIMITS,
   type TaskAdapter,
   type TaskFilter,
   type TaskPatch,
+  type TaskProblem,
   type TaskSchema,
   type TaskState,
   validateFilter,
@@ -40,6 +41,39 @@ export const DEFAULT_TASK_TIMEOUT_MS = 30_000;
 export const DEFAULT_SCHEMA_TTL_MS = 5 * 60_000;
 
 const ok = (data: Record<string, unknown>): ToolResult => ({ ok: true, ...data });
+
+/**
+ * What an adapter reports as wrong (`problems`) may carry text from files or a tracker: it is cut,
+ * counted and redacted before it goes on to the agent or the terminal.
+ */
+const MAX_PROBLEMS = 50;
+function cleanProblems(problems: TaskProblem[]): TaskProblem[] {
+  const out = problems.slice(0, MAX_PROBLEMS).map((p) => {
+    const message = redactText(p.message);
+    const clean: TaskProblem = {
+      message: message.length > 300 ? `${message.slice(0, 299)}…` : message,
+    };
+    if (p.key !== undefined) clean.key = redactText(p.key).slice(0, TASK_LIMITS.key);
+    return clean;
+  });
+  if (problems.length > MAX_PROBLEMS) {
+    out.push({ message: `and ${problems.length - MAX_PROBLEMS} more problems` });
+  }
+  return out;
+}
+
+/** Field names are names, not values: one that redaction would change is a secret in the wrong place. */
+function redactFields(fields: Record<string, FieldValue>): Record<string, FieldValue> {
+  for (const name of Object.keys(fields)) {
+    if (redactText(name) !== name) {
+      throw new KodelError(
+        "INVALID_TASK",
+        "a field name looks like a secret; put values in values",
+      );
+    }
+  }
+  return redactDeep(fields);
+}
 
 const short = (text: string | undefined): string | undefined =>
   text !== undefined && text.length > TASK_LIMITS.description
@@ -125,7 +159,7 @@ export class TaskService {
         return failure(
           error.code,
           redactText(error.message),
-          error.issues,
+          error.issues === undefined ? undefined : redactDeep(error.issues),
           error.details === undefined ? undefined : redactDeep(error.details),
         );
       }
@@ -163,8 +197,12 @@ export class TaskService {
     comment?: string;
     fields?: Record<string, unknown>;
     clear?: string[];
+    priority?: string;
+    type?: string;
   }): void {
     const caps = this.adapter.capabilities;
+    if (input.priority !== undefined && !caps.priority) throw this.unsupported("priorities");
+    if (input.type !== undefined && !caps.types) throw this.unsupported("task types");
     if (input.parent !== undefined && !caps.subtasks) throw this.unsupported("subtasks (parent)");
     if ((input.run !== undefined || input.add_run !== undefined) && caps.runs === "none") {
       throw this.unsupported("attaching runs");
@@ -175,6 +213,8 @@ export class TaskService {
     if (input.fields !== undefined && !caps.fields) throw this.unsupported("fields");
     for (const name of input.clear ?? []) {
       if (name === "parent" && !caps.subtasks) throw this.unsupported("subtasks (parent)");
+      if (name === "priority" && !caps.priority) throw this.unsupported("priorities");
+      if (name === "type" && !caps.types) throw this.unsupported("task types");
       if (name.startsWith("fields.") && !caps.fields) throw this.unsupported("fields");
     }
   }
@@ -184,6 +224,9 @@ export class TaskService {
   schema(input: { key?: string; type?: string } = {}): Promise<ToolResult> {
     return this.guarded(async () => {
       const type = input.type === undefined ? undefined : checkName("type", input.type);
+      if (type !== undefined && !this.adapter.capabilities.types) {
+        throw this.unsupported("task types");
+      }
       const key = input.key === undefined ? undefined : await this.resolve("key", input.key);
       const schema = limitSchema(await this.loadSchema(key, type));
       return ok({
@@ -219,7 +262,7 @@ export class TaskService {
       const next: NewTask = { ...input, title: redactText(input.title) };
       if (input.body !== undefined) next.body = redactText(input.body);
       if (input.comment !== undefined) next.comment = redactText(input.comment);
-      if (input.fields !== undefined) next.fields = redactDeep(input.fields);
+      if (input.fields !== undefined) next.fields = redactFields(input.fields);
       if (input.parent !== undefined) next.parent = await this.resolve("parent", input.parent);
       try {
         const task = await this.call((o) => this.adapter.create(next, o));
@@ -245,6 +288,7 @@ export class TaskService {
       if (input.cursor !== undefined) filter.cursor = input.cursor;
       validateFilter(filter);
       const caps = this.adapter.capabilities;
+      if (filter.priority !== undefined && !caps.priority) throw this.unsupported("priorities");
       if (filter.run !== undefined && caps.runs !== "full") {
         throw this.unsupported("filtering by run");
       }
@@ -258,7 +302,7 @@ export class TaskService {
       const out: Record<string, unknown> = {
         tasks: over ? answer.tasks.slice(0, filter.limit) : answer.tasks,
         truncated: answer.truncated || over,
-        problems: answer.problems,
+        problems: cleanProblems(answer.problems),
       };
       if (answer.next !== undefined && !over) out.next = answer.next;
       return ok(out);
@@ -294,7 +338,7 @@ export class TaskService {
       if (patch.title !== undefined) next.title = redactText(patch.title);
       if (patch.body !== undefined) next.body = redactText(patch.body);
       if (patch.comment !== undefined) next.comment = redactText(patch.comment);
-      if (patch.fields !== undefined) next.fields = redactDeep(checkFields(patch.fields));
+      if (patch.fields !== undefined) next.fields = redactFields(patch.fields);
       const key = await this.resolve("key", typed);
       if (patch.parent !== undefined) next.parent = await this.resolve("parent", patch.parent);
       try {
@@ -318,7 +362,7 @@ export class TaskService {
       const problems = this.adapter.verify
         ? await this.call((o) => (this.adapter.verify as NonNullable<TaskAdapter["verify"]>)(o))
         : [];
-      return ok({ adapter: this.adapter.kind, problems });
+      return ok({ adapter: this.adapter.kind, problems: cleanProblems(problems) });
     });
   }
 }
