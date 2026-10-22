@@ -6,6 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { Command } from "commander";
 import { runCli, withPlural } from "../src/cli";
+import { formatSchema } from "../src/task-format";
 
 let dir: string;
 beforeEach(async () => {
@@ -197,6 +198,43 @@ describe("the commands", () => {
     }
   });
 
+  test("schema capabilities: all six when on, none when off", () => {
+    const base = { adapter: "x", statuses: [], fields: [] };
+    const plain = (t: string) => t;
+    const all = formatSchema(
+      {
+        ...base,
+        capabilities: {
+          subtasks: true,
+          runs: "attach",
+          comment: "append",
+          fields: true,
+          priority: true,
+          types: true,
+        },
+      },
+      plain,
+    );
+    expect(all).toContain(
+      "capabilities:\n  subtasks\n  runs (attach)\n  comments (append)\n  fields\n  priority\n  types\n",
+    );
+    const none = formatSchema(
+      {
+        ...base,
+        capabilities: {
+          subtasks: false,
+          runs: "none",
+          comment: "none",
+          fields: false,
+          priority: false,
+          types: false,
+        },
+      },
+      plain,
+    );
+    expect(none).toContain("capabilities: none\n");
+  });
+
   test("schema lists the statuses, the priorities and what the adapter can do", async () => {
     const schema = (await cli("task", "schema")).out;
     for (const part of [
@@ -205,11 +243,11 @@ describe("the commands", () => {
       "declined (done)",
       "high",
       "normal",
-      "subtasks yes",
-      "runs full",
+      "capabilities:\n  subtasks\n  runs (full)\n  comments (append)\n  priority\n",
     ]) {
       expect(schema, part).toContain(part);
     }
+    expect(schema).not.toMatch(/^ {2}(fields|types)$/m);
     const key = await add("For moves");
     expect((await cli("task", "schema", key)).out).toContain("moves from this status:");
     expect(JSON.parse((await cli("task", "schema", "--json")).out).statuses.length).toBe(4);

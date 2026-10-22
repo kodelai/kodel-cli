@@ -86,9 +86,19 @@ interface SchemaAnswer {
 
 export function formatSchema(answer: SchemaAnswer, plain: Plain): string {
   const caps = answer.capabilities;
+  const enabled = [
+    caps.subtasks && "subtasks",
+    caps.runs !== "none" && `runs (${plain(caps.runs)})`,
+    caps.comment !== "none" && `comments (${plain(caps.comment)})`,
+    caps.fields && "fields",
+    caps.priority && "priority",
+    caps.types && "types",
+  ].filter((c): c is string => typeof c === "string");
   const lines = [
     `adapter: ${plain(answer.adapter)}`,
-    `capabilities: subtasks ${caps.subtasks ? "yes" : "no"}, runs ${caps.runs}, comments ${caps.comment}, fields ${caps.fields ? "yes" : "no"}`,
+    ...(enabled.length > 0
+      ? ["capabilities:", ...enabled.map((c) => `  ${c}`)]
+      : ["capabilities: none"]),
     "",
     "statuses:",
   ];
