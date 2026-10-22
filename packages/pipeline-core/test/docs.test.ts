@@ -61,6 +61,17 @@ describe("pipeline_docs", () => {
     expect(blocks).toBeGreaterThanOrEqual(3);
   });
 
+  test("tNN_pipeline_design_hands_over_through_the_tool", () => {
+    const design = topics.find((t) => t.topic === "pipeline-design")?.text ?? "";
+    expect(design).toContain("pipeline_propose_change");
+    expect(design).toContain("pipeline_proposal.apply");
+    expect(design).toContain("Changing a pipeline that exists");
+    expect(design).toContain("pipeline_resolve");
+    // the person no longer copies the file by hand
+    expect(design).not.toContain("let them save it");
+    expect(design).not.toContain("you cannot put it in place yourself");
+  });
+
   test("tNN_every_topic_linked_from_a_topic_exists_and_every_topic_is_linked", () => {
     const names = new Set(topics.map((t) => t.topic));
     const linked = new Set(

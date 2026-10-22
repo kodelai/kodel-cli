@@ -53,5 +53,19 @@ commands, its `paths`, its prompts. Remove a step only for a reason you can stat
 
 ## 5. Hand it over
 
-Write the pipeline as YAML named `.kodel/pipelines/<name>.yaml`. Show it to the person with your
-assumptions and let them save it; you cannot put it in place yourself.
+Call `pipeline_propose_change` without `run_id`: `pipeline` is the whole YAML, `summary` is what you
+assumed and why (the commands you found, the profile, the steps you left out). The engine checks it
+and keeps it apart; nothing runs and no file is written. Tell the person the command in
+`pipeline_proposal.apply`; they read the whole pipeline, with every shell command it runs listed
+apart, and accept it themselves. Do not run that command and do not write into `.kodel/pipelines`.
+If they want something different, propose again with the same name: the new proposal replaces the old
+one. The answer says `kind: new`.
+
+## 6. Changing a pipeline that exists
+
+Read it with `pipeline_resolve` (the pipeline's name, no `run_id`): `yaml` is the file as it is. Change
+only what the person asked for, keep the `name`, and send the whole YAML with
+`pipeline_propose_change` (no `run_id`). The answer says `kind: change` and what differs per step.
+In `summary` say what you changed and why. If the file changes before the person accepts, they are
+told to ask you to propose again: read it again and redo the change on the new text.
+A pipeline of a run that is going is changed with `run_id` instead, after asking the person.

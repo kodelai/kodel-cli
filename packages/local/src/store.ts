@@ -13,12 +13,23 @@
  * forget it.
  */
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readdir, readFile, rename, rm, stat } from "node:fs/promises";
+import {
+  link,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
   isRunId,
   type JournalRecord,
   KodelError,
+  proposalNameProblem,
   RECORD_VERSION,
   type RedactRule,
   type ResultReport,
@@ -54,6 +65,18 @@ export interface StoreOptions {
   /** Test hooks. */
   pid?: number;
   isAlive?: (pid: number) => boolean;
+}
+
+/** A pipeline the agent proposed outside a run; kept until a person accepts it or drops it. */
+export interface PipelineProposalRecord {
+  v: 1;
+  name: string;
+  kind: "new" | "change";
+  yaml: string;
+  summary: string;
+  /** For a change: the hash of the pipeline file as it was when this was proposed. */
+  base_hash?: string;
+  proposed_at: number;
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -254,6 +277,120 @@ export class FileStore {
     } catch (error) {
       if (isMissing(error)) return false;
       throw error;
+    }
+  }
+
+  // proposals of a pipeline outside a run: one record per pipeline name
+
+  private pipelineProposalPath(name: string): string {
+    const problem = proposalNameProblem(name);
+    if (problem !== undefined) throw new KodelError("INVALID_ARGUMENTS", problem);
+    return join(this.options.root, "proposals", `${name}.json`);
+  }
+
+  async writePipelineProposal(record: PipelineProposalRecord): Promise<void> {
+    const path = this.pipelineProposalPath(record.name);
+    await mkdir(dirname(path), { recursive: true });
+    // The text is the agent's and is kept as it is (the caller refused anything redaction would change).
+    await this.writeAtomic(
+      path,
+      `${JSON.stringify({ ...record, summary: this.redact(record.summary) })}\n`,
+    );
+  }
+
+  async readPipelineProposal(name: string): Promise<PipelineProposalRecord | undefined> {
+    let record: PipelineProposalRecord | undefined;
+    try {
+      record = await this.readJson<PipelineProposalRecord>(this.pipelineProposalPath(name));
+    } catch (error) {
+      // A file that is not JSON is not a record this kodel wrote; it can still be dropped.
+      if (error instanceof SyntaxError) return undefined;
+      throw error;
+    }
+    if (record?.v !== 1 || record.name !== name) return undefined;
+    // Anything else in the folder is not a record this kodel wrote, whatever put it there.
+    const whole =
+      typeof record.yaml === "string" &&
+      typeof record.summary === "string" &&
+      typeof record.proposed_at === "number" &&
+      (record.kind === "new" || (record.kind === "change" && typeof record.base_hash === "string"));
+    return whole ? record : undefined;
+  }
+
+  /** Whether a record is there, readable or not: a damaged one can still be dropped. */
+  async hasPipelineProposal(name: string): Promise<boolean> {
+    try {
+      await stat(this.pipelineProposalPath(name));
+      return true;
+    } catch (error) {
+      if (isMissing(error)) return false;
+      throw error;
+    }
+  }
+
+  async removePipelineProposal(name: string): Promise<boolean> {
+    try {
+      await rm(this.pipelineProposalPath(name));
+      return true;
+    } catch (error) {
+      if (isMissing(error)) return false;
+      throw error;
+    }
+  }
+
+  async listPipelineProposals(): Promise<PipelineProposalRecord[]> {
+    let files: string[];
+    try {
+      files = await readdir(join(this.options.root, "proposals"));
+    } catch (error) {
+      if (isMissing(error)) return [];
+      throw error;
+    }
+    const found: PipelineProposalRecord[] = [];
+    for (const file of files.filter((f) => f.endsWith(".json")).sort()) {
+      const record = await this.readPipelineProposal(file.slice(0, -".json".length)).catch(
+        () => undefined,
+      );
+      if (record) found.push(record);
+    }
+    return found;
+  }
+
+  /**
+   * Create a file that must not exist yet, all or nothing: false if something is already there. The
+   * content is written aside and linked into place, so a file that appears meanwhile is never replaced.
+   */
+  async createFile(path: string, content: string): Promise<boolean> {
+    this.writes += 1;
+    const tmp = `${path}.tmp-${this.pid}-${this.writes}`;
+    await rm(tmp, { force: true });
+    const handle = await open(tmp, "wx");
+    try {
+      await handle.writeFile(content);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    try {
+      await link(tmp, path);
+      return true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EEXIST") return false;
+      // Where hard links are not allowed (some mounts, FAT, Windows without the right) the file is
+      // still created exclusively, only not all at once.
+      if (code === "EPERM" || code === "ENOTSUP" || code === "EXDEV" || code === "ENOSYS") {
+        try {
+          await writeFile(path, content, { flag: "wx" });
+          return true;
+        } catch (again) {
+          if ((again as NodeJS.ErrnoException).code === "EEXIST") return false;
+          throw again;
+        }
+      }
+      throw error;
+    } finally {
+      await rm(tmp, { force: true });
     }
   }
 

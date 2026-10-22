@@ -9,7 +9,7 @@ import { LocalPipelineHost } from "@kodel-ai/local";
 import { type Decision, KodelError, type RunState } from "@kodel-ai/pipeline-core";
 import { Command, CommanderError } from "commander";
 import pkg from "../package.json" with { type: "json" };
-import { formatChange, formatReport } from "./format";
+import { formatChange, formatProposal, formatReport } from "./format";
 import { serveStdio } from "./mcp-server";
 
 export interface CliEnv {
@@ -41,11 +41,22 @@ const SHOWN_FILES = 10;
 const UNSAFE_CODES: [from: number, to: number][] = [
   [0x00, 0x1f], // control characters
   [0x7f, 0x9f], // delete and the C1 controls
+  [0xad, 0xad], // soft hyphen
+  [0x34f, 0x34f], // combining grapheme joiner
   [0x61c, 0x61c], // Arabic letter mark
-  [0x200e, 0x200f], // left-to-right and right-to-left marks
+  [0x115f, 0x1160], // Hangul fillers
+  [0x180e, 0x180e], // Mongolian vowel separator
+  [0x200b, 0x200f], // zero-width characters and the direction marks
   [0x2028, 0x2029], // line and paragraph separators
   [0x202a, 0x202e], // embeddings and overrides
-  [0x2066, 0x2069], // isolates
+  [0x2060, 0x2069], // word joiner, invisible operators, isolates
+  [0x2800, 0x2800], // blank braille
+  [0x3164, 0x3164], // Hangul filler
+  [0xfe00, 0xfe0f], // variation selectors
+  [0xfeff, 0xfeff], // byte order mark, zero-width no-break space
+  [0xffa0, 0xffa0], // halfwidth Hangul filler
+  [0xe0000, 0xe007f], // tag characters
+  [0xe0100, 0xe01ef], // more variation selectors
 ];
 
 export function plain(text: string): string {
@@ -330,9 +341,8 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       env.out(`${runId}: accepted\n`);
     });
 
-  const changes = program
-    .command("pipeline")
-    .description("The pipeline of a run")
+  const pipeline = program.command("pipeline").description("Pipelines: a run's, and proposed ones");
+  const changes = pipeline
     .command("changes")
     .description(
       "Changes of the pipeline of a run: look at the one that waits, accept it, drop it, list the versions, put one back",
@@ -482,6 +492,85 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           throw new UserError(`${error.code}: ${plain(error.message)}`);
         throw error;
       }
+    });
+
+  const proposals = pipeline
+    .command("proposals")
+    .description(
+      "Pipelines the agent proposed outside a run, new or changed: look at them, accept one, drop one",
+    );
+
+  /** A proposal as a person sees it; a record that is there but cannot be read says how to drop it. */
+  async function missingOr(h: LocalPipelineHost, name: string) {
+    const view = await h.pipelineProposal(name);
+    if (view) return view;
+    if (await h.hasPipelineProposal(name)) {
+      throw new UserError(
+        `the record of "${plain(name)}" is damaged or was written by another kodel; drop it: kodel pipeline proposals discard ${plain(name)}`,
+      );
+    }
+    throw new UserError(`no proposal of a pipeline named "${plain(name)}" waits`);
+  }
+
+  proposals
+    .command("show [name]", { isDefault: true })
+    .description("The proposals that wait, or one in full")
+    .action(async (name: string | undefined) => {
+      const h = host();
+      if (name === undefined) {
+        const waiting = await h.pipelineProposals();
+        if (waiting.length === 0) env.out("no pipeline proposal waits\n");
+        for (const r of waiting) {
+          env.out(`${plain(r.name)}  ${r.kind}  ${plain(r.summary).slice(0, 100)}\n`);
+        }
+        return;
+      }
+      const view = await missingOr(h, name);
+      env.out(`${formatProposal(view, plain)}\n\n`);
+      if (view.refused !== undefined) {
+        env.out(`It cannot be accepted: ${plain(view.refused)}\n`);
+        return;
+      }
+      env.out(`To accept it: kodel pipeline proposals apply ${plain(name)}\n`);
+      env.out(`To drop it:   kodel pipeline proposals discard ${plain(name)}\n`);
+    });
+
+  proposals
+    .command("apply <name>")
+    .description("Accept a proposal: the pipeline file is written")
+    .action(async (name: string) => {
+      requireHuman();
+      const h = host();
+      const view = await missingOr(h, name);
+      if (view.refused !== undefined) {
+        throw new UserError(`this proposal cannot be accepted: ${plain(view.refused)}`);
+      }
+      await mustConfirm(
+        `${formatProposal(view, plain)}\n\nWrite it to ${plain(view.path)}? Its commands will run on this machine.`,
+      );
+      // What is accepted is what was shown: if the text moved while the person read, nothing is taken.
+      const done = await h.acceptPipelineProposal(name, view.hash);
+      if (!done.ok) throw new UserError(plain(done.message));
+      env.out(`${plain(done.path)} is written.\n`);
+      env.out(
+        "It is not committed: commit it when you are happy with it. A run that was started before and works in the repository will notice the change and wait for you.\n",
+      );
+    });
+
+  proposals
+    .command("discard <name>")
+    .description("Drop a proposal")
+    .action(async (name: string) => {
+      requireHuman();
+      const h = host();
+      // Whether it can be read does not matter here: a damaged record is dropped the same way.
+      if (!(await h.hasPipelineProposal(name))) {
+        env.out(`no proposal of a pipeline named "${plain(name)}" waits\n`);
+        return;
+      }
+      await mustConfirm(`Drop the proposal of the pipeline "${plain(name)}"?`);
+      await h.discardPipelineProposal(name);
+      env.out(`the proposal of ${plain(name)} is dropped\n`);
     });
 
   program

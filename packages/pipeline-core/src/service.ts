@@ -47,6 +47,23 @@ export type ProposeOutcome =
       change?: PipelineChange;
     };
 
+/** What a person is told about a pipeline the agent proposed outside a run. */
+export interface PipelineProposalInfo {
+  name: string;
+  /** `new`: no such pipeline. `change`: the pipeline of that name exists and this differs from it. */
+  kind: "new" | "change";
+  /** For a change: what differs, per step. */
+  changes?: NodeDiff[];
+  /** The command a person runs to accept it. */
+  apply: string;
+  warnings?: string[];
+}
+
+export type PipelineProposalOutcome =
+  | { ok: false; code: ErrorCode; message: string }
+  | { ok: true; status: "proposed"; proposal: PipelineProposalInfo }
+  | { ok: true; status: "withdrawn" | "none"; name: string };
+
 /** One run, as the service sees it. */
 export interface RunHandle {
   readonly runId: string;
@@ -124,6 +141,19 @@ export interface StartOutcome {
 export interface PipelineHost {
   list(): Promise<{ pipelines: PipelineInfo[]; problems: PipelineProblem[] }>;
   resolve(name: string): Promise<PipelineSpec | undefined>;
+  /** The pipeline as its file has it: the text a change starts from, and the hash of that text. */
+  resolveSource?(
+    name: string,
+  ): Promise<{ spec: PipelineSpec; yaml: string; hash: string } | undefined>;
+  /**
+   * The agent proposes a pipeline outside a run: a new one, or another version of one that exists.
+   * Nothing is put in place; a person accepts it. A host that does not take these leaves it out.
+   */
+  proposePipeline?(input: {
+    yaml: string;
+    summary: string;
+    name?: string;
+  }): Promise<PipelineProposalOutcome>;
   /**
    * Start or find the run for a task; throws `KodelError`. `cwd` is the directory the agent says it
    * is working in: a hint the host may check and use, never a place it has to run anything.
@@ -247,7 +277,8 @@ export class PipelineService {
 
   /**
    * The definition of a pipeline. With a run, the one that run is on: its text as kept, which is what a
-   * proposal to change it starts from (the file in the project may be another version).
+   * proposal to change it starts from (the file in the project may be another version). Without one, the
+   * file's text and its hash, which is what a change outside a run starts from.
    */
   resolve(input: { pipeline: string; run_id?: string }): Promise<ToolResult> {
     return guarded(async () => {
@@ -255,12 +286,20 @@ export class PipelineService {
         const pinned = await (await this.run(input.run_id)).pinnedPipeline();
         return { ok: true, spec: pinned.spec, yaml: pinned.yaml, version: pinned.hash };
       }
+      const source = await this.host.resolveSource?.(input.pipeline);
+      if (source) return { ok: true, spec: source.spec, yaml: source.yaml, version: source.hash };
       return { ok: true, spec: await this.spec(input.pipeline) };
     });
   }
 
-  proposeChange(input: { run_id: string; pipeline: string; summary: string }): Promise<ToolResult> {
+  proposeChange(input: {
+    run_id?: string;
+    pipeline: string;
+    summary: string;
+    name?: string;
+  }): Promise<ToolResult> {
     return guarded(async () => {
+      if (input.run_id === undefined) return this.proposePipeline(input);
       const run = await this.run(input.run_id);
       const outcome = await run.proposeChange({ yaml: input.pipeline, summary: input.summary });
       if (!outcome.ok) return failure(outcome.code, outcome.message);
@@ -276,6 +315,45 @@ export class PipelineService {
               : "There was no proposal to take back.",
       };
     });
+  }
+
+  private async proposePipeline(input: {
+    pipeline: string;
+    summary: string;
+    name?: string;
+  }): Promise<ToolResult> {
+    if (!this.host.proposePipeline) {
+      return failure(
+        "PIPELINE_CHANGE_REFUSED",
+        "this server takes a proposal only for the pipeline of a run; pass run_id",
+      );
+    }
+    const outcome = await this.host.proposePipeline({
+      yaml: input.pipeline,
+      summary: input.summary,
+      ...(input.name === undefined ? {} : { name: input.name }),
+    });
+    if (!outcome.ok) return failure(outcome.code, outcome.message);
+    if (outcome.status !== "proposed") {
+      return {
+        ok: true,
+        status: outcome.status,
+        name: outcome.name,
+        note:
+          outcome.status === "withdrawn"
+            ? "The proposal was taken back."
+            : "There was no proposal of that name to take back.",
+      };
+    }
+    return {
+      ok: true,
+      status: "proposed",
+      pipeline_proposal: outcome.proposal,
+      note:
+        "Nothing is in place: a person has to accept it. Tell the person what you propose (and, for a change, " +
+        "what differs) and your assumptions, and the command in `pipeline_proposal.apply`; do not run it. " +
+        "To change your proposal, propose again with the same name: it replaces this one.",
+    };
   }
 
   /** A dry run: what would happen, with the task filled in, and nothing started. */

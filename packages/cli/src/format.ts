@@ -1,3 +1,4 @@
+import type { PipelineProposalView } from "@kodel-ai/local";
 import type { NodeDiff, PipelineSpec, RunReport } from "@kodel-ai/pipeline-core";
 
 const SHOWN_CHARS = 600;
@@ -11,7 +12,7 @@ export function formatChange(
   before: PipelineSpec,
   after: PipelineSpec,
   nodes: NodeDiff[],
-  redo: string[],
+  redo: string[] | undefined,
   plain: (text: string) => string,
 ): string {
   const show = (value: unknown) => {
@@ -67,10 +68,51 @@ export function formatChange(
   const lines: string[] = [];
   if (checks.length > 0) lines.push("Checks changed:", ...checks.map((l) => `  ${l}`), "");
   if (other.length > 0) lines.push("Other changes:", ...other.map((l) => `  ${l}`), "");
+  // A change of a pipeline outside a run has no run to redo anything in.
+  if (redo !== undefined) {
+    lines.push(
+      redo.length > 0
+        ? `What happens when you accept:\n${redo.map((l) => `  ${plain(l)}`).join("\n")}`
+        : "What happens when you accept: nothing is redone; the new definition is used from now on.",
+    );
+  }
+  return lines.join("\n").trimEnd();
+}
+
+/**
+ * A pipeline the agent proposed outside a run, as text for the person who accepts it: why, what differs
+ * from the file (for a change), every shell command it would run on this machine, and the whole text.
+ * The commands are the part that can do harm, so they are listed apart from the text they are in.
+ */
+export function formatProposal(
+  view: PipelineProposalView,
+  plain: (text: string) => string,
+): string {
+  const name = plain(view.record.name);
+  const lines = [
+    view.record.kind === "new"
+      ? `The agent proposed a new pipeline, "${name}".`
+      : `The agent proposed another version of the pipeline "${name}".`,
+    `Why: ${plain(view.record.summary)}`,
+    "",
+  ];
+  if (view.spec && view.current && view.changes) {
+    const diff = formatChange(view.current, view.spec, view.changes, undefined, plain);
+    lines.push("What differs, per step:", ...diff.split("\n").map((l) => `  ${l}`), "");
+  }
   lines.push(
-    redo.length > 0
-      ? `What happens when you accept:\n${redo.map((l) => `  ${plain(l)}`).join("\n")}`
-      : "What happens when you accept: nothing is redone; the new definition is used from now on.",
+    view.current
+      ? "Commands this pipeline runs on your machine ([new]: not in the pipeline as it is now):"
+      : "Commands this pipeline runs on your machine:",
+  );
+  if (view.commands.length === 0) lines.push("  (none)");
+  for (const { where, command, isNew } of view.commands) {
+    lines.push(`  ${view.current && isNew ? "[new] " : ""}${plain(where)}: ${plain(command)}`);
+  }
+  lines.push(
+    "",
+    "The whole pipeline:",
+    ...view.record.yaml.split("\n").map((l) => `  | ${plain(l)}`),
   );
   return lines.join("\n");
 }

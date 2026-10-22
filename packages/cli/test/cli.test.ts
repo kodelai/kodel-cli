@@ -865,3 +865,161 @@ describe("a run in its own worktree", () => {
     expect(result.asked.length).toBe(2); // approving needs one more yes
   });
 });
+
+describe("pipeline proposals", () => {
+  const hostOf = () => new LocalPipelineHost({ root: dir, heartbeatMs: 0 });
+  const FRESH = [
+    "name: fresh",
+    "nodes:",
+    "  - slug: write",
+    "    kind: agent",
+    "    prompt: do it",
+    "  - slug: go",
+    "    kind: command",
+    "    command: make all",
+    "edges:",
+    "  - { from: write, to: go }",
+    "  - { from: go, to: write, when: failed }",
+    "",
+  ].join("\n");
+  const propose = (yaml: string) => hostOf().proposePipeline({ yaml, summary: "to try it" });
+  const written = (name: string) => join(dir, ".kodel", "pipelines", `${name}.yaml`);
+
+  test("tNN_show_lists_what_waits_and_prints_the_whole_pipeline_with_its_commands", async () => {
+    expect((await cli("pipeline", "proposals")).out).toContain("no pipeline proposal waits");
+    await propose(FRESH);
+    await propose(DEMO.replace("built", "rebuilt"));
+    const list = await cli("pipeline", "proposals");
+    expect(list.out).toContain("fresh  new  to try it");
+    expect(list.out).toContain("demo  change  to try it");
+
+    const fresh = (await cli("pipeline", "proposals", "show", "fresh")).out;
+    expect(fresh).toContain('The agent proposed a new pipeline, "fresh".');
+    expect(fresh).toContain('step "go": make all');
+    expect(fresh).not.toContain("[new]"); // nothing to compare with
+    expect(fresh).toContain("  | name: fresh");
+    expect(fresh).toContain("kodel pipeline proposals apply fresh");
+
+    const change = (await cli("pipeline", "proposals", "show", "demo")).out;
+    expect(change).toContain('another version of the pipeline "demo"');
+    expect(change).toContain("What differs, per step:");
+    expect(change).toContain('step "build": work');
+    expect(change).toContain('[new] step "build": node -e');
+    expect(change).not.toContain("What happens when you accept"); // there is no run to redo anything in
+  });
+
+  test("tNN_apply_writes_the_file_after_a_yes_and_nothing_after_a_no", async () => {
+    await propose(FRESH);
+    const no = await cliAs({ answer: false }, "pipeline", "proposals", "apply", "fresh");
+    expect(no.code).toBe(1);
+    expect(no.err).toContain("not confirmed");
+    await expect(readFile(written("fresh"), "utf8")).rejects.toThrow();
+
+    const yes = await cli("pipeline", "proposals", "apply", "fresh");
+    expect(yes.code).toBe(0);
+    expect(yes.asked[0]).toContain("make all"); // the question shows the commands
+    expect(await readFile(written("fresh"), "utf8")).toBe(FRESH);
+    expect((await cli("pipeline", "proposals")).out).toContain("no pipeline proposal waits");
+  });
+
+  test("tNN_what_is_accepted_is_what_was_shown", async () => {
+    await propose(FRESH);
+    const result = await runCli(["pipeline", "proposals", "apply", "fresh"], {
+      cwd: dir,
+      out: () => {},
+      err: () => {},
+      interactive: true,
+      environment: {},
+      confirm: async () => {
+        await propose(FRESH.replace("make all", "rm -rf x"));
+        return true;
+      },
+    });
+    expect(result).toBe(1);
+    await expect(readFile(written("fresh"), "utf8")).rejects.toThrow();
+  });
+
+  test("tNN_apply_refuses_a_proposal_that_cannot_be_taken_any_more", async () => {
+    await propose(DEMO.replace("built", "rebuilt"));
+    await writeFile(written("demo"), `# edited\n${DEMO}`);
+    const result = await cli("pipeline", "proposals", "apply", "demo");
+    expect(result.code).toBe(1);
+    expect(result.err).toContain("changed after this was proposed");
+    expect(await readFile(written("demo"), "utf8")).toBe(`# edited\n${DEMO}`);
+  });
+
+  test("tNN_a_record_that_cannot_be_read_says_how_to_drop_it_and_is_dropped", async () => {
+    await mkdir(join(dir, ".kodel", "proposals"), { recursive: true });
+    await writeFile(join(dir, ".kodel", "proposals", "broken.json"), '{"v": 1}');
+    const shown = await cli("pipeline", "proposals", "show", "broken");
+    expect(shown.code).toBe(1);
+    expect(shown.err).toContain("kodel pipeline proposals discard broken");
+    await propose(FRESH);
+    await writeFile(
+      join(dir, ".kodel", "proposals", "fresh.json"),
+      JSON.stringify({
+        v: 1,
+        name: "fresh",
+        kind: "new",
+        yaml: "name: [",
+        summary: "s",
+        proposed_at: 1,
+      }),
+    );
+    const refused = await cli("pipeline", "proposals", "apply", "fresh");
+    expect(refused.code).toBe(1);
+    expect(refused.err).toContain("cannot be accepted");
+    expect((await cli("pipeline", "proposals", "discard", "broken")).code).toBe(0);
+    expect((await cli("pipeline", "proposals", "discard", "fresh")).code).toBe(0);
+    expect(await hostOf().hasPipelineProposal("broken")).toBe(false);
+    expect(await hostOf().hasPipelineProposal("fresh")).toBe(false);
+  });
+
+  test("tNN_discard_drops_the_proposal", async () => {
+    await propose(FRESH);
+    expect((await cli("pipeline", "proposals", "discard", "fresh")).code).toBe(0);
+    expect(await hostOf().pipelineProposals()).toEqual([]);
+  });
+
+  test("tNN_inside_an_engine_command_or_without_a_terminal_it_refuses", async () => {
+    await propose(FRESH);
+    for (const sub of ["apply", "discard"]) {
+      const inEngine = await cliAs(
+        { environment: { KODEL_ENGINE: "1" } },
+        "pipeline",
+        "proposals",
+        sub,
+        "fresh",
+      );
+      expect(inEngine.code, sub).toBe(1);
+      expect(inEngine.err).toContain("command the engine runs");
+      const noTerminal = await cliAs({ interactive: false }, "pipeline", "proposals", sub, "fresh");
+      expect(noTerminal.code, sub).toBe(1);
+      expect(noTerminal.err).toContain("for a person at a terminal");
+    }
+    expect(await hostOf().pipelineProposals()).toHaveLength(1);
+    await expect(readFile(written("fresh"), "utf8")).rejects.toThrow();
+  });
+
+  test("tNN_the_real_program_with_no_terminal_refuses_to_accept_or_drop_a_proposal", async () => {
+    await propose(FRESH);
+    const main = join(import.meta.dir, "../src/main.ts");
+    const { KODEL_ENGINE: _engine, ...outsideEngine } = process.env;
+    for (const sub of ["apply", "discard"]) {
+      const result = await new Promise<{ code: number | null; err: string }>((done) => {
+        const child = spawn("bun", [main, "--root", dir, "pipeline", "proposals", sub, "fresh"], {
+          stdio: ["ignore", "pipe", "pipe"],
+          env: outsideEngine,
+        });
+        let err = "";
+        child.stderr?.on("data", (d: Buffer) => {
+          err += d.toString();
+        });
+        child.on("close", (code) => done({ code, err }));
+      });
+      expect(result.code, sub).toBe(1);
+      expect(result.err, sub).toContain("for a person at a terminal");
+    }
+    expect(await hostOf().pipelineProposals()).toHaveLength(1);
+  });
+});

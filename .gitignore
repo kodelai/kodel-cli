@@ -6,6 +6,8 @@ dist
 /tests/agents/.stats
 # Run history of the pipelines we run on this repository.
 /.kodel/runs
+# Pipelines the agent proposed, waiting for a person.
+/.kodel/proposals
 # Worktrees made for the runs (the default of the worktree setting in the project config).
 /.kodel/worktrees
 # Local Russian working notes (product notes, decision log, contract, architecture, plan); not part of the repository.

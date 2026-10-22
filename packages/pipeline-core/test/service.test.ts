@@ -705,7 +705,7 @@ describe("the tool surface", () => {
       ],
       pipeline_complete_step: ["run_id", "node_slug", "attempt", "summary", "outcome"],
       pipeline_feedback: ["run_id", "node_slug", "attempt", "category", "message", "suggestion"],
-      pipeline_propose_change: ["run_id", "pipeline", "summary"],
+      pipeline_propose_change: ["run_id", "pipeline", "summary", "name"],
     });
   });
 

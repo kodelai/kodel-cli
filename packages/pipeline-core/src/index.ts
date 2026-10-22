@@ -6,6 +6,7 @@ export * from "./canonical";
 export * from "./checks";
 export * from "./docs";
 export * from "./errors";
+export * from "./new-pipeline";
 export * from "./next-step";
 export * from "./pipeline";
 export * from "./pipeline-diff";

@@ -3,22 +3,30 @@
  * `.kodel/runs`. A run keeps a copy of the pipeline it started with, so editing a file never
  * changes a run in flight.
  */
-import { readdir, readFile } from "node:fs/promises";
+import { mkdir, readdir, readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import {
   ChoiceNeeded,
   canonicalPipeline,
+  commandsOf,
   diffNodes,
+  hiddenCharacterProblem,
   isRunId,
   KodelError,
+  MAX_PIPELINE_PROPOSAL_BYTES,
+  MAX_PIPELINE_PROPOSALS,
+  type NodeDiff,
   type PipelineChoice,
   type PipelineHost,
   type PipelineInfo,
   type PipelineProblem,
+  type PipelineProposalOutcome,
   type PipelineSpec,
   parsePipeline,
   parseSnapshot,
+  proposalNameProblem,
   type RunState,
+  redactText,
   type StartOutcome,
 } from "@kodel-ai/pipeline-core";
 import { loadConfig, type WorktreeConfig } from "./config";
@@ -31,7 +39,7 @@ import {
   type LocalRun,
   normalizeTask,
 } from "./host";
-import { FileStore, META_VERSION, type RunMeta } from "./store";
+import { FileStore, META_VERSION, type PipelineProposalRecord, type RunMeta } from "./store";
 
 export interface LocalPipelineHostOptions extends HostOptions {
   /** Where the pipeline files are; defaults to `<root>/.kodel/pipelines`. */
@@ -48,6 +56,8 @@ interface Loaded {
 
 const isPipelineFile = (name: string) => name.endsWith(".yaml") || name.endsWith(".yml");
 const stemOf = (file: string) => file.replace(/\.ya?ml$/, "");
+/** Pipeline names are lowercase, but a file system may not tell `Foo.yaml` from `foo.yaml`. */
+const sameStem = (file: string, name: string) => stemOf(file).toLowerCase() === name;
 
 /** What the agent is given when the person has to say which version of the pipeline the run uses. */
 function askWhich(found: Loaded, file: string, committedText: string): PipelineChoice {
@@ -67,6 +77,24 @@ function askWhich(found: Loaded, file: string, committedText: string): PipelineC
       "or the committed version? Do not choose yourself. Then call pipeline_start again with the same " +
       "arguments and pipeline_version set to what they say.",
   };
+}
+
+/** A proposed pipeline as the person who accepts it needs to see it. */
+export interface PipelineProposalView {
+  record: PipelineProposalRecord;
+  /** Absent when the stored text is not a pipeline this kodel reads; `refused` says so. */
+  spec?: PipelineSpec;
+  /** For a change: the pipeline as it is now. */
+  current?: PipelineSpec;
+  changes?: NodeDiff[];
+  /** Every shell command the pipeline would run; `isNew` marks the ones the current pipeline does not have. */
+  commands: { where: string; command: string; isNew: boolean }[];
+  /** Why it cannot be accepted now, when it cannot. */
+  refused?: string;
+  /** The hash of the proposed text: passed back when accepting, so what is accepted is what was shown. */
+  hash: string;
+  /** Where accepting would write, as an absolute path. */
+  path: string;
 }
 
 export class LocalPipelineHost implements PipelineHost {
@@ -137,6 +165,217 @@ export class LocalPipelineHost implements PipelineHost {
 
   async resolve(name: string): Promise<PipelineSpec | undefined> {
     return (await this.find(name))?.spec;
+  }
+
+  async resolveSource(name: string) {
+    const found = await this.find(name);
+    return found
+      ? { spec: found.spec, yaml: found.source, hash: hashSource(found.source) }
+      : undefined;
+  }
+
+  async proposePipeline(input: {
+    yaml: string;
+    summary: string;
+    name?: string;
+  }): Promise<PipelineProposalOutcome> {
+    const refuse = (code: "INVALID_ARGUMENTS" | "PIPELINE_CHANGE_REFUSED", message: string) =>
+      ({ ok: false, code, message }) as const;
+    if (input.yaml.trim() === "") {
+      if (input.name === undefined) {
+        return refuse("INVALID_ARGUMENTS", "give the name of the proposal to take back");
+      }
+      const problem = proposalNameProblem(input.name);
+      if (problem !== undefined) return refuse("INVALID_ARGUMENTS", problem);
+      const had = await this.store.removePipelineProposal(input.name);
+      return { ok: true, status: had ? "withdrawn" : "none", name: input.name };
+    }
+    if (Buffer.byteLength(input.yaml) > MAX_PIPELINE_PROPOSAL_BYTES) {
+      return refuse("INVALID_ARGUMENTS", "the pipeline is too large");
+    }
+    const hidden = hiddenCharacterProblem(input.yaml);
+    if (hidden !== undefined) return refuse("INVALID_ARGUMENTS", hidden);
+    // A proposal is the agent's text and is kept as it is, so it may not hold what redaction would take out.
+    if (redactText(input.yaml, this.options.rules ?? []) !== input.yaml) {
+      return refuse(
+        "INVALID_ARGUMENTS",
+        "the pipeline contains something that looks like a secret (a key, a token, a password); leave it out",
+      );
+    }
+    let spec: PipelineSpec;
+    try {
+      spec = parsePipeline(input.yaml);
+    } catch (error) {
+      if (error instanceof KodelError) {
+        return { ok: false, code: error.code, message: error.message };
+      }
+      throw error;
+    }
+    const problem = proposalNameProblem(spec.name);
+    if (problem !== undefined) return refuse("INVALID_ARGUMENTS", problem);
+    if (input.name !== undefined && input.name !== spec.name) {
+      return refuse(
+        "INVALID_ARGUMENTS",
+        `name is "${input.name}" but the pipeline is named "${spec.name}"`,
+      );
+    }
+    const { loaded, problems } = await this.load();
+    const existing = loaded.find((l) => l.spec.name === spec.name);
+    const taken =
+      loaded.find((l) => sameStem(l.file, spec.name)) ??
+      problems.find((p) => sameStem(p.file, spec.name));
+    if (!existing && taken) {
+      return refuse(
+        "PIPELINE_CHANGE_REFUSED",
+        `the file ${taken.file} is already there and is not a pipeline named "${spec.name}"; fix or remove it by hand, or name this pipeline differently`,
+      );
+    }
+    if (existing && canonicalPipeline(spec) === canonicalPipeline(existing.spec)) {
+      return refuse(
+        "PIPELINE_CHANGE_REFUSED",
+        `nothing differs from the pipeline "${spec.name}" as it is`,
+      );
+    }
+    const waiting = await this.store.listPipelineProposals();
+    if (waiting.length >= MAX_PIPELINE_PROPOSALS && !waiting.some((r) => r.name === spec.name)) {
+      return refuse(
+        "PIPELINE_CHANGE_REFUSED",
+        `${waiting.length} proposals already wait for a person; they have to accept or drop some first`,
+      );
+    }
+    await this.store.writePipelineProposal({
+      v: 1,
+      name: spec.name,
+      kind: existing ? "change" : "new",
+      yaml: input.yaml,
+      summary: input.summary,
+      ...(existing ? { base_hash: hashSource(existing.source) } : {}),
+      proposed_at: (this.options.clock ?? Date.now)(),
+    });
+    return {
+      ok: true,
+      status: "proposed",
+      proposal: {
+        name: spec.name,
+        kind: existing ? "change" : "new",
+        ...(existing ? { changes: diffNodes(existing.spec, spec) } : {}),
+        apply: `kodel pipeline proposals apply ${spec.name}`,
+      },
+    };
+  }
+
+  /** The proposals that wait, by name. */
+  pipelineProposals(): Promise<PipelineProposalRecord[]> {
+    return this.store.listPipelineProposals();
+  }
+
+  /** One proposal as a person sees it before accepting; none if there is no such proposal. */
+  async pipelineProposal(name: string): Promise<PipelineProposalView | undefined> {
+    const record = await this.store.readPipelineProposal(name);
+    if (!record) return undefined;
+    const { loaded, problems } = await this.load();
+    let path = join(this.dir, `${record.name}.yaml`);
+    // The record is a file that anything could have put there: it is looked at again, not trusted.
+    let spec: PipelineSpec | undefined;
+    let unusable: string | undefined = hiddenCharacterProblem(record.yaml);
+    if (unusable === undefined) {
+      try {
+        spec = parsePipeline(record.yaml);
+      } catch (error) {
+        if (!(error instanceof KodelError)) throw error;
+        unusable = `the stored text is not a pipeline this kodel reads (${error.message}); drop it`;
+      }
+    }
+    if (spec === undefined || spec.name !== record.name) {
+      return {
+        record,
+        commands: [],
+        refused:
+          unusable ?? `the stored text is named "${spec?.name}", not "${record.name}"; drop it`,
+        hash: hashSource(record.yaml),
+        path,
+      };
+    }
+    const existing = loaded.find((l) => l.spec.name === spec.name);
+    let refused: string | undefined;
+    if (record.kind === "change") {
+      if (!existing) {
+        refused = `the pipeline "${record.name}" is no longer there; this was a change of it`;
+      } else if (hashSource(existing.source) !== record.base_hash) {
+        refused = `the pipeline file ${existing.file} changed after this was proposed; ask the agent to propose again`;
+      } else {
+        path = join(this.dir, existing.file);
+      }
+    } else {
+      const taken =
+        existing ??
+        loaded.find((l) => sameStem(l.file, record.name)) ??
+        problems.find((p) => sameStem(p.file, record.name));
+      if (taken) {
+        refused = `a pipeline or a file named "${record.name}" appeared after this was proposed; ask the agent to propose again`;
+      }
+    }
+    const before = record.kind === "change" ? existing?.spec : undefined;
+    const known = new Set(before ? commandsOf(before).map((c) => c.command) : []);
+    return {
+      record,
+      spec,
+      ...(before ? { current: before, changes: diffNodes(before, spec) } : {}),
+      commands: commandsOf(spec).map((c) => ({ ...c, isNew: !known.has(c.command) })),
+      ...(refused === undefined ? {} : { refused }),
+      hash: hashSource(record.yaml),
+      path,
+    };
+  }
+
+  /**
+   * A person accepts a proposal: the pipeline file is written, all or nothing, and the proposal is
+   * dropped. What is written is what `expectedHash` says was shown. Called only by a command that
+   * is for a person; the agent has no tool that reaches it.
+   */
+  async acceptPipelineProposal(
+    name: string,
+    expectedHash: string,
+  ): Promise<{ ok: true; path: string; kind: "new" | "change" } | { ok: false; message: string }> {
+    const view = await this.pipelineProposal(name);
+    if (!view) return { ok: false, message: `no proposal of a pipeline named "${name}" waits` };
+    if (view.hash !== expectedHash) {
+      return {
+        ok: false,
+        message:
+          "the proposal was modified while you were looking at it; nothing was accepted. Look at it again",
+      };
+    }
+    if (view.refused !== undefined) return { ok: false, message: view.refused };
+    await mkdir(this.dir, { recursive: true });
+    if (view.record.kind === "new") {
+      // Linked into place, so a file that appeared since the check is never replaced.
+      if (!(await this.store.createFile(view.path, view.record.yaml))) {
+        return {
+          ok: false,
+          message: `a file named ${name}.yaml appeared just now; nothing was written`,
+        };
+      }
+    } else {
+      // The file is read once more right before it is replaced: it must still be what was proposed against.
+      const now = await readFile(view.path, "utf8").catch(() => undefined);
+      if (now === undefined || hashSource(now) !== view.record.base_hash) {
+        return { ok: false, message: "the pipeline file changed just now; nothing was written" };
+      }
+      await this.store.replaceFile(view.path, view.record.yaml);
+    }
+    await this.store.removePipelineProposal(name);
+    return { ok: true, path: view.path, kind: view.record.kind };
+  }
+
+  /** Whether a proposal is there, readable or not. */
+  hasPipelineProposal(name: string): Promise<boolean> {
+    return this.store.hasPipelineProposal(name);
+  }
+
+  /** A person drops a proposal. */
+  discardPipelineProposal(name: string): Promise<boolean> {
+    return this.store.removePipelineProposal(name);
   }
 
   /** The path of a pipeline file relative to the repository root, `/`-separated; none outside it. */

@@ -26,9 +26,9 @@ export const SERVER_INSTRUCTIONS = [
   "3. pipeline_next_step tells you what is next: `node` (do it), `waiting` (a person has to decide), `running` (the engine is working: pass wait_s to wait, as the hint says), or `done`.",
   "4. At a `waiting` answer, do what `tell_the_person` says: write the person what they are asked to decide, a summary of what was done and changed, what to look at, and the command to decide with. Then end your turn. You cannot approve, reject or resume anything yourself, and you must not try: those commands are for the person and refuse to run for an agent.",
   "5. Do not read or edit the run files in .kodel/runs, and do not edit the pipeline files while a run is going: the only way for you to change the pipeline of a run is pipeline_propose_change, and a person accepts it.",
-  "6. If a step's description or a check looks wrong or unclear, say so with pipeline_feedback; it never blocks the run. If you think the pipeline itself should change for this run, first ask the person: change it now (the run stops at the end of the current step until they accept it), or only note it with pipeline_feedback and decide another way. Propose it only if they say now.",
+  "6. If a step's description or a check looks wrong or unclear, say so with pipeline_feedback; it never blocks the run. If you think the pipeline of a run should change for this run, first ask the person: change it now (the run stops at the end of the current step until they accept it), or only note it with pipeline_feedback and decide another way. Propose it only if they say now.",
   "7. If the answer to pipeline_start names a `workdir`, do all your work for the run in that directory (read and write files there, not in the directory you started in): the engine runs the commands and checks there.",
-  "8. If you are asked to write or change a pipeline, read pipeline_docs first: it is the reference for this engine version.",
+  "8. If you are asked to write or change a pipeline, read pipeline_docs first: it is the reference for this engine version. To add a pipeline, or to change one outside a run (start from the `yaml` of pipeline_resolve), call pipeline_propose_change without run_id: a person accepts it with a command. Never put a file in .kodel/pipelines yourself and never run that command.",
   "9. If an answer tells you that the pipeline of the run was changed and a person has to accept it (a `waiting` answer about the change, or a note about it on a `node` answer), do what `tell_the_person` says. If the change was made by editing the pipeline file and not through pipeline_propose_change, put the file back as it was and propose it instead.",
 ].join("\n");
 
@@ -104,8 +104,10 @@ export const TOOLS: ToolDescriptor[] = [
     title: "Read a pipeline",
     description:
       "Read the full definition of a pipeline: its nodes, checks and edges. With run_id you get the version " +
-      "that run is on, with its YAML text (`yaml`); start from that text when you propose a change with " +
-      "pipeline_propose_change, because the file in the project may be another version.",
+      "that run is on, with its YAML text (`yaml`); start from that text when you propose a change of the run's " +
+      "pipeline with pipeline_propose_change, because the file in the project may be another version. " +
+      "Without run_id you get the file's YAML (`yaml`) and its hash (`version`); start from that when you " +
+      "propose a change of a pipeline outside a run.",
     shape: {
       pipeline: z.string().min(1).max(LIMITS.name),
       run_id: runId.optional(),
@@ -294,17 +296,21 @@ export const TOOLS: ToolDescriptor[] = [
   },
   {
     name: "pipeline_propose_change",
-    title: "Propose a change of the run's pipeline",
+    title: "Propose a pipeline, or a change of one",
     description:
-      "Propose another version of the pipeline this run is on, as the full YAML (start from pipeline_resolve " +
-      "with run_id). Ask the person first whether to change it now or only note it with pipeline_feedback. " +
-      "Nothing changes by itself: the engine checks that the change can be taken, keeps it, and stops the run " +
-      "at the end of the current step until the person accepts it with a command they run. Never edit the " +
-      "pipeline file yourself and never run that command. The answer says what differs and which steps run " +
-      "again; tell the person. A proposal that cannot be taken is refused with the reason. A new proposal " +
-      "replaces the previous one; an empty `pipeline` takes your proposal back.",
+      "Propose a pipeline as the full YAML. With run_id it is another version of the pipeline that run is on " +
+      "(start from pipeline_resolve with run_id): ask the person first whether to change it now or only note it " +
+      "with pipeline_feedback; nothing changes by itself, the engine checks that the change can be taken, keeps " +
+      "it, and stops the run at the end of the current step until the person accepts it with a command they " +
+      "run. Without run_id it is for the project: a new pipeline, or, when the name in the YAML is one that " +
+      "exists, a change of that pipeline (start from pipeline_resolve without run_id and its `yaml`; keep the " +
+      "name). There is nothing to ask first: nothing is put in place until a person accepts it with a command " +
+      "they run, and the answer says which it is and what differs. Never edit a pipeline file yourself and " +
+      "never run that command. The answer says what differs; tell the person. A proposal that cannot be taken " +
+      "is refused with the reason. A new proposal replaces the previous one; an empty `pipeline` takes your " +
+      "proposal back (without run_id, give `name` to say which).",
     shape: {
-      run_id: runId,
+      run_id: runId.optional(),
       pipeline: z
         .string()
         .max(LIMITS.proposal)
@@ -313,6 +319,12 @@ export const TOOLS: ToolDescriptor[] = [
         .string()
         .max(LIMITS.text)
         .describe("What you change and why, in a sentence or two, for the person."),
+      name: z
+        .string()
+        .min(1)
+        .max(LIMITS.name)
+        .optional()
+        .describe("Without run_id: the pipeline's name, to say which proposal to take back."),
     },
     readOnly: false,
     idempotent: true,
