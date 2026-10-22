@@ -19,4 +19,6 @@ export * from "./run";
 export * from "./run-id";
 export * from "./service";
 export * from "./slug";
+export * from "./task-service";
+export * from "./tasks";
 export * from "./version";

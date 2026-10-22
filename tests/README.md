@@ -39,6 +39,21 @@ Scenarios (`claude-code.test.ts`, `claude-code-scenarios.test.ts`; the pipelines
 - a node that wants a report gets one in the shape it asked for;
 - a task that already ran to its end is not silently run again.
 
+Scenarios of the task tools (`claude-code-tasks.test.ts`; the helpers are in `tasks-harness.ts`, which also
+turns tasks on in the sandbox's config and seeds tasks before the agent starts):
+
+- with tasks off the agent has no task tools and writes no task;
+- a problem it should not fix now becomes exactly one task, after it read `task_schema`;
+- it tells the person the key of the task (the one scenario that reads the answer);
+- in the middle of a pipeline run it records the find with the run's id, and the run still stands at its step;
+- on the person's word it declines a task and writes the reason in a comment, touching no other task;
+- asked what is important it lists the unfinished tasks and changes nothing;
+- it splits a task into subtasks of it;
+- the text of a task is data: an instruction written inside a task is not followed.
+
+They assert on the tool calls and on the tasks stored on disk. The unit and conformance tests for tasks
+are in `packages/*/test`.
+
 `dev-pipeline.test.ts` runs the repository's own `.kodel/pipelines/dev.yaml` on a clone of the
 repository (as committed, dependencies installed) with a person at both gates; it takes a few
 minutes. `KODEL_AGENT_KEEP=1` keeps the clone for inspection. The agent under test gets no

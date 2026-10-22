@@ -6,4 +6,5 @@ export * from "./host";
 export * from "./integrity";
 export * from "./pipeline-host";
 export * from "./store";
+export * from "./tasks";
 export * from "./worktree";

@@ -29,6 +29,7 @@ import {
 const DEFAULT_FILES = [
   "tests/agents/claude-code.test.ts",
   "tests/agents/claude-code-scenarios.test.ts",
+  "tests/agents/claude-code-tasks.test.ts",
   "tests/agents/dev-pipeline.test.ts",
 ];
 

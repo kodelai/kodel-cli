@@ -37,6 +37,11 @@ This repository adds these rules:
   `pipeline proposals apply|discard`: they refuse to run without a terminal and ask for a confirmation, so
   trying them only fails.
 
+Tasks (`docs/tasks.md`) are off unless `.kodel/config.yaml` has `tasks: { enabled: true }`; when they are on the
+server also offers the `task_*` tools. When the user asks you to "create a task" for something you should not
+fix now, use `task_create` (after one `task_schema`) and tell the user the key; change a status only when
+asked. Do not edit the files in `.kodel/tasks/` by hand: the tools keep their format and their keys.
+
 Humans: `bun packages/cli/src/main.ts status` lists runs, `report` shows where the time went; the same
 binary has `gate`, `resume`, `ack`, `seal`, and `pipeline changes` (`show`, `apply`, `discard`, `history`,
 `restore`) for a change of the pipeline of a run that is going, and `pipeline proposals` (`show`, `apply`,
@@ -54,8 +59,8 @@ binary has `gate`, `resume`, `ack`, `seal`, and `pipeline changes` (`show`, `app
 
 Bun workspace (TypeScript, ESM). Runtime target: Node >= 22.19; Bun is the development toolchain.
 
-- `packages/pipeline-core` (`@kodel-ai/pipeline-core`): pure engine (pipeline spec, result checks, run state machine, routing, redaction, error codes, format versions), the `PipelineService` and the adapter interfaces. No file system, process, network or clock access. The subpath `@kodel-ai/pipeline-core/mcp` holds the MCP tool definitions bound to the service (it depends on the MCP SDK; the main entry does not import it). Transport-free: the CLI adds stdio, the server adds HTTP and auth.
-- `packages/local` (`@kodel-ai/local`): local adapters (file state store, process executor, git snapshots, system clock).
+- `packages/pipeline-core` (`@kodel-ai/pipeline-core`): pure engine (pipeline spec, result checks, run state machine, routing, redaction, error codes, format versions), the `PipelineService` and the adapter interfaces. It also holds the task adapter contract (`tasks.ts`) and the `TaskService`; the `task_*` tools (`mcp/task-tools.ts`) exist only when the config turns tasks on. No file system, process, network or clock access. The subpath `@kodel-ai/pipeline-core/mcp` holds the MCP tool definitions bound to the service (it depends on the MCP SDK; the main entry does not import it). Transport-free: the CLI adds stdio, the server adds HTTP and auth.
+- `packages/local` (`@kodel-ai/local`): local adapters (file state store, process executor, git snapshots, system clock, the `local` task adapter that keeps one YAML file per task in `.kodel/tasks/`).
 - `packages/cli` (`kodel`): the CLI, built to a single JS file (`dist/kodel.js`), including human-only commands (`gate`, `resume`, `ack`, `seal`, `pipeline changes apply|discard|restore`, `pipeline proposals apply|discard`).
 - `packages/testkit` (`@kodel-ai/testkit`, private): scripted and adversarial fake agents, fixture helpers.
 - `adapters/`: per-agent pieces (MCP config writers, deny rules, driver prompts). `skills/`: agent-facing skills.

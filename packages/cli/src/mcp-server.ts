@@ -1,16 +1,29 @@
 import { KILL_GRACE_MS } from "@kodel-ai/local";
-import { type PipelineHost, PipelineService } from "@kodel-ai/pipeline-core";
-import { registerPipelineTools, SERVER_INSTRUCTIONS } from "@kodel-ai/pipeline-core/mcp";
+import { type PipelineHost, PipelineService, type TaskService } from "@kodel-ai/pipeline-core";
+import {
+  registerPipelineTools,
+  registerTaskTools,
+  SERVER_INSTRUCTIONS,
+  TASK_INSTRUCTIONS,
+} from "@kodel-ai/pipeline-core/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 /** A host that can also stop the work it started (the local host does); it says how much it stopped. */
 export type StoppableHost = PipelineHost & { stop?(): number };
 
-/** Build the MCP server for a host; the transport is the caller's. */
-export function createServer(host: PipelineHost, version: string): McpServer {
-  const server = new McpServer({ name: "kodel", version }, { instructions: SERVER_INSTRUCTIONS });
+/**
+ * Build the MCP server for a host; the transport is the caller's. The task tools and their part of
+ * the instructions are there only when `tasks` is given (the config turned them on): with tasks
+ * off the agent is told nothing about them.
+ */
+export function createServer(host: PipelineHost, version: string, tasks?: TaskService): McpServer {
+  const instructions = tasks
+    ? `${SERVER_INSTRUCTIONS}\n\n${TASK_INSTRUCTIONS}`
+    : SERVER_INSTRUCTIONS;
+  const server = new McpServer({ name: "kodel", version }, { instructions });
   registerPipelineTools(server, new PipelineService(host, { engineVersion: version }));
+  if (tasks) registerTaskTools(server, tasks);
   return server;
 }
 
@@ -29,8 +42,12 @@ async function stopAndWait(host: StoppableHost): Promise<void> {
  * the server ends (the agent closes the pipe, or the process is told to stop), the commands it was
  * running are stopped with it; the next session starts them again.
  */
-export async function serveStdio(host: StoppableHost, version: string): Promise<void> {
-  const server = createServer(host, version);
+export async function serveStdio(
+  host: StoppableHost,
+  version: string,
+  tasks?: TaskService,
+): Promise<void> {
+  const server = createServer(host, version, tasks);
   await server.connect(new StdioServerTransport());
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.once(signal, () => {

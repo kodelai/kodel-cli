@@ -94,6 +94,8 @@ export function makeSandbox(
      * other scenarios are about the pipeline, and look for the agent's files in the repository.
      */
     worktree?: boolean;
+    /** Text appended to the project config (`TASKS_ON`, say). */
+    config?: string;
   } = {},
 ): Sandbox {
   const fixture = options.fixture ?? { pipeline: MINI_PIPELINE };
@@ -113,9 +115,8 @@ export function makeSandbox(
   const driver = options.withDriverText === true ? shippedDriverSection() : "";
   writeFileSync(join(dir, "CLAUDE.md"), `# Test repository\n\n${driver}`);
   writeFileSync(join(dir, ".gitignore"), ".kodel/runs\n.kodel/worktrees\n");
-  if (options.worktree !== true) {
-    writeFileSync(join(dir, ".kodel", "config.yaml"), "worktree:\n  mode: off\n");
-  }
+  const config = `${options.worktree === true ? "" : "worktree:\n  mode: off\n"}${options.config ?? ""}`;
+  if (config !== "") writeFileSync(join(dir, ".kodel", "config.yaml"), config);
   if (options.withProjectSettings) {
     mkdirSync(join(dir, ".claude"), { recursive: true });
     cpSync(join(REPO_ROOT, ".claude/settings.json"), join(dir, ".claude/settings.json"));

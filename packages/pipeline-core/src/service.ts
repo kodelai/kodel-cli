@@ -176,18 +176,30 @@ export interface ToolFailure {
   code: ErrorCode;
   message: string;
   issues?: unknown[];
+  details?: Record<string, unknown>;
 }
 export type ToolResult = ({ ok: true } & Record<string, unknown>) | ToolFailure;
 
-const failure = (code: ErrorCode, message: string, issues?: unknown[]): ToolFailure =>
-  issues === undefined ? { ok: false, code, message } : { ok: false, code, message, issues };
+export const failure = (
+  code: ErrorCode,
+  message: string,
+  issues?: unknown[],
+  details?: Record<string, unknown>,
+): ToolFailure => {
+  const result: ToolFailure = { ok: false, code, message };
+  if (issues !== undefined) result.issues = issues;
+  if (details !== undefined) result.details = details;
+  return result;
+};
 
 /** Run a handler and turn the engine's own errors into the failure shape; others are bugs. */
 async function guarded(work: () => Promise<ToolResult>): Promise<ToolResult> {
   try {
     return await work();
   } catch (error) {
-    if (error instanceof KodelError) return failure(error.code, error.message, error.issues);
+    if (error instanceof KodelError) {
+      return failure(error.code, error.message, error.issues, error.details);
+    }
     throw error;
   }
 }
