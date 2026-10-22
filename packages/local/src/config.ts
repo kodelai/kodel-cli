@@ -27,14 +27,36 @@ export interface PipelineConfig {
   uncommitted: "ask" | "working" | "committed";
 }
 
+export interface TasksConfig {
+  /** Off by default: the MCP server then has no task tools at all. */
+  enabled: boolean;
+  /** The kind of the adapter that keeps the tasks. */
+  adapter: string;
+  /** How long one call of the adapter may take, in seconds. */
+  timeout_s: number;
+  /**
+   * The settings of each adapter, one block per kind. They are kept unchecked here: the adapter in
+   * use checks its own block, and the others are ignored, so switching `adapter` does not mean
+   * rewriting them. The group has its own key so a core key can never collide with an adapter name.
+   */
+  adapters: Record<string, unknown>;
+}
+
 export interface ProjectConfig {
   version: string;
   worktree: WorktreeConfig;
   pipeline: PipelineConfig;
+  tasks: TasksConfig;
 }
 
 export const DEFAULT_WORKTREE: WorktreeConfig = { mode: "auto", dir: DEFAULT_WORKTREE_DIR };
 export const DEFAULT_PIPELINE: PipelineConfig = { uncommitted: "ask" };
+export const DEFAULT_TASKS: TasksConfig = {
+  enabled: false,
+  adapter: "local",
+  timeout_s: 30,
+  adapters: {},
+};
 
 export const CONFIG_FILE = "config.yaml";
 
@@ -56,6 +78,15 @@ const configSchema = z
       })
       .strict()
       .optional(),
+    tasks: z
+      .object({
+        enabled: z.boolean().optional(),
+        adapter: z.string().min(1).optional(),
+        timeout_s: z.number().int().min(1).max(300).optional(),
+        adapters: z.record(z.unknown()).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -74,6 +105,7 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
         version: parseVersion(1).version,
         worktree: { ...DEFAULT_WORKTREE },
         pipeline: { ...DEFAULT_PIPELINE },
+        tasks: { ...DEFAULT_TASKS, adapters: {} },
       };
     }
     throw error;
@@ -93,6 +125,14 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
     const where = first?.path.join(".");
     // zod names the unknown keys of a strict object in `keys`; say them, so the person sees which.
     const keys = first && "keys" in first ? `: ${(first.keys as string[]).join(", ")}` : "";
+    // A key of the top level that this engine does not know may belong to a newer one: say that
+    // too, so a person with an older build knows what to do (upgrade, or remove the key).
+    if (first && "keys" in first && first.path.length === 0) {
+      throw invalid(
+        file,
+        `unknown key${(first.keys as string[]).length > 1 ? "s" : ""}${keys}; is the file written for a newer kodel? upgrade kodel or remove the key`,
+      );
+    }
     throw invalid(file, `${first?.message ?? "invalid"}${keys}${where ? ` (at "${where}")` : ""}`);
   }
   let version: { version: string; major: number };
@@ -114,5 +154,11 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
       dir: parsed.data.worktree?.dir ?? DEFAULT_WORKTREE.dir,
     },
     pipeline: { uncommitted: parsed.data.pipeline?.uncommitted ?? DEFAULT_PIPELINE.uncommitted },
+    tasks: {
+      enabled: parsed.data.tasks?.enabled ?? DEFAULT_TASKS.enabled,
+      adapter: parsed.data.tasks?.adapter ?? DEFAULT_TASKS.adapter,
+      timeout_s: parsed.data.tasks?.timeout_s ?? DEFAULT_TASKS.timeout_s,
+      adapters: parsed.data.tasks?.adapters ?? {},
+    },
   };
 }
