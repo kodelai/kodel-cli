@@ -12,6 +12,7 @@ import {
   KodelError,
   type NewTask,
   type RunState,
+  redactText,
   type SubtaskRef,
   type Task,
   type TaskFilter,
@@ -22,6 +23,14 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { Command, CommanderError } from "commander";
 import pkg from "../package.json" with { type: "json" };
+import {
+  FEEDBACK_ENDPOINT,
+  FEEDBACK_MESSAGE_MAX,
+  type Fetch,
+  feedbackContext,
+  isFeedbackType,
+  submitFeedback,
+} from "./feedback";
 import { formatChange, formatProposal, formatReport } from "./format";
 import { serveStdio } from "./mcp-server";
 import { formatTable } from "./table";
@@ -43,6 +52,9 @@ export interface CliEnv {
   confirm(question: string): Promise<boolean>;
   /** The environment the command runs in (`process.env`), looked at for the engine's marker. */
   environment?: Record<string, string | undefined>;
+  /** For `feedback`: the HTTP client (the global `fetch` if none) and the text piped to stdin. */
+  fetch?: Fetch;
+  readStdin?(): Promise<string>;
 }
 
 /** A problem to report to the user without a stack trace. */
@@ -672,6 +684,74 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         });
       env.out(`${runId}: sealed\n`);
     });
+
+  // ── feedback ────────────────────────────────────────────────────────────────
+  // Goes to the Kodel inbox, not to the repository: it needs no run and no config.
+
+  program
+    .command("feedback [text]")
+    .description("Send a bug report, an idea or a note to the Kodel developers")
+    .option("--type <type>", "bug, feature or feedback", "feedback")
+    .option("-m, --message <text>", 'the text (or pass it as the argument, or "-" for stdin)')
+    .option(
+      "-y, --yes",
+      "send without asking (a person is asked first; a script or an agent must pass this)",
+    )
+    .option("--json", "print the answer as JSON")
+    .addHelpText(
+      "after",
+      `
+Examples:
+  kodel feedback "gate refuses to run in tmux" --type bug
+  echo "long description" | kodel feedback - --type feature --yes`,
+    )
+    .action(
+      async (
+        arg: string | undefined,
+        opts: { type: string; message?: string; yes?: boolean; json?: boolean },
+      ) => {
+        if (!isFeedbackType(opts.type)) {
+          throw new UserError(`--type is bug, feature or feedback, not "${plain(opts.type)}"`);
+        }
+        if (opts.message !== undefined && arg !== undefined) {
+          throw new UserError("give the text as the argument or as --message, not both");
+        }
+        let text = opts.message ?? arg;
+        if (text === "-") {
+          // Both are a terminal only when a person typed the command, and then nothing is piped in.
+          if (env.interactive)
+            throw new UserError('"-" reads a pipe: echo "text" | kodel feedback -');
+          text = await (env.readStdin?.() ?? Promise.resolve(""));
+        }
+        // The person or the agent may have pasted a log; what looks like a secret does not leave.
+        text = text === undefined ? undefined : redactText(text.trim());
+        if (!text) throw new UserError('a text is needed: kodel feedback "what went wrong"');
+        if (text.length > FEEDBACK_MESSAGE_MAX) {
+          throw new UserError(
+            `the text is ${text.length} characters, the most is ${FEEDBACK_MESSAGE_MAX}`,
+          );
+        }
+        const input = {
+          type: opts.type,
+          message: text,
+          context: feedbackContext(pkg.version),
+        };
+        // What leaves the machine is shown before it leaves, and again to an agent that passes --yes;
+        // with --json it goes to stderr so the answer on stdout stays one JSON document.
+        (opts.json ? env.err : env.out)(`To ${FEEDBACK_ENDPOINT}:\n${safeJson(input)}\n`);
+        if (!opts.yes) {
+          if (!env.interactive) {
+            throw new UserError("nothing was sent: no terminal to ask on, pass --yes to send it");
+          }
+          await mustConfirm("Send this?");
+        }
+        const id = await submitFeedback(env.fetch ?? fetch, input).catch((error: unknown) => {
+          throw new UserError(error instanceof Error ? error.message : String(error));
+        });
+        // The id comes from the server, so it is cleaned like anything else shown to a person.
+        env.out(opts.json ? `${safeJson({ id })}\n` : `sent: ${plain(id)}\n`);
+      },
+    );
 
   // ── tasks ───────────────────────────────────────────────────────────────────
   // The same service the MCP tools use, so a person and an agent get the same rules. Tasks carry no
