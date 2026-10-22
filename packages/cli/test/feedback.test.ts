@@ -52,7 +52,7 @@ describe("feedback", () => {
     expect(r.calls[0]?.url).toBe("https://kodel.ai/api/feedback");
     expect(body.type).toBe("feedback");
     expect(typeof body.context.kodelVersion).toBe("string");
-    expect(body.context.client).toBe("kodel");
+    expect(body.context.app).toBe("kodel");
   });
 
   test("a no from the person sends nothing", async () => {
@@ -73,11 +73,6 @@ describe("feedback", () => {
     expect(r.code).toBe(0);
     expect(r.out).toContain("boom");
     expect(bodyOf(r.calls[0]).type).toBe("bug");
-  });
-
-  test("--no-context leaves the context out", async () => {
-    const r = await cli(["feedback", "boom", "--no-context", "--yes"]);
-    expect(bodyOf(r.calls[0])).toEqual({ type: "feedback", message: "boom" });
   });
 
   test("- reads the text from stdin", async () => {

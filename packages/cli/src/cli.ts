@@ -693,7 +693,6 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .description("Send a bug report, an idea or a note to the Kodel developers")
     .option("--type <type>", "bug, feature or feedback", "feedback")
     .option("-m, --message <text>", 'the text (or pass it as the argument, or "-" for stdin)')
-    .option("--no-context", "do not attach the version, the OS and the runtime")
     .option(
       "-y, --yes",
       "send without asking (a person is asked first; a script or an agent must pass this)",
@@ -709,7 +708,7 @@ Examples:
     .action(
       async (
         arg: string | undefined,
-        opts: { type: string; message?: string; context: boolean; yes?: boolean; json?: boolean },
+        opts: { type: string; message?: string; yes?: boolean; json?: boolean },
       ) => {
         if (!isFeedbackType(opts.type)) {
           throw new UserError(`--type is bug, feature or feedback, not "${plain(opts.type)}"`);
@@ -735,7 +734,7 @@ Examples:
         const input = {
           type: opts.type,
           message: text,
-          ...(opts.context ? { context: feedbackContext(pkg.version) } : {}),
+          context: feedbackContext(pkg.version),
         };
         // What leaves the machine is shown before it leaves, and again to an agent that passes --yes;
         // with --json it goes to stderr so the answer on stdout stays one JSON document.

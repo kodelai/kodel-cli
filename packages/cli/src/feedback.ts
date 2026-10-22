@@ -26,7 +26,7 @@ export function isFeedbackType(value: string): value is FeedbackType {
 export function feedbackContext(version: string): Record<string, string> {
   return {
     // The inbox is shared with `kodelctl`, which sends its own `kodelctlVersion` instead.
-    client: "kodel",
+    app: "kodel",
     kodelVersion: version,
     platform: platform(),
     arch: arch(),
