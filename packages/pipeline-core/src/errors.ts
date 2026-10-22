@@ -27,27 +27,49 @@ export const ERROR_CODES = [
   "CONFIG_INVALID",
   "PIPELINE_CHANGE_REFUSED",
   "UNKNOWN_TOPIC",
+  "TASKS_DISABLED",
+  "TASK_NOT_FOUND",
+  "INVALID_TASK",
+  "TASK_UNSUPPORTED",
+  "TASK_TRANSITION_REFUSED",
+  "TASK_FIELDS_REQUIRED",
+  "TASK_RATE_LIMITED",
+  "TASK_AUTH_FAILED",
+  "TASK_ADAPTER_FAILED",
+  "TASK_KEY_UNAVAILABLE",
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
-/** Shape returned to tool callers on failure. */
+/**
+ * Shape returned to tool callers on failure. `issues` lists what was wrong with the arguments;
+ * `details` is the one place for any other data a code carries (`retry_after_s`, `applied`,
+ * `missing`, `adapter_code` of the task tools), so a new datum never claims a top-level key.
+ */
 export interface ToolError {
   ok: false;
   code: ErrorCode;
   message: string;
   issues?: unknown[];
+  details?: Record<string, unknown>;
 }
 
 export class KodelError extends Error {
   readonly code: ErrorCode;
   readonly issues: unknown[] | undefined;
+  readonly details: Record<string, unknown> | undefined;
 
-  constructor(code: ErrorCode, message: string, issues?: unknown[]) {
+  constructor(
+    code: ErrorCode,
+    message: string,
+    issues?: unknown[],
+    details?: Record<string, unknown>,
+  ) {
     super(message);
     this.name = "KodelError";
     this.code = code;
     this.issues = issues;
+    this.details = details;
   }
 
   override toString(): string {
@@ -55,8 +77,9 @@ export class KodelError extends Error {
   }
 
   toToolError(issues: unknown[] | undefined = this.issues): ToolError {
-    return issues === undefined
-      ? { ok: false, code: this.code, message: this.message }
-      : { ok: false, code: this.code, message: this.message, issues };
+    const error: ToolError = { ok: false, code: this.code, message: this.message };
+    if (issues !== undefined) error.issues = issues;
+    if (this.details !== undefined) error.details = this.details;
+    return error;
   }
 }

@@ -9,9 +9,19 @@ describe("error codes", () => {
     }
   });
 
-  test("list matches the contract (24 codes)", () => {
+  test("list matches the contract (34 codes)", () => {
     // A new code must be added to the contract (error codes section) and to this count.
-    expect(ERROR_CODES.length).toBe(24);
+    expect(ERROR_CODES.length).toBe(34);
+  });
+
+  test("t16_details_is_the_one_place_for_extra_data_of_a_code", () => {
+    const e = new KodelError("TASK_RATE_LIMITED", "slow down", undefined, { retry_after_s: 7 });
+    expect(e.toToolError()).toEqual({
+      ok: false,
+      code: "TASK_RATE_LIMITED",
+      message: "slow down",
+      details: { retry_after_s: 7 },
+    });
   });
 
   test("KodelError renders the code first", () => {
