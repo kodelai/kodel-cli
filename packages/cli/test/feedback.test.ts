@@ -41,25 +41,25 @@ async function cli(
 const bodyOf = (call: Call | undefined) => JSON.parse(String(call?.init?.body));
 
 describe("feedback", () => {
-  test("a bug is posted with the type, the message and the context", async () => {
-    const r = await cli(["feedback", "bug", "gate hangs"]);
+  test("the text is posted with the type feedback and the context", async () => {
+    const r = await cli(["feedback", "gate hangs"]);
     expect(r.code).toBe(0);
     expect(r.out).toContain("sent: fb_0123456789abcdef");
     expect(r.calls[0]?.url).toBe("https://kodel.ai/api/feedback");
     const body = bodyOf(r.calls[0]);
-    expect(body.type).toBe("bug");
+    expect(body.type).toBe("feedback");
     expect(body.message).toBe("gate hangs");
     expect(typeof body.context.kodelVersion).toBe("string");
   });
 
-  test("--no-context leaves the context out; note is the type feedback", async () => {
-    const r = await cli(["feedback", "note", "nice", "--no-context"]);
-    expect(bodyOf(r.calls[0])).toEqual({ type: "feedback", message: "nice" });
+  test("--type sets the type, --no-context leaves the context out", async () => {
+    const r = await cli(["feedback", "boom", "--type", "bug", "--no-context"]);
+    expect(bodyOf(r.calls[0])).toEqual({ type: "bug", message: "boom" });
   });
 
-  test("- reads the message from stdin, and --url beats the environment", async () => {
+  test("- reads the text from stdin, and --url beats the environment", async () => {
     const r = await cli(
-      ["feedback", "feature", "-", "--url", "http://localhost:1/"],
+      ["feedback", "-", "--type", "feature", "--url", "http://localhost:1/"],
       SENT,
       "  long text\n",
       { KODEL_FEEDBACK_URL: "http://elsewhere" },
@@ -68,40 +68,21 @@ describe("feedback", () => {
     expect(bodyOf(r.calls[0]).message).toBe("long text");
   });
 
-  test("no message: nothing is sent", async () => {
-    const r = await cli(["feedback", "bug"]);
-    expect(r.code).toBe(1);
-    expect(r.err).toContain("a message is needed");
-    expect(r.calls).toEqual([]);
+  test("no text or a wrong type: nothing is sent", async () => {
+    const none = await cli(["feedback"]);
+    expect(none.code).toBe(1);
+    expect(none.err).toContain("a text is needed");
+    const wrong = await cli(["feedback", "x", "--type", "nope"]);
+    expect(wrong.code).toBe(1);
+    expect(wrong.err).toContain("--type is bug, feature or feedback");
+    expect([...none.calls, ...wrong.calls]).toEqual([]);
   });
 
-  test("send checks --type; a refusal of the inbox is an error", async () => {
-    expect((await cli(["feedback", "send", "x", "--type", "nope"])).code).toBe(1);
-    const r = await cli(["feedback", "bug", "x"], () =>
+  test("a refusal of the inbox is an error", async () => {
+    const r = await cli(["feedback", "x"], () =>
       Response.json({ error: "invalid_message" }, { status: 400 }),
     );
     expect(r.code).toBe(1);
     expect(r.err).toContain("invalid_message");
-  });
-
-  test("get shows the status and the answer; an unknown id is an error", async () => {
-    const r = await cli(["feedback", "get", "fb_1"], () =>
-      Response.json({
-        id: "fb_1",
-        type: "bug",
-        message: "boom",
-        status: "done",
-        comment: "fixed",
-        createdAt: "2026-01-01T00:00:00Z",
-      }),
-    );
-    expect(r.out).toContain("fb_1: bug, done");
-    expect(r.out).toContain("answer: fixed");
-    const missing = await cli(
-      ["feedback", "get", "fb_2"],
-      () => new Response("{}", { status: 404 }),
-    );
-    expect(missing.code).toBe(1);
-    expect(missing.err).toContain("no feedback fb_2");
   });
 });

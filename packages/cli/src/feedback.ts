@@ -13,15 +13,6 @@ export const DEFAULT_FEEDBACK_URL = "https://kodel.ai";
 
 export type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 
-export interface FeedbackRecord {
-  id: string;
-  type: string;
-  message: string;
-  status: string;
-  comment: string | null;
-  createdAt: string;
-}
-
 export function isFeedbackType(value: string): value is FeedbackType {
   return (FEEDBACK_TYPES as readonly string[]).includes(value);
 }
@@ -66,15 +57,4 @@ export async function submitFeedback(
   const body = (await response.json().catch(() => undefined)) as { id?: unknown } | undefined;
   if (typeof body?.id !== "string") throw new Error("the feedback inbox sent no id");
   return body.id;
-}
-
-export async function getFeedback(
-  fetcher: Fetch,
-  baseUrl: string,
-  id: string,
-): Promise<FeedbackRecord> {
-  const response = await fetcher(`${baseUrl}/api/feedback/${encodeURIComponent(id)}`);
-  if (response.status === 404) throw new Error(`no feedback ${id}`);
-  if (!response.ok) throw new Error(`the feedback inbox failed: ${await failure(response)}`);
-  return (await response.json()) as FeedbackRecord;
 }

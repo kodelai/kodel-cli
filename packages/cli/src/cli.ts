@@ -23,10 +23,8 @@ import {
 import { Command, CommanderError } from "commander";
 import pkg from "../package.json" with { type: "json" };
 import {
-  type FeedbackType,
   type Fetch,
   feedbackContext,
-  getFeedback,
   isFeedbackType,
   resolveFeedbackUrl,
   submitFeedback,
@@ -688,90 +686,47 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
   // ── feedback ────────────────────────────────────────────────────────────────
   // Goes to the Kodel inbox, not to the repository: it needs no run and no config.
 
-  const feedback = program
-    .command("feedback")
+  program
+    .command("feedback [text]")
     .description("Send a bug report, an idea or a note to the Kodel developers")
+    .option("--type <type>", "bug, feature or feedback", "feedback")
+    .option("-m, --message <text>", 'the text (or pass it as the argument, or "-" for stdin)')
+    .option("--no-context", "do not attach the version, the OS and the runtime")
+    .option("--url <url>", "the inbox (default $KODEL_FEEDBACK_URL or https://kodel.ai)")
+    .option("--json", "print the answer as JSON")
     .addHelpText(
       "after",
       `
 Examples:
-  kodel feedback bug "gate refuses to run in tmux"
-  echo "long description" | kodel feedback feature -
-  kodel feedback get fb_0123456789abcdef`,
-    );
-
-  type FeedbackOpts = { message?: string; context: boolean; url?: string; json?: boolean };
-
-  const messageOptions = (command: Command) =>
-    command
-      .option("-m, --message <text>", 'the message (or pass it as the argument, or "-" for stdin)')
-      .option("--no-context", "do not attach the version, the OS and the runtime")
-      .option("--url <url>", "the inbox (default $KODEL_FEEDBACK_URL or https://kodel.ai)")
-      .option("--json", "print the answer as JSON");
-
-  function inboxError(error: unknown): never {
-    throw new UserError(error instanceof Error ? error.message : String(error));
-  }
-
-  async function sendFeedback(type: FeedbackType, arg: string | undefined, opts: FeedbackOpts) {
-    let message = opts.message ?? arg;
-    if (message === "-") message = await (env.readStdin?.() ?? Promise.resolve(""));
-    message = message?.trim();
-    if (!message) throw new UserError('a message is needed: kodel feedback bug "what went wrong"');
-    const id = await submitFeedback(
-      env.fetch ?? fetch,
-      resolveFeedbackUrl(opts.url, env.environment),
-      {
-        type,
-        message,
-        ...(opts.context ? { context: feedbackContext(pkg.version) } : {}),
+  kodel feedback "gate refuses to run in tmux" --type bug
+  echo "long description" | kodel feedback - --type feature`,
+    )
+    .action(
+      async (
+        arg: string | undefined,
+        opts: { type: string; message?: string; context: boolean; url?: string; json?: boolean },
+      ) => {
+        if (!isFeedbackType(opts.type)) {
+          throw new UserError(`--type is bug, feature or feedback, not "${plain(opts.type)}"`);
+        }
+        let text = opts.message ?? arg;
+        if (text === "-") text = await (env.readStdin?.() ?? Promise.resolve(""));
+        text = text?.trim();
+        if (!text) throw new UserError('a text is needed: kodel feedback "what went wrong"');
+        const id = await submitFeedback(
+          env.fetch ?? fetch,
+          resolveFeedbackUrl(opts.url, env.environment),
+          {
+            type: opts.type,
+            message: text,
+            ...(opts.context ? { context: feedbackContext(pkg.version) } : {}),
+          },
+        ).catch((error: unknown) => {
+          throw new UserError(error instanceof Error ? error.message : String(error));
+        });
+        env.out(opts.json ? `${JSON.stringify({ id })}\n` : `sent: ${id}\n`);
       },
-    ).catch(inboxError);
-    env.out(
-      opts.json
-        ? `${JSON.stringify({ id })}\n`
-        : `sent: ${id}\nits status: kodel feedback get ${id}\n`,
     );
-  }
-
-  for (const [name, type, text] of [
-    ["bug", "bug", "Report a bug"],
-    ["feature", "feature", "Ask for an improvement"],
-    ["note", "feedback", "General feedback"],
-  ] as const) {
-    messageOptions(feedback.command(`${name} [message]`).description(text)).action(
-      (arg: string | undefined, opts: FeedbackOpts) => sendFeedback(type, arg, opts),
-    );
-  }
-
-  messageOptions(feedback.command("send [message]").description("Send with an explicit type"))
-    .requiredOption("--type <type>", "bug, feature or feedback")
-    .action(async (arg: string | undefined, opts: FeedbackOpts & { type: string }) => {
-      if (!isFeedbackType(opts.type)) {
-        throw new UserError(`--type is bug, feature or feedback, not "${plain(opts.type)}"`);
-      }
-      await sendFeedback(opts.type, arg, opts);
-    });
-
-  feedback
-    .command("get <id>")
-    .description("The status of a report and the answer of the developers")
-    .option("--url <url>", "the inbox (default $KODEL_FEEDBACK_URL or https://kodel.ai)")
-    .option("--json", "print the record as JSON")
-    .action(async (id: string, opts: { url?: string; json?: boolean }) => {
-      const record = await getFeedback(
-        env.fetch ?? fetch,
-        resolveFeedbackUrl(opts.url, env.environment),
-        id,
-      ).catch(inboxError);
-      if (opts.json) {
-        env.out(`${safeJson(record)}\n`);
-        return;
-      }
-      env.out(`${plain(record.id)}: ${plain(record.type)}, ${plain(record.status)}\n`);
-      env.out(`${plain(record.message)}\n`);
-      if (record.comment) env.out(`\nanswer: ${plain(record.comment)}\n`);
-    });
 
   // ── tasks ───────────────────────────────────────────────────────────────────
   // The same service the MCP tools use, so a person and an agent get the same rules. Tasks carry no
