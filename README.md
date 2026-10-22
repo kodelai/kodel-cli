@@ -11,6 +11,8 @@ Spec-driven pipelines for solo developers, running inside the coding agent you a
 - Your agent (Claude Code, Codex, OpenCode, ...) drives the run through MCP tools.
 - Every step result is validated outside the agent, so "done" is verifiable.
 - Run history stays in git and is analyzed to suggest improvements to the pipeline.
+- Optional [tasks](docs/tasks.md): the agent writes down what it finds on the way ("create a task for
+  that bug"), you ask what is left, and a tracker such as Jira can sit behind the same interface.
 
 ## Repository
 

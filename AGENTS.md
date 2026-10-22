@@ -33,6 +33,11 @@ This repository adds these rules:
 - Do not run `gate`, `ack`, `seal`, `resume` or `pipeline changes apply|discard|restore`: they refuse to run
   without a terminal and ask for a confirmation, so trying them only fails.
 
+Tasks (`docs/tasks.md`) are off unless `.kodel/config.yaml` has `tasks: { enabled: true }`; when they are on the
+server also offers the `task_*` tools. When the user asks you to "create a task" for something you should not
+fix now, use `task_create` (after one `task_schema`) and tell the user the key; change a status only when
+asked. Do not edit the files in `.kodel/tasks/` by hand: the tools keep their format and their keys.
+
 Humans: `bun packages/cli/src/main.ts status` lists runs, `report` shows where the time went; the same
 binary has `gate`, `resume`, `ack`, `seal`, and `pipeline changes` (`show`, `apply`, `discard`, `history`,
 `restore`) for a change of the pipeline of a run that is going.
