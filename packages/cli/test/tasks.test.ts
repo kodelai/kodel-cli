@@ -34,6 +34,7 @@ async function cli(...args: string[]) {
     interactive: false,
     environment: {},
     confirm: async () => true,
+    select: async () => [],
   });
   return { code, out, err };
 }

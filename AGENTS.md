@@ -47,6 +47,13 @@ binary has `gate`, `resume`, `ack`, `seal`, and `pipeline changes` (`show`, `app
 `restore`) for a change of the pipeline of a run that is going, and `pipeline proposals` (`show`, `apply`,
 `discard`) for a pipeline the agent proposed outside a run.
 
+## Permission to write code
+
+**Do not write or change code until the person has explicitly allowed it.** A request to "add X", an
+answer to a question you asked, or a discussion of a design is not that permission. When the task is
+unclear or the person says "let's discuss first", discuss: propose, ask, wait. Start only after a clear
+go-ahead ("go", "implement it", "do it"). Reading the code and answering questions need no permission.
+
 ## Language
 
 - **All code comments, doc comments, documentation, commit messages, PR descriptions, error
