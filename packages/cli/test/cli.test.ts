@@ -69,6 +69,7 @@ async function cliAs(person: Person, ...args: string[]) {
     },
     interactive: person.interactive ?? true,
     environment: person.environment ?? {},
+    select: async () => [],
     confirm: async (question) => {
       asked.push(question);
       const answers = person.answer ?? true;
@@ -227,6 +228,7 @@ describe("pipeline changes", () => {
         await writeFile(file, DEMO.replace("built", "swapped"));
         return true;
       },
+      select: async () => [],
     });
     expect(result).toBe(1);
     expect((await journalOf(id)).some((r) => r.event === "pipeline_accepted")).toBe(false);
@@ -943,6 +945,7 @@ describe("pipeline proposals", () => {
         await propose(FRESH.replace("make all", "rm -rf x"));
         return true;
       },
+      select: async () => [],
     });
     expect(result).toBe(1);
     await expect(readFile(written("fresh"), "utf8")).rejects.toThrow();

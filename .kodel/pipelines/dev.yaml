@@ -55,7 +55,7 @@ nodes:
       Keep changes within the plan. Add or update tests for the changed behavior.
       Follow the conventions in AGENTS.md (English only, no `any`, Biome style).
     checks:
-      - { kind: diff, paths: ["packages/**", "scripts/**", "examples/**", "skills/**", "adapters/**"], max_lines: 800 }
+      - { kind: diff, paths: ["packages/**", "scripts/**", "examples/**", "skills/**", "adapters/**"] }
 
   - slug: verify
     kind: command
@@ -94,11 +94,47 @@ nodes:
     kind: human
     prompt: |
       Look at the diff and try the change. Approve to finish, or reject with what is wrong.
+    instructions: |
+      The person tries the change by hand. The message to them at this gate must contain:
+      1. The full absolute path of the run's worktree and its branch, and the command to run the built
+         binary from there (the binary is not in PATH).
+      2. A numbered, step-by-step set of manual test scenarios, each with a command that can be pasted and
+         the result to expect. Only scenarios that need the person's own check: real prompts at a terminal,
+         the wording of questions and output, and a check on the real agent. Leave out what the automated
+         tests already cover.
+      3. A note to try the change in a fresh temporary directory, not in the repository or in the run's
+         worktree, so that the trial leaves nothing behind.
     results:
       columns:
         severity:    { enum: [blocker, critical, major, minor, info] }
         location:    location
         description: text
+
+  - slug: publish
+    kind: agent
+    prompt: |
+      The person approved the change. Publish it, from the run's worktree.
+      1. Run `git status` and look at what changed. Commit everything the run changed: the code, the
+         plan docs/plans/{{task.slug}}.md, and the pipeline files in `.kodel/pipelines/` and `AGENTS.md`
+         if they changed. A file that does not belong to the task (a stray file, local settings, a
+         secret) is not committed: name it in your final message.
+      2. Commit with `git commit -s`. The message is in English: a short imperative subject and a body
+         that says what changed and why, and ends with the attribution lines your instructions give.
+      3. Push the branch of the run with `git push -u origin HEAD`. Never push to main.
+      4. Open a draft pull request into main with `gh pr create --draft --base main`. Title and
+         description are in English: what changed, how it was tested, what is left out. End the
+         description with the attribution lines your instructions give.
+      5. In your final message to the person give the link to the pull request and, as commands to
+         copy, how to remove this worktree and its branch once the pull request is merged or closed:
+         `git worktree remove <the absolute path of the worktree>` and `git branch -D <the branch>`,
+         to run from the main checkout of the repository, with the real path and branch. Do not run
+         them yourself.
+    checks:
+      - { kind: command, command: "test \"$(git branch --show-current)\" != main" }
+      - { kind: command, command: "test -z \"$(git status --porcelain)\"" }
+      - { kind: command, command: "git log -1 --format=%B | grep -q '^Signed-off-by: '" }
+      - { kind: command, command: "git fetch -q origin && test \"$(git rev-parse HEAD)\" = \"$(git rev-parse '@{upstream}')\"", timeout: 120 }
+      - { kind: command, command: "gh pr view --json baseRefName -q .baseRefName | grep -qx main", timeout: 120 }
 
 edges:
   - { from: plan,           to: plan-approval }
@@ -115,4 +151,5 @@ edges:
   - { from: build,          to: impl,         when: failed }
   - { from: review,         to: final-approval }
   - { from: review,         to: impl,         when: blocking_findings }
+  - { from: final-approval, to: publish,      when: approved }
   - { from: final-approval, to: impl,         when: rejected }

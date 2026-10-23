@@ -33,6 +33,7 @@ import {
   submitFeedback,
 } from "./feedback";
 import { formatChange, formatProposal, formatReport } from "./format";
+import { type Choice, InitError, runInit } from "./init";
 import { serveStdio } from "./mcp-server";
 import { formatTable } from "./table";
 import {
@@ -51,6 +52,8 @@ export interface CliEnv {
   interactive: boolean;
   /** Ask the person a yes/no question. */
   confirm(question: string): Promise<boolean>;
+  /** Ask the person to pick any number of the choices; the answer is the values picked. */
+  select(question: string, choices: Choice[]): Promise<string[]>;
   /** The environment the command runs in (`process.env`), looked at for the engine's marker. */
   environment?: Record<string, string | undefined>;
   /** For `feedback`: the HTTP client (the global `fetch` if none) and the text piped to stdin. */
@@ -241,6 +244,56 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       }
       await serveStdio(host(), pkg.version, tasks);
     });
+
+  program
+    .command("init")
+    .description("Set the project up for your coding agents: MCP server, skills, config")
+    .option(
+      "--agent <list>",
+      "agents to set up, comma-separated: claude-code, codex, opencode, all",
+    )
+    .option("-y, --yes", "ask nothing: use the flags and the agents found here")
+    .option("--tasks", "turn the local task tracker on (asked when not given)")
+    .option("--server-command <command>", "how the agent starts the server", "kodel mcp")
+    .option("--force", "replace skills that were edited or that kodel did not write")
+    .option("--dry-run", "show what would change without writing")
+    .action(
+      async (opts: {
+        agent?: string;
+        yes?: boolean;
+        tasks?: true;
+        serverCommand: string;
+        force?: boolean;
+        dryRun?: boolean;
+      }) => {
+        try {
+          await runInit(
+            {
+              root: program.opts<{ root: string }>().root,
+              agents: opts.agent
+                ?.split(",")
+                .map((id) => id.trim())
+                .filter(Boolean),
+              yes: opts.yes ?? false,
+              tasks: opts.tasks,
+              serverCommand: opts.serverCommand,
+              force: opts.force ?? false,
+              dryRun: opts.dryRun ?? false,
+            },
+            {
+              out: env.out,
+              interactive: env.interactive,
+              select: env.select,
+              confirm: env.confirm,
+              environment: env.environment ?? {},
+            },
+          );
+        } catch (error) {
+          if (error instanceof InitError) throw new UserError(error.message);
+          throw error;
+        }
+      },
+    );
 
   program
     .command("status [run]")

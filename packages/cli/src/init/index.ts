@@ -1,0 +1,203 @@
+/**
+ * `kodel init`: set a project up for the coding agents that will run its pipelines. It only adds
+ * and updates; it never removes anything, and every file it touches is edited in place, so the
+ * person's own lines stay. `--dry-run` lists what would change without writing.
+ */
+import { stat } from "node:fs/promises";
+import { join } from "node:path";
+import { loadConfig } from "@kodel-ai/local";
+import { AGENT_IDS, AGENTS, type AgentAdapter, detectAgents, type ServerCommand } from "./agents";
+import { type Change, type Context, editFile, readIfExists } from "./files";
+import { installSkills } from "./skills";
+
+/** A problem to report to the person without a stack trace. */
+export class InitError extends Error {}
+
+export interface Choice {
+  value: string;
+  label: string;
+  checked: boolean;
+}
+
+export interface InitIO {
+  out(text: string): void;
+  /** Whether a person is at a terminal. */
+  interactive: boolean;
+  /** Ask for any number of the choices; the answer is the values picked. */
+  select(question: string, choices: Choice[]): Promise<string[]>;
+  /** Ask a yes/no question; the default answer is no. */
+  confirm(question: string): Promise<boolean>;
+  environment: Record<string, string | undefined>;
+}
+
+export interface InitOptions {
+  root: string;
+  /** Agent ids, or `all`. Without it the agents are asked for, or detected. */
+  agents?: string[];
+  /** Do not ask anything: take the flags and the detected agents. */
+  yes: boolean;
+  /** Turn the task tracker on. Without it the person is asked, or it stays off. */
+  tasks?: boolean;
+  /** The command the agent starts the server with. */
+  serverCommand: string;
+  force: boolean;
+  dryRun: boolean;
+}
+
+const KODEL_DIR = ".kodel";
+const IGNORED = ["/.kodel/runs", "/.kodel/worktrees"];
+
+function configText(tasks: boolean): string {
+  return [
+    "# The Kodel project config. Every key is optional.",
+    "version: 1",
+    "tasks:",
+    `  enabled: ${tasks}`,
+    "",
+  ].join("\n");
+}
+
+function parseAgents(requested: string[]): AgentAdapter[] {
+  if (requested.includes("all")) return [...AGENTS];
+  const picked: AgentAdapter[] = [];
+  for (const id of requested) {
+    const agent = AGENTS.find((a) => a.id === id);
+    if (!agent) {
+      throw new InitError(`unknown agent "${id}"; use ${[...AGENT_IDS, "all"].join(", ")}`);
+    }
+    if (!picked.includes(agent)) picked.push(agent);
+  }
+  return picked;
+}
+
+async function chooseAgents(opts: InitOptions, io: InitIO, canAsk: boolean) {
+  if (opts.agents && opts.agents.length > 0) return parseAgents(opts.agents);
+  const detected = await detectAgents(opts.root, io.environment);
+  if (!canAsk) {
+    if (detected.length === 0) {
+      throw new InitError(
+        `no coding agent found here; name one with --agent (${AGENT_IDS.join(", ")}, all)`,
+      );
+    }
+    return detected;
+  }
+  const picked = await io.select(
+    "Which coding agents should be set up?",
+    AGENTS.map((agent) => ({
+      value: agent.id,
+      label: `${agent.label}${detected.includes(agent) ? " (found)" : ""}`,
+      checked: detected.includes(agent),
+    })),
+  );
+  if (picked.length === 0) throw new InitError("no agent chosen, nothing was changed");
+  return parseAgents(picked);
+}
+
+async function chooseTasks(opts: InitOptions, io: InitIO, canAsk: boolean): Promise<boolean> {
+  if (opts.tasks !== undefined) return opts.tasks;
+  if (!canAsk) return false;
+  return io.confirm(
+    "Turn on the local task tracker? It lets the agent or the CLI create tasks in the project so that nothing important is lost.",
+  );
+}
+
+async function setUpConfig(ctx: Context, tasks: boolean) {
+  const existed = (await readIfExists(join(ctx.root, KODEL_DIR, "config.yaml"))) !== undefined;
+  // The file is the person's and may carry comments: an existing one is not rewritten.
+  await editFile(ctx, `${KODEL_DIR}/config.yaml`, (previous) => ({
+    text: previous ?? configText(tasks),
+  }));
+  if (!tasks || !existed) return;
+  const config = await loadConfig(join(ctx.root, KODEL_DIR)).catch(() => undefined);
+  if (config && !config.tasks.enabled) {
+    ctx.changes.push({
+      path: `${KODEL_DIR}/config.yaml`,
+      status: "skipped",
+      note: "tasks are off in the existing file; set `tasks: { enabled: true }` yourself",
+    });
+  }
+}
+
+async function ignoreRuns(ctx: Context) {
+  const isGit = await stat(join(ctx.root, ".git")).then(
+    () => true,
+    () => false,
+  );
+  if (!isGit) {
+    ctx.changes.push({
+      path: ".gitignore",
+      status: "skipped",
+      note: `${IGNORED.join(" and ")} are not ignored: this is not the top of a git repository`,
+    });
+    return;
+  }
+  await editFile(ctx, ".gitignore", (previous) => {
+    const have = new Set((previous ?? "").split(/\r?\n/).map((line) => line.trim()));
+    const missing = IGNORED.filter((line) => !have.has(line) && !have.has(line.slice(1)));
+    if (missing.length === 0) return { text: previous ?? "" };
+    const base = previous === undefined || previous === "" ? "" : `${previous.trimEnd()}\n\n`;
+    return {
+      text: `${base}# Kodel: run history and the worktrees of the runs.\n${missing.join("\n")}\n`,
+    };
+  });
+}
+
+export async function runInit(opts: InitOptions, io: InitIO): Promise<Change[]> {
+  const rootStat = await stat(opts.root).catch(() => undefined);
+  if (!rootStat?.isDirectory()) throw new InitError(`${opts.root} is not a directory`);
+  const [command, ...args] = opts.serverCommand.trim().split(/\s+/);
+  if (!command) throw new InitError("--server-command is empty");
+  const server: ServerCommand = { command, args };
+
+  const canAsk = io.interactive && !opts.yes;
+  const agents = await chooseAgents(opts, io, canAsk);
+  const tasks = await chooseTasks(opts, io, canAsk);
+
+  const ctx: Context = { root: opts.root, dryRun: opts.dryRun, force: opts.force, changes: [] };
+
+  await setUpConfig(ctx, tasks);
+  await ignoreRuns(ctx);
+
+  for (const agent of agents) {
+    await agent.connect(ctx, server);
+    await installSkills(ctx, agent);
+  }
+
+  report(ctx, agents, io);
+  return ctx.changes;
+}
+
+const RANK: Record<Change["status"], number> = { created: 3, updated: 2, skipped: 1, unchanged: 0 };
+
+/** One line per file: a file edited by two steps is reported once, with the stronger status. */
+function merged(changes: Change[]): Change[] {
+  const byPath = new Map<string, Change>();
+  for (const change of changes) {
+    const seen = byPath.get(change.path);
+    if (!seen) byPath.set(change.path, { ...change });
+    else {
+      if (RANK[change.status] > RANK[seen.status]) seen.status = change.status;
+      seen.note = seen.note ?? change.note;
+    }
+  }
+  return [...byPath.values()];
+}
+
+function report(ctx: Context, agents: AgentAdapter[], io: InitIO) {
+  const verb = (status: Change["status"]) =>
+    ctx.dryRun && (status === "created" || status === "updated") ? `would be ${status}` : status;
+  const lines = merged(ctx.changes);
+  const width = Math.max(...lines.map((c) => verb(c.status).length));
+  io.out(
+    `${ctx.dryRun ? "kodel init (dry run, nothing is written)" : "kodel init"}: ${ctx.root}\n`,
+  );
+  for (const change of lines) {
+    const note = change.note ? `  (${change.note})` : "";
+    io.out(`  ${verb(change.status).padEnd(width)}  ${change.path}${note}\n`);
+  }
+  const unverified = agents.filter((agent) => !agent.verified).map((agent) => agent.label);
+  if (unverified.length > 0) {
+    io.out(`note: the setup for ${unverified.join(", ")} is not checked on the real agent yet\n`);
+  }
+  if (!ctx.dryRun) io.out("next: restart the agent so that it connects the kodel server\n");
+}
