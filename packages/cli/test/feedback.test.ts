@@ -28,6 +28,7 @@ async function cli(
     interactive,
     environment: {},
     confirm: async () => answer,
+    select: async () => [],
     fetch: async (url, init) => {
       const call = { url, init };
       calls.push(call);
@@ -143,6 +144,7 @@ describe("feedback", () => {
       },
       interactive: false,
       confirm: async () => true,
+      select: async () => [],
       fetch: async () => {
         throw new TypeError("fetch failed", { cause: new Error("getaddrinfo ENOTFOUND kodel.ai") });
       },
