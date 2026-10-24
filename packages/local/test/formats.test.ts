@@ -210,6 +210,25 @@ describe("every stored format is opened by the current engine", () => {
     }
   });
 
+  test("hp9r_v1_check_results_without_check_id_and_params_hash_are_read", async () => {
+    await copyRuns("v1");
+    const host = hostFor();
+    const store = new FileStore({ root: join(root, ".kodel") });
+    let seen = 0;
+    for (const id of Object.keys(V1_RUNS)) {
+      const finished = (await store.readJournal(id)).filter((r) => r.event === "check_finished");
+      for (const record of finished) {
+        expect(record.check_id).toBeUndefined();
+        expect(record.params_hash).toBeUndefined();
+      }
+      seen += finished.length;
+      const report = await (await host.open(id))?.report();
+      const checks = report?.nodes.flatMap((n) => n.attempts.flatMap((a) => a.checks ?? []));
+      expect(checks?.length).toBe(finished.length);
+    }
+    expect(seen).toBeGreaterThan(0);
+  });
+
   test("formats_a_fixture_reads_as_unsealed_never_as_modified", async () => {
     await copyRuns("v1");
     const host = hostFor();
