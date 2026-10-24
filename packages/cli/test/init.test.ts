@@ -24,6 +24,10 @@ interface Person {
   picks?: string[][];
   /** The answer to the yes/no question about the task tracker. */
   tracker?: boolean;
+  /** The answer to the question about the hooks; an empty line (the default) when not given. */
+  hooks?: boolean;
+  /** The PATH the command sees. */
+  path?: string;
 }
 
 async function init(person: Person, ...args: string[]) {
@@ -31,6 +35,7 @@ async function init(person: Person, ...args: string[]) {
   let err = "";
   const questions: { question: string; choices: Choice[] }[] = [];
   const asked: string[] = [];
+  const hooksAsked: { question: string; defaultYes: boolean | undefined }[] = [];
   const code = await runCli(["init", ...args], {
     cwd: dir,
     out: (t) => {
@@ -40,8 +45,12 @@ async function init(person: Person, ...args: string[]) {
       err += t;
     },
     interactive: person.interactive ?? false,
-    environment: {},
-    confirm: async (question) => {
+    environment: { PATH: person.path ?? "" },
+    confirm: async (question, defaultYes) => {
+      if (/hooks/i.test(question)) {
+        hooksAsked.push({ question, defaultYes });
+        return person.hooks ?? defaultYes ?? false;
+      }
       asked.push(question);
       return person.tracker ?? false;
     },
@@ -50,7 +59,7 @@ async function init(person: Person, ...args: string[]) {
       return person.picks?.[questions.length - 1] ?? [];
     },
   });
-  return { code, out, err, questions, asked };
+  return { code, out, err, questions, asked, hooksAsked };
 }
 
 const read = (rel: string) => readFile(join(dir, rel), "utf8");
@@ -312,5 +321,164 @@ describe("skills", () => {
     await installSkills(c, claude, [skill]);
     expect(c.changes[0]?.status).toBe("skipped");
     expect(await read(file)).toBe("mine\n");
+  });
+});
+
+describe("kodel init hooks", () => {
+  const SETTINGS = ".claude/settings.local.json";
+  const claudeHooks = async () => (await json(SETTINGS)).hooks as Record<string, unknown[]>;
+  const commandsOf = (groups: unknown[]) =>
+    groups.flatMap((g) => (g as { hooks: { command: string }[] }).hooks.map((h) => h.command));
+
+  test("hooks_are_registered_by_default_for_the_chosen_agent", async () => {
+    await init({}, "--agent", "claude-code");
+    const hooks = await claudeHooks();
+    expect(Object.keys(hooks)).toEqual(["SessionStart"]);
+    expect(commandsOf(hooks.SessionStart ?? [])).toEqual(["kodel-hook claude-code"]);
+    const ignore = await read(".gitignore");
+    for (const line of [SETTINGS, ".kodel/sessions.jsonl", ".kodel/hooks.log"]) {
+      expect(ignore.split("\n")).toContain(`/${line}`);
+    }
+  });
+
+  test("yes_and_no_terminal_register_the_hooks_too", async () => {
+    await init({ interactive: true }, "--agent", "claude-code", "--yes");
+    expect(Object.keys(await claudeHooks())).toEqual(["SessionStart"]);
+  });
+
+  test("no_hooks_leaves_every_hook_file_and_ignore_line_alone", async () => {
+    const { out } = await init({}, "--agent", "claude-code,codex,opencode", "--no-hooks");
+    await expect(read(SETTINGS)).rejects.toThrow();
+    await expect(read(".codex/hooks.json")).rejects.toThrow();
+    await expect(read(".opencode/plugins/kodel-hooks.ts")).rejects.toThrow();
+    expect(await read(".gitignore")).not.toContain("sessions.jsonl");
+    expect(out).not.toContain("trust");
+  });
+
+  test("the_question_defaults_to_yes_and_a_no_is_honoured", async () => {
+    const yes = await init({ interactive: true, picks: [["claude-code"]] });
+    expect(yes.hooksAsked).toHaveLength(1);
+    expect(yes.hooksAsked[0]?.defaultYes).toBe(true);
+    expect(Object.keys(await claudeHooks())).toEqual(["SessionStart"]);
+
+    await rm(join(dir, ".claude"), { recursive: true });
+    const no = await init({ interactive: true, picks: [["claude-code"]], hooks: false });
+    expect(no.hooksAsked).toHaveLength(1);
+    await expect(read(SETTINGS)).rejects.toThrow();
+  });
+
+  test("the_hooks_flag_asks_nothing", async () => {
+    const { hooksAsked } = await init({ interactive: true, picks: [["claude-code"]] }, "--hooks");
+    expect(hooksAsked).toEqual([]);
+    expect(Object.keys(await claudeHooks())).toEqual(["SessionStart"]);
+  });
+
+  test("dry_run_lists_the_hook_files_and_writes_nothing", async () => {
+    const { out } = await init({}, "--agent", "claude-code,codex,opencode", "--dry-run");
+    expect(out).toContain(SETTINGS);
+    expect(out).toContain(".codex/hooks.json");
+    expect(out).toContain(".opencode/plugins/kodel-hooks.ts");
+    await expect(read(SETTINGS)).rejects.toThrow();
+    await expect(read(".gitignore")).rejects.toThrow();
+  });
+
+  test("the_persons_own_hooks_stay_and_ours_is_added_once", async () => {
+    await mkdir(join(dir, ".claude"), { recursive: true });
+    await writeFile(
+      join(dir, SETTINGS),
+      JSON.stringify({
+        permissions: { allow: ["Bash(ls)"] },
+        hooks: {
+          SessionStart: [{ hooks: [{ type: "command", command: "echo mine" }] }],
+          Stop: [{ hooks: [{ type: "command", command: "echo stop" }] }],
+        },
+      }),
+    );
+    await init({}, "--agent", "claude-code");
+    const again = await init({}, "--agent", "claude-code");
+    const settings = await json(SETTINGS);
+    expect(settings.permissions.allow).toEqual(["Bash(ls)"]);
+    expect(commandsOf(settings.hooks.SessionStart)).toEqual([
+      "echo mine",
+      "kodel-hook claude-code",
+    ]);
+    expect(commandsOf(settings.hooks.Stop)).toEqual(["echo stop"]);
+    expect(again.out).toMatch(/unchanged\s+\.claude\/settings\.local\.json/);
+  });
+
+  test("a_rerun_changes_nothing_and_the_ignore_lines_are_added_once", async () => {
+    await init({}, "--agent", "claude-code,codex,opencode");
+    const files = [SETTINGS, ".codex/hooks.json", ".opencode/plugins/kodel-hooks.ts", ".gitignore"];
+    const before = await Promise.all(files.map(read));
+    await init({}, "--agent", "claude-code,codex,opencode");
+    expect(await Promise.all(files.map(read))).toEqual(before);
+    const ignore = (await read(".gitignore")).split("\n");
+    expect(ignore.filter((line) => line === "/.kodel/sessions.jsonl")).toHaveLength(1);
+  });
+
+  test("broken_json_and_comments_are_skipped_with_a_note", async () => {
+    await mkdir(join(dir, ".claude"), { recursive: true });
+    for (const text of ["{ not json", '{\n  // mine\n  "hooks": {},\n}\n']) {
+      await writeFile(join(dir, SETTINGS), text);
+      const { out } = await init({}, "--agent", "claude-code");
+      expect(await read(SETTINGS)).toBe(text);
+      expect(out).toMatch(/skipped\s+\.claude\/settings\.local\.json/);
+    }
+  });
+
+  test("the_hook_command_is_the_server_command_with_hook_for_mcp", async () => {
+    await init(
+      {},
+      "--agent",
+      "claude-code",
+      "--server-command",
+      "bun packages/cli/src/main.ts mcp",
+    );
+    const hooks = await claudeHooks();
+    expect(commandsOf(hooks.SessionStart ?? [])).toEqual([
+      "bun packages/cli/src/main.ts hook claude-code",
+    ]);
+  });
+
+  test("codex_is_told_to_trust_the_hook_every_time_also_on_a_rerun_and_a_dry_run", async () => {
+    const first = await init({}, "--agent", "codex");
+    expect(first.out).toContain("Codex does not run project hooks until you trust them");
+    expect(first.out).toContain("/hooks");
+    const hooks = await json(".codex/hooks.json");
+    expect(commandsOf(hooks.hooks.SessionStart)).toEqual(["kodel-hook codex"]);
+    expect((await init({}, "--agent", "codex")).out).toContain("until you trust them");
+    expect((await init({}, "--agent", "codex", "--dry-run")).out).toContain("until you trust them");
+  });
+
+  test("opencode_gets_a_plugin_and_a_foreign_file_is_not_replaced", async () => {
+    const file = ".opencode/plugins/kodel-hooks.ts";
+    await init({}, "--agent", "opencode");
+    const plugin = await read(file);
+    expect(plugin).toContain("// kodel:events SessionStart");
+    expect(plugin).toContain('"kodel-hook opencode"');
+
+    await writeFile(join(dir, file), "mine\n");
+    const kept = await init({}, "--agent", "opencode");
+    expect(await read(file)).toBe("mine\n");
+    expect(kept.out).toMatch(/skipped\s+\.opencode\/plugins\/kodel-hooks\.ts/);
+    await init({}, "--agent", "opencode", "--force");
+    expect(await read(file)).toBe(plugin);
+  });
+
+  test("a_missing_kodel_on_the_path_is_warned_about_and_a_found_one_is_not", async () => {
+    const missing = await init({ path: "/nonexistent" }, "--agent", "claude-code");
+    expect(missing.out).toContain("`kodel-hook` is not on the PATH");
+    await mkdir(join(dir, "bin"));
+    await writeFile(join(dir, "bin", "kodel-hook"), "#!/bin/sh\n", { mode: 0o755 });
+    const found = await init({ path: join(dir, "bin") }, "--agent", "claude-code");
+    expect(found.out).not.toContain("is not on the PATH");
+  });
+
+  test("hooks_are_not_called_unchecked_now_that_the_real_agent_tests_pass_but_the_codex_sandbox_is_named", async () => {
+    const { out } = await init({}, "--agent", "claude-code,codex,opencode");
+    expect(out).not.toContain("the hooks for");
+    // The MCP setup of Codex and OpenCode is still the unchecked one.
+    expect(out).toContain("the setup for Codex, OpenCode is not checked on the real agent yet");
+    expect(out).toContain("read-only session the hook cannot write .kodel/sessions.jsonl");
   });
 });
