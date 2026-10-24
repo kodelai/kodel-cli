@@ -1,0 +1,10 @@
+{
+  "v": 2,
+  "runId": "r_0mvimyn54_tc9o",
+  "pipeline": "dev",
+  "task": "Let a new pipeline be proposed and created through the pipeline_propose_change machinery when the project has no run yet (step 2 of the pipeline_docs work; pipeline_docs and its topics are already in main). The agent, asked to write a pipeline for a project, should hand it over through the engine and a person should accept it with a terminal-only command, instead of the agent only showing YAML in chat. My earlier sketch is NOT decided, treat it as one option for the plan to compare with others (including making the creation a recorded run): run_id optional on pipeline_propose_change; the proposal kept outside .kodel/pipelines/ (for example .kodel/proposals/<name>.yaml), replaced by the next proposal and taken back by an empty pipeline; refused if a pipeline with that name exists; validated with parsePipeline plus warnings for commands the project does not have; accepted by a human-only command with a terminal and confirmation (for example kodel pipeline proposals show|apply|discard) that writes .kodel/pipelines/<name>.yaml. The plan must settle: the tool surface and its pinned snapshot tests, the host interface and store change, the CLI command, the changes to SERVER_INSTRUCTIONS and to AGENTS.md rules (agent never accepts, deny rules), the update of the pipeline-design topic in pipeline_docs (it must stop saying the person saves the file by hand), a real-agent scenario, and what is left for the thin design skill (step 3, not in this run). Keep the change small enough for the diff limit of the impl step, and say which part is left for a follow-up if it does not fit.",
+  "specHash": "ae3a83dba5509be9",
+  "createdAt": 1792618821544,
+  "workdir": "/kodel-fixture/workdir/r_0mvimyn54_tc9o",
+  "branch": "kodel/r_0mvimyn54_tc9o"
+}

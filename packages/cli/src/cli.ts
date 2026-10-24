@@ -7,6 +7,7 @@
 
 import { join } from "node:path";
 import { LocalPipelineHost, loadConfig, openTaskService } from "@kodel-ai/local";
+import { MAX_PAYLOAD_BYTES, runHook } from "@kodel-ai/local/hooks";
 import {
   type Decision,
   KodelError,
@@ -50,8 +51,8 @@ export interface CliEnv {
   err(text: string): void;
   /** Whether a person is at a terminal: stdin and stdout are both a TTY. */
   interactive: boolean;
-  /** Ask the person a yes/no question. */
-  confirm(question: string): Promise<boolean>;
+  /** Ask the person a yes/no question; the answer to an empty line is `defaultYes` (no unless given). */
+  confirm(question: string, defaultYes?: boolean): Promise<boolean>;
   /** Ask the person to pick any number of the choices; the answer is the values picked. */
   select(question: string, choices: Choice[]): Promise<string[]>;
   /** The environment the command runs in (`process.env`), looked at for the engine's marker. */
@@ -292,6 +293,8 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .option("-y, --yes", "ask nothing: use the flags and the agents found here")
     .option("--tasks", "turn the local task tracker on (asked when not given)")
     .option("--server-command <command>", "how the agent starts the server", "kodel mcp")
+    .option("--hooks", "register the hooks without asking (they are on by default)")
+    .option("--no-hooks", "do not register the hooks that let Kodel see your agent sessions")
     .option("--force", "replace skills that were edited or that kodel did not write")
     .option("--dry-run", "show what would change without writing")
     .action(
@@ -300,6 +303,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         yes?: boolean;
         tasks?: true;
         serverCommand: string;
+        hooks?: boolean;
         force?: boolean;
         dryRun?: boolean;
       }) => {
@@ -314,6 +318,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
               yes: opts.yes ?? false,
               tasks: opts.tasks,
               serverCommand: opts.serverCommand,
+              hooks: opts.hooks,
               force: opts.force ?? false,
               dryRun: opts.dryRun ?? false,
             },
@@ -331,6 +336,21 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         }
       },
     );
+
+  program
+    .command("hook <agent>")
+    .description(
+      "Called by a coding agent on its events (reads the event on stdin; always exits 0)",
+    )
+    .action(async (agent: string) => {
+      // Never fails and prints nothing unless a handler means it: see `hooks/run.ts`.
+      const input = env.readStdin ? await env.readStdin().catch(() => "") : "";
+      const out = await runHook(agent, {
+        text: input,
+        tooLarge: Buffer.byteLength(input) > MAX_PAYLOAD_BYTES,
+      });
+      if (out !== "") env.out(out);
+    });
 
   program
     .command("status [run]")

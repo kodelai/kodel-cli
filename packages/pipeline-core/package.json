@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./hooks": "./src/hooks-index.ts",
     "./mcp": "./src/mcp/index.ts"
   },
   "dependencies": {

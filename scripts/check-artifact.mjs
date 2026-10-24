@@ -1,7 +1,16 @@
 // Verifies the built CLI artifact under plain Node (not Bun): it must start, report its version,
 // print help, and stay within the size budget.
-import { execFileSync } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -35,6 +44,78 @@ for (const line of [
   "Complete pipelines. Replace the commands",
 ]) {
   if (!built.includes(line)) fail(`the documentation line "${line}" is not in the artifact`);
+}
+
+// The hook runs on every registered event of an agent, so it is a bundle of its own: small, quiet, always
+// exit 0, and quick to start. Its start is compared with a bare `node -e 0` measured in the same run, so a
+// slow machine does not fail it; what is limited is what the hook adds.
+const hookArtifact = join(root, "packages/cli/dist/kodel-hook.js");
+const HOOK_BUDGET_BYTES = 100 * 1024;
+const HOOK_BUDGET_OVERHEAD_MS = 35;
+const HOOK_RUNS = 15;
+
+const hookSize = statSync(hookArtifact).size;
+if (hookSize > HOOK_BUDGET_BYTES)
+  fail(`hook bundle size ${hookSize} exceeds budget ${HOOK_BUDGET_BYTES}`);
+
+const project = mkdtempSync(join(tmpdir(), "kodel-artifact-"));
+try {
+  mkdirSync(join(project, ".kodel"));
+  writeFileSync(join(project, ".kodel", "config.yaml"), "version: 1\n");
+  const event = (name, over = {}) =>
+    JSON.stringify({ hook_event_name: name, session_id: "check-1", cwd: project, ...over });
+  const runHook = (input, args = ["claude-code"]) =>
+    spawnSync(process.execPath, [hookArtifact, ...args], { input, encoding: "utf8" });
+
+  for (const [label, input, args] of [
+    ["empty stdin", "", undefined],
+    ["garbage", "\u001b[2J not json", undefined],
+    ["an unknown agent", event("SessionStart"), ["emacs"]],
+    ["no agent", event("SessionStart"), []],
+  ]) {
+    const r = runHook(input, args);
+    if (r.status !== 0 || r.stdout !== "" || r.stderr !== "") {
+      fail(
+        `the hook bundle must exit 0 and say nothing on ${label}: exit ${r.status}, ${r.stdout}${r.stderr}`,
+      );
+    }
+  }
+  const registered = runHook(event("SessionStart"));
+  if (registered.status !== 0 || registered.stdout !== "" || registered.stderr !== "") {
+    fail("the hook bundle must record a session start silently");
+  }
+  const index = join(project, ".kodel", "sessions.jsonl");
+  if (
+    !existsSync(index) ||
+    JSON.parse(readFileSync(index, "utf8").trim()).session_id !== "check-1"
+  ) {
+    fail("the hook bundle did not record the session in .kodel/sessions.jsonl");
+  }
+
+  const timed = (command, args, input) => {
+    const t = process.hrtime.bigint();
+    spawnSync(command, args, { input, stdio: ["pipe", "ignore", "ignore"] });
+    return Number(process.hrtime.bigint() - t) / 1e6;
+  };
+  const median = (list) => [...list].sort((a, b) => a - b)[Math.floor(list.length / 2)];
+  const bare = [];
+  const hook = [];
+  const payload = event("PreToolUse");
+  for (let i = 0; i < HOOK_RUNS; i += 1) {
+    bare.push(timed(process.execPath, ["-e", "0"], ""));
+    hook.push(timed(process.execPath, [hookArtifact, "claude-code"], payload));
+  }
+  const overhead = median(hook) - median(bare);
+  console.log(
+    `hook start: ${median(hook).toFixed(1)} ms, bare node ${median(bare).toFixed(1)} ms, adds ${overhead.toFixed(1)} ms (budget ${HOOK_BUDGET_OVERHEAD_MS} ms), ${hookSize} bytes`,
+  );
+  if (overhead > HOOK_BUDGET_OVERHEAD_MS) {
+    fail(
+      `the hook adds ${overhead.toFixed(1)} ms to the start of node, above the budget of ${HOOK_BUDGET_OVERHEAD_MS} ms`,
+    );
+  }
+} finally {
+  rmSync(project, { recursive: true, force: true });
 }
 
 console.log(`artifact ok under node ${process.version}: ${size} bytes, version ${version}`);

@@ -6,8 +6,17 @@
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { loadConfig } from "@kodel-ai/local";
-import { AGENT_IDS, AGENTS, type AgentAdapter, detectAgents, type ServerCommand } from "./agents";
+import { defaultHookRegistry, HOOK_LOG, hookCommand, SESSIONS_INDEX } from "@kodel-ai/local/hooks";
+import {
+  AGENT_IDS,
+  AGENTS,
+  type AgentAdapter,
+  detectAgents,
+  onPath,
+  type ServerCommand,
+} from "./agents";
 import { type Change, type Context, editFile, readIfExists } from "./files";
+import { hookFile, registerHooks } from "./hooks";
 import { installSkills } from "./skills";
 
 /** A problem to report to the person without a stack trace. */
@@ -25,8 +34,8 @@ export interface InitIO {
   interactive: boolean;
   /** Ask for any number of the choices; the answer is the values picked. */
   select(question: string, choices: Choice[]): Promise<string[]>;
-  /** Ask a yes/no question; the default answer is no. */
-  confirm(question: string): Promise<boolean>;
+  /** Ask a yes/no question; the default answer is no unless `defaultYes`. */
+  confirm(question: string, defaultYes?: boolean): Promise<boolean>;
   environment: Record<string, string | undefined>;
 }
 
@@ -40,12 +49,16 @@ export interface InitOptions {
   tasks?: boolean;
   /** The command the agent starts the server with. */
   serverCommand: string;
+  /** Register the hooks. Without it the person is asked (default yes), or they are registered. */
+  hooks?: boolean;
   force: boolean;
   dryRun: boolean;
 }
 
 const KODEL_DIR = ".kodel";
 const IGNORED = ["/.kodel/runs", "/.kodel/worktrees"];
+/** What the hook writes into the project; it is personal, like the run history. */
+const HOOK_IGNORED = [SESSIONS_INDEX, HOOK_LOG].map((file) => `/${file.replaceAll("\\", "/")}`);
 
 function configText(tasks: boolean): string {
   return [
@@ -118,7 +131,7 @@ async function setUpConfig(ctx: Context, tasks: boolean) {
   }
 }
 
-async function ignoreRuns(ctx: Context) {
+async function ignoreLines(ctx: Context, lines: string[]) {
   const isGit = await stat(join(ctx.root, ".git")).then(
     () => true,
     () => false,
@@ -127,19 +140,55 @@ async function ignoreRuns(ctx: Context) {
     ctx.changes.push({
       path: ".gitignore",
       status: "skipped",
-      note: `${IGNORED.join(" and ")} are not ignored: this is not the top of a git repository`,
+      note: `${lines.join(" and ")} are not ignored: this is not the top of a git repository`,
     });
     return;
   }
   await editFile(ctx, ".gitignore", (previous) => {
     const have = new Set((previous ?? "").split(/\r?\n/).map((line) => line.trim()));
-    const missing = IGNORED.filter((line) => !have.has(line) && !have.has(line.slice(1)));
+    const missing = lines.filter((line) => !have.has(line) && !have.has(line.slice(1)));
     if (missing.length === 0) return { text: previous ?? "" };
     const base = previous === undefined || previous === "" ? "" : `${previous.trimEnd()}\n\n`;
     return {
-      text: `${base}# Kodel: run history and the worktrees of the runs.\n${missing.join("\n")}\n`,
+      text: `${base}# Kodel: run history, the worktrees of the runs, and what the hooks write.\n${missing.join("\n")}\n`,
     };
   });
+}
+
+async function chooseHooks(opts: InitOptions, io: InitIO, canAsk: boolean): Promise<boolean> {
+  if (opts.hooks !== undefined) return opts.hooks;
+  if (!canAsk) return true;
+  return io.confirm(
+    "Register the Kodel hooks? They are what lets Kodel see your agent sessions (personal, not committed).",
+    true,
+  );
+}
+
+/** Register the hooks; the answer is what the person has to know afterwards. */
+async function setUpHooks(
+  ctx: Context,
+  agents: AgentAdapter[],
+  serverCommand: string,
+  environment: Record<string, string | undefined>,
+): Promise<string[]> {
+  const notes: string[] = [];
+  const registry = defaultHookRegistry();
+  for (const agent of agents) {
+    await registerHooks(ctx, agent.id, serverCommand, registry.events(agent.id));
+  }
+  const program = hookCommand(serverCommand, "claude-code").split(/\s+/)[0] ?? "";
+  if (program !== "" && !/[\\/]/.test(program) && !(await onPath(program, environment.PATH))) {
+    notes.push(
+      `\`${program}\` is not on the PATH: the agents will not find it to run the hook; install it or give --server-command`,
+    );
+  }
+  if (agents.some((agent) => agent.id === "codex")) {
+    notes.push(
+      "Codex does not run project hooks until you trust them once: start Codex in this project, open /hooks and trust the Kodel hook (kodel init cannot do that for you)",
+      "Codex runs hooks inside its sandbox: in a read-only session the hook cannot write .kodel/sessions.jsonl, so that session is not recorded",
+    );
+  }
+  return notes;
 }
 
 export async function runInit(opts: InitOptions, io: InitIO): Promise<Change[]> {
@@ -152,18 +201,23 @@ export async function runInit(opts: InitOptions, io: InitIO): Promise<Change[]> 
   const canAsk = io.interactive && !opts.yes;
   const agents = await chooseAgents(opts, io, canAsk);
   const tasks = await chooseTasks(opts, io, canAsk);
+  const hooks = await chooseHooks(opts, io, canAsk);
 
   const ctx: Context = { root: opts.root, dryRun: opts.dryRun, force: opts.force, changes: [] };
 
   await setUpConfig(ctx, tasks);
-  await ignoreRuns(ctx);
+  await ignoreLines(ctx, [
+    ...IGNORED,
+    ...(hooks ? [...HOOK_IGNORED, ...agents.map((agent) => `/${hookFile(agent.id)}`)] : []),
+  ]);
 
   for (const agent of agents) {
     await agent.connect(ctx, server);
     await installSkills(ctx, agent);
   }
+  const notes = hooks ? await setUpHooks(ctx, agents, opts.serverCommand, io.environment) : [];
 
-  report(ctx, agents, io);
+  report(ctx, agents, io, hooks, notes);
   return ctx.changes;
 }
 
@@ -183,7 +237,7 @@ function merged(changes: Change[]): Change[] {
   return [...byPath.values()];
 }
 
-function report(ctx: Context, agents: AgentAdapter[], io: InitIO) {
+function report(ctx: Context, agents: AgentAdapter[], io: InitIO, hooks: boolean, notes: string[]) {
   const verb = (status: Change["status"]) =>
     ctx.dryRun && (status === "created" || status === "updated") ? `would be ${status}` : status;
   const lines = merged(ctx.changes);
@@ -199,5 +253,14 @@ function report(ctx: Context, agents: AgentAdapter[], io: InitIO) {
   if (unverified.length > 0) {
     io.out(`note: the setup for ${unverified.join(", ")} is not checked on the real agent yet\n`);
   }
+  const hooksUnverified = hooks
+    ? agents.filter((agent) => !agent.hooksVerified).map((agent) => agent.label)
+    : [];
+  if (hooksUnverified.length > 0) {
+    io.out(
+      `note: the hooks for ${hooksUnverified.join(", ")} are not checked on the real agent yet\n`,
+    );
+  }
+  for (const note of notes) io.out(`note: ${note}\n`);
   if (!ctx.dryRun) io.out("next: restart the agent so that it connects the kodel server\n");
 }
