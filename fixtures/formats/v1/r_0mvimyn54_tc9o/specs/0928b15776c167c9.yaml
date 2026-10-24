@@ -1,0 +1,118 @@
+# The pipeline we use on this repository itself (dogfooding). Syntax: examples/pipelines/feature.yaml.
+name: dev
+description: Plan, implement and verify a change to Kodel, with a human gate on the plan and on the result.
+
+defaults:
+  timeout: 900
+  max_consecutive_failures: 3
+  max_attempts: 10
+
+nodes:
+  - slug: plan
+    kind: agent
+    # Another way for the step to end: the task needs no change. A person has to confirm that.
+    outcomes: [nothing_to_change]
+    prompt: |
+      Task: {{task}}
+      Read AGENTS.md first. Explore the repository and write an implementation plan to
+      docs/plans/{{task.slug}}.md: goal, affected files, steps, test strategy, risks.
+      Do not change any other file.
+      If, after looking, the task needs no change (it is already done, or already true), write the
+      plan file saying so and why, with the evidence, and complete the step with the outcome
+      nothing_to_change instead of the usual one. Do not use it to skip work that is needed.
+    checks:
+      - kind: diff
+        paths: ["docs/plans/{{task.slug}}.md"]
+        mode: changed_only
+        min_lines: 10
+
+  - slug: plan-approval
+    kind: human
+    prompt: "Review the plan. Approve to start implementation, or reject with a reason."
+    instructions: "Read docs/plans/{{task.slug}}.md: does it solve the task, and are its steps and tests concrete enough to implement?"
+    results:
+      columns:
+        severity:    { enum: [blocker, critical, major, minor, info] }
+        location:    location
+        description: text
+
+  - slug: confirm-nothing-to-do
+    kind: human
+    prompt: |
+      The plan says the task needs no change. Read it and check the evidence. Approve to end the
+      run, or reject with what was missed, and the plan is made again.
+    instructions: "Read docs/plans/{{task.slug}}.md and check that its evidence shows the task really needs no change."
+    results:
+      columns:
+        severity:    { enum: [blocker, critical, major, minor, info] }
+        location:    location
+        description: text
+
+  - slug: impl
+    kind: agent
+    prompt: |
+      Implement the approved plan in docs/plans/{{task.slug}}.md.
+      Keep changes within the plan. Add or update tests for the changed behavior.
+      Follow the conventions in AGENTS.md (English only, no `any`, Biome style).
+    checks:
+      - { kind: diff, paths: ["packages/**", "scripts/**", "examples/**", "skills/**", "adapters/**"] }
+
+  - slug: verify
+    kind: command
+    command: "bun run typecheck && bun run lint"
+    expected_duration: 20
+    timeout: 300
+
+  - slug: test
+    kind: command
+    command: "bun test"
+    expected_duration: 60
+    timeout: 900
+
+  - slug: build
+    kind: command
+    command: "bun run build && bun run check:artifact"
+    expected_duration: 30
+    timeout: 300
+
+  - slug: review
+    kind: agent
+    fresh_context: true     # an independent look: not by the one who wrote the change
+    prompt: |
+      Review the changes against the plan in docs/plans/{{task.slug}}.md and against AGENTS.md.
+      Report every problem as a finding.
+    checks:
+      - kind: result
+        columns:
+          severity:    { enum: [blocker, critical, major, minor, info] }
+          location:    location
+          description: text
+        fail_when: { severity: [blocker, critical, major] }
+        on_fail: blocking_findings
+
+  - slug: final-approval
+    kind: human
+    prompt: |
+      Look at the diff and try the change. Approve to finish, or reject with what is wrong.
+    results:
+      columns:
+        severity:    { enum: [blocker, critical, major, minor, info] }
+        location:    location
+        description: text
+
+edges:
+  - { from: plan,           to: plan-approval }
+  - { from: plan,           to: confirm-nothing-to-do, when: nothing_to_change }
+  - { from: confirm-nothing-to-do, to: plan,  when: rejected }
+  - { from: plan-approval,  to: impl,         when: approved }
+  - { from: plan-approval,  to: plan,         when: rejected }
+  - { from: impl,           to: verify }
+  - { from: verify,         to: test }
+  - { from: verify,         to: impl,         when: failed }
+  - { from: test,           to: build }
+  - { from: test,           to: impl,         when: failed }
+  - { from: build,          to: review }
+  - { from: build,          to: impl,         when: failed }
+  - { from: review,         to: final-approval }
+  - { from: review,         to: impl,         when: blocking_findings }
+  - { from: final-approval, to: impl,         when: rejected }
