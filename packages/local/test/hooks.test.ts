@@ -1,5 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,6 +27,7 @@ import {
   runHook,
   SESSIONS_INDEX,
 } from "../src/hooks";
+import { findProjectRoot as findProject } from "../src/project-root";
 
 let base: string;
 
@@ -78,6 +89,29 @@ describe("findProjectRoot", () => {
     await mkdir(join(worktree, "src"), { recursive: true });
     expect(await findProjectRoot(worktree)).toBe(root);
     expect(await findProjectRoot(join(worktree, "src"))).toBe(root);
+  });
+
+  test("tXJPC_a_linked_worktree_anywhere_belongs_to_the_main_checkout_like_for_the_cli", async () => {
+    const root = await project("repo");
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
+    git("init", "-q");
+    git("config", "user.email", "t@example.com");
+    git("config", "user.name", "T");
+    git("add", "-A");
+    git("commit", "-q", "-m", "initial");
+    const linked = join(base, "elsewhere");
+    git("worktree", "add", "-q", "-b", "side", linked);
+    const real = await realpath(linked);
+    expect(await findProjectRoot(real)).toBe(root);
+    // The same answer the CLI and the host get, so the events go to the same project.
+    expect((await findProject(real)).root).toBe(root);
+  });
+
+  test("tXJPC_a_marker_that_is_a_symbolic_link_is_not_a_project_for_a_hook_either", async () => {
+    await mkdir(join(base, "l", ".kodel"), { recursive: true });
+    await writeFile(join(base, "real.yaml"), "");
+    await symlink(join(base, "real.yaml"), join(base, "l", ".kodel", "config.yaml"));
+    expect(await findProjectRoot(join(base, "l"))).toBeUndefined();
   });
 
   test("a_nested_project_that_is_not_a_worktree_keeps_its_own_root", async () => {
