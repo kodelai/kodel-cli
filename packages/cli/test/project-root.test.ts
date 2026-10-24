@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -106,6 +107,30 @@ describe("tXJPC_cli_project_root", () => {
       expect(result.out).toBe("");
     }
     expect(await readdir(outside)).toEqual([]);
+  });
+
+  test("kodel init makes the project it never looks for, and the other commands then find it", async () => {
+    const fresh = join(outside, "fresh");
+    await mkdir(join(fresh, "deep"), { recursive: true });
+    expect((await cliIn(fresh, "status")).err).toContain("no Kodel project here");
+    const init = await cliIn(fresh, "init", "--yes", "--agent", "claude-code", "--no-hooks");
+    expect(init.code, init.err + init.out).toBe(0);
+    expect(existsSync(join(fresh, ".kodel", "config.yaml"))).toBe(true);
+    // From a folder below it the project is found, with the climb said on stderr.
+    const below = await cliIn(join(fresh, "deep"), "status");
+    expect(below.code, below.err).toBe(0);
+    expect(below.err).toContain(`using the project at ${fresh}`);
+    // init in a subfolder makes a project of its own there, not in the one above.
+    const nested = await cliIn(
+      join(fresh, "deep"),
+      "init",
+      "--yes",
+      "--agent",
+      "claude-code",
+      "--no-hooks",
+    );
+    expect(nested.code, nested.err + nested.out).toBe(0);
+    expect(existsSync(join(fresh, "deep", ".kodel", "config.yaml"))).toBe(true);
   });
 
   test("--root wins, also from outside any project", async () => {
