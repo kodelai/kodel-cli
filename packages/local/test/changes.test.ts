@@ -97,6 +97,51 @@ describe("a pipeline file edited under a run in the repository root", () => {
     expect(JSON.stringify(held)).not.toContain("node -e 1"); // the new text is not sent to the agent
   });
 
+  test("tNN_the_config_turns_the_offer_of_kodel_wait_off_and_on_again_without_a_restart", async () => {
+    const run = await startRun();
+    await run.completeStep("write", 1);
+    await run.waitForRest(5_000);
+    // What a command that only looks says and what the agent is told must agree.
+    const offered = async () => {
+      const [looked, told] = [await run.inspect(), await run.nextStep()].map((step) =>
+        JSON.stringify(step).includes(`kodel wait ${run.runId}`),
+      );
+      expect(looked).toBe(told);
+      return looked;
+    };
+    expect(await offered()).toBe(true);
+    await writeFile(
+      join(dir, ".kodel", "config.yaml"),
+      "worktree:\n  mode: off\nagent_hints:\n  wait: false\n",
+    );
+    expect(await offered()).toBe(false);
+    // A config that cannot be read leaves the default (the commands that need it say what is wrong).
+    await writeFile(join(dir, ".kodel", "config.yaml"), "agent_hints: [\n");
+    expect(await offered()).toBe(true);
+    await writeFile(join(dir, ".kodel", "config.yaml"), "worktree:\n  mode: off\n");
+    expect(await offered()).toBe(true);
+  });
+
+  test("tNN_kodel_wait_is_not_offered_behind_a_step", async () => {
+    // Behind a step the run still reads as the agent's step to a command that only looks, so such a
+    // command would return at once and the agent would go round again.
+    const run = await startRun();
+    await writeFile(join(dir, FILE), PIPELINE("node -e 1"));
+    const held = await run.nextStep({ atCompletion: true });
+    expect(waitingReason(held)).toBe("pipeline_changed");
+    expect(JSON.stringify(held)).not.toContain("kodel wait");
+  });
+
+  test("tNN_kodel_wait_is_offered_when_the_change_waits_behind_a_gate", async () => {
+    const run = await startRun();
+    await run.completeStep("write", 1);
+    await run.waitForRest(5_000);
+    await writeFile(join(dir, FILE), PIPELINE("node -e 1"));
+    const step = await run.nextStep();
+    expect(waitingReason(step)).toBe("pipeline_changed");
+    expect(JSON.stringify(step)).toContain(`kodel wait ${run.runId}`);
+  });
+
   test("restoring_the_file_ends_the_pending_change_without_a_command", async () => {
     const run = await startRun();
     await writeFile(join(dir, FILE), PIPELINE("node -e 1"));

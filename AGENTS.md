@@ -36,13 +36,21 @@ This repository adds these rules:
 - Do not run `gate`, `ack`, `seal`, `resume`, `pipeline changes apply|discard|restore` or
   `pipeline proposals apply|discard`: they refuse to run without a terminal and ask for a confirmation, so
   trying them only fails.
+- `kodel wait <run>` is yours: it only watches and prints one line when the person has decided, so start it
+  in the background (Claude Code: the Bash tool with `run_in_background`) when a `waiting` answer offers it,
+  end your turn, and call `pipeline_next_step` when it reports. Never poll `pipeline_next_step` in a loop to
+  wait for a person. If it says `still waiting` it gave up (`--timeout`, 8 hours by default): do not start it
+  again, tell the person you stopped watching. A project can turn the offer off with
+  `agent_hints: { wait: false }` in the project config; then no answer mentions `kodel wait`, and you just
+  end your turn and wait to be told.
 
 Tasks (`docs/tasks.md`) are off unless `.kodel/config.yaml` has `tasks: { enabled: true }`; when they are on the
 server also offers the `task_*` tools. When the user asks you to "create a task" for something you should not
 fix now, use `task_create` (after one `task_schema`) and tell the user the key; change a status only when
 asked. Do not edit the files in `.kodel/tasks/` by hand: the tools keep their format and their keys.
 
-Humans: `bun packages/cli/src/main.ts status` lists runs, `report` shows where the time went; the same
+Humans: `bun packages/cli/src/main.ts status` lists runs, `report` shows where the time went, `wait <run>` stays
+until a run stops waiting for a person (see above); the same
 binary has `gate`, `resume`, `ack`, `seal`, and `pipeline changes` (`show`, `apply`, `discard`, `history`,
 `restore`) for a change of the pipeline of a run that is going, and `pipeline proposals` (`show`, `apply`,
 `discard`) for a pipeline the agent proposed outside a run.

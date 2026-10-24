@@ -3,7 +3,7 @@ import { type PipelineHost, PipelineService, type TaskService } from "@kodel-ai/
 import {
   registerPipelineTools,
   registerTaskTools,
-  SERVER_INSTRUCTIONS,
+  serverInstructions,
   TASK_INSTRUCTIONS,
 } from "@kodel-ai/pipeline-core/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -17,10 +17,14 @@ export type StoppableHost = PipelineHost & { stop?(): number };
  * the instructions are there only when `tasks` is given (the config turned them on): with tasks
  * off the agent is told nothing about them.
  */
-export function createServer(host: PipelineHost, version: string, tasks?: TaskService): McpServer {
-  const instructions = tasks
-    ? `${SERVER_INSTRUCTIONS}\n\n${TASK_INSTRUCTIONS}`
-    : SERVER_INSTRUCTIONS;
+export function createServer(
+  host: PipelineHost,
+  version: string,
+  tasks?: TaskService,
+  options: { waitHint?: boolean } = {},
+): McpServer {
+  const base = serverInstructions(options);
+  const instructions = tasks ? `${base}\n\n${TASK_INSTRUCTIONS}` : base;
   const server = new McpServer({ name: "kodel", version }, { instructions });
   registerPipelineTools(server, new PipelineService(host, { engineVersion: version }));
   if (tasks) registerTaskTools(server, tasks);
@@ -46,8 +50,9 @@ export async function serveStdio(
   host: StoppableHost,
   version: string,
   tasks?: TaskService,
+  options: { waitHint?: boolean } = {},
 ): Promise<void> {
-  const server = createServer(host, version, tasks);
+  const server = createServer(host, version, tasks, options);
   await server.connect(new StdioServerTransport());
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.once(signal, () => {
