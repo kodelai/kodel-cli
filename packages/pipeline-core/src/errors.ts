@@ -37,6 +37,7 @@ export const ERROR_CODES = [
   "TASK_AUTH_FAILED",
   "TASK_ADAPTER_FAILED",
   "TASK_KEY_UNAVAILABLE",
+  "NO_PROJECT",
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];

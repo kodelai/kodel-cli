@@ -563,6 +563,7 @@ describe("a gate whose record of the files cannot be used", () => {
       await rm(join(dir, ".kodel"), { recursive: true, force: true });
       await mkdir(join(dir, ".kodel", "pipelines"), { recursive: true });
       await writeFile(join(dir, ".kodel", "pipelines", "demo.yaml"), DEMO);
+      await writeFile(join(dir, ".kodel", "config.yaml"), "worktree:\n  mode: off\n");
     }
   });
 

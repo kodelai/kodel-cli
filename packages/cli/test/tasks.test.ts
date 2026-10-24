@@ -12,6 +12,8 @@ let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "kodel-clitasks-"));
   await mkdir(join(dir, ".kodel"), { recursive: true });
+  // The marker of a project; an empty config is all defaults.
+  await writeFile(join(dir, ".kodel", "config.yaml"), "");
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });

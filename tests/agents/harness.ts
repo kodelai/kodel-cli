@@ -116,13 +116,28 @@ export function makeSandbox(
   writeFileSync(join(dir, "CLAUDE.md"), `# Test repository\n\n${driver}`);
   writeFileSync(join(dir, ".gitignore"), ".kodel/runs\n.kodel/worktrees\n");
   const config = `${options.worktree === true ? "" : "worktree:\n  mode: off\n"}${options.config ?? ""}`;
-  if (config !== "") writeFileSync(join(dir, ".kodel", "config.yaml"), config);
+  // The config file is the marker of a project, so it is there even when it says nothing.
+  writeFileSync(join(dir, ".kodel", "config.yaml"), config);
   if (options.withProjectSettings) {
     mkdirSync(join(dir, ".claude"), { recursive: true });
     cpSync(join(REPO_ROOT, ".claude/settings.json"), join(dir, ".claude/settings.json"));
   }
   git("add", "-A");
   git("commit", "-q", "-m", "initial");
+  return {
+    dir,
+    stateDir,
+    cleanup() {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(stateDir, { recursive: true, force: true });
+    },
+  };
+}
+
+/** A folder that is no project: no git, no marker, nothing in it. */
+export function makeBareSandbox(): Sandbox {
+  const dir = mkdtempSync(join(tmpdir(), "kodel-agent-bare-"));
+  const stateDir = mkdtempSync(join(tmpdir(), "kodel-agent-state-"));
   return {
     dir,
     stateDir,
@@ -221,6 +236,11 @@ export interface TurnOptions {
   allowedTools: string[];
   /** The directory the agent is started in; the sandbox when left out. */
   cwd?: string;
+  /**
+   * Start the server without `--root`, as a project's own `.mcp.json` does: it finds the project
+   * from the directory the agent is started in.
+   */
+  rootFromCwd?: boolean;
 }
 
 /** One `claude -p` call: the agent works until it ends its turn. */
@@ -230,7 +250,7 @@ export async function runAgentTurn(options: TurnOptions): Promise<AgentTurn> {
     mcpServers: {
       kodel: {
         command: "bun",
-        args: [MAIN_TS, "--root", sandbox.dir, "mcp"],
+        args: options.rootFromCwd ? [MAIN_TS, "mcp"] : [MAIN_TS, "--root", sandbox.dir, "mcp"],
         env: { KODEL_STATE_DIR: sandbox.stateDir },
       },
     },

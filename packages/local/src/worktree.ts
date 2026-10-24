@@ -192,6 +192,7 @@ export class GitWorktreeProvider implements WorkdirProvider {
   }
 
   private async rootIsDirty(): Promise<boolean> {
+    // The pathspecs are relative to `root`, the project folder, so a package project looks at itself.
     const { stdout } = await git(
       ["status", "--porcelain", "--", ".", ":(exclude).kodel"],
       this.root,

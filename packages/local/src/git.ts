@@ -24,6 +24,19 @@ interface GitResult {
   stdout: string;
 }
 
+/**
+ * The way from the top of the repository down to `cwd`, `/`-free at the ends; empty at the top, or
+ * when `cwd` is not in a repository (a project then has no folder of its own inside a worktree).
+ */
+export async function repoPrefix(cwd: string): Promise<string> {
+  try {
+    const { stdout } = await git(["rev-parse", "--show-prefix"], cwd);
+    return stdout.trim().replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
+}
+
 /** Configuration that would let the repository run something on our behalf, switched off. */
 export const SAFE_CONFIG = ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"];
 
@@ -74,6 +87,7 @@ export class GitSnapshotter {
     private readonly root: string,
     options: SnapshotterOptions = {},
   ) {
+    // Relative to `root`, which is the project folder: a package project excludes its own `.kodel`.
     this.exclude = options.exclude ?? [".kodel"];
   }
 
