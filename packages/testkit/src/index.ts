@@ -4,7 +4,10 @@
  * An engine under test implements `ScenarioEngine`; scenarios are plain data.
  * Not published.
  */
+export * from "./agent-history-contract";
 export * from "./dsl";
+export * from "./fake-agent-history";
+export * from "./history-fixtures";
 export * from "./load";
 export * from "./local-engine";
 export * from "./matchers";
