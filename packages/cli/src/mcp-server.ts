@@ -1,10 +1,15 @@
 import { KILL_GRACE_MS } from "@kodel-ai/local";
-import { type PipelineHost, PipelineService, type TaskService } from "@kodel-ai/pipeline-core";
+import {
+  type PipelineHost,
+  PipelineService,
+  type RunTaskLink,
+  type TaskService,
+} from "@kodel-ai/pipeline-core";
 import {
   registerPipelineTools,
   registerTaskTools,
   SERVER_INSTRUCTIONS,
-  TASK_INSTRUCTIONS,
+  taskInstructions,
 } from "@kodel-ai/pipeline-core/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -15,14 +20,22 @@ export type StoppableHost = PipelineHost & { stop?(): number };
 /**
  * Build the MCP server for a host; the transport is the caller's. The task tools and their part of
  * the instructions are there only when `tasks` is given (the config turned them on): with tasks
- * off the agent is told nothing about them.
+ * off the agent is told nothing about them. `runLink` (the config asks for runs to be tied to tasks)
+ * adds `task_key` to pipeline_start and the rule about it to the instructions.
  */
-export function createServer(host: PipelineHost, version: string, tasks?: TaskService): McpServer {
+export function createServer(
+  host: PipelineHost,
+  version: string,
+  tasks?: TaskService,
+  runLink?: RunTaskLink,
+): McpServer {
   const instructions = tasks
-    ? `${SERVER_INSTRUCTIONS}\n\n${TASK_INSTRUCTIONS}`
+    ? `${SERVER_INSTRUCTIONS}\n\n${taskInstructions(runLink?.mode ?? "disabled", runLink !== undefined)}`
     : SERVER_INSTRUCTIONS;
   const server = new McpServer({ name: "kodel", version }, { instructions });
-  registerPipelineTools(server, new PipelineService(host, { engineVersion: version }));
+  registerPipelineTools(server, new PipelineService(host, { engineVersion: version }), {
+    taskLink: tasks !== undefined && runLink !== undefined,
+  });
   if (tasks) registerTaskTools(server, tasks);
   return server;
 }
@@ -46,8 +59,9 @@ export async function serveStdio(
   host: StoppableHost,
   version: string,
   tasks?: TaskService,
+  runLink?: RunTaskLink,
 ): Promise<void> {
-  const server = createServer(host, version, tasks);
+  const server = createServer(host, version, tasks, runLink);
   await server.connect(new StdioServerTransport());
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.once(signal, () => {

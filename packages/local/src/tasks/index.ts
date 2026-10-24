@@ -4,7 +4,12 @@
  * nothing when tasks are off).
  */
 import { join } from "node:path";
-import { TaskAdapterRegistry, TaskService } from "@kodel-ai/pipeline-core";
+import {
+  createRunTaskLink,
+  type RunTaskLink,
+  TaskAdapterRegistry,
+  TaskService,
+} from "@kodel-ai/pipeline-core";
 import { loadConfig, type TasksConfig } from "../config";
 import { localTaskAdapter } from "./local-adapter";
 
@@ -28,6 +33,11 @@ export interface OpenTasksOptions {
 export interface OpenedTasks {
   service: TaskService;
   config: TasksConfig;
+  /**
+   * The tie between a run and a task. Absent when the mode is `disabled` or the adapter cannot
+   * attach runs: nothing then offers `task_key`.
+   */
+  runLink?: RunTaskLink;
 }
 
 /**
@@ -45,7 +55,12 @@ export async function openTaskService(options: OpenTasksOptions): Promise<Opened
     random: options.random ?? Math.random,
   });
   const service = new TaskService(adapter, { timeoutMs: tasks.timeout_s * 1000, now: clock });
-  return { service, config: tasks };
+  const linkable = tasks.on_run.mode !== "disabled" && service.capabilities.runs !== "none";
+  return {
+    service,
+    config: tasks,
+    ...(linkable ? { runLink: createRunTaskLink(service, tasks.on_run.mode) } : {}),
+  };
 }
 
 /** Where the tasks of a repository live, for messages. */

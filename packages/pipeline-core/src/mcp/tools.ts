@@ -340,13 +340,45 @@ export const TOOLS: ToolDescriptor[] = [
   },
 ];
 
+/**
+ * `pipeline_start` takes the key of a task only on a server whose runs can be tied to tasks (tasks on,
+ * an adapter that attaches runs, the mode not `disabled`): on any other it is not in the schema.
+ */
+export function toolsFor(options: { taskLink?: boolean } = {}): ToolDescriptor[] {
+  if (options.taskLink !== true) return TOOLS;
+  return TOOLS.map((tool) =>
+    tool.name !== "pipeline_start"
+      ? tool
+      : {
+          ...tool,
+          description: `${tool.description} If the user names a task to work on (its key, such as KDL-7K3Q), pass it as task_key: the run is then tied to the task and the engine moves the task as the run goes.`,
+          shape: {
+            ...tool.shape,
+            task_key: z
+              .string()
+              .min(1)
+              .max(300)
+              .optional()
+              .describe("The key of the task this run is for, as the person says it."),
+            restart_task: z
+              .boolean()
+              .optional()
+              .describe(
+                "Only if the answer was TASK_ALREADY_DONE and the person said to start the task again. Never set it on your own: ask first.",
+              ),
+          },
+        },
+  );
+}
+
 /** Validate a call against the tool's schema and run it. Never throws for bad input. */
 export async function invokeTool(
   service: PipelineService,
   name: string,
   raw: unknown,
+  tools: ToolDescriptor[] = TOOLS,
 ): Promise<ToolResult> {
-  const tool = TOOLS.find((t) => t.name === name);
+  const tool = tools.find((t) => t.name === name);
   if (!tool) {
     return { ok: false, code: "INVALID_ARGUMENTS", message: `there is no tool "${name}"` };
   }

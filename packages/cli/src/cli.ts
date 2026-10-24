@@ -13,6 +13,7 @@ import {
   KodelError,
   type NewTask,
   type RunState,
+  type RunTaskLink,
   redactText,
   runSlug,
   type SubtaskRef,
@@ -236,14 +237,26 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       // A config that cannot be used for the tasks must not take the pipelines down with it: the
       // server starts without the task tools and says why on stderr (stdout is the protocol).
       let tasks: TaskService | undefined;
+      let runLink: RunTaskLink | undefined;
       try {
-        tasks = (await openTaskService({ storeRoot: storeRoot() }))?.service;
+        const opened = await openTaskService({ storeRoot: storeRoot() });
+        tasks = opened?.service;
+        runLink = opened?.runLink;
       } catch (error) {
         // Any failure (an unreadable config included) leaves the pipeline tools running.
         const why = error instanceof Error ? error.message : String(error);
         env.err(`kodel: the task tools are not served: ${plain(why)}\n`);
       }
-      await serveStdio(host(), pkg.version, tasks);
+      await serveStdio(
+        new LocalPipelineHost({
+          root: program.opts<{ root: string }>().root,
+          // The same tie the tools were built for; without one the host asks the config itself.
+          ...(runLink === undefined ? {} : { runTaskLink: runLink }),
+        }),
+        pkg.version,
+        tasks,
+        runLink,
+      );
     });
 
   program
@@ -372,6 +385,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const where = await run.location().catch(() => undefined);
       if (where) env.out(`workdir:   ${plain(where.path)}\n`);
       if (where?.branch) env.out(`branch:    ${plain(where.branch)}\n`);
+      if (state.taskKey !== undefined) env.out(`tracker:   ${plain(state.taskKey)}\n`);
       env.out(`integrity: ${await run.integrityStatus()}\n`);
       env.out(`seal:      ${await run.sealStatus()}\n`);
       env.out(`trail:     ${state.trail.map(plain).join(" > ")}\n`);

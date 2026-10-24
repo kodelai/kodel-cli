@@ -15,6 +15,8 @@ import {
   registerTaskTools,
   SERVER_INSTRUCTIONS,
   TASK_INSTRUCTIONS,
+  taskInstructions,
+  toolsFor,
 } from "../src/mcp";
 
 const FULL: TaskAdapterCapabilities = {
@@ -265,5 +267,29 @@ describe("over MCP", () => {
     expect(result.isError).toBe(true);
     const text = (result.content as { text: string }[])[0]?.text ?? "";
     expect(JSON.parse(text)).toMatchObject({ ok: false, code: "INVALID_TASK" });
+  });
+});
+
+describe("tools and instructions for runs tied to tasks", () => {
+  test("run_task_instructions_follow_the_mode_and_say_not_to_set_restart_task_alone", () => {
+    expect(taskInstructions("auto", false)).toBe(TASK_INSTRUCTIONS);
+    expect(taskInstructions("disabled", true)).toBe(TASK_INSTRUCTIONS);
+    const auto = taskInstructions("auto", true);
+    expect(auto).toContain("the engine moves it to progress when the run starts and to done");
+    expect(auto).toContain("task_key");
+    expect(auto).toContain("never on your own");
+    const ask = taskInstructions("ask", true);
+    expect(ask).toContain("the engine does not close the task: ask the person");
+    expect(ask).not.toContain("and to done when the run completes");
+  });
+
+  test("run_task_pipeline_start_has_task_key_only_when_the_server_ties_runs", () => {
+    const keys = (tools: ReturnType<typeof toolsFor>) =>
+      Object.keys(tools.find((t) => t.name === "pipeline_start")?.shape ?? {});
+    expect(keys(toolsFor())).not.toContain("task_key");
+    expect(keys(toolsFor({ taskLink: false }))).not.toContain("restart_task");
+    expect(keys(toolsFor({ taskLink: true }))).toEqual(
+      expect.arrayContaining(["task_key", "restart_task"]),
+    );
   });
 });

@@ -17,6 +17,7 @@ import {
   type NewTask,
   OPEN_STATES,
   TASK_LIMITS,
+  type Task,
   type TaskAdapter,
   type TaskFilter,
   type TaskPatch,
@@ -354,6 +355,56 @@ export class TaskService {
         throw error;
       }
     });
+  }
+
+  // ── for the tie between a run and a task (see run-task.ts) ────────────────
+  // These throw `KodelError` instead of answering with the failure shape: the caller decides which
+  // failures stop a start and which only become a warning.
+
+  /** The task a person named, as the tracker has it. */
+  async taskForRun(typed: string): Promise<Task> {
+    const key = await this.resolve("task_key", typed);
+    const found = await this.call((o) => this.adapter.get(key, o));
+    if (!found) throw new KodelError("TASK_NOT_FOUND", `there is no task "${redactText(key)}"`);
+    return found.task;
+  }
+
+  /**
+   * Move a task to a state and note the run on it. The status is picked by `state` from the schema,
+   * never by its name: a tracker names its statuses as it likes. A status the task already has is
+   * not sent again; without `state` only the note is added. With a schema that lists the moves allowed, one of those is taken.
+   */
+  async advanceForRun(
+    task: Task,
+    state: "progress" | "done" | undefined,
+    note: { comment: string; add_run?: string },
+  ): Promise<Task> {
+    const patch: TaskPatch = {};
+    if (this.adapter.capabilities.comment !== "none") patch.comment = redactText(note.comment);
+    if (note.add_run !== undefined && this.adapter.capabilities.runs !== "none") {
+      patch.add_run = note.add_run;
+    }
+    if (state !== undefined && task.state !== state) {
+      const schema = await this.loadSchema(task.key, undefined);
+      const allowed = schema.transitions?.map((t) => t.to);
+      const candidates = schema.statuses.filter(
+        (s) => s.state === state && (allowed === undefined || allowed.includes(s.name)),
+      );
+      const chosen = candidates.find((s) => s.name.toLowerCase() === state) ?? candidates[0];
+      if (!chosen) {
+        throw new KodelError(
+          "TASK_TRANSITION_REFUSED",
+          `the tracker offers no status in state "${state}" for task ${redactText(task.key)}`,
+        );
+      }
+      patch.status = chosen.name;
+    }
+    if (patch.status === undefined && patch.comment === undefined && patch.add_run === undefined) {
+      return task;
+    }
+    const done = await this.call((o) => this.adapter.update(task.key, patch, o));
+    if (!done) throw new KodelError("TASK_NOT_FOUND", `there is no task "${redactText(task.key)}"`);
+    return done.task;
   }
 
   /** For `kodel task doctor`: what the adapter finds wrong with its setup. */

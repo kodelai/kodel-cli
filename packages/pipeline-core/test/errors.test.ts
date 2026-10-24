@@ -9,9 +9,9 @@ describe("error codes", () => {
     }
   });
 
-  test("list matches the contract (34 codes)", () => {
+  test("list matches the contract (35 codes)", () => {
     // A new code must be added to the contract (error codes section) and to this count.
-    expect(ERROR_CODES.length).toBe(34);
+    expect(ERROR_CODES.length).toBe(35);
   });
 
   test("t16_details_is_the_one_place_for_extra_data_of_a_code", () => {

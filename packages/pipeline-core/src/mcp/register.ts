@@ -4,10 +4,15 @@
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { PipelineService } from "../service";
-import { invokeTool, TOOLS } from "./tools";
+import { invokeTool, toolsFor } from "./tools";
 
-export function registerPipelineTools(server: McpServer, service: PipelineService): void {
-  for (const tool of TOOLS) {
+export function registerPipelineTools(
+  server: McpServer,
+  service: PipelineService,
+  options: { taskLink?: boolean } = {},
+): void {
+  const tools = toolsFor(options);
+  for (const tool of tools) {
     server.registerTool(
       tool.name,
       {
@@ -17,7 +22,7 @@ export function registerPipelineTools(server: McpServer, service: PipelineServic
         annotations: { readOnlyHint: tool.readOnly, idempotentHint: tool.idempotent },
       },
       (async (args: Record<string, unknown>) => {
-        const result = await invokeTool(service, tool.name, args);
+        const result = await invokeTool(service, tool.name, args, tools);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
           isError: !result.ok,
