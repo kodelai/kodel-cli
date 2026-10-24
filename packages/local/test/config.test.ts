@@ -32,6 +32,7 @@ describe("the project config", () => {
       version: "1.0.0",
       worktree: expected,
       pipeline: { uncommitted: "ask" },
+      agent_hints: { wait: true },
       tasks: {
         enabled: false,
         adapter: "local",
@@ -91,6 +92,18 @@ describe("the project config", () => {
     expect((await loadConfig(dir)).pipeline).toEqual({ uncommitted: "working" });
     expect((await failure("pipeline:\n  uncommitted: sometimes\n")).code).toBe("CONFIG_INVALID");
     expect((await failure("pipeline:\n  uncomitted: working\n")).message).toContain("uncomitted");
+  });
+
+  test("tNN_config_can_turn_off_the_offer_of_kodel_wait", async () => {
+    expect((await loadConfig(dir)).agent_hints).toEqual({ wait: true });
+    await write("agent_hints:\n  wait: false\n");
+    expect((await loadConfig(dir)).agent_hints).toEqual({ wait: false });
+    await write("agent_hints: {}\n");
+    expect((await loadConfig(dir)).agent_hints).toEqual({ wait: true });
+    // A word is not a boolean, and a misspelled key is named, not ignored.
+    expect((await failure("agent_hints:\n  wait: never\n")).code).toBe("CONFIG_INVALID");
+    expect((await failure("agent_hints:\n  waits: false\n")).message).toContain("waits");
+    expect((await failure("agent_hint:\n  wait: false\n")).message).toContain("agent_hint");
   });
 
   test("tNN_config_reads_mode_and_dir", async () => {

@@ -25,6 +25,7 @@ import {
   evaluateDiff,
   evaluateResult,
   isRunEnd,
+  type JournalRecord,
   KodelError,
   mergeReports,
   type NextStep,
@@ -50,7 +51,7 @@ import {
   validateReport,
 } from "@kodel-ai/pipeline-core";
 import { type CommandOptions, type CommandResult, runCommand } from "./command";
-import type { WorktreeConfig } from "./config";
+import { loadConfig, type WorktreeConfig } from "./config";
 import { GitSnapshotter } from "./git";
 import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integrity";
 import { FileStore, META_VERSION, newRunId, type RunMeta } from "./store";
@@ -513,6 +514,25 @@ export class LocalRun {
     const state = await this.host.store.readState(this.runId);
     if (!state) throw new Error(`run ${this.runId} has no state`);
     return state;
+  }
+
+  /**
+   * Whether waiting answers offer the agent `kodel wait`: on unless the project's config turns it
+   * off. Read at each answer, so an edit of the config applies to the next one. A config that cannot
+   * be read leaves the default: this is a hint, and the commands that need the config say what is wrong.
+   */
+  private async waitHint(): Promise<boolean> {
+    const { options } = this.host;
+    try {
+      return (await loadConfig(options.storeRoot ?? `${options.root}/.kodel`)).agent_hints.wait;
+    } catch {
+      return true;
+    }
+  }
+
+  /** The run's journal, as it is on disk; read-only. */
+  journal(): Promise<JournalRecord[]> {
+    return this.host.store.readJournal(this.runId);
   }
 
   private readonly versions = new Map<string, PipelineSpec>();
@@ -978,7 +998,7 @@ export class LocalRun {
       state,
       this.host.clock(),
       this.host.engine.registry ?? defaultRegistry(),
-      pending ? { pending: pending.info } : {},
+      { waitHint: await this.waitHint(), ...(pending ? { pending: pending.info } : {}) },
     );
   }
 
@@ -1332,6 +1352,7 @@ export class LocalRun {
       this.host.clock(),
       this.host.engine.registry ?? defaultRegistry(),
       {
+        waitHint: await this.waitHint(),
         ...(pending ? { pending: pending.info } : {}),
         ...(options.atCompletion === true ? { atCompletion: true } : {}),
       },

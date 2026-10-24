@@ -53,6 +53,10 @@ interface Person {
   answer?: boolean | boolean[];
   /** The environment the command runs in. */
   environment?: Record<string, string | undefined>;
+  /** How often `wait` looks at the run, in milliseconds. */
+  pollMs?: number;
+  /** Called when `wait` is watching a run that waits. */
+  onWatching?: () => void;
 }
 
 /** Run a command as a person at a terminal who says yes, unless told otherwise. */
@@ -70,6 +74,8 @@ async function cliAs(person: Person, ...args: string[]) {
     },
     interactive: person.interactive ?? true,
     environment: person.environment ?? {},
+    ...(person.pollMs === undefined ? {} : { pollMs: person.pollMs }),
+    ...(person.onWatching === undefined ? {} : { onWatching: person.onWatching }),
     select: async () => [],
     confirm: async (question) => {
       asked.push(question);
@@ -736,6 +742,34 @@ describe("mcp over stdio", () => {
     await client.close();
   });
 
+  test("tNN_the_server_instructions_offer_kodel_wait_unless_the_config_turns_it_off", async () => {
+    const instructionsOf = async () => {
+      const client = new Client({ name: "agent", version: "0.0.0" });
+      await client.connect(
+        new StdioClientTransport({
+          command: process.execPath,
+          args: [join(import.meta.dir, "../src/main.ts"), "--root", dir, "mcp"],
+          env: { ...(process.env as Record<string, string>) },
+          stderr: "pipe",
+        }),
+      );
+      const text = client.getInstructions() ?? "";
+      await client.close();
+      return text;
+    };
+    expect(await instructionsOf()).toContain("kodel wait");
+    await writeFile(
+      join(dir, ".kodel", "config.yaml"),
+      "worktree:\n  mode: off\nagent_hints:\n  wait: false\n",
+    );
+    const off = await instructionsOf();
+    expect(off).not.toContain("kodel wait");
+    expect(off).toContain("pipeline_start"); // the rest is as it was
+    // A config that cannot be read leaves the offer in; the server still starts.
+    await writeFile(join(dir, ".kodel", "config.yaml"), "agent_hints: [\n");
+    expect(await instructionsOf()).toContain("kodel wait");
+  });
+
   test("a server whose agent closed the pipe exits, and does not wait for ever", async () => {
     const child = spawn(
       process.execPath,
@@ -1034,6 +1068,234 @@ describe("pipeline proposals", () => {
       expect(result.err, sub).toContain("for a person at a terminal");
     }
     expect(await hostOf().pipelineProposals()).toHaveLength(1);
+  });
+});
+
+describe("wait", () => {
+  const LINE = (id: string, what: string) => `${id}: ${what}. Call pipeline_next_step.\n`;
+  const hostOf = () => new LocalPipelineHost({ root: dir, heartbeatMs: 0 });
+  const FAST = { pollMs: 20 };
+
+  /** A command that is going: whether it is done, and when it is watching (or has already ended). */
+  function started(person: Person, ...args: string[]) {
+    let done = false;
+    let watching: () => void = () => {};
+    const isWatching = new Promise<void>((resolve) => {
+      watching = resolve;
+    });
+    const result = cliAs({ ...person, onWatching: watching }, ...args).then((r) => {
+      done = true;
+      return r;
+    });
+    return {
+      result,
+      isDone: () => done,
+      /** Resolves once it is watching, so a decision made after it is one it can see. */
+      ready: () => Promise.race([isWatching, result]),
+    };
+  }
+
+  test("tNN_wait_returns_at_once_for_a_run_that_does_not_wait", async () => {
+    const id = await runAtGate();
+    await cli("gate", "approve", id);
+    const result = await cliAs(FAST, "wait", id);
+    expect(result.code).toBe(0);
+    expect(result.out).toBe(
+      `${id}: not waiting for a person (completed). Call pipeline_next_step.\n`,
+    );
+  });
+
+  test("tNN_wait_stays_at_a_gate_and_reports_the_approval", async () => {
+    const id = await runAtGate();
+    const wait = started(FAST, "wait", id);
+    await Bun.sleep(250);
+    expect(wait.isDone()).toBe(false);
+    expect((await cli("gate", "approve", id)).code).toBe(0);
+    const result = await wait.result;
+    expect(result.code).toBe(0);
+    expect(result.out).toBe(LINE(id, 'approved at "approve"'));
+  });
+
+  test("tNN_wait_reports_a_rejection_without_the_reason_and_on_one_line", async () => {
+    const id = await runAtGate();
+    const wait = started(FAST, "wait", id);
+    await wait.ready();
+    await cli("gate", "reject", id, "--reason", "secret\u001b[31m reason");
+    const result = await wait.result;
+    expect(result.out).toBe(LINE(id, 'rejected at "approve"'));
+    expect(result.out.trim().split("\n")).toHaveLength(1);
+  });
+
+  test("tNN_wait_ends_when_the_run_waits_somewhere_new_not_only_when_it_stops_waiting", async () => {
+    const id = await runAtGate();
+    // Slow rounds: the rejection and the next gate are both there before wait looks again.
+    const wait = started({ pollMs: 1500 }, "wait", id);
+    await wait.ready();
+    await cli("gate", "reject", id, "--reason", "again");
+    const run = await hostOf().open(id);
+    await run?.completeStep("write", 2);
+    await run?.waitForRest(5_000);
+    const result = await wait.result;
+    expect(result.out).toBe(LINE(id, 'rejected at "approve"'));
+    // And a new wait is a new wait: it stays until that gate is decided.
+    const again = started(FAST, "wait", id);
+    await Bun.sleep(250);
+    expect(again.isDone()).toBe(false);
+    await cli("gate", "approve", id);
+    expect((await again.result).out).toBe(LINE(id, 'approved at "approve"'));
+  });
+
+  test("tNN_wait_reports_that_a_change_of_the_pipeline_was_accepted", async () => {
+    const id = await runAtGate();
+    await editPipeline();
+    const wait = started(FAST, "wait", id);
+    await Bun.sleep(250);
+    expect(wait.isDone()).toBe(false);
+    expect((await cli("pipeline", "changes", "apply", id)).code).toBe(0);
+    expect((await wait.result).out).toBe(LINE(id, "change accepted"));
+  });
+
+  test("tNN_wait_reports_that_a_paused_run_was_resumed", async () => {
+    await writeFile(
+      join(dir, ".kodel", "pipelines", "stuck.yaml"),
+      [
+        "name: stuck",
+        "nodes:",
+        "  - slug: write",
+        "    kind: agent",
+        "    prompt: write it",
+        "  - slug: build",
+        "    kind: command",
+        `    command: node -e "process.exit(1)"`,
+        "edges:",
+        "  - { from: write, to: build }",
+        "  - { from: build, to: write, when: failed }",
+        "",
+      ].join("\n"),
+    );
+    const { run } = await hostOf().start({ pipeline: "stuck", task: "t", restart: false });
+    for (let i = 1; i <= 10 && (await run.state()).status !== "paused"; i++) {
+      await run.completeStep("write", i);
+      await run.waitForRest(5_000);
+    }
+    expect((await run.state()).status).toBe("paused");
+    const wait = started(FAST, "wait", run.runId);
+    await Bun.sleep(250);
+    expect(wait.isDone()).toBe(false);
+    await cli("resume", run.runId);
+    expect((await wait.result).out).toBe(LINE(run.runId, "resumed"));
+  });
+
+  test("tNN_wait_still_names_the_decision_when_the_journal_is_written_after_the_state", async () => {
+    const id = await runAtGate();
+    const wait = started(FAST, "wait", id);
+    await wait.ready();
+    // The state is written first and the journal a moment later: wait may look in between.
+    const run = await hostOf().open(id);
+    const { store } = (
+      run as unknown as {
+        host: { store: { appendJournal(runId: string, records: unknown[]): Promise<void> } };
+      }
+    ).host;
+    const append = store.appendJournal.bind(store);
+    store.appendJournal = async (runId, records) => {
+      await Bun.sleep(400);
+      return append(runId, records);
+    };
+    expect((await run?.decideHuman("approve", "approved"))?.ok).toBe(true);
+    expect((await wait.result).out).toBe(LINE(id, 'approved at "approve"'));
+  });
+
+  test("tNN_wait_says_so_when_the_run_waits_for_something_else_and_nobody_decided", async () => {
+    const id = await runAtGate();
+    const wait = started(FAST, "wait", id);
+    await wait.ready();
+    await editPipeline(); // the gate now waits behind a change of the pipeline
+    const result = await wait.result;
+    expect(result.out).toBe(
+      `${id}: no decision, but the run now waits at "approve" (pipeline_changed). Call pipeline_next_step.\n`,
+    );
+  });
+
+  test("tNN_wait_gives_up_after_its_timeout_with_exit_code_2_and_writes_nothing", async () => {
+    const id = await runAtGate();
+    const files = ["state.json", "journal.jsonl"].map((f) => join(dir, ".kodel", "runs", id, f));
+    const before = await Promise.all(files.map((f) => readFile(f, "utf8")));
+    // Nothing that a person has: no terminal, and inside a command the engine runs.
+    const result = await cliAs(
+      { ...FAST, interactive: false, environment: { KODEL_ENGINE: "1" } },
+      "wait",
+      id,
+      "--timeout",
+      "1",
+    );
+    expect(result.code).toBe(2);
+    expect(result.out).toBe(
+      `${id}: still waiting at "approve" (gate), nothing was decided in 1s. Not watching any more.\n`,
+    );
+    expect(await Promise.all(files.map((f) => readFile(f, "utf8")))).toEqual(before);
+  });
+
+  test("tNN_a_decision_before_the_timeout_wins", async () => {
+    const quick = await runAtGate();
+    const early = started(FAST, "wait", quick, "--timeout", "30");
+    await early.ready();
+    await cli("gate", "approve", quick);
+    const result = await early.result;
+    expect(result.code).toBe(0);
+    expect(result.out).toBe(LINE(quick, 'approved at "approve"'));
+  });
+
+  test("tNN_timeout_0_is_not_a_limit", async () => {
+    const id = await runAtGate();
+    const wait = started(FAST, "wait", id, "--timeout", "0");
+    await Bun.sleep(1500); // longer than the shortest limit would have allowed
+    expect(wait.isDone()).toBe(false);
+    await cli("gate", "approve", id);
+    expect((await wait.result).code).toBe(0);
+  });
+
+  test("tNN_a_bad_timeout_is_refused_and_the_default_is_eight_hours", async () => {
+    const id = await runAtGate();
+    for (const bad of ["-1", "1.5", "abc", "", "1e3"]) {
+      const result = await cliAs(FAST, "wait", id, `--timeout=${bad}`);
+      expect(result.code, bad).toBe(1);
+      expect(result.err, bad).toContain("--timeout is a whole number of seconds");
+    }
+    expect((await cli("wait", "--help")).out).toContain('(default: "28800")');
+  });
+
+  test("tNN_wait_on_an_unknown_run_is_an_error", async () => {
+    const result = await cliAs(FAST, "wait", "r_000000000_0000");
+    expect(result.code).toBe(1);
+    expect(result.err).toContain("there is no run");
+  });
+
+  test("tNN_the_real_program_with_no_terminal_reports_a_decision_and_a_timeout", async () => {
+    const id = await runAtGate();
+    const main = join(import.meta.dir, "../src/main.ts");
+    const { KODEL_ENGINE: _engine, ...outsideEngine } = process.env;
+    const run = (...extra: string[]) =>
+      new Promise<{ code: number | null; out: string }>((done) => {
+        const child = spawn("bun", [main, "--root", dir, "wait", id, ...extra], {
+          stdio: ["ignore", "pipe", "pipe"],
+          env: outsideEngine,
+        });
+        let out = "";
+        child.stdout?.on("data", (d: Buffer) => {
+          out += d.toString();
+        });
+        child.on("close", (code) => done({ code, out }));
+      });
+    const gaveUp = await run("--timeout", "1");
+    expect(gaveUp.code).toBe(2);
+    expect(gaveUp.out).toContain("still waiting");
+    const decided = run();
+    await Bun.sleep(1500);
+    await cli("gate", "approve", id);
+    const result = await decided;
+    expect(result.code).toBe(0);
+    expect(result.out).toBe(LINE(id, 'approved at "approve"'));
   });
 });
 

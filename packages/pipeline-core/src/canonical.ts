@@ -21,6 +21,18 @@ export function stableJson(value: unknown): string {
   });
 }
 
+/**
+ * The id of a check: `<node>/<kind>#<n>`, `n` being its 1-based position among the checks of that
+ * kind in the node. It does not change when the check's parameters change; it changes only when
+ * checks of the same kind in the node are reordered, or one is inserted or removed before it.
+ */
+export function checkIdOf(node: NodeSpec, index: number): string | undefined {
+  const check = node.checks[index];
+  if (!check) return undefined;
+  const n = node.checks.slice(0, index + 1).filter((c) => c.kind === check.kind).length;
+  return `${node.slug}/${check.kind}#${n}`;
+}
+
 export interface NodeForms {
   /** What the node does: kind, parameters, timeout, what a failure of the node itself is called. */
   work: string;

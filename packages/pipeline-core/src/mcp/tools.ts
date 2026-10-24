@@ -15,22 +15,32 @@ export const CONTRACT_VERSION = 1;
 /**
  * What the agent is told about this server when it connects (the MCP `instructions` field), so the
  * rules of working with a pipeline travel with the server and do not depend on a file in the
- * project that someone has to write and keep up to date.
+ * project that someone has to write and keep up to date. `waitHint: false` (the project turned it
+ * off in its config) leaves out the offer of `kodel wait`.
  */
-export const SERVER_INSTRUCTIONS = [
-  "This server runs the project's pipelines: fixed sequences of steps that the engine, not you, checks.",
-  "",
-  "When the user asks you to do something through a pipeline (or to run one), work only through the pipeline_* tools:",
-  "1. If you do not know the pipeline's name, call pipeline_list. Then call pipeline_start with the task in the user's words and a title for the run: English, 2-5 words, kebab-case (for example fix-login-timeout).",
-  "2. Follow each answer. Never pick, reorder or skip steps yourself, and never decide that a step is done: after you do a step, call pipeline_complete_step and let the engine's checks decide. If a check fails you get the reason and the same step again.",
-  "3. pipeline_next_step tells you what is next: `node` (do it), `waiting` (a person has to decide), `running` (the engine is working: pass wait_s to wait, as the hint says), or `done`.",
-  "4. At a `waiting` answer, do what `tell_the_person` says: write the person what they are asked to decide, a summary of what was done and changed, what to look at, and the command to decide with. Then end your turn. You cannot approve, reject or resume anything yourself, and you must not try: those commands are for the person and refuse to run for an agent.",
-  "5. Do not read or edit the run files in .kodel/runs, and do not edit the pipeline files while a run is going: the only way for you to change the pipeline of a run is pipeline_propose_change, and a person accepts it.",
-  "6. If a step's description or a check looks wrong or unclear, say so with pipeline_feedback; it never blocks the run. If you think the pipeline of a run should change for this run, first ask the person: change it now (the run stops at the end of the current step until they accept it), or only note it with pipeline_feedback and decide another way. Propose it only if they say now.",
-  "7. If the answer to pipeline_start names a `workdir`, do all your work for the run in that directory (read and write files there, not in the directory you started in): the engine runs the commands and checks there.",
-  "8. If you are asked to write or change a pipeline, read pipeline_docs first: it is the reference for this engine version. To add a pipeline, or to change one outside a run (start from the `yaml` of pipeline_resolve), call pipeline_propose_change without run_id: a person accepts it with a command. Never put a file in .kodel/pipelines yourself and never run that command.",
-  "9. If an answer tells you that the pipeline of the run was changed and a person has to accept it (a `waiting` answer about the change, or a note about it on a `node` answer), do what `tell_the_person` says. If the change was made by editing the pipeline file and not through pipeline_propose_change, put the file back as it was and propose it instead.",
-].join("\n");
+const WAIT_OFFER =
+  " `tell_the_person` may offer you `kodel wait <run_id>`, a command that only watches and prints one line when the person has decided: start it in the background as it says, end your turn, and call pipeline_next_step when it reports. Never poll pipeline_next_step in a loop to wait for a person.";
+
+export function serverInstructions(options: { waitHint?: boolean } = {}): string {
+  const wait = options.waitHint === false ? "" : WAIT_OFFER;
+  return [
+    "This server runs the project's pipelines: fixed sequences of steps that the engine, not you, checks.",
+    "",
+    "When the user asks you to do something through a pipeline (or to run one), work only through the pipeline_* tools:",
+    "1. If you do not know the pipeline's name, call pipeline_list. Then call pipeline_start with the task in the user's words and a title for the run: English, 2-5 words, kebab-case (for example fix-login-timeout).",
+    "2. Follow each answer. Never pick, reorder or skip steps yourself, and never decide that a step is done: after you do a step, call pipeline_complete_step and let the engine's checks decide. If a check fails you get the reason and the same step again.",
+    "3. pipeline_next_step tells you what is next: `node` (do it), `waiting` (a person has to decide), `running` (the engine is working: pass wait_s to wait, as the hint says), or `done`.",
+    "4. At a `waiting` answer, do what `tell_the_person` says: write the person what they are asked to decide, a summary of what was done and changed, what to look at, and the command to decide with. Then end your turn. You cannot approve, reject or resume anything yourself, and you must not try: those commands are for the person and refuse to run for an agent." +
+      wait,
+    "5. Do not read or edit the run files in .kodel/runs, and do not edit the pipeline files while a run is going: the only way for you to change the pipeline of a run is pipeline_propose_change, and a person accepts it.",
+    "6. If a step's description or a check looks wrong or unclear, say so with pipeline_feedback; it never blocks the run. If you think the pipeline of a run should change for this run, first ask the person: change it now (the run stops at the end of the current step until they accept it), or only note it with pipeline_feedback and decide another way. Propose it only if they say now.",
+    "7. If the answer to pipeline_start names a `workdir`, do all your work for the run in that directory (read and write files there, not in the directory you started in): the engine runs the commands and checks there.",
+    "8. If you are asked to write or change a pipeline, read pipeline_docs first: it is the reference for this engine version. To add a pipeline, or to change one outside a run (start from the `yaml` of pipeline_resolve), call pipeline_propose_change without run_id: a person accepts it with a command. Never put a file in .kodel/pipelines yourself and never run that command.",
+    "9. If an answer tells you that the pipeline of the run was changed and a person has to accept it (a `waiting` answer about the change, or a note about it on a `node` answer), do what `tell_the_person` says. If the change was made by editing the pipeline file and not through pipeline_propose_change, put the file back as it was and propose it instead.",
+  ].join("\n");
+}
+
+export const SERVER_INSTRUCTIONS = serverInstructions();
 
 export interface ToolDescriptor {
   name: string;

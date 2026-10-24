@@ -8,7 +8,7 @@ import {
 import {
   registerPipelineTools,
   registerTaskTools,
-  SERVER_INSTRUCTIONS,
+  serverInstructions,
   taskInstructions,
 } from "@kodel-ai/pipeline-core/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -28,10 +28,12 @@ export function createServer(
   version: string,
   tasks?: TaskService,
   runLink?: RunTaskLink,
+  options: { waitHint?: boolean } = {},
 ): McpServer {
+  const base = serverInstructions(options);
   const instructions = tasks
-    ? `${SERVER_INSTRUCTIONS}\n\n${taskInstructions(runLink?.mode ?? "disabled", runLink !== undefined)}`
-    : SERVER_INSTRUCTIONS;
+    ? `${base}\n\n${taskInstructions(runLink?.mode ?? "disabled", runLink !== undefined)}`
+    : base;
   const server = new McpServer({ name: "kodel", version }, { instructions });
   registerPipelineTools(server, new PipelineService(host, { engineVersion: version }), {
     taskLink: tasks !== undefined && runLink !== undefined,
@@ -60,8 +62,9 @@ export async function serveStdio(
   version: string,
   tasks?: TaskService,
   runLink?: RunTaskLink,
+  options: { waitHint?: boolean } = {},
 ): Promise<void> {
-  const server = createServer(host, version, tasks, runLink);
+  const server = createServer(host, version, tasks, runLink, options);
   await server.connect(new StdioServerTransport());
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.once(signal, () => {

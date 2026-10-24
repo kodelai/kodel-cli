@@ -97,6 +97,51 @@ describe("a pipeline file edited under a run in the repository root", () => {
     expect(JSON.stringify(held)).not.toContain("node -e 1"); // the new text is not sent to the agent
   });
 
+  test("tNN_the_config_turns_the_offer_of_kodel_wait_off_and_on_again_without_a_restart", async () => {
+    const run = await startRun();
+    await run.completeStep("write", 1);
+    await run.waitForRest(5_000);
+    // What a command that only looks says and what the agent is told must agree.
+    const offered = async () => {
+      const [looked, told] = [await run.inspect(), await run.nextStep()].map((step) =>
+        JSON.stringify(step).includes(`kodel wait ${run.runId}`),
+      );
+      expect(looked).toBe(told);
+      return looked;
+    };
+    expect(await offered()).toBe(true);
+    await writeFile(
+      join(dir, ".kodel", "config.yaml"),
+      "worktree:\n  mode: off\nagent_hints:\n  wait: false\n",
+    );
+    expect(await offered()).toBe(false);
+    // A config that cannot be read leaves the default (the commands that need it say what is wrong).
+    await writeFile(join(dir, ".kodel", "config.yaml"), "agent_hints: [\n");
+    expect(await offered()).toBe(true);
+    await writeFile(join(dir, ".kodel", "config.yaml"), "worktree:\n  mode: off\n");
+    expect(await offered()).toBe(true);
+  });
+
+  test("tNN_kodel_wait_is_not_offered_behind_a_step", async () => {
+    // Behind a step the run still reads as the agent's step to a command that only looks, so such a
+    // command would return at once and the agent would go round again.
+    const run = await startRun();
+    await writeFile(join(dir, FILE), PIPELINE("node -e 1"));
+    const held = await run.nextStep({ atCompletion: true });
+    expect(waitingReason(held)).toBe("pipeline_changed");
+    expect(JSON.stringify(held)).not.toContain("kodel wait");
+  });
+
+  test("tNN_kodel_wait_is_offered_when_the_change_waits_behind_a_gate", async () => {
+    const run = await startRun();
+    await run.completeStep("write", 1);
+    await run.waitForRest(5_000);
+    await writeFile(join(dir, FILE), PIPELINE("node -e 1"));
+    const step = await run.nextStep();
+    expect(waitingReason(step)).toBe("pipeline_changed");
+    expect(JSON.stringify(step)).toContain(`kodel wait ${run.runId}`);
+  });
+
   test("restoring_the_file_ends_the_pending_change_without_a_command", async () => {
     const run = await startRun();
     await writeFile(join(dir, FILE), PIPELINE("node -e 1"));
@@ -163,6 +208,43 @@ describe("a pipeline file edited under a run in the repository root", () => {
     await run.completeStep("write", 1);
     await run.waitForRest(10_000);
     expect((await run.state()).nodes.write?.lastFailure?.source).toBe("check:command");
+  });
+
+  test("hp9r_check_ids_survive_a_restart_and_a_recheck_after_an_accept", async () => {
+    const first = host();
+    const run = await startRun(first);
+    const failing = PIPELINE('node -e "process.exit(3)"');
+    await writeFile(join(dir, FILE), failing);
+    const found = await run.pendingChange();
+    await run.acceptChange({ source: "file", text: found?.text ?? "" });
+    await run.completeStep("write", 1);
+    await run.waitForRest(10_000);
+    expect((await run.state()).nodes.write?.lastFailure).toMatchObject({
+      source: "check:command",
+      check_id: "write/command#1",
+    });
+
+    // a new process opens the run: the failure still names the check
+    const reopened = (await host().open(run.runId)) as LocalRun;
+    expect((await reopened.state()).nodes.write?.lastFailure?.check_id).toBe("write/command#1");
+
+    // the person accepts a fixed condition; the node is checked again under the new version
+    await writeFile(join(dir, FILE), V1);
+    const fixed = await reopened.pendingChange();
+    await reopened.acceptChange({ source: "file", text: fixed?.text ?? "" });
+    await reopened.completeStep("write", 2);
+    await reopened.waitForRest(10_000);
+
+    const rows = (await readFile(join(dir, ".kodel", "runs", run.runId, "journal.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((r) => r.event === "check_finished");
+    expect(rows.map((r) => [r.attempt, r.passed, r.check_id])).toEqual([
+      [1, false, "write/command#1"],
+      [2, true, "write/command#1"],
+    ]);
+    expect(rows[0]?.params_hash).not.toBe(rows[1]?.params_hash);
   });
 
   test("a_run_opened_by_another_process_follows_an_accept_made_by_the_first", async () => {
