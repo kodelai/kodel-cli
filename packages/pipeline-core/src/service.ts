@@ -137,6 +137,8 @@ export interface StartOutcome {
   run: RunHandle;
   /** Absent when the run works in the agent's own directory. */
   workdir?: RunLocation;
+  /** The task the run was tied to. `warning`: the tracker could not be told, the run goes on. */
+  task?: { key: string; restarted?: true; warning?: string };
 }
 
 export interface PipelineHost {
@@ -168,6 +170,9 @@ export interface PipelineHost {
     pipeline_version?: "working" | "committed";
     /** The run's slug, as the agent gave it and the service validated it; absent: made from the task. */
     title?: string;
+    /** The task to tie the run to, as the person named it; `restart_task` allows a task that is done. */
+    task_key?: string;
+    restart_task?: boolean;
   }): Promise<StartOutcome>;
   open(runId: string): Promise<RunHandle | undefined>;
 }
@@ -411,11 +416,19 @@ export class PipelineService {
     cwd?: string;
     pipeline_version?: "working" | "committed";
     title?: string;
+    task_key?: string;
+    restart_task?: boolean;
   }): Promise<ToolResult> {
     return guarded(async () => {
       // First of all: the host makes a worktree and a branch before it writes the run, and a title
       // that is refused must leave nothing of either behind.
       if (input.title !== undefined) validateTitle(input.title);
+      // The flag means "start this task again": without a task it would only force a new run.
+      if (input.restart_task === true && input.task_key === undefined) {
+        throw new KodelError("INVALID_ARGUMENTS", "restart_task needs task_key", [
+          { path: ["restart_task"], message: "needs task_key" },
+        ]);
+      }
       let name = input.pipeline;
       if (!name) {
         const { pipelines } = await this.host.list();
@@ -446,6 +459,8 @@ export class PipelineService {
             ? {}
             : { pipeline_version: input.pipeline_version }),
           ...(input.title === undefined ? {} : { title: input.title }),
+          ...(input.task_key === undefined ? {} : { task_key: input.task_key }),
+          ...(input.restart_task === true ? { restart_task: true } : {}),
         });
       } catch (error) {
         // No run exists yet: the answer has no run_id, only what the person has to decide.
@@ -462,6 +477,7 @@ export class PipelineService {
         workdir: outcome.workdir?.path ?? null,
         ...(outcome.workdir?.branch === undefined ? {} : { branch: outcome.workdir.branch }),
         ...(outcome.workdir?.note === undefined ? {} : { note: outcome.workdir.note }),
+        ...(outcome.task === undefined ? {} : { task: outcome.task }),
         next: await outcome.run.nextStep(),
       };
     });

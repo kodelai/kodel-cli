@@ -18,6 +18,7 @@ import {
   KodelError,
   type NewTask,
   type RunState,
+  type RunTaskLink,
   redactText,
   runSlug,
   type SubtaskRef,
@@ -310,8 +311,11 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         throw error;
       }
       let tasks: TaskService | undefined;
+      let runLink: RunTaskLink | undefined;
       try {
-        tasks = (await openTaskService({ storeRoot: resolved.dataDir }))?.service;
+        const opened = await openTaskService({ storeRoot: resolved.dataDir });
+        tasks = opened?.service;
+        runLink = opened?.runLink;
       } catch (error) {
         // Any failure (an unreadable config included) leaves the pipeline tools running.
         const why = error instanceof Error ? error.message : String(error);
@@ -322,7 +326,18 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const waitHint = await loadConfig(resolved.dataDir)
         .then((config) => config.agent_hints.wait)
         .catch(() => true);
-      await serveStdio(await host(), pkg.version, tasks, { waitHint });
+      await serveStdio(
+        new LocalPipelineHost({
+          root: resolved.root,
+          storeRoot: resolved.dataDir,
+          // The same tie the tools were built for; without one the host asks the config itself.
+          ...(runLink === undefined ? {} : { runTaskLink: runLink }),
+        }),
+        pkg.version,
+        tasks,
+        runLink,
+        { waitHint },
+      );
     });
 
   program
@@ -452,6 +467,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const where = await run.location().catch(() => undefined);
       if (where) env.out(`workdir:   ${plain(where.path)}\n`);
       if (where?.branch) env.out(`branch:    ${plain(where.branch)}\n`);
+      if (state.taskKey !== undefined) env.out(`tracker:   ${plain(state.taskKey)}\n`);
       env.out(`integrity: ${await run.integrityStatus()}\n`);
       env.out(`seal:      ${await run.sealStatus()}\n`);
       env.out(`trail:     ${state.trail.map(plain).join(" > ")}\n`);

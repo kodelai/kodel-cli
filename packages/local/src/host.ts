@@ -24,6 +24,7 @@ import {
   evaluateCommand,
   evaluateDiff,
   evaluateResult,
+  isRunEnd,
   type JournalRecord,
   KodelError,
   mergeReports,
@@ -39,6 +40,7 @@ import {
   type RunEvent,
   type RunReport,
   type RunState,
+  type RunTaskLink,
   redactText,
   renderContextOf,
   renderDeep,
@@ -116,6 +118,11 @@ export interface HostOptions {
   ownerId?: string;
   /** Whether an owner is still alive. Tests replace it; by default a process id on this machine is looked up. */
   isOwnerAlive?: (owner: string) => boolean;
+  /**
+   * Ties a run to the task it was started for; absent when tasks are off or the mode is `disabled`.
+   * A function is asked on first use, so a host that never meets a task never reads the task config.
+   */
+  runTaskLink?: RunTaskLink | (() => Promise<RunTaskLink | undefined>);
 }
 
 /**
@@ -267,6 +274,8 @@ export class LocalHost {
       worktree?: WorktreeConfig;
       /** A pipeline file to put into the run's directory, when the last commit does not have it as it should be. */
       pipelineCopy?: { path: string; text: string };
+      /** The key of the task the run is for, already resolved by the tracker. */
+      taskKey?: string;
     } = {},
   ): Promise<{ run: LocalRun; reused: boolean; terminal: boolean; workdir?: Workdir }> {
     const registry = this.engine.registry ?? defaultRegistry();
@@ -351,6 +360,7 @@ export class LocalHost {
           ...(this.options.pipelineFile === undefined
             ? {}
             : { pipelineFile: this.options.pipelineFile }),
+          ...(options.taskKey === undefined ? {} : { taskKey: options.taskKey }),
         });
         if (!result.ok) throw result.error;
         return { run, reused: false, terminal: false, ...(workdir ? { workdir } : {}) };
@@ -366,6 +376,16 @@ export class LocalHost {
     // missing is said at the gate, not hidden.
     if (!started.reused && !started.terminal) await started.run.recordRunBaseline();
     return started;
+  }
+
+  private linkPromise: Promise<RunTaskLink | undefined> | undefined;
+
+  /** The tie between runs and tasks, when there is one. */
+  taskLink(): Promise<RunTaskLink | undefined> {
+    const given = this.options.runTaskLink;
+    if (typeof given !== "function") return Promise.resolve(given);
+    this.linkPromise ??= given();
+    return this.linkPromise;
   }
 
   private rel: Promise<string> | undefined;
@@ -871,7 +891,11 @@ export class LocalRun {
       .catch(() => undefined)
       .then(() => this.applyLocked(event, options.trust === true));
     this.queue = step;
-    return step;
+    // After the lock is let go: the tracker may be slow, and it must not hold up the run's files.
+    return step.then(async (decision) => {
+      await this.tieEnd(decision);
+      return decision;
+    });
   }
 
   private applyLocked(incoming: RunEvent, trust: boolean): Promise<Decision> {
@@ -932,6 +956,32 @@ export class LocalRun {
       for (const effect of decision.effects) await this.dispatch(effect);
       return decision;
     });
+  }
+
+  /**
+   * The run has just ended: tell its task, and note in the journal what came of it. The note is an
+   * ordinary event on a finished run, so the state is sealed again with it. If the process dies
+   * between the end of the run and the note, the task stays as it was. This never fails the run.
+   */
+  private async tieEnd(decision: Decision): Promise<void> {
+    if (!decision.ok || decision.noop) return;
+    const key = decision.state.taskKey;
+    const status = decision.state.status;
+    if (key === undefined || !isRunEnd(status)) return;
+    if (!decision.journal.some((r) => r.event === "run_finished")) return;
+    try {
+      const link = await this.host.taskLink();
+      if (!link) return;
+      const out = await link.end(key, this.runId, status);
+      await this.apply({
+        type: "task_note",
+        what: out.what,
+        task: key,
+        ...(out.note === undefined ? {} : { note: out.note }),
+      });
+    } catch {
+      // The tracker is not the run's business: what could not be noted is only lost from the journal.
+    }
   }
 
   /** Whether the state file is what kodel last wrote. `unknown`: kodel has not seen this run yet. */
@@ -1329,6 +1379,10 @@ export class LocalRun {
       const where = await this.locationForDisplay();
       if (where?.branch !== undefined) {
         step.tell_the_person = doneHint(this.host.options.root, where.path, where.branch);
+      }
+      if (state.taskKey !== undefined && (await this.host.taskLink())?.mode === "ask") {
+        const ask = `The run was started for task ${state.taskKey} and the engine does not close it by itself (tasks.on_run.mode is ask): ask the person whether to close it, and if they agree call task_update with the done status from task_schema.`;
+        step.tell_the_person = step.tell_the_person ? `${step.tell_the_person}\n\n${ask}` : ask;
       }
     }
     if ("waiting" in step && step.waiting.reason === "gate") {
