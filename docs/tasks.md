@@ -159,8 +159,10 @@ one. While tasks are off every command refuses and says how to turn them on.
 
 One YAML file per task in `.kodel/tasks/<KEY>.yaml`. A file per task means two branches that add tasks
 never touch the same file. Whether you commit the folder is your choice (the repository does not ignore
-it). Tasks made inside a run's worktree are written to the main repository's `.kodel`, not to the run's
-branch: a task is about the project, not about the run.
+it). Tasks are kept in the data folder of the [project](project-root.md), wherever the command or the
+agent runs: inside a run's worktree or a linked worktree they are written to the main checkout's `.kodel`,
+not to the run's branch, because a task is about the project, not about the run. Outside a project
+there is nowhere to keep them: the commands and every MCP tool answer `NO_PROJECT`.
 
 ```yaml
 v: 1

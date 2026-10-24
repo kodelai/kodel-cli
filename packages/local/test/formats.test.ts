@@ -101,7 +101,7 @@ async function formatDirs(): Promise<string[]> {
 
 async function runIds(format: string): Promise<string[]> {
   return (await readdir(join(FORMATS, format), { withFileTypes: true }))
-    .filter((e) => e.isDirectory())
+    .filter((e) => e.isDirectory() && e.name.startsWith("r_"))
     .map((e) => e.name)
     .sort();
 }

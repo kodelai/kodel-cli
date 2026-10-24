@@ -1,5 +1,6 @@
 import { KILL_GRACE_MS } from "@kodel-ai/local";
 import {
+  type KodelError,
   type PipelineHost,
   PipelineService,
   type RunTaskLink,
@@ -16,6 +17,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 
 /** A host that can also stop the work it started (the local host does); it says how much it stopped. */
 export type StoppableHost = PipelineHost & { stop?(): number };
+
+/** A host for a server started outside a project: every tool answers with the same error. */
+export function noProjectHost(error: KodelError): StoppableHost {
+  const refuse = (): never => {
+    throw error;
+  };
+  return { list: refuse, resolve: refuse, start: refuse, open: refuse };
+}
 
 /**
  * Build the MCP server for a host; the transport is the caller's. The task tools and their part of

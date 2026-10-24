@@ -439,7 +439,7 @@ export class LocalPipelineHost implements PipelineHost {
       if (!(await new GitSnapshotter(this.options.root).isRepo())) return undefined;
       let committed: string | undefined;
       try {
-        committed = (await git(["show", `HEAD:${file}`], this.options.root)).stdout;
+        committed = (await git(["show", `HEAD:./${file}`], this.options.root)).stdout;
       } catch {
         return { committed: undefined };
       }
@@ -541,7 +541,8 @@ export class LocalPipelineHost implements PipelineHost {
     if (!known) throw new KodelError("UNKNOWN_RUN", `there is no run "${run.runId}"`);
     this.runs.set(run.runId, known);
     // Where the run works is what its record says, also for a run picked up again.
-    const where = await known.location();
+    const located = await known.location();
+    const where = located && { ...located, path: await known.inProject(located.path) };
     const copied =
       pipelineCopy && workdir && tellCopy
         ? `The pipeline file ${pipelineCopy.path} was put into the run's directory as it is now, so it goes into the run's branch with its other changes.`

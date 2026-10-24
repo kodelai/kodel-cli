@@ -15,6 +15,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { parse } from "yaml";
 import { z } from "zod";
+import { CONFIG_FILE } from "./project-locate";
 
 export const DEFAULT_WORKTREE_DIR = ".kodel/worktrees";
 
@@ -78,7 +79,7 @@ export const DEFAULT_TASKS: TasksConfig = {
   adapters: {},
 };
 
-export const CONFIG_FILE = "config.yaml";
+export { CONFIG_FILE };
 
 // Unknown keys are refused, not ignored: a misspelled `mode` must not leave the default in force
 // without the person noticing.

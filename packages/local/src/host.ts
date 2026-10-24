@@ -52,7 +52,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { type CommandOptions, type CommandResult, runCommand } from "./command";
 import { loadConfig, type WorktreeConfig } from "./config";
-import { GitSnapshotter } from "./git";
+import { GitSnapshotter, repoPrefix } from "./git";
 import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integrity";
 import { FileStore, META_VERSION, newRunId, type RunMeta } from "./store";
 import { GitWorktreeProvider, type Workdir, type WorkdirProvider } from "./worktree";
@@ -329,7 +329,7 @@ export class LocalHost {
       try {
         // The copy is part of the start: if it cannot be made the directory is taken away again.
         if (workdir && options.pipelineCopy) {
-          const target = join(workdir.path, options.pipelineCopy.path);
+          const target = join(workdir.path, await this.projectRel(), options.pipelineCopy.path);
           await mkdir(dirname(target), { recursive: true });
           await this.store.replaceFile(target, options.pipelineCopy.text);
         }
@@ -386,6 +386,18 @@ export class LocalHost {
     if (typeof given !== "function") return Promise.resolve(given);
     this.linkPromise ??= given();
     return this.linkPromise;
+  }
+
+  private rel: Promise<string> | undefined;
+
+  /**
+   * Where the project is inside the repository (empty when it is the repository's top, or when the
+   * directories come from a provider of the caller's). A worktree is of the whole repository, and a
+   * run of a project in a subfolder works in that same subfolder of its worktree.
+   */
+  projectRel(): Promise<string> {
+    this.rel ??= this.options.workdirs ? Promise.resolve("") : repoPrefix(this.options.root);
+    return this.rel;
   }
 
   /** Throws `WORKDIR_MISSING` or `WORKDIR_INVALID` unless `workdir` is still the run's own directory. */
@@ -501,7 +513,12 @@ export class LocalRun {
     const where = await this.location();
     if (!where) return this.host.options.root;
     await this.host.verifyWorkdir(where.path);
-    return where.path;
+    return this.inProject(where.path);
+  }
+
+  /** The place of the project inside a worktree of the repository. */
+  async inProject(worktree: string): Promise<string> {
+    return join(worktree, await this.host.projectRel());
   }
 
   private async snapshotter(): Promise<GitSnapshotter> {
@@ -571,7 +588,8 @@ export class LocalRun {
    */
   private async watched(state: RunState): Promise<{ path: string; relative: string } | undefined> {
     if (state.pipelineFile === undefined) return undefined;
-    const base = state.workdir ?? this.host.options.root;
+    const base =
+      state.workdir === undefined ? this.host.options.root : await this.inProject(state.workdir);
     const path = join(base, state.pipelineFile);
     const inside = (from: string, to: string) => {
       const rel = relative(from, to);

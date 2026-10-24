@@ -5,8 +5,13 @@
  * type them; the deny rules in the agent's settings are a second line, not the only one.
  */
 
-import { join } from "node:path";
-import { LocalPipelineHost, loadConfig, openTaskService } from "@kodel-ai/local";
+import {
+  findProjectRoot,
+  LocalPipelineHost,
+  loadConfig,
+  openTaskService,
+  type ProjectRoot,
+} from "@kodel-ai/local";
 import { MAX_PAYLOAD_BYTES, runHook } from "@kodel-ai/local/hooks";
 import {
   type Decision,
@@ -36,7 +41,7 @@ import {
 } from "./feedback";
 import { formatChange, formatProposal, formatReport } from "./format";
 import { type Choice, InitError, runInit } from "./init";
-import { serveStdio } from "./mcp-server";
+import { noProjectHost, serveStdio } from "./mcp-server";
 import { formatTable } from "./table";
 import {
   formatFailure,
@@ -192,12 +197,36 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .name("kodel")
     .description("Spec-driven pipelines inside your coding agent")
     .version(pkg.version)
-    .option("--root <dir>", "the repository the pipelines belong to", env.cwd)
+    .option(
+      "--root <dir>",
+      "the project the pipelines belong to (default: the nearest folder above with a committed project config; KODEL_ROOT also sets it)",
+    )
     .exitOverride()
     .configureOutput({ writeOut: env.out, writeErr: env.err });
 
-  const host = () => new LocalPipelineHost({ root: program.opts<{ root: string }>().root });
-  const storeRoot = () => join(program.opts<{ root: string }>().root, ".kodel");
+  // Found once, the first time a command needs it; the notes go to stderr (stdout is the protocol of
+  // `mcp` and the data of `--json`).
+  let found: Promise<ProjectRoot> | undefined;
+  const project = (): Promise<ProjectRoot> => {
+    found ??= (async () => {
+      const result = await findProjectRoot(env.cwd, {
+        explicit: program.opts<{ root?: string }>().root,
+        env: env.environment ?? {},
+      });
+      if (result.via === "worktree") {
+        env.err(`kodel: using the project at ${plain(result.root)}: you are in a worktree of it\n`);
+      } else if (result.climbed) {
+        env.err(`kodel: using the project at ${plain(result.root)}: it is above this folder\n`);
+      }
+      return result;
+    })();
+    return found;
+  };
+  const host = async () => {
+    const { root, dataDir } = await project();
+    return new LocalPipelineHost({ root, storeRoot: dataDir });
+  };
+  const storeRoot = async () => (await project()).dataDir;
 
   async function openRun(host_: LocalPipelineHost, runId: string) {
     const run = await host_.open(runId);
@@ -268,10 +297,23 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .action(async () => {
       // A config that cannot be used for the tasks must not take the pipelines down with it: the
       // server starts without the task tools and says why on stderr (stdout is the protocol).
+      let resolved: ProjectRoot;
+      try {
+        resolved = await project();
+      } catch (error) {
+        // Outside a project the server still starts: the agent gets the reason from every tool,
+        // which is better than a server that is "not connected" and says nothing.
+        if (error instanceof KodelError && error.code === "NO_PROJECT") {
+          env.err(`kodel: ${plain(error.message)}\n`);
+          await serveStdio(noProjectHost(error), pkg.version);
+          return;
+        }
+        throw error;
+      }
       let tasks: TaskService | undefined;
       let runLink: RunTaskLink | undefined;
       try {
-        const opened = await openTaskService({ storeRoot: storeRoot() });
+        const opened = await openTaskService({ storeRoot: resolved.dataDir });
         tasks = opened?.service;
         runLink = opened?.runLink;
       } catch (error) {
@@ -281,12 +323,13 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       }
       // The instructions are sent once, when the agent connects: a change of this setting applies
       // when the server is started again. A config that cannot be read leaves the default.
-      const waitHint = await loadConfig(storeRoot())
+      const waitHint = await loadConfig(resolved.dataDir)
         .then((config) => config.agent_hints.wait)
         .catch(() => true);
       await serveStdio(
         new LocalPipelineHost({
-          root: program.opts<{ root: string }>().root,
+          root: resolved.root,
+          storeRoot: resolved.dataDir,
           // The same tie the tools were built for; without one the host asks the config itself.
           ...(runLink === undefined ? {} : { runTaskLink: runLink }),
         }),
@@ -324,7 +367,8 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         try {
           await runInit(
             {
-              root: program.opts<{ root: string }>().root,
+              // init makes a project, so it never looks for one: the folder given, or this one.
+              root: program.opts<{ root?: string }>().root ?? env.cwd,
               agents: opts.agent
                 ?.split(",")
                 .map((id) => id.trim())
@@ -372,7 +416,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .option("--json", "print the run list as JSON")
     .option("--no-headers", "do not print the header row of the run list")
     .action(async (runId: string | undefined, opts: { json?: boolean; headers?: boolean }) => {
-      const h = host();
+      const h = await host();
       if (!runId) {
         const runs = await h.runSummaries();
         if (opts.json) {
@@ -454,7 +498,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     )
     .action(async (runId: string, opts: { timeout: string }) => {
       const limitS = wholeSeconds(opts.timeout);
-      const run = await openRun(host(), runId);
+      const run = await openRun(await host(), runId);
       const say = (what: string) => env.out(`${run.runId}: ${what}\n`);
       const lastSeq = async () =>
         (await run.journal()).reduce((last, r) => Math.max(last, r.seq), 0);
@@ -541,7 +585,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         if (decision !== "approve" && decision !== "reject") {
           throw new UserError(`the decision is "approve" or "reject", not "${decision}"`);
         }
-        const run = await openRun(host(), runId);
+        const run = await openRun(await host(), runId);
         await refuseWhilePending(run, opts.ignorePendingChange);
         const state = await run.state();
         const waiting = state.active.filter((v) => v.phase === "human");
@@ -604,7 +648,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     )
     .action(async (runId: string, opts: { ignorePendingChange?: boolean }) => {
       requireHuman();
-      const run = await openRun(host(), runId);
+      const run = await openRun(await host(), runId);
       await refuseWhilePending(run, opts.ignorePendingChange);
       if ((await run.state()).status !== "paused") {
         throw new UserError(`run ${runId} is not paused`);
@@ -620,7 +664,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .option("--note <text>", "what you changed")
     .action(async (runId: string, opts: { note?: string }) => {
       requireHuman();
-      const run = await openRun(host(), runId);
+      const run = await openRun(await host(), runId);
       await mustConfirm(`Accept the state of run ${runId} as it is now?`);
       failIfRefused(await run.acknowledge(opts.note));
       env.out(`${runId}: accepted\n`);
@@ -656,7 +700,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .command("show <run>", { isDefault: true })
     .description("The change that waits for you, if there is one")
     .action(async (runId: string) => {
-      const run = await openRun(host(), runId);
+      const run = await openRun(await host(), runId);
       const found = await run.pendingChange();
       if (!found) {
         env.out(`${runId}: no change of the pipeline waits\n`);
@@ -677,7 +721,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       if (opts.from !== undefined && opts.from !== "proposal" && opts.from !== "file") {
         throw new UserError('--from is "proposal" or "file"');
       }
-      const run = await openRun(host(), runId);
+      const run = await openRun(await host(), runId);
       const state = await run.state();
       if (state.status !== "running" && state.status !== "paused") {
         throw new UserError(`run ${runId} is ${state.status}; its pipeline cannot change now`);
@@ -715,7 +759,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .description("Drop the agent's proposal, or put the pipeline file back as the run has it")
     .action(async (runId: string) => {
       requireHuman();
-      const run = await openRun(host(), runId);
+      const run = await openRun(await host(), runId);
       const found = await run.pendingChange();
       if (!found) {
         env.out(`${runId}: no change of the pipeline waits\n`);
@@ -738,7 +782,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .command("history <run>")
     .description("The versions of the pipeline the run has had")
     .action(async (runId: string) => {
-      const run = await openRun(host(), runId);
+      const run = await openRun(await host(), runId);
       const { versions, orphans } = await run.history();
       for (const [i, v] of versions.entries()) {
         const when = new Date(v.at).toISOString().replace("T", " ").slice(0, 19);
@@ -766,7 +810,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     )
     .action(async (runId: string, hash: string | undefined) => {
       requireHuman();
-      const run = await openRun(host(), runId);
+      const run = await openRun(await host(), runId);
       const state = await run.state();
       await mustConfirm(
         `Write ${hash ? `version ${plain(hash)}` : "the version the run is on"} into ${plain(state.pipelineFile ?? "the pipeline file")}?`,
@@ -803,7 +847,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .command("show [name]", { isDefault: true })
     .description("The proposals that wait, or one in full")
     .action(async (name: string | undefined) => {
-      const h = host();
+      const h = await host();
       if (name === undefined) {
         const waiting = await h.pipelineProposals();
         if (waiting.length === 0) env.out("no pipeline proposal waits\n");
@@ -827,7 +871,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .description("Accept a proposal: the pipeline file is written")
     .action(async (name: string) => {
       requireHuman();
-      const h = host();
+      const h = await host();
       const view = await missingOr(h, name);
       if (view.refused !== undefined) {
         throw new UserError(`this proposal cannot be accepted: ${plain(view.refused)}`);
@@ -849,7 +893,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .description("Drop a proposal")
     .action(async (name: string) => {
       requireHuman();
-      const h = host();
+      const h = await host();
       // Whether it can be read does not matter here: a damaged record is dropped the same way.
       if (!(await h.hasPipelineProposal(name))) {
         env.out(`no proposal of a pipeline named "${plain(name)}" waits\n`);
@@ -865,7 +909,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .description("Where the time went and what was redone in a run (the latest, if none is named)")
     .option("--json", "print the report as JSON")
     .action(async (runId: string | undefined, opts: { json?: boolean }) => {
-      const h = host();
+      const h = await host();
       const id = runId ?? (await h.runSummaries()).at(-1)?.meta.runId;
       if (!id) throw new UserError("there are no runs yet");
       const run = await openRun(h, id);
@@ -886,12 +930,10 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .action(async (runId: string) => {
       requireHuman();
       await mustConfirm(`Accept the files of finished run ${runId} as they are now?`);
-      await host()
-        .seal(runId)
-        .catch((error: unknown) => {
-          if (error instanceof KodelError) throw error;
-          throw new UserError(error instanceof Error ? error.message : String(error));
-        });
+      await (await host()).seal(runId).catch((error: unknown) => {
+        if (error instanceof KodelError) throw error;
+        throw new UserError(error instanceof Error ? error.message : String(error));
+      });
       env.out(`${runId}: sealed\n`);
     });
 
@@ -970,7 +1012,7 @@ Examples:
   async function tasksService(): Promise<TaskService> {
     let opened: Awaited<ReturnType<typeof openTaskService>>;
     try {
-      opened = await openTaskService({ storeRoot: storeRoot() });
+      opened = await openTaskService({ storeRoot: await storeRoot() });
     } catch (error) {
       if (error instanceof KodelError) {
         throw new UserError(`${error.code}: ${plain(error.message)}`);
