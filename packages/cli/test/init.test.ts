@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { TOOLS } from "@kodel-ai/pipeline-core/mcp";
 import { runCli } from "../src/cli";
 import type { Choice } from "../src/init";
 import { AGENTS } from "../src/init/agents";
@@ -285,8 +286,43 @@ describe("skills", () => {
   const ctx = (force = false) => ({ root: dir, dryRun: false, force, changes: [] as Change[] });
   const file = ".claude/skills/kodel-x/SKILL.md";
 
-  test("none_are_shipped_yet", () => {
-    expect(SKILLS).toEqual([]);
+  const launcher = () => SKILLS.find((s) => s.name === "kodel-run")?.text ?? "";
+
+  test("vj7z_kodel_run_is_shipped", () => {
+    expect(SKILLS.map((s) => s.name)).toEqual(["kodel-run"]);
+    const frontmatter = /^---\n([\s\S]*?)\n---\n/.exec(launcher())?.[1] ?? "";
+    expect(frontmatter).toContain("name: kodel-run\n");
+    expect(frontmatter).toMatch(/^description: \S/m);
+  });
+
+  test("vj7z_kodel_run_names_the_tools_that_exist", () => {
+    const known = new Set(TOOLS.map((t) => t.name));
+    const named = launcher().match(/\bpipeline_[a-z_]+/g) ?? [];
+    expect(named).toContain("pipeline_list");
+    expect(named).toContain("pipeline_start");
+    for (const name of named) expect(known.has(name)).toBe(true);
+  });
+
+  test("vj7z_kodel_run_does_not_copy_the_rules", () => {
+    for (const forbidden of ["gate", "ack", "seal", "resume", "pipeline_complete_step"]) {
+      expect(launcher()).not.toMatch(new RegExp(`\\b${forbidden}\\b`));
+    }
+    expect(launcher()).toContain("instructions the server sent");
+    expect(launcher()).toMatch(/lists no pipelines, tell the person and stop/);
+  });
+
+  test("vj7z_init_installs_kodel_run_for_every_agent", async () => {
+    const args = ["--agent", "claude-code,codex,opencode"];
+    expect((await init({}, ...args)).code).toBe(0);
+    const files = [
+      ".claude/skills/kodel-run/SKILL.md",
+      ".agents/skills/kodel-run/SKILL.md",
+      ".opencode/skills/kodel-run/SKILL.md",
+    ];
+    for (const rel of files) expect(await read(rel)).toContain("name: kodel-run");
+    const before = await Promise.all(files.map(read));
+    await init({}, ...args);
+    expect(await Promise.all(files.map(read))).toEqual(before);
   });
 
   test("a_skill_is_installed_updated_and_an_edited_copy_is_kept", async () => {
