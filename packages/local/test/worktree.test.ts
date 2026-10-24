@@ -14,7 +14,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { KodelError, parsePipeline } from "@kodel-ai/pipeline-core";
+import { DEFAULT_HISTORY, KodelError, parsePipeline } from "@kodel-ai/pipeline-core";
 import {
   doneHint,
   GitWorktreeProvider,
@@ -185,7 +185,12 @@ describe("a worktree for each run", () => {
     cleanup.push(plain);
     await mkdir(join(plain, ".kodel", "pipelines"), { recursive: true });
     await writeFile(join(plain, ".kodel", "pipelines", "p.yaml"), TWO_COMMANDS("p", 'node -e "0"'));
-    const host = new LocalPipelineHost({ root: plain, heartbeatMs: 0, worktree: AUTO });
+    const host = new LocalPipelineHost({
+      root: plain,
+      heartbeatMs: 0,
+      worktree: AUTO,
+      history: { ...DEFAULT_HISTORY, changes: { ...DEFAULT_HISTORY.changes, enabled: false } },
+    });
     const { run, workdir } = await start(host, "p", "t");
     await run.settle();
     expect(workdir).toBeUndefined();

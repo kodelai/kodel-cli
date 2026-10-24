@@ -24,6 +24,7 @@ import {
   evaluateCommand,
   evaluateDiff,
   evaluateResult,
+  type HistoryConfig,
   isRunEnd,
   type JournalRecord,
   KodelError,
@@ -272,6 +273,8 @@ export class LocalHost {
       title?: string;
       cwd?: string;
       worktree?: WorktreeConfig;
+      /** The effective `history` settings of the project config; omitted: not recorded and no git needed for them. */
+      history?: HistoryConfig;
       /** A pipeline file to put into the run's directory, when the last commit does not have it as it should be. */
       pipelineCopy?: { path: string; text: string };
       /** The key of the task the run is for, already resolved by the tracker. */
@@ -279,14 +282,27 @@ export class LocalHost {
     } = {},
   ): Promise<{ run: LocalRun; reused: boolean; terminal: boolean; workdir?: Workdir }> {
     const registry = this.engine.registry ?? defaultRegistry();
-    const needsGit = this.spec.nodes.some((n) =>
+    const { history } = options;
+    const needsDiffGit = this.spec.nodes.some((n) =>
       n.checks.some((c) => registry.check(c.kind)?.baseline?.(c.params)),
     );
-    if (needsGit && !(await this.snapshotter.isRepo())) {
-      throw new Error(
-        `this pipeline has a diff check, which needs a git repository, and ${this.options.root} is not inside one`,
+    const recordsChanges = history?.changes.enabled === true;
+    // Only a start that would make a new run needs git: a run that exists is picked up as it is, so
+    // this runs inside the start lock after the reuse branches, and before anything is created.
+    const requireGit = async () => {
+      if (!(needsDiffGit || recordsChanges) || (await this.snapshotter.isRepo())) return;
+      // `isRepo` is false for no git binary, a bare repository and a directory outside a repository
+      // alike, so the message names the ways out instead of guessing which it was.
+      const setting = recordsChanges
+        ? `; history.changes.enabled also needs git: set it to false in .kodel/config.yaml, or run kodel inside a git repository`
+        : "";
+      throw new KodelError(
+        "GIT_REQUIRED",
+        needsDiffGit
+          ? `this pipeline has a diff check, which needs a git repository, and ${this.options.root} is not inside one${setting}`
+          : `${this.options.root} is not inside a git work tree (or git is not installed), and this run records changes: set history.changes.enabled to false in .kodel/config.yaml, or run kodel inside a git repository`,
       );
-    }
+    };
     // Spaces at the ends or doubled are not a different task; otherwise a changed space would
     // slip past the run that is waiting for a person.
     const redactedTask = normalizeTask(task, this.rules);
@@ -310,6 +326,7 @@ export class LocalHost {
         }
       }
 
+      await requireGit();
       const now = this.clock();
       const runId = newRunId(now);
       // Of the text the pipeline was read from, when it is known: that is what a copy is checked
@@ -361,6 +378,7 @@ export class LocalHost {
             ? {}
             : { pipelineFile: this.options.pipelineFile }),
           ...(options.taskKey === undefined ? {} : { taskKey: options.taskKey }),
+          ...(history === undefined ? {} : { history }),
         });
         if (!result.ok) throw result.error;
         return { run, reused: false, terminal: false, ...(workdir ? { workdir } : {}) };

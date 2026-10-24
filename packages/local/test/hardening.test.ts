@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { MAX_LOGGED_REFUSALS, parsePipeline } from "@kodel-ai/pipeline-core";
+import { DEFAULT_HISTORY, MAX_LOGGED_REFUSALS, parsePipeline } from "@kodel-ai/pipeline-core";
 import {
   capChanges,
   engineEnv,
@@ -396,7 +396,11 @@ describe("approving knows what changed since the gate, and says when it cannot t
     try {
       await mkdir(join(plain, ".kodel", "pipelines"), { recursive: true });
       await writeFile(join(plain, ".kodel", "pipelines", "demo.yaml"), DEMO);
-      const h = new LocalPipelineHost({ root: plain, heartbeatMs: 0 });
+      const h = new LocalPipelineHost({
+        root: plain,
+        heartbeatMs: 0,
+        history: { ...DEFAULT_HISTORY, changes: { ...DEFAULT_HISTORY.changes, enabled: false } },
+      });
       const { run } = await h.start({ pipeline: "demo", task: "t", restart: false });
       const mine = (await h.open(run.runId)) as LocalRun;
       await mine.completeStep("write", 1);

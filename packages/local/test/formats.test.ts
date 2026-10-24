@@ -99,6 +99,7 @@ async function formatDirs(): Promise<string[]> {
     .sort();
 }
 
+/** The run directories of a format; other directories (`history/`, golden events) are not runs. */
 async function runIds(format: string): Promise<string[]> {
   return (await readdir(join(FORMATS, format), { withFileTypes: true }))
     .filter((e) => e.isDirectory() && e.name.startsWith("r_"))

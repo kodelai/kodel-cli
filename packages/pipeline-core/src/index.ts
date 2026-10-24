@@ -7,6 +7,7 @@ export * from "./canonical";
 export * from "./checks";
 export * from "./docs";
 export * from "./errors";
+export * from "./history-config";
 export * from "./hook-normalizers";
 export * from "./hooks";
 export * from "./new-pipeline";

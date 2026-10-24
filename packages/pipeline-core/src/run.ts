@@ -9,6 +9,7 @@
  */
 import { canonicalNode, checkIdOf, type NodeForms, stableJson } from "./canonical";
 import { type ErrorCode, KodelError } from "./errors";
+import type { HistoryConfig } from "./history-config";
 import type { NodeSpec, PipelineSpec } from "./pipeline";
 import { diffPipelines } from "./pipeline-diff";
 import { defaultRegistry, type Registry } from "./registry";
@@ -180,6 +181,8 @@ export type RunEvent =
       pipelineFile?: string;
       /** The task the run was started for (its key as the tracker resolved it). */
       taskKey?: string;
+      /** The effective `history` settings, fixed for the run. */
+      history?: HistoryConfig;
     }
   | {
       type: "agent_completed";
@@ -865,6 +868,7 @@ class Machine {
       ...(event.branch === undefined ? {} : { branch: event.branch }),
       ...(event.pipelineFile === undefined ? {} : { pipelineFile: event.pipelineFile }),
       ...(event.taskKey === undefined ? {} : { task_key: event.taskKey }),
+      ...(event.history === undefined ? {} : { history: event.history }),
     });
     const needsRunBaseline = this.spec.nodes.some((n) =>
       n.checks.some((c) => this.registry.check(c.kind)?.baseline?.(c.params) === "run"),
