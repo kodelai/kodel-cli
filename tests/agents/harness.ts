@@ -6,9 +6,17 @@
  * These tests spend money and are not deterministic, so they only run when KODEL_AGENT_TESTS=1.
  */
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { LocalPipelineHost } from "../../packages/local/src";
 import type { Fixture } from "./pipelines";
 
@@ -123,6 +131,7 @@ export function makeSandbox(
   }
   git("add", "-A");
   git("commit", "-q", "-m", "initial");
+  writeKodelShim(stateDir, dir);
   return {
     dir,
     stateDir,
@@ -131,6 +140,33 @@ export function makeSandbox(
       rmSync(stateDir, { recursive: true, force: true });
     },
   };
+}
+
+/** Where the `kodel` shim of a sandbox lives: first on the `PATH` of the agent under test. */
+export const shimDir = (stateDir: string) => join(stateDir, "bin");
+
+/**
+ * The texts the server gives an agent name `kodel`, and a sandbox has no installed binary, so the
+ * agent's shell gets one that runs this checkout on the sandbox. `KODEL_TEST_WAIT_TIMEOUT` makes
+ * `kodel wait` give up sooner, so a scenario about the timeout does not take hours.
+ */
+function writeKodelShim(stateDir: string, root: string): void {
+  mkdirSync(shimDir(stateDir), { recursive: true });
+  const run = `bun "${MAIN_TS}" --root "${root}"`;
+  const file = join(shimDir(stateDir), "kodel");
+  writeFileSync(
+    file,
+    [
+      "#!/bin/sh",
+      'if [ "$1" = "wait" ] && [ -n "$KODEL_TEST_WAIT_TIMEOUT" ]; then',
+      "  shift",
+      `  exec ${run} wait "$@" --timeout "$KODEL_TEST_WAIT_TIMEOUT"`,
+      "fi",
+      `exec ${run} "$@"`,
+      "",
+    ].join("\n"),
+  );
+  chmodSync(file, 0o755);
 }
 
 /**
@@ -221,6 +257,8 @@ export interface TurnOptions {
   allowedTools: string[];
   /** The directory the agent is started in; the sandbox when left out. */
   cwd?: string;
+  /** More environment for the agent and the commands it runs (`KODEL_TEST_WAIT_TIMEOUT`, say). */
+  env?: Record<string, string>;
 }
 
 /** One `claude -p` call: the agent works until it ends its turn. */
@@ -254,10 +292,12 @@ export async function runAgentTurn(options: TurnOptions): Promise<AgentTurn> {
     BUDGET_USD,
     ...(options.resume ? ["--resume", options.resume] : []),
   ];
+  const env = { ...agentEnv(sandbox.stateDir), ...options.env };
+  env.PATH = [shimDir(sandbox.stateDir), env.PATH].filter(Boolean).join(delimiter);
   const child: ChildProcess = spawn("claude", args, {
     cwd: options.cwd ?? sandbox.dir,
     stdio: ["ignore", "pipe", "pipe"],
-    env: agentEnv(sandbox.stateDir),
+    env,
   });
   let stdout = "";
   let stderr = "";

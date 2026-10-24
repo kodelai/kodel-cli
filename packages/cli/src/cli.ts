@@ -6,7 +6,7 @@
  */
 
 import { join } from "node:path";
-import { LocalPipelineHost, openTaskService } from "@kodel-ai/local";
+import { LocalPipelineHost, loadConfig, openTaskService } from "@kodel-ai/local";
 import { MAX_PAYLOAD_BYTES, runHook } from "@kodel-ai/local/hooks";
 import {
   type Decision,
@@ -60,6 +60,10 @@ export interface CliEnv {
   /** For `feedback`: the HTTP client (the global `fetch` if none) and the text piped to stdin. */
   fetch?: Fetch;
   readStdin?(): Promise<string>;
+  /** For `wait`: how often it looks at the run, in milliseconds (a second if none). */
+  pollMs?: number;
+  /** For `wait`: called once, when it is watching a run that waits (so a test knows when to decide). */
+  onWatching?(): void;
 }
 
 /** A problem to report to the user without a stack trace. */
@@ -69,6 +73,33 @@ class UserError extends Error {}
 const WORK_WAIT_MS = 30 * 60_000;
 
 const SHOWN_FILES = 10;
+
+/**
+ * How long `wait` stays when nobody decides. Long enough for a night, short enough not to live for
+ * weeks; a shorter one would wake the agent again and again while the person is away.
+ */
+export const WAIT_TIMEOUT_S = 28_800;
+
+/** How long `wait` looks for the journal record of a change it has seen in the state. */
+const JOURNAL_GRACE_MS = 3000;
+
+/** The exit code of `wait` that gave up: not 0 (it reported a decision) and not 1 (it failed). */
+const WAIT_GAVE_UP = 2;
+
+function wholeSeconds(text: string): number {
+  if (!/^\d+$/.test(text.trim())) {
+    throw new UserError(
+      `--timeout is a whole number of seconds, 0 for no limit; "${plain(text)}" is not`,
+    );
+  }
+  return Number(text);
+}
+
+function describeDuration(seconds: number): string {
+  if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+  if (seconds % 60 === 0) return `${seconds / 60}min`;
+  return `${seconds}s`;
+}
 
 /**
  * Text that came from the agent (a task, a name, a file name) or from files it can write, with
@@ -154,6 +185,7 @@ function failIfRefused(decision: Decision): void {
 }
 
 export async function runCli(argv: string[], env: CliEnv): Promise<number> {
+  let exitCode = 0;
   const program = new Command();
   program
     .name("kodel")
@@ -243,7 +275,12 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         const why = error instanceof Error ? error.message : String(error);
         env.err(`kodel: the task tools are not served: ${plain(why)}\n`);
       }
-      await serveStdio(host(), pkg.version, tasks);
+      // The instructions are sent once, when the agent connects: a change of this setting applies
+      // when the server is started again. A config that cannot be read leaves the default.
+      const waitHint = await loadConfig(storeRoot())
+        .then((config) => config.agent_hints.wait)
+        .catch(() => true);
+      await serveStdio(host(), pkg.version, tasks, { waitHint });
     });
 
   program
@@ -388,6 +425,83 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       } catch {
         env.out("next:      cannot be worked out from this state (it is not readable as a run)\n");
       }
+    });
+
+  program
+    .command("wait <run>")
+    .description(
+      "Stay until a run stops waiting for a person, print one line, and exit; it changes nothing",
+    )
+    .option(
+      "--timeout <seconds>",
+      `give up after this long with nothing decided (0: never); exit code ${WAIT_GAVE_UP}`,
+      String(WAIT_TIMEOUT_S),
+    )
+    .action(async (runId: string, opts: { timeout: string }) => {
+      const limitS = wholeSeconds(opts.timeout);
+      const run = await openRun(host(), runId);
+      const say = (what: string) => env.out(`${run.runId}: ${what}\n`);
+      const lastSeq = async () =>
+        (await run.journal()).reduce((last, r) => Math.max(last, r.seq), 0);
+      // The journal first: a decision between the reads below is then still after `seen`.
+      const seen = await lastSeq();
+      const look = async () => {
+        const step = await run.inspect();
+        const state = await run.state();
+        if (!("waiting" in step)) return { step, state, key: undefined };
+        const { reason, behind, node_slug } = step.waiting;
+        // Where it waits, so a new wait (a gate reached again after a rejection) counts as an end.
+        const attempt = state.active.find((v) => v.phase === "human")?.attempt;
+        return { step, state, key: [reason, behind, node_slug, attempt].join("|") };
+      };
+      const first = await look();
+      if (!("waiting" in first.step)) {
+        say(`not waiting for a person (${describeRun(first.state)}). Call pipeline_next_step.`);
+        return;
+      }
+      const pollMs = env.pollMs ?? 1000;
+      const pause = () => new Promise((resolve) => setTimeout(resolve, pollMs));
+      env.onWatching?.();
+      const started = Date.now();
+      let now = first;
+      while (now.key === first.key) {
+        await pause();
+        now = await look();
+        if (now.key !== first.key) break;
+        if (limitS > 0 && Date.now() - started >= limitS * 1000) {
+          const where = first.step.waiting;
+          say(
+            `still waiting at "${plain(where.node_slug)}" (${where.reason}), nothing was decided in ${describeDuration(limitS)}. Not watching any more.`,
+          );
+          exitCode = WAIT_GAVE_UP;
+          return;
+        }
+      }
+      // What the person did is in the journal, and the journal is written just after the state, so
+      // the record may come a moment after the change was seen. The first thing they did after we
+      // began is the answer.
+      const decisive = ["gate_decided", "run_resumed", "pipeline_accepted", "run_finished"];
+      let done: Awaited<ReturnType<typeof run.journal>>[number] | undefined;
+      for (let rounds = 0; !done && rounds <= Math.ceil(JOURNAL_GRACE_MS / pollMs); rounds++) {
+        if (rounds > 0) await pause();
+        done = (await run.journal()).find((r) => r.seq > seen && decisive.includes(r.event));
+      }
+      const node = plain(String(done?.node ?? ""));
+      const where =
+        "waiting" in now.step
+          ? ` now waits at "${plain(now.step.waiting.node_slug)}" (${now.step.waiting.reason})`
+          : ` is now ${describeRun(now.state)}`;
+      const what =
+        done?.event === "gate_decided"
+          ? `${done.decision === "approved" ? "approved" : "rejected"} at "${node}"`
+          : done?.event === "run_resumed"
+            ? "resumed"
+            : done?.event === "pipeline_accepted"
+              ? "change accepted"
+              : done?.event === "run_finished"
+                ? `the run ended: ${plain(String(done.status))}`
+                : `no decision, but the run${where}`;
+      say(`${what}. Call pipeline_next_step.`);
     });
 
   program
@@ -1052,7 +1166,7 @@ Examples:
 
   try {
     await program.parseAsync(argv, { from: "user" });
-    return 0;
+    return exitCode;
   } catch (error) {
     if (error instanceof CommanderError) return error.exitCode;
     if (error instanceof UserError || error instanceof KodelError) {

@@ -147,6 +147,61 @@ describe("next_step shapes", () => {
     expect(text).toContain("end your turn");
   });
 
+  test("tNN_a_gate_and_a_pause_offer_kodel_wait_with_the_run_id_and_forbid_polling", () => {
+    const atGate = nextStep(feature, drive(auto).state, 5_000);
+    const paused = nextStep(
+      feature,
+      drive(
+        (e) =>
+          e.type === "run_command" && e.node === "build"
+            ? {
+                type: "work_finished",
+                node: "build",
+                attempt: e.attempt,
+                passed: false,
+                reason: "exit code 1",
+              }
+            : auto(e),
+        [approve("plan-approval")],
+      ).state,
+      5_000,
+    );
+    for (const step of [atGate, paused]) {
+      if (!("waiting" in step)) throw new Error("expected waiting");
+      const text = step.waiting.tell_the_person;
+      expect(text).toContain("`kodel wait r7`");
+      expect(text).toContain("run_in_background");
+      expect(text).toContain("still waiting");
+      expect(text).toContain("do not start it again");
+      expect(text).toContain("Never poll pipeline_next_step in a loop");
+    }
+  });
+
+  test("tNN_waitHint_false_leaves_the_offer_out_of_every_waiting_answer", () => {
+    const stuck = (e: Effect): RunEvent | undefined =>
+      e.type === "run_command" && e.node === "build"
+        ? {
+            type: "work_finished",
+            node: "build",
+            attempt: e.attempt,
+            passed: false,
+            reason: "exit code 1",
+          }
+        : auto(e);
+    const gate = drive(auto).state;
+    const paused = drive(stuck, [approve("plan-approval")]).state;
+    for (const state of [gate, paused]) {
+      const on = nextStep(feature, state, 5_000);
+      const off = nextStep(feature, state, 5_000, undefined, { waitHint: false });
+      if (!("waiting" in on) || !("waiting" in off)) throw new Error("expected waiting");
+      expect(on.waiting.tell_the_person).toContain("kodel wait");
+      expect(off.waiting.tell_the_person).not.toContain("kodel wait");
+      expect(off.waiting.tell_the_person).not.toContain("run_in_background");
+      // Nothing else changes: the text is the one that was there before the offer.
+      expect(on.waiting.tell_the_person.startsWith(off.waiting.tell_the_person)).toBe(true);
+    }
+  });
+
   test("engine work in progress: a running answer that says there is nothing to do", () => {
     const run = drive(
       (e) => (e.type === "run_command" && e.node === "build" ? undefined : auto(e)),
