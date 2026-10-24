@@ -7,7 +7,7 @@
  * an *attempt*. A failed attempt of an agent node with no edge for its label is retried as a new
  * attempt of the same visit (rework). Limits: `max_consecutive_failures` and `max_attempts`.
  */
-import { canonicalNode, type NodeForms } from "./canonical";
+import { canonicalNode, checkIdOf, type NodeForms, stableJson } from "./canonical";
 import { type ErrorCode, KodelError } from "./errors";
 import type { NodeSpec, PipelineSpec } from "./pipeline";
 import { diffPipelines } from "./pipeline-diff";
@@ -51,6 +51,8 @@ export interface Feedback {
   reason: string;
   /** The node that failed, when the failure was handed to a different node along an edge. */
   from?: string;
+  /** The id of the check that failed (`checkIdOf`), when a check did. */
+  check_id?: string;
 }
 
 export interface NodeRun {
@@ -748,11 +750,16 @@ class Machine {
         if (event.index !== visit.checkIndex) throw new Repeat();
         const check = this.node(event.node).checks[event.index];
         if (!check) throw new Repeat();
+        const checkId = checkIdOf(this.node(event.node), event.index);
+        // The declared params, not the rendered ones: the hash follows the condition, not the run.
+        const paramsHash = this.fingerprint?.(stableJson(check.params));
         this.log("check_finished", {
           node: event.node,
           attempt: event.attempt,
           index: event.index,
           kind: check.kind,
+          ...(checkId === undefined ? {} : { check_id: checkId }),
+          ...(paramsHash === undefined ? {} : { params_hash: paramsHash }),
           passed: event.passed,
           ...(event.exit === undefined ? {} : { exit: event.exit }),
           ...(event.duration_ms === undefined ? {} : { duration_ms: event.duration_ms }),
@@ -765,6 +772,7 @@ class Machine {
           this.finish(visit, check.on_fail, {
             source: `check:${check.kind}`,
             reason: event.reason,
+            ...(checkId === undefined ? {} : { check_id: checkId }),
           });
         }
         return;

@@ -73,6 +73,40 @@ describe("next_step shapes", () => {
     expect(step.node.result_spec).toBeUndefined();
   });
 
+  test("hp9r_the_retry_text_names_the_check_and_keeps_the_old_text_as_a_prefix", () => {
+    const run = drive((e) => {
+      if (e.type === "run_check") {
+        return {
+          type: "check_finished",
+          node: e.node,
+          attempt: e.attempt,
+          index: e.index,
+          passed: false,
+          reason: "nothing changed in docs/plans",
+        };
+      }
+      return e.type === "need_agent" && e.attempt === 1
+        ? auto(e)
+        : e.type === "need_agent"
+          ? undefined
+          : auto(e);
+    });
+    const withId = nextStep(feature, run.state, 5_000);
+    if (!("node" in withId)) throw new Error("expected a node");
+    expect(withId.node.reentry_feedback).toBe(
+      "The previous attempt failed (check:diff): nothing changed in docs/plans (plan/diff#1)",
+    );
+
+    // a failure written before the id existed has none, and reads as before
+    const old = structuredClone(run.state);
+    delete old.nodes.plan?.lastFailure?.check_id;
+    const without = nextStep(feature, old, 5_000);
+    if (!("node" in without)) throw new Error("expected a node");
+    expect(without.node.reentry_feedback).toBe(
+      "The previous attempt failed (check:diff): nothing changed in docs/plans",
+    );
+  });
+
   test("after a failed attempt the agent is told why", () => {
     const run = drive((e) => {
       if (e.type === "run_check") {
@@ -95,7 +129,7 @@ describe("next_step shapes", () => {
     if (!("node" in step)) throw new Error("expected a node");
     expect(step.node.attempt).toBe(2);
     expect(step.node.reentry_feedback).toBe(
-      "The previous attempt failed (check:diff): nothing changed in docs/plans",
+      "The previous attempt failed (check:diff): nothing changed in docs/plans (plan/diff#1)",
     );
   });
 

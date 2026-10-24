@@ -165,6 +165,43 @@ describe("a pipeline file edited under a run in the repository root", () => {
     expect((await run.state()).nodes.write?.lastFailure?.source).toBe("check:command");
   });
 
+  test("hp9r_check_ids_survive_a_restart_and_a_recheck_after_an_accept", async () => {
+    const first = host();
+    const run = await startRun(first);
+    const failing = PIPELINE('node -e "process.exit(3)"');
+    await writeFile(join(dir, FILE), failing);
+    const found = await run.pendingChange();
+    await run.acceptChange({ source: "file", text: found?.text ?? "" });
+    await run.completeStep("write", 1);
+    await run.waitForRest(10_000);
+    expect((await run.state()).nodes.write?.lastFailure).toMatchObject({
+      source: "check:command",
+      check_id: "write/command#1",
+    });
+
+    // a new process opens the run: the failure still names the check
+    const reopened = (await host().open(run.runId)) as LocalRun;
+    expect((await reopened.state()).nodes.write?.lastFailure?.check_id).toBe("write/command#1");
+
+    // the person accepts a fixed condition; the node is checked again under the new version
+    await writeFile(join(dir, FILE), V1);
+    const fixed = await reopened.pendingChange();
+    await reopened.acceptChange({ source: "file", text: fixed?.text ?? "" });
+    await reopened.completeStep("write", 2);
+    await reopened.waitForRest(10_000);
+
+    const rows = (await readFile(join(dir, ".kodel", "runs", run.runId, "journal.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((r) => r.event === "check_finished");
+    expect(rows.map((r) => [r.attempt, r.passed, r.check_id])).toEqual([
+      [1, false, "write/command#1"],
+      [2, true, "write/command#1"],
+    ]);
+    expect(rows[0]?.params_hash).not.toBe(rows[1]?.params_hash);
+  });
+
   test("a_run_opened_by_another_process_follows_an_accept_made_by_the_first", async () => {
     const first = host();
     const run = await startRun(first);
