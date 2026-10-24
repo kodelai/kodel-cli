@@ -1,0 +1,40 @@
+{
+  "completeness": "complete",
+  "rows": [
+    {
+      "severity": "info",
+      "location": "docs/plans/let_a_new_pipeline_be_proposed_and_created_through_the_pipel.md: Options compared",
+      "description": "Option A is chosen (pipeline_propose_change without run_id). Of the four decisions at the end of the plan only this one was answered; items 2-4 (.kodel/proposals/<name>.json git-ignored, the extra name argument for taking back, warnings left for a follow-up) stand as written unless said otherwise. The diff limit of the impl step was removed for this run, so the plan no longer has to fit 800 lines: drop the diff-limit estimate and the part of the Risks that talks about it."
+    },
+    {
+      "severity": "major",
+      "location": "docs/plans/let_a_new_pipeline_be_proposed_and_created_through_the_pipel.md: Design / The tool",
+      "description": "Through pipeline_propose_change without run_id one must also be able to change an EXISTING pipeline, in this change and not as a follow-up. A name that is already in use is then a proposal to change that pipeline, not a refusal. Remove the follow-up 'Proposing a change of an existing pipeline outside a run' and the refusal on a name in use; a rename is not a change (a different name is a new pipeline)."
+    },
+    {
+      "severity": "major",
+      "location": "docs/plans/let_a_new_pipeline_be_proposed_and_created_through_the_pipel.md: Design / The tool",
+      "description": "pipeline_resolve without run_id returns only the parsed spec, not the YAML text, so an agent cannot start a change from the real file. Settle that resolve without run_id also returns the file's YAML and its hash, and that the tool description says to start from it."
+    },
+    {
+      "severity": "major",
+      "location": "docs/plans/let_a_new_pipeline_be_proposed_and_created_through_the_pipel.md: Design / The local host and store",
+      "description": "The proposal record must say whether it is new or a change, and for a change keep the hash of the file as it was when proposed. Accepting refuses if the file moved since (or the name appeared meanwhile for a new one), and for a change it replaces the existing file found by name or stem, not a new path. A no-op (nothing differs from the file) is refused like for a run."
+    },
+    {
+      "severity": "major",
+      "location": "docs/plans/let_a_new_pipeline_be_proposed_and_created_through_the_pipel.md: Design / The CLI",
+      "description": "For a change, show and the confirmation of apply must show what differs per step (the existing diffNodes) and the full YAML with the block of commands, not only the text."
+    },
+    {
+      "severity": "minor",
+      "location": "docs/plans/let_a_new_pipeline_be_proposed_and_created_through_the_pipel.md: Risks",
+      "description": "Say what happens when a change of an existing pipeline is accepted while a run of it is going: runs keep their own copy, but the edit of the file is noticed by the existing mechanism for a hand-edited file and waits for the person; and the next pipeline_start asks working or committed version because the file is not committed. Cover both with a test."
+    },
+    {
+      "severity": "minor",
+      "location": "docs/plans/let_a_new_pipeline_be_proposed_and_created_through_the_pipel.md: What the agent is told",
+      "description": "SERVER_INSTRUCTIONS: the 'ask the person first' rule is for a run; a project-level proposal needs no asking, the person accepts anyway. pipeline_docs, topic pipeline-design, gets a short section on changing an existing pipeline (start from pipeline_resolve yaml, keep the name, change only what is needed). Add a real-agent scenario step or a second scenario for a change of an existing pipeline."
+    }
+  ]
+}

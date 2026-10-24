@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { LocalPipelineHost } from "@kodel-ai/local";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -1033,5 +1034,59 @@ describe("pipeline proposals", () => {
       expect(result.err, sub).toContain("for a person at a terminal");
     }
     expect(await hostOf().pipelineProposals()).toHaveLength(1);
+  });
+});
+
+describe("a store made from the golden runs of the stored formats", () => {
+  const V1 = resolve(
+    fileURLToPath(import.meta.url),
+    "..",
+    "..",
+    "..",
+    "..",
+    "fixtures",
+    "formats",
+    "v1",
+  );
+  const RUNS = ["r_0mviewgvl_i1ig", "r_0mvimyn54_tc9o"];
+
+  let outer: string;
+  beforeEach(async () => {
+    outer = dir;
+    // The directory of the repository has a space in its name on purpose.
+    dir = join(await mkdtemp(join(tmpdir(), "kodel formats-")), "a repo");
+    for (const id of RUNS) {
+      await cp(join(V1, id), join(dir, ".kodel", "runs", id), { recursive: true });
+    }
+  });
+  afterEach(async () => {
+    await rm(join(dir, ".."), { recursive: true, force: true });
+    dir = outer;
+  });
+
+  test("formats_status_lists_both_runs_and_shows_one_as_unsealed", async () => {
+    const list = await cli("status");
+    expect(list.code).toBe(0);
+    for (const id of RUNS) expect(list.out).toContain(id);
+    expect(list.out.match(/ dev /g)?.length).toBe(2);
+    expect(list.out.match(/completed/g)?.length).toBe(2);
+    for (const id of RUNS) {
+      const one = await cli("status", id);
+      expect(one.code).toBe(0);
+      expect(one.out).toContain("status:    completed");
+      expect(one.out).toContain("seal:      unsealed");
+    }
+  });
+
+  test("formats_report_shows_where_the_time_went", async () => {
+    for (const id of RUNS) {
+      const report = await cli("report", id);
+      expect(report.code).toBe(0);
+      expect(report.out).toContain(`run ${id}  completed`);
+      expect(report.out).toContain("final-approval");
+      expect(report.out).toContain("(a person decides)");
+    }
+    const parsed = JSON.parse((await cli("report", "r_0mviewgvl_i1ig", "--json")).out);
+    expect(parsed).toMatchObject({ status: "completed", extra_attempts: 9, feedback: 1 });
   });
 });

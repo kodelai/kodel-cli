@@ -1,0 +1,70 @@
+{
+  "completeness": "complete",
+  "rows": [
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/src/docs.ts:30",
+      "description": "type() rendered fail_when as 'map of string | boolean[]', which reads wrongly; the union needs parentheses. (Fixed after the review, with a test.)"
+    },
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/agent-docs/examples.md:136",
+      "description": "'Each outcome needs an edge, and a person confirms it' is not an engine rule; only the edge is enforced. (Reworded after the review.)"
+    },
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/agent-docs/pipeline-spec.md:11",
+      "description": "The prose omitted two parser rules: an edge from a node to itself is refused, and an edge's when must be a label the node can emit. (Added after the review.)"
+    },
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/agent-docs/pipeline-design.md:1",
+      "description": "Plan deviation: profiles are full yaml blocks in examples, not in pipeline-design, and summaries are in docs.ts, not on the files' first line. (The plan text was aligned with what was built.)"
+    },
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/agent-docs/pipeline-design.md:52",
+      "description": "'Write prompts in the language of the project's conventions' is vague. (Replaced after the review.)"
+    },
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/agent-docs/pipeline-design.md:57",
+      "description": "'a person has to accept every pipeline before it runs' implies a separate accept step that does not exist today. (Reworded after the review.)"
+    },
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/test/docs.test.ts:101",
+      "description": "The test registered only a check kind; the node path for kinds registered later was untested. (A node kind test was added after the review.)"
+    },
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/test/errors.test.ts:12",
+      "description": "The test title still said 23 codes while the count is 24. (Fixed after the review.)"
+    },
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/src/pipeline.ts:132",
+      "description": "The kind and checks describe texts list built-in kinds, which goes stale for plugin kinds. (Reworded to point to the generated lists after the review.)"
+    },
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/test/docs.test.ts:74",
+      "description": "The plan said a test warns above 12 KB; the test fails above it. (The plan text was aligned.)"
+    },
+    {
+      "severity": "info",
+      "location": "packages/cli/test/cli.test.ts:152",
+      "description": "Strips KODEL_ENGINE from the environment of the spawned process; outside the plan but justified and harmless."
+    },
+    {
+      "severity": "info",
+      "location": "tests/agents/claude-code-docs.test.ts:66",
+      "description": "The real-agent test is sound: skipped without KODEL_AGENT_TESTS=1, asserts on tool calls and on a parsable YAML block with scripts that exist, not on wording."
+    },
+    {
+      "severity": "info",
+      "location": "scripts/check-artifact.mjs:35",
+      "description": "The sentinel lines each exist in their agent-docs file; a wording edit needs a matching change here, and the failure message names the line."
+    }
+  ]
+}

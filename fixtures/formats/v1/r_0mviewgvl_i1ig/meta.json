@@ -1,0 +1,10 @@
+{
+  "v": 2,
+  "runId": "r_0mviewgvl_i1ig",
+  "pipeline": "dev",
+  "task": "Add a read-only MCP tool `pipeline_docs` (no run_id needed) that works like llms.txt: without arguments it returns an index (what Kodel is, engine version, one line per topic), with `topic` it returns that topic; an unknown topic returns {ok:false, code, message} listing the existing topics. Docs are markdown embedded in the build (single dist/kodel.js, must work on plain Node); the pipeline-spec reference is generated from the zod schema so it cannot drift. Tests: every yaml block in every topic is parsed by the current pipeline parser; every topic linked from the index exists. Name the tool in SERVER_INSTRUCTIONS (the existing test checks only real tools are named). First topics: pipeline-spec, checks, examples, and pipeline-design (best practices, profiles lean/standard/strict, and two modes for creating a pipeline for a project: auto, where the agent explores and builds it with no questions and lists its assumptions, or guided, where the agent asks a few batched questions). The plan must also say how creating a NEW pipeline (no run yet) can go through the pipeline_propose_change machinery (a draft that a person accepts with a terminal command), and what is needed for that; implement only what the plan fixes as step 1 (pipeline_docs and its topics), and list the rest as follow-ups.",
+  "specHash": "55b4ff5a84b195dd",
+  "createdAt": 1792605283185,
+  "workdir": "/kodel-fixture/workdir/r_0mviewgvl_i1ig",
+  "branch": "kodel/r_0mviewgvl_i1ig"
+}

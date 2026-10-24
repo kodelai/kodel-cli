@@ -1,0 +1,70 @@
+{
+  "completeness": "complete",
+  "rows": [
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/src/service.ts:229",
+      "description": "Plan says pipeline_list for a project with no pipelines gets a pointer to pipeline_docs (topic pipeline-design). Only the pipeline_start message was changed; list() still returns the bare empty list."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/src/service.ts:211",
+      "description": "Plan says the index names the contract version, but CONTRACT_VERSION is not in the answer; only engine_version and pipeline_file_version {baseline, max_major} are."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/test/docs.test.ts:1",
+      "description": "Two items of the plan's test list have no test: the over-MCP check in the CLI tests (tools/list includes pipeline_docs, calling it returns the index) and the idempotent hint on pipeline_docs (only readOnly is pinned, via the tool-list snapshot)."
+    },
+    {
+      "severity": "minor",
+      "location": "scripts/check-artifact.mjs:30",
+      "description": "The sentinels '# Checks' and '# Examples' are substrings that could match unrelated bundled text, so the check can pass even if the markdown was dropped. A unique sentinel line per topic would be stronger."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/agent-docs/examples.md",
+      "description": "The plan lists an example with a nothing_to_change outcome; the outcomes field is shown in no example, only in the pipeline-spec prose."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/agent-docs/examples.md:91",
+      "description": "The strict example says 'standard with a review after the tests' but merges verify and test into one verify node. The plan's lean profile includes plan; the docs' lean has none."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/src/docs.ts:70",
+      "description": "The generated 'Every node' table omits checks (the parser adds it per kind), and the check tables omit the universal kind and on_fail; only the checks prose mentions on_fail. The reference never states that a node has a checks list; an agent learns it only from the examples."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/agent-docs/pipeline-spec.md:29",
+      "description": "The Edges table is hand-written, not generated, although the plan says the reference is read from the schemas; edgeSchema is not exported (the plan says to export it), so the table can drift, and the undescribed-fields test does not cover the edge fields."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/agent-docs/pipeline-design.md:44",
+      "description": "The trap 'A result check needs an edge for its on_fail label' overstates the rule: the parser requires failure-label edges only for command and human nodes (requiresRoutes). A failing agent node without an edge is retried, as pipeline-spec.md:15 says, so the two statements disagree."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/src/pipeline.ts:122",
+      "description": "version is described as 'absent means 1', but the project config's version is used first (resolveVersion with configVersion)."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/agent-docs/pipeline-spec.md",
+      "description": "Parser rules that expected_duration must not exceed timeout and max_consecutive_failures must not exceed max_attempts are not documented, nor is the \\{{ escape; an agent can fail validation without having been told."
+    },
+    {
+      "severity": "info",
+      "location": "packages/cli/test/cli.test.ts:152",
+      "description": "The edit strips KODEL_ENGINE from the spawned process environment. It is unrelated to the plan (scope addition), harmless; it fixes a test that failed inside the engine."
+    },
+    {
+      "severity": "info",
+      "location": "packages/pipeline-core/agent-docs/checks.md:3",
+      "description": "Checked against the code and accurate: on_fail defaults to failed, human nodes take no checks, {{task}} is rejected in any command field, diff modes and the since default node, fail_when limited to enum or boolean columns. All yaml examples parse."
+    }
+  ]
+}
