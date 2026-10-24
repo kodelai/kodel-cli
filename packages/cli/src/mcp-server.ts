@@ -14,6 +14,7 @@ import {
 } from "@kodel-ai/pipeline-core/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { createElicitor, type HumanHost } from "./elicit";
 
 /** A host that can also stop the work it started (the local host does); it says how much it stopped. */
 export type StoppableHost = PipelineHost & { stop?(): number };
@@ -27,6 +28,33 @@ export function noProjectHost(error: KodelError): StoppableHost {
 }
 
 /**
+ * How long a dialog may stay open, from `KODEL_DIALOG_TIMEOUT_S` in the server's environment: for a
+ * client that gives up on a call sooner than the default. Anything but a positive number of seconds
+ * leaves the default.
+ */
+export function dialogTimeoutFrom(
+  environment: Record<string, string | undefined> | undefined,
+): number | undefined {
+  const raw = environment?.["KODEL_DIALOG_TIMEOUT_S"];
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const seconds = Number(raw);
+  return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : undefined;
+}
+
+export interface ServerOptions {
+  /** Whether the answers offer the agent `kodel wait` (the project config can turn it off). */
+  waitHint?: boolean;
+  /**
+   * A host that can decide for a person (the local one). With it, a client that can show a form is
+   * asked there at a gate, a pause, a change of the pipeline and a state changed outside kodel; a
+   * client that cannot is answered as before.
+   */
+  humans?: HumanHost;
+  /** How long a dialog may stay open, in milliseconds; the default is long enough to read the changes. */
+  dialogTimeoutMs?: number;
+}
+
+/**
  * Build the MCP server for a host; the transport is the caller's. The task tools and their part of
  * the instructions are there only when `tasks` is given (the config turned them on): with tasks
  * off the agent is told nothing about them. `runLink` (the config asks for runs to be tied to tasks)
@@ -37,15 +65,26 @@ export function createServer(
   version: string,
   tasks?: TaskService,
   runLink?: RunTaskLink,
-  options: { waitHint?: boolean } = {},
+  options: ServerOptions = {},
 ): McpServer {
-  const base = serverInstructions(options);
+  const { humans } = options;
+  const base = serverInstructions({ ...options, dialog: humans !== undefined });
   const instructions = tasks
     ? `${base}\n\n${taskInstructions(runLink?.mode ?? "disabled", runLink !== undefined)}`
     : base;
   const server = new McpServer({ name: "kodel", version }, { instructions });
-  registerPipelineTools(server, new PipelineService(host, { engineVersion: version }), {
+  const service = new PipelineService(host, { engineVersion: version });
+  registerPipelineTools(server, service, {
     taskLink: tasks !== undefined && runLink !== undefined,
+    ...(humans
+      ? {
+          afterTool: createElicitor(server.server, humans, service, {
+            ...(options.dialogTimeoutMs === undefined
+              ? {}
+              : { timeoutMs: options.dialogTimeoutMs }),
+          }),
+        }
+      : {}),
   });
   if (tasks) registerTaskTools(server, tasks);
   return server;
@@ -71,7 +110,7 @@ export async function serveStdio(
   version: string,
   tasks?: TaskService,
   runLink?: RunTaskLink,
-  options: { waitHint?: boolean } = {},
+  options: ServerOptions = {},
 ): Promise<void> {
   const server = createServer(host, version, tasks, runLink, options);
   await server.connect(new StdioServerTransport());
