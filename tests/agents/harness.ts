@@ -255,6 +255,8 @@ export interface TurnOptions {
   resume?: string;
   /** Tools the agent may use without asking; anything else is refused (headless cannot ask). */
   allowedTools: string[];
+  /** What this turn may spend, in USD; `BUDGET_USD` when left out. */
+  budgetUsd?: string;
   /** The directory the agent is started in; the sandbox when left out. */
   cwd?: string;
   /** More environment for the agent and the commands it runs (`KODEL_TEST_WAIT_TIMEOUT`, say). */
@@ -289,7 +291,7 @@ export async function runAgentTurn(options: TurnOptions): Promise<AgentTurn> {
     "--model",
     MODEL,
     "--max-budget-usd",
-    BUDGET_USD,
+    options.budgetUsd ?? BUDGET_USD,
     ...(options.resume ? ["--resume", options.resume] : []),
   ];
   const env = { ...agentEnv(sandbox.stateDir), ...options.env };

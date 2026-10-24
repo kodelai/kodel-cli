@@ -10,6 +10,7 @@
  * `name` is the directory name in the project and must match `name:` in the skill's frontmatter.
  */
 import { join } from "node:path";
+import design from "../../../../skills/design/SKILL.md" with { type: "text" };
 import kodelRun from "../../../../skills/kodel-run/SKILL.md" with { type: "text" };
 import type { AgentAdapter } from "./agents";
 import { type Context, editFile, ownership, stamp } from "./files";
@@ -20,7 +21,10 @@ export interface Skill {
   text: string;
 }
 
-export const SKILLS: readonly Skill[] = [{ name: "kodel-run", text: kodelRun }];
+export const SKILLS: readonly Skill[] = [
+  { name: "kodel-run", text: kodelRun },
+  { name: "kodel-design", text: design },
+];
 
 /**
  * Add or update the skills. A copy init wrote and nobody edited is replaced by the new text; one
