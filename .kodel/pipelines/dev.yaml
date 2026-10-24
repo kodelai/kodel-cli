@@ -54,6 +54,13 @@ nodes:
       Implement the approved plan in docs/plans/{{task.slug}}.md.
       Keep changes within the plan. Add or update tests for the changed behavior.
       Follow the conventions in AGENTS.md (English only, no `any`, Biome style).
+
+      If you were sent back because of conflicts with main (the feedback lists the conflicting files,
+      from the sync step or from the pull request): commit your work on the run's branch
+      (`git add -A && git commit -s`), then `git fetch origin main && git merge --signoff origin/main`
+      and resolve the conflicts so that both sides' changes stay (what main added is not yours to
+      remove). Where the plan and main disagree, follow main and note it at the end of the plan file.
+      Then the checks run again. If the pull request already exists, publish only pushes to it.
     checks:
       - { kind: diff, paths: ["packages/**", "scripts/**", "examples/**", "skills/**", "adapters/**", "tests/**"] }
 
@@ -90,6 +97,29 @@ nodes:
         fail_when: { severity: [blocker, critical, major] }
         on_fail: blocking_findings
 
+  # Would this work merge into the latest main? Asked on a temporary commit of the working tree
+  # (tracked, new and changed files, not ignored ones), so nothing in the worktree is touched.
+  - slug: sync
+    kind: command
+    expected_duration: 10
+    timeout: 120
+    command: |
+      set -e
+      git fetch -q origin main
+      idx="$(mktemp -u)"
+      GIT_INDEX_FILE="$idx" git read-tree HEAD
+      GIT_INDEX_FILE="$idx" git add -A
+      tree="$(GIT_INDEX_FILE="$idx" git write-tree)"
+      rm -f "$idx"
+      commit="$(git commit-tree "$tree" -p HEAD -m 'kodel sync check')"
+      if out="$(git merge-tree --write-tree --name-only "$commit" origin/main 2>&1)"; then
+        echo "no conflicts with origin/main"
+      else
+        echo "$out"
+        echo "CONFLICTS with origin/main: merge it into the branch and resolve them (see the impl step)"
+        exit 1
+      fi
+
   - slug: final-approval
     kind: human
     prompt: |
@@ -123,7 +153,8 @@ nodes:
       3. Push the branch of the run with `git push -u origin HEAD`. Never push to main.
       4. Open a draft pull request into main with `gh pr create --draft --base main`. Title and
          description are in English: what changed, how it was tested, what is left out. End the
-         description with the attribution lines your instructions give.
+         description with the attribution lines your instructions give. If a pull request for this
+         branch already exists (`gh pr view`), do not open another: the push above updated it.
       5. In your final message to the person give the link to the pull request and, as commands to
          copy, how to remove this worktree and its branch once the pull request is merged or closed:
          `git worktree remove <the absolute path of the worktree>` and `git branch -D <the branch>`,
@@ -135,6 +166,18 @@ nodes:
       - { kind: command, command: "git log -1 --format=%B | grep -q '^Signed-off-by: '" }
       - { kind: command, command: "git fetch -q origin && test \"$(git rev-parse HEAD)\" = \"$(git rev-parse '@{upstream}')\"", timeout: 120 }
       - { kind: command, command: "gh pr view --json baseRefName -q .baseRefName | grep -qx main", timeout: 120 }
+      # GitHub works the answer out after the pull request is made: UNKNOWN is waited for.
+      - kind: command
+        timeout: 120
+        on_fail: conflicts
+        command: |
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            state="$(gh pr view --json mergeable -q .mergeable)"
+            [ "$state" = UNKNOWN ] || break
+            sleep 5
+          done
+          echo "mergeable: $state"
+          test "$state" != CONFLICTING
 
 edges:
   - { from: plan,           to: plan-approval }
@@ -149,7 +192,10 @@ edges:
   - { from: test,           to: impl,         when: failed }
   - { from: build,          to: review }
   - { from: build,          to: impl,         when: failed }
-  - { from: review,         to: final-approval }
+  - { from: review,         to: sync }
   - { from: review,         to: impl,         when: blocking_findings }
+  - { from: sync,           to: final-approval }
+  - { from: sync,           to: impl,         when: failed }
   - { from: final-approval, to: publish,      when: approved }
   - { from: final-approval, to: impl,         when: rejected }
+  - { from: publish,        to: impl,         when: conflicts }
