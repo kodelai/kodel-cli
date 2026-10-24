@@ -280,7 +280,7 @@ describe("skills", () => {
   const launcher = () => SKILLS.find((s) => s.name === "kodel-run")?.text ?? "";
 
   test("vj7z_kodel_run_is_shipped", () => {
-    expect(SKILLS.map((s) => s.name)).toEqual(["kodel-run"]);
+    expect(SKILLS.map((s) => s.name)).toEqual(["kodel-run", "kodel-design"]);
     const frontmatter = /^---\n([\s\S]*?)\n---\n/.exec(launcher())?.[1] ?? "";
     expect(frontmatter).toContain("name: kodel-run\n");
     expect(frontmatter).toMatch(/^description: \S/m);
@@ -311,6 +311,46 @@ describe("skills", () => {
       ".opencode/skills/kodel-run/SKILL.md",
     ];
     for (const rel of files) expect(await read(rel)).toContain("name: kodel-run");
+    const before = await Promise.all(files.map(read));
+    await init({}, ...args);
+    expect(await Promise.all(files.map(read))).toEqual(before);
+  });
+
+  const designer = () => SKILLS.find((s) => s.name === "kodel-design")?.text ?? "";
+
+  test("t2t8e_kodel_design_is_shipped", () => {
+    const frontmatter = /^---\n([\s\S]*?)\n---\n/.exec(designer())?.[1] ?? "";
+    expect(frontmatter).toContain("name: kodel-design\n");
+    expect(frontmatter).toMatch(/^description: \S/m);
+  });
+
+  test("t2t8e_kodel_design_names_the_tools_that_exist", () => {
+    const known = new Set(TOOLS.map((t) => t.name));
+    const named = designer().match(/\bpipeline_[a-z_]+/g) ?? [];
+    for (const name of ["pipeline_docs", "pipeline_propose_change"]) expect(named).toContain(name);
+    for (const name of named) expect(known.has(name)).toBe(true);
+    expect(designer()).toContain("pipeline-design");
+  });
+
+  test("t2t8e_kodel_design_proposes_and_never_writes_pipelines", () => {
+    expect(designer()).toContain("without `run_id`");
+    expect(designer()).toContain("never write into `.kodel/pipelines/`");
+    for (const forbidden of ["gate", "ack", "seal", "resume", "proposals apply"]) {
+      expect(designer()).not.toMatch(new RegExp(`\\b${forbidden}\\b`));
+    }
+  });
+
+  test("t2t8e_init_installs_kodel_design_for_every_agent", async () => {
+    const args = ["--agent", "claude-code,codex,opencode"];
+    expect((await init({}, ...args)).code).toBe(0);
+    const files = [".claude/skills", ".agents/skills", ".opencode/skills"].map(
+      (d) => `${d}/kodel-design/SKILL.md`,
+    );
+    for (const rel of files) {
+      const text = await read(rel);
+      expect(text).toContain("name: kodel-design");
+      expect(text).toContain(designer().trimEnd());
+    }
     const before = await Promise.all(files.map(read));
     await init({}, ...args);
     expect(await Promise.all(files.map(read))).toEqual(before);

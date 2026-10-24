@@ -9,4 +9,4 @@ Until the adapters are split out of the CLI, the code of `kodel init` lives in `
 (`agents.ts` has one adapter per agent). `claude-code` is checked on the real agent; `codex` and `opencode`
 are written to the agents' documented formats and not checked yet.
 
-The `kodel-run` launcher skill is installed for every agent by `kodel init`, into its `skillsDir` (`.claude/skills`, `.agents/skills`, `.opencode/skills`).
+The `kodel-run` launcher and `kodel-design` skills are installed for every agent by `kodel init`, into its `skillsDir` (`.claude/skills`, `.agents/skills`, `.opencode/skills`).
