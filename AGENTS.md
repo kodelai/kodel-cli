@@ -53,7 +53,12 @@ Humans: `bun packages/cli/src/main.ts status` lists runs, `report` shows where t
 until a run stops waiting for a person (see above); the same
 binary has `gate`, `resume`, `ack`, `seal`, and `pipeline changes` (`show`, `apply`, `discard`, `history`,
 `restore`) for a change of the pipeline of a run that is going, and `pipeline proposals` (`show`, `apply`,
-`discard`) for a pipeline the agent proposed outside a run.
+`discard`) for a pipeline the agent proposed outside a run. A client that can show a form (MCP elicitation) is
+also asked there at a gate, a pause, a change of the pipeline of a run and a state changed outside kodel, and
+the person's answer in that dialog is the same decision as the command; the commands stay the way to decide
+when the client has no dialog or the person did not answer in it. A dialog stays open 10 minutes at most;
+`KODEL_DIALOG_TIMEOUT_S` in the server's environment (`.mcp.json`) changes that for a client that gives up
+on a call sooner.
 
 ## Permission to write code
 

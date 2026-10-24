@@ -99,9 +99,12 @@ async function formatDirs(): Promise<string[]> {
     .sort();
 }
 
+/** Directories of a format that are not runs: the golden files of other readers. */
+const NOT_RUNS = new Set(["history"]);
+
 async function runIds(format: string): Promise<string[]> {
   return (await readdir(join(FORMATS, format), { withFileTypes: true }))
-    .filter((e) => e.isDirectory())
+    .filter((e) => e.isDirectory() && !NOT_RUNS.has(e.name))
     .map((e) => e.name)
     .sort();
 }

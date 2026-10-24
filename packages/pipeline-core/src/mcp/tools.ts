@@ -16,12 +16,16 @@ export const CONTRACT_VERSION = 1;
  * What the agent is told about this server when it connects (the MCP `instructions` field), so the
  * rules of working with a pipeline travel with the server and do not depend on a file in the
  * project that someone has to write and keep up to date. `waitHint: false` (the project turned it
- * off in its config) leaves out the offer of `kodel wait`.
+ * off in its config) leaves out the offer of `kodel wait`; `dialog: true` (the host can ask the person
+ * through the client) adds the rule for the dialog.
  */
 const WAIT_OFFER =
   " `tell_the_person` may offer you `kodel wait <run_id>`, a command that only watches and prints one line when the person has decided: start it in the background as it says, end your turn, and call pipeline_next_step when it reports. Never poll pipeline_next_step in a loop to wait for a person.";
 
-export function serverInstructions(options: { waitHint?: boolean } = {}): string {
+const DIALOG_RULE =
+  "10. Some clients show the person a dialog when a call would answer `waiting` for them (or when the state of a run was changed outside kodel): the call then stays open until they answer, and it returns the state after their decision with a `dialog` entry saying what they did. If `dialog.answer` is anything but `decided`, they did not decide there: do what `tell_the_person` says, the command in `how_to_decide` still works. You cannot answer the dialog, and nothing you send is read as an answer.";
+
+export function serverInstructions(options: { waitHint?: boolean; dialog?: boolean } = {}): string {
   const wait = options.waitHint === false ? "" : WAIT_OFFER;
   return [
     "This server runs the project's pipelines: fixed sequences of steps that the engine, not you, checks.",
@@ -37,6 +41,7 @@ export function serverInstructions(options: { waitHint?: boolean } = {}): string
     "7. If the answer to pipeline_start names a `workdir`, do all your work for the run in that directory (read and write files there, not in the directory you started in): the engine runs the commands and checks there.",
     "8. If you are asked to write or change a pipeline, read pipeline_docs first: it is the reference for this engine version. To add a pipeline, or to change one outside a run (start from the `yaml` of pipeline_resolve), call pipeline_propose_change without run_id: a person accepts it with a command. Never put a file in .kodel/pipelines yourself and never run that command.",
     "9. If an answer tells you that the pipeline of the run was changed and a person has to accept it (a `waiting` answer about the change, or a note about it on a `node` answer), do what `tell_the_person` says. If the change was made by editing the pipeline file and not through pipeline_propose_change, put the file back as it was and propose it instead.",
+    ...(options.dialog === true ? [DIALOG_RULE] : []),
   ].join("\n");
 }
 

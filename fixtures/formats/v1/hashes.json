@@ -1,4 +1,6 @@
 {
+  "history/claude-code-agent-abc123.events.jsonl": "f5324bbd58df6a79211542270a77e119d04dfe3429ca3748c3a083b969740cdb",
+  "history/claude-code-session.events.jsonl": "742158cb41a8f2e66cc83f74a2560ca67e811cb3e2d678d02c35e179259cc19c",
   "r_0mviewgvl_i1ig/journal.jsonl": "55eb5ed1574a50b6bc28e3f4a058ba09dbf33721eef8654cc3b3f6aae08ec54e",
   "r_0mviewgvl_i1ig/meta.json": "d7ff287f651920298eb7076496eb1fcc460c05bc312dfec32f0ecbad3560c7a6",
   "r_0mviewgvl_i1ig/reports/review-1.json": "680296e9d38da5d8b2342aed0c2807ee34c4c0c112bff9f3cd088d7e77f637d0",

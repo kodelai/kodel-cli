@@ -25,6 +25,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { Command, CommanderError } from "commander";
 import pkg from "../package.json" with { type: "json" };
+import { describePendingChange, gateChangesText, gateCommentsText } from "./decide-text";
 import {
   FEEDBACK_ENDPOINT,
   FEEDBACK_MESSAGE_MAX,
@@ -33,9 +34,10 @@ import {
   isFeedbackType,
   submitFeedback,
 } from "./feedback";
-import { formatChange, formatProposal, formatReport } from "./format";
+import { formatProposal, formatReport } from "./format";
 import { type Choice, InitError, runInit } from "./init";
-import { serveStdio } from "./mcp-server";
+import { dialogTimeoutFrom, serveStdio } from "./mcp-server";
+import { plain, UNSAFE_CODES } from "./plain";
 import { formatTable } from "./table";
 import {
   formatFailure,
@@ -72,7 +74,7 @@ class UserError extends Error {}
 /** How long a command waits for engine work it started (a build, say) before it lets go. */
 const WORK_WAIT_MS = 30 * 60_000;
 
-const SHOWN_FILES = 10;
+export { plain };
 
 /**
  * How long `wait` stays when nobody decides. Long enough for a night, short enough not to live for
@@ -101,52 +103,9 @@ function describeDuration(seconds: number): string {
   return `${seconds}s`;
 }
 
-/**
- * Text that came from the agent (a task, a name, a file name) or from files it can write, with
- * what could mislead a person taking out: control characters (they move the cursor or fake a line),
- * the characters that reorder text (a file name can be made to read backwards), and line and
- * paragraph separators.
- */
-const UNSAFE_CODES: [from: number, to: number][] = [
-  [0x00, 0x1f], // control characters
-  [0x7f, 0x9f], // delete and the C1 controls
-  [0xad, 0xad], // soft hyphen
-  [0x34f, 0x34f], // combining grapheme joiner
-  [0x61c, 0x61c], // Arabic letter mark
-  [0x115f, 0x1160], // Hangul fillers
-  [0x180e, 0x180e], // Mongolian vowel separator
-  [0x200b, 0x200f], // zero-width characters and the direction marks
-  [0x2028, 0x2029], // line and paragraph separators
-  [0x202a, 0x202e], // embeddings and overrides
-  [0x2060, 0x2069], // word joiner, invisible operators, isolates
-  [0x2800, 0x2800], // blank braille
-  [0x3164, 0x3164], // Hangul filler
-  [0xfe00, 0xfe0f], // variation selectors
-  [0xfeff, 0xfeff], // byte order mark, zero-width no-break space
-  [0xffa0, 0xffa0], // halfwidth Hangul filler
-  [0xe0000, 0xe007f], // tag characters
-  [0xe0100, 0xe01ef], // more variation selectors
-];
-
 /** Gives a command group its plural alias (`task` -> `tasks`); use it for every new group. */
 export function withPlural(group: Command): Command {
   return group.alias(`${group.name()}s`);
-}
-
-export function plain(text: string): string {
-  let out = "";
-  let skipped = false;
-  for (const char of text) {
-    const code = char.codePointAt(0) ?? 0;
-    if (UNSAFE_CODES.some(([from, to]) => code >= from && code <= to)) {
-      if (!skipped) out += " ";
-      skipped = true;
-    } else {
-      out += char;
-      skipped = false;
-    }
-  }
-  return out;
 }
 
 /**
@@ -280,7 +239,13 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const waitHint = await loadConfig(storeRoot())
         .then((config) => config.agent_hints.wait)
         .catch(() => true);
-      await serveStdio(host(), pkg.version, tasks, { waitHint });
+      const dialogTimeoutMs = dialogTimeoutFrom(env.environment);
+      const local = host();
+      await serveStdio(local, pkg.version, tasks, {
+        waitHint,
+        humans: local,
+        ...(dialogTimeoutMs === undefined ? {} : { dialogTimeoutMs }),
+      });
     });
 
   program
@@ -547,22 +512,13 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         if (decision === "reject" && !opts.reason && !comments) {
           throw new UserError('a rejection needs a reason: --reason "..."');
         }
-        let question = `${decision === "approve" ? "Approve" : "Reject"} "${plain(node)}" of run ${plain(runId)}?`;
-        if (comments) {
-          const lines = comments.csv.split("\n").map((line) => `  ${plain(line)}`);
-          question = `${comments.count} comment(s) recorded at this step will go back with the rejection:\n${lines.join("\n")}\n${question}`;
-        }
-        if (found.kind === "changes") {
-          const files = Object.keys(found.files);
-          if (files.length > 0) {
-            const shown = files.slice(0, SHOWN_FILES).map((f) => `  ${plain(f)}`);
-            const more =
-              files.length > SHOWN_FILES ? [`  and ${files.length - SHOWN_FILES} more`] : [];
-            question = `${files.length} file(s) changed since the run stopped here:\n${[...shown, ...more].join("\n")}\n${question}`;
-          }
-        } else if (found.kind === "unavailable") {
-          question = `WARNING: the engine cannot tell what changed since the run stopped here: ${plain(found.reason)}\nThe agent may have gone on working after its checks passed.\n${question}`;
-        }
+        const question = [
+          gateChangesText(found),
+          comments ? gateCommentsText(comments) : undefined,
+          `${decision === "approve" ? "Approve" : "Reject"} "${plain(node)}" of run ${plain(runId)}?`,
+        ]
+          .filter((part): part is string => part !== undefined)
+          .join("\n");
         await mustConfirm(question);
         if (found.kind === "unavailable" && decision === "approve") {
           await mustConfirm(
@@ -620,23 +576,6 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       "Changes of the pipeline of a run: look at the one that waits, accept it, drop it, list the versions, put one back",
     );
 
-  /** What waits for the person, as the commands show it: where it came from, then the differences. */
-  async function describePending(
-    run: Awaited<ReturnType<typeof openRun>>,
-    found: NonNullable<Awaited<ReturnType<typeof run.pendingChange>>>,
-  ): Promise<string> {
-    const { info } = found;
-    const current = await run.currentSpec();
-    const origin =
-      info.source === "proposal"
-        ? "The agent proposed another version of the pipeline."
-        : `The pipeline file ${plain(info.watched ?? "")} was changed.`;
-    const body = formatChange(current, found.spec, info.changes, info.redo, plain);
-    return info.refused === undefined
-      ? `${origin}\n\n${body}`
-      : `${origin}\n\nIt cannot be accepted: ${plain(info.refused)}\n\n${body}`;
-  }
-
   changes
     .command("show <run>", { isDefault: true })
     .description("The change that waits for you, if there is one")
@@ -647,7 +586,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         env.out(`${runId}: no change of the pipeline waits\n`);
         return;
       }
-      env.out(`${await describePending(run, found)}\n\n`);
+      env.out(`${await describePendingChange(run, found)}\n\n`);
       env.out(`To accept it: ${plain(found.info.apply)}\n`);
       env.out(`To drop it:   kodel pipeline changes discard ${runId}\n`);
     });
@@ -673,7 +612,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         throw new UserError(`this change cannot be accepted: ${plain(found.info.refused)}`);
       }
       await mustConfirm(
-        `${await describePending(run, found)}\n\nAccept it for run ${plain(runId)}?`,
+        `${await describePendingChange(run, found)}\n\nAccept it for run ${plain(runId)}?`,
       );
       // What is accepted is what was shown: if the text moved while the person read, nothing is taken.
       const again = await run.pendingChange(undefined, found.info.source);

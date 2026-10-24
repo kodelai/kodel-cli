@@ -377,6 +377,19 @@ describe("kodel init hooks", () => {
     }
   });
 
+  test("t_elicit_init_never_registers_a_hook_that_could_answer_a_dialog_for_the_person", async () => {
+    await init({}, "--agent", "claude-code,codex,opencode");
+    // The hook file is really there, so a text without the word means something.
+    expect(await read(SETTINGS)).toContain("SessionStart");
+    for (const file of [SETTINGS, ".claude/settings.json", ".codex/hooks.json"]) {
+      const text = await read(file).catch(() => "");
+      expect(text).not.toMatch(/Elicitation/i);
+    }
+    expect(await read(".opencode/plugins/kodel-hooks.ts").catch(() => "")).not.toMatch(
+      /Elicitation/i,
+    );
+  });
+
   test("yes_and_no_terminal_register_the_hooks_too", async () => {
     await init({ interactive: true }, "--agent", "claude-code", "--yes");
     expect(Object.keys(await claudeHooks())).toEqual(["SessionStart"]);
