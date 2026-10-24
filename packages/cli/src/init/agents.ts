@@ -26,6 +26,8 @@ export interface AgentAdapter {
   label: string;
   /** Checked on a real agent. The others are written to the agent's documented format only. */
   verified: boolean;
+  /** The hooks are checked on a real agent (a session in a project reached the index). */
+  hooksVerified: boolean;
   /** The binary a person types to start it. */
   binary: string;
   /** Files or directories in a project that show the project already uses the agent. */
@@ -57,6 +59,7 @@ const claudeCode: AgentAdapter = {
   id: "claude-code",
   label: "Claude Code",
   verified: true,
+  hooksVerified: true,
   binary: "claude",
   markers: [".claude", "CLAUDE.md", ".mcp.json"],
   skillsDir: ".claude/skills",
@@ -91,6 +94,7 @@ const codex: AgentAdapter = {
   id: "codex",
   label: "Codex",
   verified: false,
+  hooksVerified: true,
   binary: "codex",
   markers: [".codex"],
   skillsDir: ".agents/skills",
@@ -119,6 +123,7 @@ const opencode: AgentAdapter = {
   id: "opencode",
   label: "OpenCode",
   verified: false,
+  hooksVerified: true,
   binary: "opencode",
   markers: ["opencode.json", "opencode.jsonc", ".opencode"],
   skillsDir: ".opencode/skills",
@@ -161,7 +166,7 @@ async function exists(path: string): Promise<boolean> {
   );
 }
 
-async function onPath(binary: string, path: string | undefined): Promise<boolean> {
+export async function onPath(binary: string, path: string | undefined): Promise<boolean> {
   for (const dir of (path ?? "").split(delimiter)) {
     if (dir === "") continue;
     for (const name of [binary, `${binary}.exe`, `${binary}.cmd`]) {

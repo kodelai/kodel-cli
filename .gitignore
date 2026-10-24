@@ -10,5 +10,8 @@ dist
 /.kodel/proposals
 # Worktrees made for the runs (the default of the worktree setting in the project config).
 /.kodel/worktrees
+# What the hooks write into the project.
+/.kodel/sessions.jsonl
+/.kodel/hooks.log
 # Local Russian working notes (product notes, decision log, contract, architecture, plan); not part of the repository.
 /notes

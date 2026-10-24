@@ -4,7 +4,8 @@
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./hooks": "./src/hooks/index.ts"
   },
   "dependencies": {
     "@kodel-ai/pipeline-core": "workspace:*",
