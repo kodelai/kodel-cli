@@ -28,6 +28,14 @@ export interface PipelineConfig {
   uncommitted: "ask" | "working" | "committed";
 }
 
+export interface AgentHintsConfig {
+  /**
+   * Whether the answers that wait for a person offer the agent `kodel wait` (and the server's
+   * instructions say so). Off for a project whose agent should only end its turn and be told.
+   */
+  wait: boolean;
+}
+
 export interface TasksConfig {
   /** Off by default: the MCP server then has no task tools at all. */
   enabled: boolean;
@@ -47,11 +55,13 @@ export interface ProjectConfig {
   version: string;
   worktree: WorktreeConfig;
   pipeline: PipelineConfig;
+  agent_hints: AgentHintsConfig;
   tasks: TasksConfig;
 }
 
 export const DEFAULT_WORKTREE: WorktreeConfig = { mode: "auto", dir: DEFAULT_WORKTREE_DIR };
 export const DEFAULT_PIPELINE: PipelineConfig = { uncommitted: "ask" };
+export const DEFAULT_AGENT_HINTS: AgentHintsConfig = { wait: true };
 export const DEFAULT_TASKS: TasksConfig = {
   enabled: false,
   adapter: "local",
@@ -76,6 +86,12 @@ const configSchema = z
     pipeline: z
       .object({
         uncommitted: z.enum(["ask", "working", "committed"]).optional(),
+      })
+      .strict()
+      .optional(),
+    agent_hints: z
+      .object({
+        wait: z.boolean().optional(),
       })
       .strict()
       .optional(),
@@ -106,6 +122,7 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
         version: parseVersion(1).version,
         worktree: { ...DEFAULT_WORKTREE },
         pipeline: { ...DEFAULT_PIPELINE },
+        agent_hints: { ...DEFAULT_AGENT_HINTS },
         tasks: { ...DEFAULT_TASKS, adapters: {} },
       };
     }
@@ -155,6 +172,7 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
       dir: parsed.data.worktree?.dir ?? DEFAULT_WORKTREE.dir,
     },
     pipeline: { uncommitted: parsed.data.pipeline?.uncommitted ?? DEFAULT_PIPELINE.uncommitted },
+    agent_hints: { wait: parsed.data.agent_hints?.wait ?? DEFAULT_AGENT_HINTS.wait },
     tasks: {
       enabled: parsed.data.tasks?.enabled ?? DEFAULT_TASKS.enabled,
       adapter: parsed.data.tasks?.adapter ?? DEFAULT_TASKS.adapter,

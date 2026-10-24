@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./hooks": "./src/hooks/index.ts"
+    "./hooks": "./src/hooks/index.ts",
+    "./history": "./src/history/index.ts"
   },
   "dependencies": {
     "@kodel-ai/pipeline-core": "workspace:*",

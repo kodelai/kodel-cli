@@ -127,6 +127,27 @@ const TELL_AT_GATE =
   "words, concretely, and do not leave out a step), and anything else they should check; (4) how to decide, with the command in " +
   "`how_to_decide`. Do not decide for them and do not run that command. Then end your turn.";
 
+/**
+ * How the agent can be woken when the person has decided, without asking again and without spending
+ * tokens while it waits. The command is the same one the other texts name (`kodel`), whatever the
+ * agent's shell calls it. The agent that cannot run a command in the background loses nothing: it ends
+ * its turn and the person tells it.
+ */
+function tellToWait(runId: string, on: boolean): string {
+  if (!on) return "";
+  return (
+    " If your tools can run a command in the background, then after you have written to the person " +
+    `start \`kodel wait ${runId}\` that way and end your turn: it only watches, and prints one line ` +
+    "when the person has decided, so you are woken then and nothing is spent while you wait. In " +
+    "Claude Code use the Bash tool with run_in_background (not the Monitor tool: it stops after 30 " +
+    "minutes and wakes you then). When it reports, call pipeline_next_step. If the line says `still " +
+    "waiting`, it gave up and nothing was decided: do not start it again; tell the person in one " +
+    "sentence that you stopped watching and end your turn. If your tools cannot do that, just end " +
+    "your turn; the person tells you when they have decided. Never poll pipeline_next_step in a " +
+    "loop to wait for a person."
+  );
+}
+
 const TELL_RESULTS =
   "This step records the person's comments. While you talk, each time they name a problem, " +
   "add it with pipeline_report_result (node_slug and `attempt` from this answer, one row per " +
@@ -140,6 +161,8 @@ const TELL_WHEN_PAUSED =
   "do not run that command. Then end your turn.";
 
 export interface NextStepOptions {
+  /** Whether a waiting answer offers the agent `kodel wait`; on unless the project turned it off. */
+  waitHint?: boolean;
   /** A change of the run's pipeline that waits for a person. */
   pending?: PendingChange;
   /** The agent has just said a step is done: a change that holds the run is met here, not before. */
@@ -166,6 +189,8 @@ const CHANGE_WORDS: Record<string, string> = {
 };
 
 function changedWaiting(
+  runId: string,
+  waitHint: boolean,
   change: PipelineChange,
   slug: string,
   behind: "gate" | "paused" | "step",
@@ -182,7 +207,12 @@ function changedWaiting(
       prompt: `The pipeline of this run was changed: ${steps || "no step differs"}.${redo}`,
       pipeline_change: change,
       how_to_decide: { cli: change.apply },
-      tell_the_person: TELL_PIPELINE_CHANGED,
+      // Behind a step the run still reads as the agent's step to anyone who only looks, so a
+      // command that only looks would return at once; there the agent just ends its turn.
+      tell_the_person:
+        behind === "step"
+          ? TELL_PIPELINE_CHANGED
+          : TELL_PIPELINE_CHANGED + tellToWait(runId, waitHint),
     },
   };
 }
@@ -195,22 +225,36 @@ export function nextStep(
   registry: Registry = defaultRegistry(),
   options: NextStepOptions = {},
 ): NextStep {
-  const step = baseStep(spec, state, now, registry);
+  const waitHint = options.waitHint !== false;
+  const step = baseStep(spec, state, now, registry, waitHint);
   const pending = options.pending;
   if (!pending || "done" in step) return step;
   const { blocking, ...change } = pending;
   if ("waiting" in step) {
     if (!blocking) return { waiting: { ...step.waiting, pipeline_change: change } };
-    return changedWaiting(change, step.waiting.node_slug, step.waiting.reason as "gate" | "paused");
+    return changedWaiting(
+      state.runId,
+      waitHint,
+      change,
+      step.waiting.node_slug,
+      step.waiting.reason as "gate" | "paused",
+    );
   }
   if ("node" in step) {
-    if (blocking && options.atCompletion) return changedWaiting(change, step.node.slug, "step");
+    if (blocking && options.atCompletion)
+      return changedWaiting(state.runId, waitHint, change, step.node.slug, "step");
     return { node: { ...step.node, pipeline_change: change } };
   }
   return { running: { ...step.running, pipeline_change: change } };
 }
 
-function baseStep(spec: PipelineSpec, state: RunState, now: number, registry: Registry): NextStep {
+function baseStep(
+  spec: PipelineSpec,
+  state: RunState,
+  now: number,
+  registry: Registry,
+  waitHint: boolean,
+): NextStep {
   if (state.status === "completed" || state.status === "failed" || state.status === "canceled") {
     return { done: true, run_status: state.status };
   }
@@ -230,7 +274,7 @@ function baseStep(spec: PipelineSpec, state: RunState, now: number, registry: Re
         node_slug: state.pause.node,
         prompt: `The run is paused: ${PAUSE_TEXT[state.pause.reason]} ("${state.pause.node}").${detail}`,
         how_to_decide: { cli: `kodel resume ${state.runId}` },
-        tell_the_person: TELL_WHEN_PAUSED,
+        tell_the_person: TELL_WHEN_PAUSED + tellToWait(state.runId, waitHint),
       },
     };
   }
@@ -293,9 +337,9 @@ function baseStep(spec: PipelineSpec, state: RunState, now: number, registry: Re
           : {}),
         how_to_decide: { cli: `kodel gate approve|reject ${state.runId} --reason "..."` },
         tell_the_person:
-          begin?.needs === "human" && begin.results
+          (begin?.needs === "human" && begin.results
             ? `${TELL_AT_GATE} ${TELL_RESULTS}`
-            : TELL_AT_GATE,
+            : TELL_AT_GATE) + tellToWait(state.runId, waitHint),
       },
     };
   }

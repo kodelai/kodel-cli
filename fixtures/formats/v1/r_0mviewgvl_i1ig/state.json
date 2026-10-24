@@ -1,0 +1,116 @@
+{
+  "v": 1,
+  "runId": "r_0mviewgvl_i1ig",
+  "task": "Add a read-only MCP tool `pipeline_docs` (no run_id needed) that works like llms.txt: without arguments it returns an index (what Kodel is, engine version, one line per topic), with `topic` it returns that topic; an unknown topic returns {ok:false, code, message} listing the existing topics. Docs are markdown embedded in the build (single dist/kodel.js, must work on plain Node); the pipeline-spec reference is generated from the zod schema so it cannot drift. Tests: every yaml block in every topic is parsed by the current pipeline parser; every topic linked from the index exists. Name the tool in SERVER_INSTRUCTIONS (the existing test checks only real tools are named). First topics: pipeline-spec, checks, examples, and pipeline-design (best practices, profiles lean/standard/strict, and two modes for creating a pipeline for a project: auto, where the agent explores and builds it with no questions and lists its assumptions, or guided, where the agent asks a few batched questions). The plan must also say how creating a NEW pipeline (no run yet) can go through the pipeline_propose_change machinery (a draft that a person accepts with a terminal command), and what is needed for that; implement only what the plan fixes as step 1 (pipeline_docs and its topics), and list the rest as follow-ups.",
+  "specHash": "55b4ff5a84b195dd",
+  "status": "completed",
+  "startedAt": 1792605283348,
+  "nodes": {
+    "plan": {
+      "slug": "plan",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 1
+    },
+    "plan-approval": {
+      "slug": "plan-approval",
+      "status": "passed",
+      "outcome": "approved",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 2
+    },
+    "confirm-nothing-to-do": {
+      "slug": "confirm-nothing-to-do",
+      "status": "pending",
+      "outcome": null,
+      "attempt": 0,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 0
+    },
+    "impl": {
+      "slug": "impl",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 3,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 12
+    },
+    "verify": {
+      "slug": "verify",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 3,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 13
+    },
+    "test": {
+      "slug": "test",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 3,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 14
+    },
+    "build": {
+      "slug": "build",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 2,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 15
+    },
+    "review": {
+      "slug": "review",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 2,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 16
+    },
+    "final-approval": {
+      "slug": "final-approval",
+      "status": "passed",
+      "outcome": "approved",
+      "attempt": 2,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 17
+    }
+  },
+  "active": [],
+  "trail": [
+    "plan",
+    "plan-approval",
+    "impl",
+    "verify",
+    "test",
+    "impl",
+    "verify",
+    "test",
+    "build",
+    "review",
+    "final-approval",
+    "impl",
+    "verify",
+    "test",
+    "build",
+    "review",
+    "final-approval"
+  ],
+  "nextVisitId": 18,
+  "seq": 65,
+  "workdir": "/kodel-fixture/workdir/r_0mviewgvl_i1ig",
+  "pipelineFile": ".kodel/pipelines/dev.yaml",
+  "finishedAt": 1792618251778
+}

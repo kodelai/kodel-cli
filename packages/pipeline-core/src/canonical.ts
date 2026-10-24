@@ -7,7 +7,9 @@
  * The forms are text, not hashes: hashing needs `node:crypto`, which the core does not import. The
  * host hashes them (see `EngineOptions.fingerprint`).
  */
+import { z } from "zod";
 import { type NodeSpec, type PipelineSpec, parsePipeline } from "./pipeline";
+import { defaultRegistry, type Registry } from "./registry";
 
 /** JSON with the keys of every object sorted, so the same value always gives the same text. */
 export function stableJson(value: unknown): string {
@@ -73,5 +75,31 @@ export function canonicalPipeline(spec: PipelineSpec): string {
  * as a modified file.
  */
 export function parseSnapshot(source: string): PipelineSpec {
-  return parsePipeline(source);
+  return parsePipeline(source, { registry: snapshotRegistry() });
+}
+
+/**
+ * Fields a kind used to take and no longer does, by kind. A pipeline kept with an old run may still
+ * have them: they stay in the node's parameters, so the node keeps the definition the run's journal
+ * recorded, and nothing reads them. Add an entry here when a kind loses a field, never when it
+ * gains one.
+ */
+const REMOVED_NODE_FIELDS: Record<string, z.ZodRawShape> = {
+  // Replaced by `instructions`.
+  human: { files: z.array(z.string()).optional() },
+};
+
+const snapshotRegistry = (): Registry => {
+  snapshotKinds ??= withRemovedFields(defaultRegistry());
+  return snapshotKinds;
+};
+let snapshotKinds: Registry | undefined;
+
+function withRemovedFields(registry: Registry): Registry {
+  for (const [kind, removed] of Object.entries(REMOVED_NODE_FIELDS)) {
+    const handler = registry.node(kind);
+    if (!handler) throw new Error(`REMOVED_NODE_FIELDS names the unknown node kind "${kind}"`);
+    registry.registerNode({ ...handler, shape: { ...handler.shape, ...removed } });
+  }
+  return registry;
 }

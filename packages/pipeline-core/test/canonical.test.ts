@@ -103,4 +103,24 @@ describe("the canonical form of a pipeline", () => {
       expect((error as KodelError).code).toBe("UNSUPPORTED_FORMAT");
     }
   });
+
+  test("a_snapshot_still_reads_the_files_a_human_node_used_to_take", () => {
+    const old = BASE.replace(
+      "edges:\n",
+      [
+        "  - slug: approve",
+        "    kind: human",
+        "    prompt: Looks fine?",
+        '    files: ["docs/plans/{{task.slug}}.md"]',
+        "edges:",
+        "  - { from: verify, to: approve }",
+        "  - { from: approve, to: write, when: rejected }",
+        "",
+      ].join("\n"),
+    );
+    expect(() => parsePipeline(old)).toThrow('"files" is not allowed for node kind "human"');
+    const node = parseSnapshot(old).nodes.find((n) => n.slug === "approve");
+    // Kept in the parameters, so the node has the definition the run's journal recorded.
+    expect(node?.params.files).toEqual(["docs/plans/{{task.slug}}.md"]);
+  });
 });
