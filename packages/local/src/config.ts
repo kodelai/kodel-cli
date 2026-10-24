@@ -78,9 +78,13 @@ export const DEFAULT_TASKS: TasksConfig = {
 
 export const CONFIG_FILE = "config.yaml";
 
+const MAX_EXCLUDE_GLOBS = 256;
+
 // Whole kilobytes, at least one: 0 would mean "keep nothing", which is what `enabled: false` says.
 const maxKb = z.number().int().min(1);
 
+// Strict at every level like the rest: a misspelled category must not leave a switch on without the
+// person noticing, and a switch is the point of this section.
 const historySchema = z
   .object({
     changes: z
@@ -88,6 +92,7 @@ const historySchema = z
         enabled: z.boolean().optional(),
         exclude: z
           .array(z.string().refine(isValidGlob, { message: "not a valid glob" }))
+          .max(MAX_EXCLUDE_GLOBS)
           .optional(),
         max_kb: maxKb.optional(),
       })

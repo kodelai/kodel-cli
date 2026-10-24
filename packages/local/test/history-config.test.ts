@@ -1,14 +1,19 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_HISTORY, KodelError, PipelineService } from "@kodel-ai/pipeline-core";
+import {
+  DEFAULT_HISTORY,
+  KodelError,
+  PipelineService,
+  parsePipeline,
+} from "@kodel-ai/pipeline-core";
 import { registerPipelineTools } from "@kodel-ai/pipeline-core/mcp";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { LocalPipelineHost } from "../src";
+import { LocalHost, LocalPipelineHost, type LocalRun } from "../src";
 
 const PIPELINE = [
   "name: plain",
@@ -146,6 +151,43 @@ describe("starting a run needs git when history.changes is on", () => {
     const error = await failure(start(newHost()));
     expect(error.code).toBe("GIT_REQUIRED");
     expect(error.message).toContain("this pipeline has a diff check");
+  });
+});
+
+describe("a run that exists is picked up without git", () => {
+  test("history_an_active_or_finished_run_is_reused_in_a_directory_without_git", async () => {
+    await config("history:\n  changes: { enabled: false }\n");
+    const host = newHost();
+    const first = await start(host, "same task");
+    await (first.run as LocalRun).settle();
+    // The config is edited afterwards: patches are on and there is still no git.
+    await config();
+    const again = await start(newHost(), "same task");
+    expect(again.status).toBe("terminal");
+    expect(again.run.runId).toBe(first.run.runId);
+    // A new task is a new run, and that one needs git.
+    expect((await failure(start(newHost(), "another task"))).code).toBe("GIT_REQUIRED");
+  });
+
+  test("history_a_refused_start_with_worktrees_on_leaves_no_directory_behind", async () => {
+    await writeFile(join(dir, ".kodel", "config.yaml"), "worktree:\n  mode: auto\n");
+    expect((await failure(start(newHost()))).code).toBe("GIT_REQUIRED");
+    await expect(access(join(dir, ".kodel", "worktrees"))).rejects.toThrow();
+    await expect(access(join(dir, ".kodel", "runs"))).rejects.toThrow();
+  });
+});
+
+describe("a run started before the section existed", () => {
+  test("history_run_started_without_history_is_read_as_before", async () => {
+    initGit();
+    const spec = parsePipeline(PIPELINE);
+    const host = new LocalHost(spec, { root: dir, heartbeatMs: 0 });
+    const { run } = await host.start("old style");
+    await run.settle();
+    const journal = await run.journal();
+    expect(journal.find((r) => r.event === "run_started")).not.toHaveProperty("history");
+    const reopened = await new LocalHost(spec, { root: dir, heartbeatMs: 0 }).open(run.runId);
+    expect((await reopened?.state())?.status).toBe("completed");
   });
 });
 

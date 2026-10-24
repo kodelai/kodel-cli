@@ -30,7 +30,7 @@ import {
   redactText,
   type StartOutcome,
 } from "@kodel-ai/pipeline-core";
-import { loadConfig, type WorktreeConfig } from "./config";
+import { loadConfig, type ProjectConfig, type WorktreeConfig } from "./config";
 import { GitSnapshotter, git } from "./git";
 import {
   type HostOptions,
@@ -447,11 +447,14 @@ export class LocalPipelineHost implements PipelineHost {
     if (!found)
       throw new KodelError("UNKNOWN_PIPELINE", `there is no pipeline "${input.pipeline}"`);
     // Read at each start, so an edit of the config applies to the next run without a restart.
-    const config =
-      this.options.worktree && this.options.history ? undefined : await loadConfig(this.storeRoot);
-    const worktree = this.options.worktree ?? (config as NonNullable<typeof config>).worktree;
+    let loaded: ProjectConfig | undefined;
+    const projectConfig = async () => {
+      loaded ??= await loadConfig(this.storeRoot);
+      return loaded;
+    };
+    const worktree = this.options.worktree ?? (await projectConfig()).worktree;
     // Fixed here for the run: the host journals it, and a later edit of the config does not reach it.
-    const history = this.options.history ?? (config as NonNullable<typeof config>).history;
+    const history = this.options.history ?? (await projectConfig()).history;
     let pipelineCopy: { path: string; text: string } | undefined;
     let tellCopy = false;
     const file = this.pipelineFileOf(found.file);
@@ -462,10 +465,7 @@ export class LocalPipelineHost implements PipelineHost {
           // Only the working version exists: the worktree has none, so it gets this one.
           pipelineCopy = { path: file, text: found.source };
         } else {
-          const choice =
-            input.pipeline_version ??
-            (await (config ? Promise.resolve(config) : loadConfig(this.storeRoot))).pipeline
-              .uncommitted;
+          const choice = input.pipeline_version ?? (await projectConfig()).pipeline.uncommitted;
           if (choice === "ask") {
             throw new ChoiceNeeded(askWhich(found, file, dirt.committed));
           }

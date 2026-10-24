@@ -47,7 +47,8 @@ export const MAX_GLOB_LENGTH = 1024;
 /**
  * Whether `pattern` can be an `exclude` glob. minimatch reads nearly any string (a lone `[` is a
  * literal), so the refusals are the ones that are certainly a mistake: empty, with a NUL, too long,
- * or one it cannot compile (`makeRe` returns `false`, or throws for a huge pattern).
+ * or one it cannot compile (`makeRe` returns `false`, or throws for a huge pattern). A lone `[` is
+ * therefore accepted: it matches a path with a bracket in it, which is what minimatch means by it.
  */
 export function isValidGlob(pattern: string): boolean {
   if (pattern === "" || pattern.length > MAX_GLOB_LENGTH || pattern.includes("\0")) return false;

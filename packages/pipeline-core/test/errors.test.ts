@@ -9,7 +9,7 @@ describe("error codes", () => {
     }
   });
 
-  test("list matches the contract (34 codes)", () => {
+  test("list matches the contract (37 codes)", () => {
     // A new code must be added to the contract (error codes section) and to this count.
     expect(ERROR_CODES.length).toBe(37);
   });

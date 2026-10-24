@@ -277,16 +277,23 @@ export class LocalHost {
     const needsDiffGit = this.spec.nodes.some((n) =>
       n.checks.some((c) => registry.check(c.kind)?.baseline?.(c.params)),
     );
-    if ((needsDiffGit || history?.changes.enabled) && !(await this.snapshotter.isRepo())) {
+    const recordsChanges = history?.changes.enabled === true;
+    // Only a start that would make a new run needs git: a run that exists is picked up as it is, so
+    // this runs inside the start lock after the reuse branches, and before anything is created.
+    const requireGit = async () => {
+      if (!(needsDiffGit || recordsChanges) || (await this.snapshotter.isRepo())) return;
       // `isRepo` is false for no git binary, a bare repository and a directory outside a repository
       // alike, so the message names the ways out instead of guessing which it was.
+      const setting = recordsChanges
+        ? `; history.changes.enabled also needs git: set it to false in .kodel/config.yaml, or run kodel inside a git repository`
+        : "";
       throw new KodelError(
         "GIT_REQUIRED",
         needsDiffGit
-          ? `this pipeline has a diff check, which needs a git repository, and ${this.options.root} is not inside one`
+          ? `this pipeline has a diff check, which needs a git repository, and ${this.options.root} is not inside one${setting}`
           : `${this.options.root} is not inside a git work tree (or git is not installed), and this run records changes: set history.changes.enabled to false in .kodel/config.yaml, or run kodel inside a git repository`,
       );
-    }
+    };
     // Spaces at the ends or doubled are not a different task; otherwise a changed space would
     // slip past the run that is waiting for a person.
     const redactedTask = normalizeTask(task, this.rules);
@@ -310,6 +317,7 @@ export class LocalHost {
         }
       }
 
+      await requireGit();
       const now = this.clock();
       const runId = newRunId(now);
       // Of the text the pipeline was read from, when it is known: that is what a copy is checked

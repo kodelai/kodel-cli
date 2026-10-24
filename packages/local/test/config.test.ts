@@ -199,6 +199,15 @@ describe("the history section", () => {
     }
   });
 
+  test("history_the_exclude_list_has_a_bound", async () => {
+    const globs = (n: number) => Array.from({ length: n }, (_, i) => `'d${i}/**'`).join(", ");
+    await write(`history:\n  changes: { exclude: [${globs(256)}] }\n`);
+    expect((await loadConfig(dir)).history.changes.exclude.length).toBe(256);
+    expect((await failure(`history:\n  changes: { exclude: [${globs(257)}] }\n`)).code).toBe(
+      "CONFIG_INVALID",
+    );
+  });
+
   test("every_history_category_has_a_switch", async () => {
     // The categories the engine can write, the section of the schema and the defaults must list the
     // same ones, and each must have an `enabled` key.

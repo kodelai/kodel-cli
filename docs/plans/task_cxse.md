@@ -129,3 +129,13 @@ none is invented).
   appended after `pipelineFile` to reduce conflicts.
 - The working copy of the main checkout has uncommitted files (`docs/plans/...`, `todo.md`) that this
   worktree does not have; none is needed for this task.
+
+## Deviations found while implementing
+
+- `isValidGlob` refuses an empty pattern, one with a NUL, one over 1024 characters, and the list is
+  capped at 256. A lone `[` or `{` is **not** refused: minimatch reads it as a literal, so there is no
+  grounds to call it wrong; the plan's example `"["` is dropped from the bad-glob test for that reason.
+- The git check moved into the start lock, after the reuse and terminal branches and before the
+  worktree is made: a run that exists is picked up as it is, also in a directory without git.
+- `LocalHost.start` without a `history` option behaves as before (no git needed for it, nothing
+  recorded); `LocalPipelineHost` always passes the effective values from the config.
