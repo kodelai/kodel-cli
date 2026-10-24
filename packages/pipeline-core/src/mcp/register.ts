@@ -4,7 +4,7 @@
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { PipelineService, ToolResult } from "../service";
-import { invokeTool, TOOLS } from "./tools";
+import { invokeTool, toolsFor } from "./tools";
 
 /** A tool call that has been answered, as the host sees it before the agent does. */
 export interface ToolCall {
@@ -23,6 +23,7 @@ export interface ToolCall {
 export type AfterTool = (call: ToolCall) => Promise<ToolResult | undefined>;
 
 export interface RegisterOptions {
+  taskLink?: boolean;
   afterTool?: AfterTool;
 }
 
@@ -31,7 +32,8 @@ export function registerPipelineTools(
   service: PipelineService,
   options: RegisterOptions = {},
 ): void {
-  for (const tool of TOOLS) {
+  const tools = toolsFor(options);
+  for (const tool of tools) {
     server.registerTool(
       tool.name,
       {
@@ -41,7 +43,7 @@ export function registerPipelineTools(
         annotations: { readOnlyHint: tool.readOnly, idempotentHint: tool.idempotent },
       },
       (async (args: Record<string, unknown>, extra: { signal: AbortSignal }) => {
-        let result = await invokeTool(service, tool.name, args);
+        let result = await invokeTool(service, tool.name, args, tools);
         if (options.afterTool) {
           const replaced = await options
             .afterTool({ tool: tool.name, args, result, signal: extra.signal })

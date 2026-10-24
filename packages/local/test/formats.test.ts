@@ -99,12 +99,10 @@ async function formatDirs(): Promise<string[]> {
     .sort();
 }
 
-/** Directories of a format that are not runs: the golden files of other readers. */
-const NOT_RUNS = new Set(["history"]);
-
+/** The run directories of a format; other directories (`history/`, golden events) are not runs. */
 async function runIds(format: string): Promise<string[]> {
   return (await readdir(join(FORMATS, format), { withFileTypes: true }))
-    .filter((e) => e.isDirectory() && !NOT_RUNS.has(e.name))
+    .filter((e) => e.isDirectory() && e.name.startsWith("r_"))
     .map((e) => e.name)
     .sort();
 }
@@ -211,6 +209,25 @@ describe("every stored format is opened by the current engine", () => {
       ).toEqual(want.nodes);
       expect(report?.workdir).toBe(`/kodel-fixture/workdir/${id}`);
     }
+  });
+
+  test("hp9r_v1_check_results_without_check_id_and_params_hash_are_read", async () => {
+    await copyRuns("v1");
+    const host = hostFor();
+    const store = new FileStore({ root: join(root, ".kodel") });
+    let seen = 0;
+    for (const id of Object.keys(V1_RUNS)) {
+      const finished = (await store.readJournal(id)).filter((r) => r.event === "check_finished");
+      for (const record of finished) {
+        expect(record.check_id).toBeUndefined();
+        expect(record.params_hash).toBeUndefined();
+      }
+      seen += finished.length;
+      const report = await (await host.open(id))?.report();
+      const checks = report?.nodes.flatMap((n) => n.attempts.flatMap((a) => a.checks ?? []));
+      expect(checks?.length).toBe(finished.length);
+    }
+    expect(seen).toBeGreaterThan(0);
   });
 
   test("formats_a_fixture_reads_as_unsealed_never_as_modified", async () => {

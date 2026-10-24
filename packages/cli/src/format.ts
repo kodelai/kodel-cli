@@ -148,6 +148,10 @@ export function formatReport(
     );
   }
   if (report.workdir !== undefined) lines.push(`workdir: ${plain(report.workdir)}`);
+  if (report.tracker_task !== undefined) {
+    const again = report.tracker_task.restarted ? " (restarted: the task had been done)" : "";
+    lines.push(`tracker task: ${plain(report.tracker_task.key)}${again}`);
+  }
   lines.push(
     `total ${formatDuration(report.total_s)}: work ${formatDuration(report.work_s)}, ` +
       `waiting for a person ${formatDuration(report.waiting_s)}`,

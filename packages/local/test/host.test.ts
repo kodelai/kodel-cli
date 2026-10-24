@@ -463,7 +463,46 @@ describe("extending the host", () => {
     expect(state.nodes.work?.lastFailure).toEqual({
       source: "check:always-no",
       reason: "the plugin said no",
+      check_id: "work/always-no#1",
     });
+  });
+
+  test("hp9r_the_journal_of_a_real_run_carries_check_id_and_params_hash", async () => {
+    const registry = defaultRegistry().registerCheck({ kind: "always-no", shape: {} });
+    const spec = parsePipeline(
+      [
+        "name: plug",
+        "nodes:",
+        "  - slug: work",
+        "    kind: agent",
+        "    prompt: x",
+        "    checks:",
+        "      - { kind: always-no }",
+        "",
+      ].join("\n"),
+      { registry },
+    );
+    const h = new LocalHost(spec, {
+      root: dir,
+      heartbeatMs: 0,
+      engine: { registry },
+      checkRunners: { "always-no": async () => ({ passed: false, reason: "no" }) },
+    });
+    const { run } = await h.start("t");
+    await run.completeStep("work", 1);
+    await finish(run);
+    const text = await readFile(join(h.store.runDir(run.runId), "journal.jsonl"), "utf8");
+    const records = text
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((r) => r.event === "check_finished");
+    expect(records.length).toBeGreaterThan(0);
+    for (const r of records) {
+      expect(r.check_id).toBe("work/always-no#1");
+      expect(typeof r.params_hash).toBe("string");
+    }
+    expect(new Set(records.map((r) => r.params_hash)).size).toBe(1);
   });
 
   test("a check kind with no runner fails clearly instead of hanging", async () => {

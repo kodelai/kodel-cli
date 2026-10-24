@@ -1,10 +1,16 @@
 import { KILL_GRACE_MS } from "@kodel-ai/local";
-import { type PipelineHost, PipelineService, type TaskService } from "@kodel-ai/pipeline-core";
+import {
+  type KodelError,
+  type PipelineHost,
+  PipelineService,
+  type RunTaskLink,
+  type TaskService,
+} from "@kodel-ai/pipeline-core";
 import {
   registerPipelineTools,
   registerTaskTools,
   serverInstructions,
-  TASK_INSTRUCTIONS,
+  taskInstructions,
 } from "@kodel-ai/pipeline-core/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -12,6 +18,14 @@ import { createElicitor, type HumanHost } from "./elicit";
 
 /** A host that can also stop the work it started (the local host does); it says how much it stopped. */
 export type StoppableHost = PipelineHost & { stop?(): number };
+
+/** A host for a server started outside a project: every tool answers with the same error. */
+export function noProjectHost(error: KodelError): StoppableHost {
+  const refuse = (): never => {
+    throw error;
+  };
+  return { list: refuse, resolve: refuse, start: refuse, open: refuse };
+}
 
 /**
  * How long a dialog may stay open, from `KODEL_DIALOG_TIMEOUT_S` in the server's environment: for a
@@ -43,23 +57,26 @@ export interface ServerOptions {
 /**
  * Build the MCP server for a host; the transport is the caller's. The task tools and their part of
  * the instructions are there only when `tasks` is given (the config turned them on): with tasks
- * off the agent is told nothing about them.
+ * off the agent is told nothing about them. `runLink` (the config asks for runs to be tied to tasks)
+ * adds `task_key` to pipeline_start and the rule about it to the instructions.
  */
 export function createServer(
   host: PipelineHost,
   version: string,
   tasks?: TaskService,
+  runLink?: RunTaskLink,
   options: ServerOptions = {},
 ): McpServer {
   const { humans } = options;
   const base = serverInstructions({ ...options, dialog: humans !== undefined });
-  const instructions = tasks ? `${base}\n\n${TASK_INSTRUCTIONS}` : base;
+  const instructions = tasks
+    ? `${base}\n\n${taskInstructions(runLink?.mode ?? "disabled", runLink !== undefined)}`
+    : base;
   const server = new McpServer({ name: "kodel", version }, { instructions });
   const service = new PipelineService(host, { engineVersion: version });
-  registerPipelineTools(
-    server,
-    service,
-    humans
+  registerPipelineTools(server, service, {
+    taskLink: tasks !== undefined && runLink !== undefined,
+    ...(humans
       ? {
           afterTool: createElicitor(server.server, humans, service, {
             ...(options.dialogTimeoutMs === undefined
@@ -67,8 +84,8 @@ export function createServer(
               : { timeoutMs: options.dialogTimeoutMs }),
           }),
         }
-      : {},
-  );
+      : {}),
+  });
   if (tasks) registerTaskTools(server, tasks);
   return server;
 }
@@ -92,9 +109,10 @@ export async function serveStdio(
   host: StoppableHost,
   version: string,
   tasks?: TaskService,
+  runLink?: RunTaskLink,
   options: ServerOptions = {},
 ): Promise<void> {
-  const server = createServer(host, version, tasks, options);
+  const server = createServer(host, version, tasks, runLink, options);
   await server.connect(new StdioServerTransport());
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.once(signal, () => {

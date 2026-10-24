@@ -79,7 +79,7 @@ async function connect(
   options: ConnectOptions = {},
 ) {
   const host = new LocalPipelineHost({ root: options.root ?? dir, heartbeatMs: 0 });
-  const server = createServer(host, "0.0.0", undefined, {
+  const server = createServer(host, "0.0.0", undefined, undefined, {
     ...(options.withoutHumans ? {} : { humans: options.humans ? options.humans(host) : host }),
     ...(options.dialogTimeoutMs === undefined ? {} : { dialogTimeoutMs: options.dialogTimeoutMs }),
   });

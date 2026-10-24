@@ -10,6 +10,7 @@ import {
   canonicalPipeline,
   commandsOf,
   diffNodes,
+  type HistoryConfig,
   hiddenCharacterProblem,
   isRunId,
   KodelError,
@@ -22,14 +23,16 @@ import {
   type PipelineProblem,
   type PipelineProposalOutcome,
   type PipelineSpec,
+  type PreparedTask,
   parsePipeline,
   parseSnapshot,
   proposalNameProblem,
   type RunState,
+  type RunTaskLink,
   redactText,
   type StartOutcome,
 } from "@kodel-ai/pipeline-core";
-import { loadConfig, type WorktreeConfig } from "./config";
+import { loadConfig, type ProjectConfig, type WorktreeConfig } from "./config";
 import { GitSnapshotter, git } from "./git";
 import {
   type HostOptions,
@@ -40,12 +43,15 @@ import {
   normalizeTask,
 } from "./host";
 import { FileStore, META_VERSION, type PipelineProposalRecord, type RunMeta } from "./store";
+import { openTaskService } from "./tasks";
 
 export interface LocalPipelineHostOptions extends HostOptions {
   /** Where the pipeline files are; defaults to `<root>/.kodel/pipelines`. */
   pipelinesDir?: string;
   /** Instead of the `worktree` section of the project config; mostly for tests. */
   worktree?: WorktreeConfig;
+  /** Instead of the `history` section of the project config; mostly for tests. */
+  history?: HistoryConfig;
 }
 
 interface Loaded {
@@ -112,6 +118,28 @@ export class LocalPipelineHost implements PipelineHost {
       root: this.storeRoot,
       ...(options.rules ? { rules: options.rules } : {}),
     });
+  }
+
+  private linkPromise: Promise<RunTaskLink | undefined> | undefined;
+
+  /**
+   * The tie between runs and tasks: the one the host was given, else the one the project config
+   * asks for. Asked once, and only when a run meets a task; a config that cannot be used for tasks
+   * means no tie (the MCP server says why on stderr when it starts).
+   */
+  taskLink(): Promise<RunTaskLink | undefined> {
+    const given = this.options.runTaskLink;
+    if (given !== undefined && typeof given !== "function") return Promise.resolve(given);
+    this.linkPromise ??= (given ?? (() => this.linkFromConfig()))();
+    return this.linkPromise;
+  }
+
+  private async linkFromConfig(): Promise<RunTaskLink | undefined> {
+    try {
+      return (await openTaskService({ storeRoot: this.storeRoot }))?.runLink;
+    } catch {
+      return undefined;
+    }
   }
 
   private async load(): Promise<{ loaded: Loaded[]; problems: PipelineProblem[] }> {
@@ -392,6 +420,7 @@ export class LocalPipelineHost implements PipelineHost {
     if (!host) {
       host = new LocalHost(spec, {
         ...this.options,
+        runTaskLink: () => this.taskLink(),
         ...(source === undefined ? {} : { source }),
         ...(pipelineFile === undefined ? {} : { pipelineFile }),
       });
@@ -413,7 +442,7 @@ export class LocalPipelineHost implements PipelineHost {
       if (!(await new GitSnapshotter(this.options.root).isRepo())) return undefined;
       let committed: string | undefined;
       try {
-        committed = (await git(["show", `HEAD:${file}`], this.options.root)).stdout;
+        committed = (await git(["show", `HEAD:./${file}`], this.options.root)).stdout;
       } catch {
         return { committed: undefined };
       }
@@ -439,27 +468,51 @@ export class LocalPipelineHost implements PipelineHost {
     cwd?: string;
     pipeline_version?: "working" | "committed";
     title?: string;
+    task_key?: string;
+    restart_task?: boolean;
   }): Promise<StartOutcome> {
     let found = await this.find(input.pipeline);
     if (!found)
       throw new KodelError("UNKNOWN_PIPELINE", `there is no pipeline "${input.pipeline}"`);
+    // Looked at before anything is made: a task that cannot be started leaves no worktree behind.
+    let prepared: PreparedTask | undefined;
+    if (input.restart_task === true && input.task_key === undefined) {
+      throw new KodelError("INVALID_ARGUMENTS", "restart_task needs task_key", [
+        { path: ["restart_task"], message: "needs task_key" },
+      ]);
+    }
+    if (input.task_key !== undefined) {
+      const link = await this.taskLink();
+      if (!link) {
+        throw new KodelError(
+          "INVALID_ARGUMENTS",
+          "task_key is not available here: tasks are off, tasks.on_run.mode is disabled, or the tracker cannot attach runs",
+        );
+      }
+      prepared = await link.prepare(input.task_key, input.restart_task === true);
+    }
+    // Starting a task again means a new run, not the finished one coming back.
+    const restart = input.restart || input.restart_task === true;
     // Read at each start, so an edit of the config applies to the next run without a restart.
-    const config = this.options.worktree ? undefined : await loadConfig(this.storeRoot);
-    const worktree = this.options.worktree ?? (config as NonNullable<typeof config>).worktree;
+    let loaded: ProjectConfig | undefined;
+    const projectConfig = async () => {
+      loaded ??= await loadConfig(this.storeRoot);
+      return loaded;
+    };
+    const worktree = this.options.worktree ?? (await projectConfig()).worktree;
+    // Fixed here for the run: the host journals it, and a later edit of the config does not reach it.
+    const history = this.options.history ?? (await projectConfig()).history;
     let pipelineCopy: { path: string; text: string } | undefined;
     let tellCopy = false;
     const file = this.pipelineFileOf(found.file);
     if (file !== undefined && worktree.mode === "auto" && this.options.workdirs === undefined) {
       const dirt = await this.uncommitted(found, file);
-      if (dirt && !(await this.runExists(found.spec.name, input))) {
+      if (dirt && !(await this.runExists(found.spec.name, { task: input.task, restart }))) {
         if (dirt.committed === undefined) {
           // Only the working version exists: the worktree has none, so it gets this one.
           pipelineCopy = { path: file, text: found.source };
         } else {
-          const choice =
-            input.pipeline_version ??
-            (await (config ? Promise.resolve(config) : loadConfig(this.storeRoot))).pipeline
-              .uncommitted;
+          const choice = input.pipeline_version ?? (await projectConfig()).pipeline.uncommitted;
           if (choice === "ask") {
             throw new ChoiceNeeded(askWhich(found, file, dirt.committed));
           }
@@ -482,9 +535,11 @@ export class LocalPipelineHost implements PipelineHost {
       found.source,
       found.file,
     ).start(input.task, {
-      restart: input.restart,
+      restart,
+      ...(prepared?.key === undefined ? {} : { taskKey: prepared.key }),
       ...(input.title === undefined ? {} : { title: input.title }),
       worktree,
+      history,
       ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
       ...(pipelineCopy === undefined ? {} : { pipelineCopy }),
     });
@@ -493,16 +548,58 @@ export class LocalPipelineHost implements PipelineHost {
     if (!known) throw new KodelError("UNKNOWN_RUN", `there is no run "${run.runId}"`);
     this.runs.set(run.runId, known);
     // Where the run works is what its record says, also for a run picked up again.
-    const where = await known.location();
+    const located = await known.location();
+    const where = located && { ...located, path: await known.inProject(located.path) };
     const copied =
       pipelineCopy && workdir && tellCopy
         ? `The pipeline file ${pipelineCopy.path} was put into the run's directory as it is now, so it goes into the run's branch with its other changes.`
         : undefined;
     const note = [workdir?.note, copied].filter((part) => part !== undefined).join(" ");
+    const task = await this.tieStart(input.task_key, prepared, known, !reused && !terminal);
     return {
       status: reused ? "reused" : terminal ? "terminal" : "started",
       run: known,
       ...(where ? { workdir: { ...where, ...(note === "" ? {} : { note }) } } : {}),
+      ...(task ? { task } : {}),
+    };
+  }
+
+  /**
+   * The run exists: tie it to its task. A tracker that fails is a warning in the answer and a line in
+   * the journal; the run goes on. A run that was only picked up again is not tied a second time.
+   */
+  private async tieStart(
+    typed: string | undefined,
+    prepared: PreparedTask | undefined,
+    run: LocalRun,
+    fresh: boolean,
+  ): Promise<StartOutcome["task"]> {
+    if (typed === undefined || !prepared) return undefined;
+    const link = await this.taskLink();
+    if (!link) return undefined;
+    const key = prepared.key ?? typed;
+    if (prepared.key === undefined) {
+      return { key, ...(prepared.warning === undefined ? {} : { warning: prepared.warning }) };
+    }
+    if (!fresh) {
+      // The run was there before: it belongs to whatever it was started for.
+      return {
+        key,
+        warning: `this run already existed and was not tied to task ${prepared.key}`,
+      };
+    }
+    const began = await link.begin(prepared.key, run.runId, prepared.restarting);
+    await run.apply({
+      type: "task_note",
+      what: began.failed ? "failed" : prepared.restarting ? "restarted" : "linked",
+      task: key,
+      ...(began.note === undefined ? {} : { note: began.note }),
+      ...(prepared.restarting ? { restarting: true as const } : {}),
+    });
+    return {
+      key,
+      ...(prepared.restarting ? { restarted: true as const } : {}),
+      ...(began.note === undefined ? {} : { warning: began.note }),
     };
   }
 

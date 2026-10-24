@@ -124,7 +124,8 @@ export function makeSandbox(
   writeFileSync(join(dir, "CLAUDE.md"), `# Test repository\n\n${driver}`);
   writeFileSync(join(dir, ".gitignore"), ".kodel/runs\n.kodel/worktrees\n");
   const config = `${options.worktree === true ? "" : "worktree:\n  mode: off\n"}${options.config ?? ""}`;
-  if (config !== "") writeFileSync(join(dir, ".kodel", "config.yaml"), config);
+  // The config file is the marker of a project, so it is there even when it says nothing.
+  writeFileSync(join(dir, ".kodel", "config.yaml"), config);
   if (options.withProjectSettings) {
     mkdirSync(join(dir, ".claude"), { recursive: true });
     cpSync(join(REPO_ROOT, ".claude/settings.json"), join(dir, ".claude/settings.json"));
@@ -132,6 +133,20 @@ export function makeSandbox(
   git("add", "-A");
   git("commit", "-q", "-m", "initial");
   writeKodelShim(stateDir, dir);
+  return {
+    dir,
+    stateDir,
+    cleanup() {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(stateDir, { recursive: true, force: true });
+    },
+  };
+}
+
+/** A folder that is no project: no git, no marker, nothing in it. */
+export function makeBareSandbox(): Sandbox {
+  const dir = mkdtempSync(join(tmpdir(), "kodel-agent-bare-"));
+  const stateDir = mkdtempSync(join(tmpdir(), "kodel-agent-state-"));
   return {
     dir,
     stateDir,
@@ -255,8 +270,15 @@ export interface TurnOptions {
   resume?: string;
   /** Tools the agent may use without asking; anything else is refused (headless cannot ask). */
   allowedTools: string[];
+  /** What this turn may spend, in USD; `BUDGET_USD` when left out. */
+  budgetUsd?: string;
   /** The directory the agent is started in; the sandbox when left out. */
   cwd?: string;
+  /**
+   * Start the server without `--root`, as a project's own `.mcp.json` does: it finds the project
+   * from the directory the agent is started in.
+   */
+  rootFromCwd?: boolean;
   /** More environment for the agent and the commands it runs (`KODEL_TEST_WAIT_TIMEOUT`, say). */
   env?: Record<string, string>;
 }
@@ -268,7 +290,7 @@ export async function runAgentTurn(options: TurnOptions): Promise<AgentTurn> {
     mcpServers: {
       kodel: {
         command: "bun",
-        args: [MAIN_TS, "--root", sandbox.dir, "mcp"],
+        args: options.rootFromCwd ? [MAIN_TS, "mcp"] : [MAIN_TS, "--root", sandbox.dir, "mcp"],
         env: { KODEL_STATE_DIR: sandbox.stateDir },
       },
     },
@@ -289,7 +311,7 @@ export async function runAgentTurn(options: TurnOptions): Promise<AgentTurn> {
     "--model",
     MODEL,
     "--max-budget-usd",
-    BUDGET_USD,
+    options.budgetUsd ?? BUDGET_USD,
     ...(options.resume ? ["--resume", options.resume] : []),
   ];
   const env = { ...agentEnv(sandbox.stateDir), ...options.env };

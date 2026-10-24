@@ -24,6 +24,8 @@ import {
   evaluateCommand,
   evaluateDiff,
   evaluateResult,
+  type HistoryConfig,
+  isRunEnd,
   type JournalRecord,
   KodelError,
   mergeReports,
@@ -39,6 +41,7 @@ import {
   type RunEvent,
   type RunReport,
   type RunState,
+  type RunTaskLink,
   redactText,
   renderContextOf,
   renderDeep,
@@ -50,7 +53,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { type CommandOptions, type CommandResult, runCommand } from "./command";
 import { loadConfig, type WorktreeConfig } from "./config";
-import { GitSnapshotter } from "./git";
+import { GitSnapshotter, repoPrefix } from "./git";
 import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integrity";
 import { FileStore, META_VERSION, newRunId, type RunMeta } from "./store";
 import { GitWorktreeProvider, type Workdir, type WorkdirProvider } from "./worktree";
@@ -116,6 +119,11 @@ export interface HostOptions {
   ownerId?: string;
   /** Whether an owner is still alive. Tests replace it; by default a process id on this machine is looked up. */
   isOwnerAlive?: (owner: string) => boolean;
+  /**
+   * Ties a run to the task it was started for; absent when tasks are off or the mode is `disabled`.
+   * A function is asked on first use, so a host that never meets a task never reads the task config.
+   */
+  runTaskLink?: RunTaskLink | (() => Promise<RunTaskLink | undefined>);
 }
 
 /**
@@ -265,19 +273,36 @@ export class LocalHost {
       title?: string;
       cwd?: string;
       worktree?: WorktreeConfig;
+      /** The effective `history` settings of the project config; omitted: not recorded and no git needed for them. */
+      history?: HistoryConfig;
       /** A pipeline file to put into the run's directory, when the last commit does not have it as it should be. */
       pipelineCopy?: { path: string; text: string };
+      /** The key of the task the run is for, already resolved by the tracker. */
+      taskKey?: string;
     } = {},
   ): Promise<{ run: LocalRun; reused: boolean; terminal: boolean; workdir?: Workdir }> {
     const registry = this.engine.registry ?? defaultRegistry();
-    const needsGit = this.spec.nodes.some((n) =>
+    const { history } = options;
+    const needsDiffGit = this.spec.nodes.some((n) =>
       n.checks.some((c) => registry.check(c.kind)?.baseline?.(c.params)),
     );
-    if (needsGit && !(await this.snapshotter.isRepo())) {
-      throw new Error(
-        `this pipeline has a diff check, which needs a git repository, and ${this.options.root} is not inside one`,
+    const recordsChanges = history?.changes.enabled === true;
+    // Only a start that would make a new run needs git: a run that exists is picked up as it is, so
+    // this runs inside the start lock after the reuse branches, and before anything is created.
+    const requireGit = async () => {
+      if (!(needsDiffGit || recordsChanges) || (await this.snapshotter.isRepo())) return;
+      // `isRepo` is false for no git binary, a bare repository and a directory outside a repository
+      // alike, so the message names the ways out instead of guessing which it was.
+      const setting = recordsChanges
+        ? `; history.changes.enabled also needs git: set it to false in .kodel/config.yaml, or run kodel inside a git repository`
+        : "";
+      throw new KodelError(
+        "GIT_REQUIRED",
+        needsDiffGit
+          ? `this pipeline has a diff check, which needs a git repository, and ${this.options.root} is not inside one${setting}`
+          : `${this.options.root} is not inside a git work tree (or git is not installed), and this run records changes: set history.changes.enabled to false in .kodel/config.yaml, or run kodel inside a git repository`,
       );
-    }
+    };
     // Spaces at the ends or doubled are not a different task; otherwise a changed space would
     // slip past the run that is waiting for a person.
     const redactedTask = normalizeTask(task, this.rules);
@@ -301,6 +326,7 @@ export class LocalHost {
         }
       }
 
+      await requireGit();
       const now = this.clock();
       const runId = newRunId(now);
       // Of the text the pipeline was read from, when it is known: that is what a copy is checked
@@ -320,7 +346,7 @@ export class LocalHost {
       try {
         // The copy is part of the start: if it cannot be made the directory is taken away again.
         if (workdir && options.pipelineCopy) {
-          const target = join(workdir.path, options.pipelineCopy.path);
+          const target = join(workdir.path, await this.projectRel(), options.pipelineCopy.path);
           await mkdir(dirname(target), { recursive: true });
           await this.store.replaceFile(target, options.pipelineCopy.text);
         }
@@ -351,6 +377,8 @@ export class LocalHost {
           ...(this.options.pipelineFile === undefined
             ? {}
             : { pipelineFile: this.options.pipelineFile }),
+          ...(options.taskKey === undefined ? {} : { taskKey: options.taskKey }),
+          ...(history === undefined ? {} : { history }),
         });
         if (!result.ok) throw result.error;
         return { run, reused: false, terminal: false, ...(workdir ? { workdir } : {}) };
@@ -366,6 +394,28 @@ export class LocalHost {
     // missing is said at the gate, not hidden.
     if (!started.reused && !started.terminal) await started.run.recordRunBaseline();
     return started;
+  }
+
+  private linkPromise: Promise<RunTaskLink | undefined> | undefined;
+
+  /** The tie between runs and tasks, when there is one. */
+  taskLink(): Promise<RunTaskLink | undefined> {
+    const given = this.options.runTaskLink;
+    if (typeof given !== "function") return Promise.resolve(given);
+    this.linkPromise ??= given();
+    return this.linkPromise;
+  }
+
+  private rel: Promise<string> | undefined;
+
+  /**
+   * Where the project is inside the repository (empty when it is the repository's top, or when the
+   * directories come from a provider of the caller's). A worktree is of the whole repository, and a
+   * run of a project in a subfolder works in that same subfolder of its worktree.
+   */
+  projectRel(): Promise<string> {
+    this.rel ??= this.options.workdirs ? Promise.resolve("") : repoPrefix(this.options.root);
+    return this.rel;
   }
 
   /** Throws `WORKDIR_MISSING` or `WORKDIR_INVALID` unless `workdir` is still the run's own directory. */
@@ -481,7 +531,12 @@ export class LocalRun {
     const where = await this.location();
     if (!where) return this.host.options.root;
     await this.host.verifyWorkdir(where.path);
-    return where.path;
+    return this.inProject(where.path);
+  }
+
+  /** The place of the project inside a worktree of the repository. */
+  async inProject(worktree: string): Promise<string> {
+    return join(worktree, await this.host.projectRel());
   }
 
   private async snapshotter(): Promise<GitSnapshotter> {
@@ -551,7 +606,8 @@ export class LocalRun {
    */
   private async watched(state: RunState): Promise<{ path: string; relative: string } | undefined> {
     if (state.pipelineFile === undefined) return undefined;
-    const base = state.workdir ?? this.host.options.root;
+    const base =
+      state.workdir === undefined ? this.host.options.root : await this.inProject(state.workdir);
     const path = join(base, state.pipelineFile);
     const inside = (from: string, to: string) => {
       const rel = relative(from, to);
@@ -853,7 +909,11 @@ export class LocalRun {
       .catch(() => undefined)
       .then(() => this.applyLocked(event, options.trust === true));
     this.queue = step;
-    return step;
+    // After the lock is let go: the tracker may be slow, and it must not hold up the run's files.
+    return step.then(async (decision) => {
+      await this.tieEnd(decision);
+      return decision;
+    });
   }
 
   private applyLocked(incoming: RunEvent, trust: boolean): Promise<Decision> {
@@ -914,6 +974,32 @@ export class LocalRun {
       for (const effect of decision.effects) await this.dispatch(effect);
       return decision;
     });
+  }
+
+  /**
+   * The run has just ended: tell its task, and note in the journal what came of it. The note is an
+   * ordinary event on a finished run, so the state is sealed again with it. If the process dies
+   * between the end of the run and the note, the task stays as it was. This never fails the run.
+   */
+  private async tieEnd(decision: Decision): Promise<void> {
+    if (!decision.ok || decision.noop) return;
+    const key = decision.state.taskKey;
+    const status = decision.state.status;
+    if (key === undefined || !isRunEnd(status)) return;
+    if (!decision.journal.some((r) => r.event === "run_finished")) return;
+    try {
+      const link = await this.host.taskLink();
+      if (!link) return;
+      const out = await link.end(key, this.runId, status);
+      await this.apply({
+        type: "task_note",
+        what: out.what,
+        task: key,
+        ...(out.note === undefined ? {} : { note: out.note }),
+      });
+    } catch {
+      // The tracker is not the run's business: what could not be noted is only lost from the journal.
+    }
   }
 
   /** Whether the state file is what kodel last wrote. `unknown`: kodel has not seen this run yet. */
@@ -1311,6 +1397,10 @@ export class LocalRun {
       const where = await this.locationForDisplay();
       if (where?.branch !== undefined) {
         step.tell_the_person = doneHint(this.host.options.root, where.path, where.branch);
+      }
+      if (state.taskKey !== undefined && (await this.host.taskLink())?.mode === "ask") {
+        const ask = `The run was started for task ${state.taskKey} and the engine does not close it by itself (tasks.on_run.mode is ask): ask the person whether to close it, and if they agree call task_update with the done status from task_schema.`;
+        step.tell_the_person = step.tell_the_person ? `${step.tell_the_person}\n\n${ask}` : ask;
       }
     }
     if ("waiting" in step && step.waiting.reason === "gate") {
