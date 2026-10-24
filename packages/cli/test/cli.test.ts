@@ -1321,6 +1321,8 @@ describe("a store made from the golden runs of the stored formats", () => {
     for (const id of RUNS) {
       await cp(join(V1, id), join(dir, ".kodel", "runs", id), { recursive: true });
     }
+    // A store is a project only with the marker, which the golden runs do not carry.
+    await writeFile(join(dir, ".kodel", "config.yaml"), "");
   });
   afterEach(async () => {
     await rm(join(dir, ".."), { recursive: true, force: true });
