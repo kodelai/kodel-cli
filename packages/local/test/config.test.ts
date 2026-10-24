@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { KodelError } from "@kodel-ai/pipeline-core";
-import { CONFIG_FILE, DEFAULT_WORKTREE_DIR, loadConfig } from "../src";
+import { DEFAULT_HISTORY, HISTORY_CATEGORIES, KodelError } from "@kodel-ai/pipeline-core";
+import { CONFIG_FILE, DEFAULT_WORKTREE_DIR, HISTORY_SECTION_KEYS, loadConfig } from "../src";
 
 let dir: string;
 beforeEach(async () => {
@@ -34,6 +34,7 @@ describe("the project config", () => {
       pipeline: { uncommitted: "ask" },
       agent_hints: { wait: true },
       tasks: { enabled: false, adapter: "local", timeout_s: 30, adapters: {} },
+      history: DEFAULT_HISTORY,
     });
   });
 
@@ -124,5 +125,89 @@ describe("the project config", () => {
     expect(error.code).toBe("UNSUPPORTED_FORMAT");
     expect(error.message).toContain("9.0.0");
     expect(error.message).toContain("upgrade");
+  });
+});
+
+describe("the history section", () => {
+  test("history_defaults_when_there_is_no_file_or_no_section", async () => {
+    expect((await loadConfig(dir)).history).toEqual(DEFAULT_HISTORY);
+    await write("version: 1\n");
+    expect((await loadConfig(dir)).history).toEqual(DEFAULT_HISTORY);
+    await write("history: {}\n");
+    expect((await loadConfig(dir)).history).toEqual(DEFAULT_HISTORY);
+  });
+
+  test("history_every_key_is_read_and_the_rest_keep_their_defaults", async () => {
+    await write(
+      [
+        "history:",
+        "  changes: { enabled: false, exclude: ['**/.env*', 'secrets/**'], max_kb: 8 }",
+        "  output: { enabled: false, max_kb: 2 }",
+        "  prompts: { enabled: false }",
+        "  executor: { enabled: false }",
+        "  tool_log: { enabled: false }",
+        "",
+      ].join("\n"),
+    );
+    expect((await loadConfig(dir)).history).toEqual({
+      changes: { enabled: false, exclude: ["**/.env*", "secrets/**"], max_kb: 8 },
+      output: { enabled: false, max_kb: 2 },
+      prompts: { enabled: false },
+      executor: { enabled: false },
+      tool_log: { enabled: false },
+    });
+    await write("history:\n  changes: { exclude: ['a/**'] }\n");
+    expect((await loadConfig(dir)).history.changes).toEqual({
+      enabled: true,
+      exclude: ["a/**"],
+      max_kb: 512,
+    });
+    await write("history:\n  output: { enabled: false }\n");
+    expect((await loadConfig(dir)).history.output).toEqual({ enabled: false, max_kb: 64 });
+  });
+
+  test("history_an_unknown_key_is_refused_by_name", async () => {
+    expect((await failure("history:\n  change: { enabled: false }\n")).message).toContain("change");
+    const nested = await failure("history:\n  changes: { enable: false }\n");
+    expect(nested.code).toBe("CONFIG_INVALID");
+    expect(nested.message).toContain("enable");
+    expect((await failure("history:\n  prompts: { max_kb: 1 }\n")).message).toContain("max_kb");
+  });
+
+  test("history_wrong_types_and_limits_are_refused", async () => {
+    for (const text of [
+      "history:\n  changes: { enabled: 'yes' }\n",
+      "history:\n  changes: { exclude: 'a' }\n",
+      "history:\n  changes: { exclude: [1] }\n",
+      "history:\n  changes: { max_kb: 0 }\n",
+      "history:\n  changes: { max_kb: -1 }\n",
+      "history:\n  changes: { max_kb: 1.5 }\n",
+      "history:\n  output: { max_kb: 0 }\n",
+      "history:\n  output: { max_kb: '5' }\n",
+      "history: yes\n",
+      "history:\n  tool_log: true\n",
+    ]) {
+      expect((await failure(text)).code).toBe("CONFIG_INVALID");
+    }
+  });
+
+  test("history_a_bad_exclude_glob_is_refused_with_its_place", async () => {
+    for (const glob of ["''", '"a\\0b"', `'${"a".repeat(2000)}'`]) {
+      const error = await failure(`history:\n  changes: { exclude: [${glob}] }\n`);
+      expect(error.code).toBe("CONFIG_INVALID");
+      expect(error.message).toContain("history.changes.exclude");
+    }
+  });
+
+  test("every_history_category_has_a_switch", async () => {
+    // The categories the engine can write, the section of the schema and the defaults must list the
+    // same ones, and each must have an `enabled` key.
+    expect([...HISTORY_SECTION_KEYS].sort()).toEqual([...HISTORY_CATEGORIES].sort());
+    expect(Object.keys(DEFAULT_HISTORY).sort()).toEqual([...HISTORY_CATEGORIES].sort());
+    for (const category of HISTORY_CATEGORIES) {
+      expect(DEFAULT_HISTORY[category].enabled).toBe(true);
+      await write(`history:\n  ${category}: { enabled: false }\n`);
+      expect((await loadConfig(dir)).history[category].enabled).toBe(false);
+    }
   });
 });

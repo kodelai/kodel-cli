@@ -5,7 +5,14 @@
  */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { KodelError, MAX_SUPPORTED_MAJOR, parseVersion } from "@kodel-ai/pipeline-core";
+import {
+  defaultHistory,
+  type HistoryConfig,
+  isValidGlob,
+  KodelError,
+  MAX_SUPPORTED_MAJOR,
+  parseVersion,
+} from "@kodel-ai/pipeline-core";
 import { parse } from "yaml";
 import { z } from "zod";
 
@@ -56,6 +63,7 @@ export interface ProjectConfig {
   pipeline: PipelineConfig;
   agent_hints: AgentHintsConfig;
   tasks: TasksConfig;
+  history: HistoryConfig;
 }
 
 export const DEFAULT_WORKTREE: WorktreeConfig = { mode: "auto", dir: DEFAULT_WORKTREE_DIR };
@@ -69,6 +77,34 @@ export const DEFAULT_TASKS: TasksConfig = {
 };
 
 export const CONFIG_FILE = "config.yaml";
+
+// Whole kilobytes, at least one: 0 would mean "keep nothing", which is what `enabled: false` says.
+const maxKb = z.number().int().min(1);
+
+const historySchema = z
+  .object({
+    changes: z
+      .object({
+        enabled: z.boolean().optional(),
+        exclude: z
+          .array(z.string().refine(isValidGlob, { message: "not a valid glob" }))
+          .optional(),
+        max_kb: maxKb.optional(),
+      })
+      .strict()
+      .optional(),
+    output: z
+      .object({ enabled: z.boolean().optional(), max_kb: maxKb.optional() })
+      .strict()
+      .optional(),
+    prompts: z.object({ enabled: z.boolean().optional() }).strict().optional(),
+    executor: z.object({ enabled: z.boolean().optional() }).strict().optional(),
+    tool_log: z.object({ enabled: z.boolean().optional() }).strict().optional(),
+  })
+  .strict();
+
+/** The keys of the `history` section; a test compares them with the categories the engine can write. */
+export const HISTORY_SECTION_KEYS = Object.keys(historySchema.shape);
 
 // Unknown keys are refused, not ignored: a misspelled `mode` must not leave the default in force
 // without the person noticing.
@@ -103,6 +139,7 @@ const configSchema = z
       })
       .strict()
       .optional(),
+    history: historySchema.optional(),
   })
   .strict();
 
@@ -123,6 +160,7 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
         pipeline: { ...DEFAULT_PIPELINE },
         agent_hints: { ...DEFAULT_AGENT_HINTS },
         tasks: { ...DEFAULT_TASKS, adapters: {} },
+        history: defaultHistory(),
       };
     }
     throw error;
@@ -178,5 +216,24 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
       timeout_s: parsed.data.tasks?.timeout_s ?? DEFAULT_TASKS.timeout_s,
       adapters: parsed.data.tasks?.adapters ?? {},
     },
+    history: mergeHistory(parsed.data.history),
+  };
+}
+
+function mergeHistory(given: z.infer<typeof historySchema> | undefined): HistoryConfig {
+  const d = defaultHistory();
+  return {
+    changes: {
+      enabled: given?.changes?.enabled ?? d.changes.enabled,
+      exclude: given?.changes?.exclude ?? d.changes.exclude,
+      max_kb: given?.changes?.max_kb ?? d.changes.max_kb,
+    },
+    output: {
+      enabled: given?.output?.enabled ?? d.output.enabled,
+      max_kb: given?.output?.max_kb ?? d.output.max_kb,
+    },
+    prompts: { enabled: given?.prompts?.enabled ?? d.prompts.enabled },
+    executor: { enabled: given?.executor?.enabled ?? d.executor.enabled },
+    tool_log: { enabled: given?.tool_log?.enabled ?? d.tool_log.enabled },
   };
 }

@@ -10,6 +10,7 @@ import {
   canonicalPipeline,
   commandsOf,
   diffNodes,
+  type HistoryConfig,
   hiddenCharacterProblem,
   isRunId,
   KodelError,
@@ -46,6 +47,8 @@ export interface LocalPipelineHostOptions extends HostOptions {
   pipelinesDir?: string;
   /** Instead of the `worktree` section of the project config; mostly for tests. */
   worktree?: WorktreeConfig;
+  /** Instead of the `history` section of the project config; mostly for tests. */
+  history?: HistoryConfig;
 }
 
 interface Loaded {
@@ -444,8 +447,11 @@ export class LocalPipelineHost implements PipelineHost {
     if (!found)
       throw new KodelError("UNKNOWN_PIPELINE", `there is no pipeline "${input.pipeline}"`);
     // Read at each start, so an edit of the config applies to the next run without a restart.
-    const config = this.options.worktree ? undefined : await loadConfig(this.storeRoot);
+    const config =
+      this.options.worktree && this.options.history ? undefined : await loadConfig(this.storeRoot);
     const worktree = this.options.worktree ?? (config as NonNullable<typeof config>).worktree;
+    // Fixed here for the run: the host journals it, and a later edit of the config does not reach it.
+    const history = this.options.history ?? (config as NonNullable<typeof config>).history;
     let pipelineCopy: { path: string; text: string } | undefined;
     let tellCopy = false;
     const file = this.pipelineFileOf(found.file);
@@ -485,6 +491,7 @@ export class LocalPipelineHost implements PipelineHost {
       restart: input.restart,
       ...(input.title === undefined ? {} : { title: input.title }),
       worktree,
+      history,
       ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
       ...(pipelineCopy === undefined ? {} : { pipelineCopy }),
     });

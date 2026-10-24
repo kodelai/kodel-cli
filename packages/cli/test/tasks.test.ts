@@ -447,7 +447,8 @@ describe("tasks over MCP", () => {
   });
 
   test("an agent finds a problem in the middle of a run: the task is tied to the run and the run goes on", async () => {
-    await config(`${ENABLED}worktree:\n  mode: off\n`);
+    // The directory is not a git repository, so patches are off.
+    await config(`${ENABLED}worktree:\n  mode: off\nhistory:\n  changes: { enabled: false }\n`);
     await mkdir(join(dir, ".kodel", "pipelines"), { recursive: true });
     await writeFile(
       join(dir, ".kodel", "pipelines", "one.yaml"),

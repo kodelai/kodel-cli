@@ -24,6 +24,7 @@ import {
   evaluateCommand,
   evaluateDiff,
   evaluateResult,
+  type HistoryConfig,
   type JournalRecord,
   KodelError,
   mergeReports,
@@ -265,17 +266,25 @@ export class LocalHost {
       title?: string;
       cwd?: string;
       worktree?: WorktreeConfig;
+      /** The effective `history` settings of the project config; omitted: not recorded and no git needed for them. */
+      history?: HistoryConfig;
       /** A pipeline file to put into the run's directory, when the last commit does not have it as it should be. */
       pipelineCopy?: { path: string; text: string };
     } = {},
   ): Promise<{ run: LocalRun; reused: boolean; terminal: boolean; workdir?: Workdir }> {
     const registry = this.engine.registry ?? defaultRegistry();
-    const needsGit = this.spec.nodes.some((n) =>
+    const { history } = options;
+    const needsDiffGit = this.spec.nodes.some((n) =>
       n.checks.some((c) => registry.check(c.kind)?.baseline?.(c.params)),
     );
-    if (needsGit && !(await this.snapshotter.isRepo())) {
-      throw new Error(
-        `this pipeline has a diff check, which needs a git repository, and ${this.options.root} is not inside one`,
+    if ((needsDiffGit || history?.changes.enabled) && !(await this.snapshotter.isRepo())) {
+      // `isRepo` is false for no git binary, a bare repository and a directory outside a repository
+      // alike, so the message names the ways out instead of guessing which it was.
+      throw new KodelError(
+        "GIT_REQUIRED",
+        needsDiffGit
+          ? `this pipeline has a diff check, which needs a git repository, and ${this.options.root} is not inside one`
+          : `${this.options.root} is not inside a git work tree (or git is not installed), and this run records changes: set history.changes.enabled to false in .kodel/config.yaml, or run kodel inside a git repository`,
       );
     }
     // Spaces at the ends or doubled are not a different task; otherwise a changed space would
@@ -351,6 +360,7 @@ export class LocalHost {
           ...(this.options.pipelineFile === undefined
             ? {}
             : { pipelineFile: this.options.pipelineFile }),
+          ...(history === undefined ? {} : { history }),
         });
         if (!result.ok) throw result.error;
         return { run, reused: false, terminal: false, ...(workdir ? { workdir } : {}) };
