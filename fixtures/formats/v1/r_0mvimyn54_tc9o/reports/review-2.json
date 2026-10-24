@@ -1,0 +1,60 @@
+{
+  "completeness": "complete",
+  "rows": [
+    {
+      "severity": "info",
+      "location": "packages/local/src/pipeline-host.ts:285",
+      "description": "Earlier finding 1 (stored YAML parsed unguarded): fixed for YAML. pipelineProposal wraps parsePipeline and hiddenCharacterProblem and returns a view with refused; accept refuses it, and discard works through hasPipelineProposal without reading the record. Tested."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/local/src/store.ts:304",
+      "description": "Residual of finding 1: readPipelineProposal called readJson, which throws SyntaxError when the record file is not JSON, so show and apply ended in an uncaught error and the 'damaged, drop it' hint was never reached. (Fixed after the review: a SyntaxError is a record this kodel did not write and reads as none; a test plants a file that is not JSON.)"
+    },
+    {
+      "severity": "info",
+      "location": "packages/local/src/pipeline-host.ts:285",
+      "description": "Earlier finding 2 (the text read is the text written, rechecked on accept): fixed. pipelineProposal rechecks hiddenCharacterProblem and that the parsed name equals the record name; readPipelineProposal checks v, name, field types and base_hash for a change. The accept hash covers the YAML only, which is acceptable."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/src/new-pipeline.ts:25",
+      "description": "Earlier finding 3 (zero-width characters) is fixed for the listed ones, but not covered and invisible in a terminal: tag characters U+E0000-E007F, variation selectors FE00-FE0F, the Hangul fillers 115F/3164/FFA0, U+034F and U+2800. (Fixed after the review: added to both the rule and plain(), with tests.)"
+    },
+    {
+      "severity": "info",
+      "location": "packages/local/src/pipeline-host.ts:59",
+      "description": "Earlier finding 4 (case-sensitive stem check): fixed; sameStem lowercases the file stem. Tested."
+    },
+    {
+      "severity": "info",
+      "location": "packages/local/src/store.ts:345",
+      "description": "Earlier finding 5 (rename overwrites a file that appeared meanwhile): fixed for a new pipeline by createFile (temporary file linked into place; EEXIST returns false; a directory or a dangling link also gives EEXIST). For a change the file is read again and compared right before replaceFile; a small race inherent to rename remains and is accepted."
+    },
+    {
+      "severity": "minor",
+      "location": "packages/local/src/store.ts:361",
+      "description": "createFile has no fallback where hard links are not allowed (FAT, some mounts, Windows without the right): link throws EPERM or similar and accepting a new pipeline can never work there. (Fixed after the review: on EPERM, ENOTSUP, EXDEV, ENOSYS it falls back to an exclusive create.)"
+    },
+    {
+      "severity": "minor",
+      "location": "docs/plans/let_a_new_pipeline_be_proposed_and_created_through_the_pipel.md:150",
+      "description": "Earlier finding 6 (plan and code disagree): mostly fixed. Remaining: the plan said accept writes a new pipeline with replaceFile while the code uses createFile, and it named listPipelineProposals as a host method while the host has pipelineProposals, pipelineProposal, hasPipelineProposal and discardPipelineProposal. (Plan text aligned after the review.)"
+    },
+    {
+      "severity": "minor",
+      "location": "packages/pipeline-core/src/new-pipeline.ts:62",
+      "description": "commandsOf lists only string command params, but the local runner does String(effect.params.command); a non-string value would run yet be missing from the commands block (it is still in the full YAML shown). (Fixed after the review: any defined command value is listed as the text the runner would run, with a test.)"
+    },
+    {
+      "severity": "info",
+      "location": "packages/cli/src/cli.ts:535",
+      "description": "requireHuman is applied to proposals apply and discard and show is read-only. No MCP tool reaches acceptPipelineProposal or discard. The only agent-reachable write is the proposals/<name>.json record, and the name is validated so it cannot reach a path outside .kodel/proposals or .kodel/pipelines. The core stays pure, no any, the new host methods are optional with a refusal fallback."
+    },
+    {
+      "severity": "info",
+      "location": "packages/pipeline-core/agent-docs/pipeline-design.md:56",
+      "description": "The docs match the engine: the tool without run_id, kind in the answer, propose again replacing the proposal, the commands listed apart, the stale-file message, and the instructions item 8. No false statement found."
+    }
+  ]
+}
