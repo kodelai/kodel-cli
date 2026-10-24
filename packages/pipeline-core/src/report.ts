@@ -61,6 +61,8 @@ export interface RunReport {
   nodes: NodeReport[];
   /** Where the run works, when not in the repository root; added by a host that knows. */
   workdir?: string;
+  /** The task the run was started for, and whether that task had been done before (a restart). */
+  tracker_task?: { key: string; restarted: boolean };
   restarts: number;
   pauses: number;
   feedback: number;
@@ -83,6 +85,7 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
   let restarts = 0;
   let pauses = 0;
   let feedback = 0;
+  let taskRestarted = false;
   const first = journal[0]?.ts ?? state.startedAt;
   const last = journal.at(-1)?.ts ?? first;
 
@@ -139,6 +142,9 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
         break;
       case "gate_waiting":
         if (name) gates.add(name);
+        break;
+      case "task_link":
+        if (record.what === "restarted" || record.restarting === true) taskRestarted = true;
         break;
       case "node_finished":
         if (name && attempt !== undefined) {
@@ -248,6 +254,9 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
     runId: state.runId,
     task: state.task,
     slug: state.slug ?? runSlug(undefined, state.task),
+    ...(state.taskKey === undefined
+      ? {}
+      : { tracker_task: { key: state.taskKey, restarted: taskRestarted } }),
     status: state.status,
     total_s: seconds(first, state.finishedAt ?? last),
     work_s: sum(all.filter((n) => !n.gate)),

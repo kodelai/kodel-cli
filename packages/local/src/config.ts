@@ -6,15 +6,19 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  DEFAULT_TASK_ON_RUN,
   defaultHistory,
   type HistoryConfig,
   isValidGlob,
   KodelError,
   MAX_SUPPORTED_MAJOR,
   parseVersion,
+  TASK_ON_RUN_MODES,
+  type TaskOnRunMode,
 } from "@kodel-ai/pipeline-core";
 import { parse } from "yaml";
 import { z } from "zod";
+import { CONFIG_FILE } from "./project-locate";
 
 export const DEFAULT_WORKTREE_DIR = ".kodel/worktrees";
 
@@ -49,6 +53,8 @@ export interface TasksConfig {
   adapter: string;
   /** How long one call of the adapter may take, in seconds. */
   timeout_s: number;
+  /** What the engine does to a task that a run was started for: see `TASK_ON_RUN_MODES`. */
+  on_run: { mode: TaskOnRunMode };
   /**
    * The settings of each adapter, one block per kind. They are kept unchecked here: the adapter in
    * use checks its own block, and the others are ignored, so switching `adapter` does not mean
@@ -73,10 +79,11 @@ export const DEFAULT_TASKS: TasksConfig = {
   enabled: false,
   adapter: "local",
   timeout_s: 30,
+  on_run: { mode: DEFAULT_TASK_ON_RUN },
   adapters: {},
 };
 
-export const CONFIG_FILE = "config.yaml";
+export { CONFIG_FILE };
 
 const MAX_EXCLUDE_GLOBS = 256;
 
@@ -140,6 +147,10 @@ const configSchema = z
         enabled: z.boolean().optional(),
         adapter: z.string().min(1).optional(),
         timeout_s: z.number().int().min(1).max(300).optional(),
+        on_run: z
+          .object({ mode: z.enum(TASK_ON_RUN_MODES).optional() })
+          .strict()
+          .optional(),
         adapters: z.record(z.unknown()).optional(),
       })
       .strict()
@@ -164,7 +175,7 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
         worktree: { ...DEFAULT_WORKTREE },
         pipeline: { ...DEFAULT_PIPELINE },
         agent_hints: { ...DEFAULT_AGENT_HINTS },
-        tasks: { ...DEFAULT_TASKS, adapters: {} },
+        tasks: { ...DEFAULT_TASKS, on_run: { ...DEFAULT_TASKS.on_run }, adapters: {} },
         history: defaultHistory(),
       };
     }
@@ -219,6 +230,7 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
       enabled: parsed.data.tasks?.enabled ?? DEFAULT_TASKS.enabled,
       adapter: parsed.data.tasks?.adapter ?? DEFAULT_TASKS.adapter,
       timeout_s: parsed.data.tasks?.timeout_s ?? DEFAULT_TASKS.timeout_s,
+      on_run: { mode: parsed.data.tasks?.on_run?.mode ?? DEFAULT_TASKS.on_run.mode },
       adapters: parsed.data.tasks?.adapters ?? {},
     },
     history: mergeHistory(parsed.data.history),

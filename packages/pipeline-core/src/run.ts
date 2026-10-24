@@ -125,6 +125,8 @@ export interface RunState {
    * from before it existed have none, and read as the name their task text would have given.
    */
   slug?: string;
+  /** The key of the task this run was started for; absent for a run that is not tied to one. */
+  taskKey?: string;
   /** Hash of the pipeline spec this run started with. */
   specHash: string;
   status: RunStatus;
@@ -177,6 +179,8 @@ export type RunEvent =
       branch?: string;
       /** The pipeline file, relative to the repository root, when the pipeline was read from one. */
       pipelineFile?: string;
+      /** The task the run was started for (its key as the tracker resolved it). */
+      taskKey?: string;
       /** The effective `history` settings, fixed for the run. */
       history?: HistoryConfig;
     }
@@ -270,7 +274,16 @@ export type RunEvent =
    */
   | { type: "tick"; deadOwners?: string[] }
   | { type: "resume" }
-  | { type: "cancel" };
+  | { type: "cancel" }
+  /** What the tie between the run and its task did (or could not do); only goes to the journal. */
+  | {
+      type: "task_note";
+      what: "linked" | "restarted" | "closed" | "commented" | "hinted" | "failed";
+      task: string;
+      note?: string;
+      /** The task had been done and the person allowed starting it again. */
+      restarting?: true;
+    };
 
 export type Effect =
   /** Remember the working tree under this key, so a `diff` check can compare against it. */
@@ -622,6 +635,15 @@ class Machine {
       this.log("manual_edit", { note: event.note ?? null });
       return;
     }
+    if (event.type === "task_note") {
+      this.log("task_link", {
+        what: event.what,
+        task: event.task,
+        ...(event.note === undefined ? {} : { note: event.note }),
+        ...(event.restarting === true ? { restarting: true } : {}),
+      });
+      return;
+    }
     if (event.type === "feedback") {
       if (event.node !== undefined) this.node(event.node);
       // A note is about the pipeline as it was when it was written, and the pipeline may change
@@ -845,6 +867,7 @@ class Machine {
       ...(event.workdir === undefined ? {} : { workdir: event.workdir }),
       ...(event.branch === undefined ? {} : { branch: event.branch }),
       ...(event.pipelineFile === undefined ? {} : { pipelineFile: event.pipelineFile }),
+      ...(event.taskKey === undefined ? {} : { task_key: event.taskKey }),
       ...(event.history === undefined ? {} : { history: event.history }),
     });
     const needsRunBaseline = this.spec.nodes.some((n) =>
@@ -1061,6 +1084,7 @@ export function decide(
     draft.specHash = event.specHash;
     if (event.workdir !== undefined) draft.workdir = event.workdir;
     if (event.pipelineFile !== undefined) draft.pipelineFile = event.pipelineFile;
+    if (event.taskKey !== undefined) draft.taskKey = event.taskKey;
   }
   const machine = new Machine(spec, draft, now, options);
   try {

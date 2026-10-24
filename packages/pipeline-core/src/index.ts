@@ -21,6 +21,7 @@ export * from "./report";
 export * from "./result";
 export * from "./run";
 export * from "./run-id";
+export * from "./run-task";
 export * from "./service";
 export * from "./slug";
 export * from "./task-service";

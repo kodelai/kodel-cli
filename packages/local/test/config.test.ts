@@ -33,7 +33,13 @@ describe("the project config", () => {
       worktree: expected,
       pipeline: { uncommitted: "ask" },
       agent_hints: { wait: true },
-      tasks: { enabled: false, adapter: "local", timeout_s: 30, adapters: {} },
+      tasks: {
+        enabled: false,
+        adapter: "local",
+        timeout_s: 30,
+        on_run: { mode: "auto" },
+        adapters: {},
+      },
       history: DEFAULT_HISTORY,
     });
   });
@@ -58,6 +64,7 @@ describe("the project config", () => {
       enabled: true,
       adapter: "jira",
       timeout_s: 10,
+      on_run: { mode: "auto" },
       // Both blocks are kept as they are: whichever adapter is in use checks its own.
       adapters: { local: { prefix: "KDL" }, jira: { site: "https://acme.atlassian.net" } },
     });
@@ -125,6 +132,16 @@ describe("the project config", () => {
     expect(error.code).toBe("UNSUPPORTED_FORMAT");
     expect(error.message).toContain("9.0.0");
     expect(error.message).toContain("upgrade");
+  });
+  test("run_task_on_run_mode_defaults_to_auto_and_a_bad_value_names_the_three", async () => {
+    await write("tasks:\n  enabled: true\n  on_run:\n    mode: ask\n");
+    expect((await loadConfig(dir)).tasks.on_run).toEqual({ mode: "ask" });
+    await write("tasks:\n  enabled: true\n  on_run: {}\n");
+    expect((await loadConfig(dir)).tasks.on_run).toEqual({ mode: "auto" });
+    await write("tasks:\n  on_run:\n    mode: sometimes\n");
+    await expect(loadConfig(dir)).rejects.toThrow(/auto.*ask.*disabled/);
+    await write("tasks:\n  on_run:\n    mod: ask\n");
+    await expect(loadConfig(dir)).rejects.toThrow(/mod/);
   });
 });
 

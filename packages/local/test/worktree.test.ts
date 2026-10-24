@@ -351,15 +351,21 @@ describe("reusing is limited to the folder for worktrees, and never the root its
     const sub = join(root, "packages", "app");
     await mkdir(join(sub, ".kodel", "pipelines"), { recursive: true });
     await writeFile(join(sub, ".kodel", "pipelines", "where.yaml"), WHERE);
+    // The folder has to be in the commit the worktree is made from.
+    await writeFile(join(sub, "mark.js"), await readFile(join(root, "mark.js"), "utf8"));
+    git(root, "add", "packages/app/mark.js");
+    git(root, "commit", "-q", "-m", "app");
     const host = new LocalPipelineHost({ root: sub, heartbeatMs: 0, worktree: AUTO });
 
     const out = await host.start({ pipeline: "where", task: "in a subfolder", restart: false });
     await (out.run as LocalRun).settle();
-    expect(out.workdir?.path).toBe(join(sub, ".kodel", "worktrees", out.run.runId));
-    expect(git(root, "worktree", "list", "--porcelain")).toContain(out.workdir?.path ?? "?");
-    expect(
-      (await readFile(join(out.workdir?.path ?? "", "where.json"), "utf8")).length,
-    ).toBeGreaterThan(0);
+    // The worktree is of the whole repository; the run works in the same folder inside it.
+    const top = join(sub, ".kodel", "worktrees", out.run.runId);
+    expect(out.workdir?.path).toBe(join(top, "packages", "app"));
+    expect(git(root, "worktree", "list", "--porcelain")).toContain(top);
+    // The command ran there, not at the top of the worktree.
+    const where = JSON.parse(await readFile(join(out.workdir?.path ?? "", "where.json"), "utf8"));
+    expect(where.cwd).toBe(out.workdir?.path ?? "?");
   });
 });
 
