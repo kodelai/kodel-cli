@@ -31,6 +31,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { Command, CommanderError } from "commander";
 import pkg from "../package.json" with { type: "json" };
+import { BUILD } from "./build-info";
 import { describePendingChange, gateChangesText, gateCommentsText } from "./decide-text";
 import {
   FEEDBACK_ENDPOINT,
@@ -289,6 +290,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const local = new LocalPipelineHost({
         root: resolved.root,
         storeRoot: resolved.dataDir,
+        build: BUILD,
         // The same tie the tools were built for; without one the host asks the config itself.
         ...(runLink === undefined ? {} : { runTaskLink: runLink }),
       });

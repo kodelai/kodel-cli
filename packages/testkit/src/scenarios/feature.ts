@@ -306,6 +306,31 @@ export const featureScenarios: Scenario[] = [
     .expect([matcher("nodeStatus", { impl: "rework" }), matcher("attempts", { impl: 2 })])
     .build(),
 
+  base("feature/agent-claims-an-executor")
+    .describe(
+      "an executor or model the agent puts in a call is not an argument: the call is judged as " +
+        "usual, whatever the extra fields hold",
+    )
+    .agent("manual")
+    .inject(inj("plan", { 1: planOk }))
+    .call(
+      "pipeline_complete_step",
+      {
+        run_id: "$run",
+        node_slug: "plan",
+        attempt: 1,
+        summary: "planned",
+        executor: {
+          model: "\u0000evil\u001b[2J",
+          engine: "x".repeat(1_000_000),
+        },
+        model: "sk-ant-abcdefghijklmnopqrstuvwxyz0123456789",
+      },
+      expectOk({ advanced: true }),
+    )
+    .expect([matcher("waitingGate", "plan-approval")])
+    .build(),
+
   base("feature/stale-attempt-is-rejected")
     .describe("completing a node with the wrong attempt number is an error and changes nothing")
     .agent("manual")

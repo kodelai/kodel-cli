@@ -30,7 +30,15 @@ const size = statSync(artifact).size;
 if (size > BUDGET_BYTES) fail(`size ${size} exceeds budget ${BUDGET_BYTES}`);
 
 const version = run(["--version"]).trim();
+// A build that was never given a version would write `0.0.0` into every run's `engine` record.
+if (version === "0.0.0" || pkg.version === "0.0.0")
+  fail(`the artifact reports version ${version}: set a real version in packages/cli/package.json`);
 if (version !== pkg.version) fail(`--version printed "${version}", expected "${pkg.version}"`);
+
+// The commit comes from scripts/build-cli.mjs; an artifact built another way would record `dev`.
+const stamped = /BUILD_COMMIT\s*=\s*"([^"]+)"/.exec(readFileSync(artifact, "utf8"))?.[1];
+if (stamped === undefined || stamped === "dev")
+  fail("the artifact has no commit stamped in it: build it with `bun run build`");
 
 if (!run(["--help"]).includes("kodel")) fail("--help output does not mention kodel");
 
