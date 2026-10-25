@@ -39,7 +39,7 @@ async function after(
 export function createAgentDecider(humans: HumanHost, dialog: DialogState): AgentDecider {
   return {
     async decideGate(service, input) {
-      if (dialog.open) return dialogOpen();
+      if (dialog.open > 0) return dialogOpen();
       const run = await humans.open(input.run_id);
       if (!run) return failure("UNKNOWN_RUN", `there is no run ${plain(input.run_id)}`);
       const node = input.node_slug;
@@ -79,20 +79,22 @@ export function createAgentDecider(humans: HumanHost, dialog: DialogState): Agen
         return failure("INVALID_ARGUMENTS", "a rejection needs a reason");
       }
       const by: AgentDecision = { instruction: input.instruction };
-      // A dialog may have opened while the checks above ran; the person's form comes first.
-      if (dialog.open) return dialogOpen();
-      const done = await run.decideHuman(
-        node,
-        input.decision,
-        reason === "" ? undefined : reason,
-        by,
-      );
+      // A dialog may have opened while the checks above ran; the person's form comes first. Looking
+      // and claiming happen in one tick, so a dialog that starts later is skipped, not shown twice.
+      if (dialog.open > 0) return dialogOpen();
+      dialog.deciding++;
+      let done: Awaited<ReturnType<typeof run.decideHuman>>;
+      try {
+        done = await run.decideHuman(node, input.decision, reason === "" ? undefined : reason, by);
+      } finally {
+        dialog.deciding--;
+      }
       if (!done.ok) return failure(done.error.code, done.error.message);
       return after(service, input.run_id, { decision: input.decision, node_slug: node });
     },
 
     async acceptChange(service, input) {
-      if (dialog.open) return dialogOpen();
+      if (dialog.open > 0) return dialogOpen();
       const run = await humans.open(input.run_id);
       if (!run) return failure("UNKNOWN_RUN", `there is no run ${plain(input.run_id)}`);
       const found = await run.pendingChange();
@@ -112,13 +114,19 @@ export function createAgentDecider(humans: HumanHost, dialog: DialogState): Agen
         );
       }
       const reason = input.reason?.trim() ?? "";
-      if (dialog.open) return dialogOpen();
-      const done = await run.acceptChange({
-        source: found.info.source,
-        text: found.text,
-        ...(reason === "" ? {} : { reason }),
-        byAgent: { instruction: input.instruction },
-      });
+      if (dialog.open > 0) return dialogOpen();
+      dialog.deciding++;
+      let done: Awaited<ReturnType<typeof run.acceptChange>>;
+      try {
+        done = await run.acceptChange({
+          source: found.info.source,
+          text: found.text,
+          ...(reason === "" ? {} : { reason }),
+          byAgent: { instruction: input.instruction },
+        });
+      } finally {
+        dialog.deciding--;
+      }
       if (!done.ok) return failure(done.error.code, done.error.message);
       return after(service, input.run_id, { accepted: found.hash });
     },

@@ -55,12 +55,19 @@ export interface HumanRun {
 }
 
 /**
- * Whether the server has a question open with the person right now. The agent's own decision tools
- * read it: while a person may be answering a dialog, the agent does not decide the same thing.
+ * Who is deciding right now, so that the person's dialog and the agent's own decision tools never
+ * decide the same thing at once. Both sides change it in the same tick as they look at it (no
+ * `await` between), so exactly one of them wins: a dialog that starts while the agent is deciding is
+ * skipped, and an agent decision that starts while a dialog is held is answered `waiting`.
  */
 export interface DialogState {
-  open: boolean;
+  /** Dialogs held: from the moment an answer needs the person until it has been asked and applied. */
+  open: number;
+  /** Agent decisions being applied. */
+  deciding: number;
 }
+
+export const newDialogState = (): DialogState => ({ open: 0, deciding: 0 });
 
 /** A host that can also decide for a person (the local one); a host that cannot passes nothing. */
 export interface HumanHost {
@@ -203,16 +210,6 @@ export function createElicitor(
   let busy = false;
 
   async function ask(question: Question, signal: AbortSignal): Promise<Outcome> {
-    // Only while a form is really shown: the agent's own decisions wait for it, not for any call.
-    if (options.state) options.state.open = true;
-    try {
-      return await askRounds(question, signal);
-    } finally {
-      if (options.state) options.state.open = false;
-    }
-  }
-
-  async function askRounds(question: Question, signal: AbortSignal): Promise<Outcome> {
     let note: string | undefined;
     for (let round = 0; round < MAX_ROUNDS; round++) {
       let reply: Awaited<ReturnType<Server["elicitInput"]>>;
@@ -298,7 +295,7 @@ export function createElicitor(
     }
   }
 
-  async function handle(call: ToolCall): Promise<ToolResult | undefined> {
+  async function handle(call: ToolCall, claim: () => boolean): Promise<ToolResult | undefined> {
     const runId = runIdOf(call);
     if (runId === undefined) return undefined;
     const run = await humans.open(runId);
@@ -308,6 +305,8 @@ export function createElicitor(
     for (let link = 0; link < MAX_CHAIN; link++) {
       const what = wanted(result);
       if (!what) break;
+      // The agent is deciding this itself right now: no form for something already being decided.
+      if (!claim()) break;
       const question = await build(runId, run, what);
       if (!question) break;
       const provoked = what.kind === "change" || what.kind === "ack";
@@ -351,10 +350,23 @@ export function createElicitor(
     if (!server.getClientCapabilities()?.elicitation?.form) return undefined;
     if (busy) return undefined;
     busy = true;
+    // Held from the first look at an answer that needs the person until the last form is dealt with.
+    const state = options.state;
+    let held = false;
+    const claim = () => {
+      if (!state) return true;
+      if (state.deciding > 0) return false;
+      if (!held) {
+        state.open++;
+        held = true;
+      }
+      return true;
+    };
     try {
-      return await handle(call);
+      return await handle(call, claim);
     } finally {
       busy = false;
+      if (held && state) state.open--;
     }
   };
 }

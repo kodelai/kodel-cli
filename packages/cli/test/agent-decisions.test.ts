@@ -4,11 +4,18 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalPipelineHost } from "@kodel-ai/local";
-import { summarizeRun } from "@kodel-ai/pipeline-core";
+import { type PipelineService, summarizeRun } from "@kodel-ai/pipeline-core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import type { HumanHost } from "../src/elicit";
+import { createAgentDecider } from "../src/agent-decisions";
+import {
+  createElicitor,
+  type DialogState,
+  type HumanHost,
+  type HumanRun,
+  newDialogState,
+} from "../src/elicit";
 import { createServer } from "../src/mcp-server";
 
 let dir: string;
@@ -426,6 +433,117 @@ describe("t_decisions: the answers give the agent what the tools need", () => {
       expect(await journalOf(runId)).not.toContain("pipeline_accepted");
     }
     await s.close();
+  });
+});
+
+describe("t_decisions: the agent never decides what only a person can accept", () => {
+  test("t_decisions_agent_gate_is_refused_on_a_state_changed_outside_kodel", async () => {
+    const s = await connect({ gate: true });
+    const { runId } = await toGate(s);
+    const path = join(dir, ".kodel", "runs", runId, "state.json");
+    const state = JSON.parse(await readFile(path, "utf8"));
+    state.nodes.write.attempts = 0;
+    await writeFile(path, JSON.stringify(state));
+
+    // Without the box the tool already refuses, so tick it: the engine itself must still say no.
+    const refused = await s.call(
+      "pipeline_decide_gate",
+      decide(runId, { confirm_unverified: true }),
+    );
+    expect(refused.ok).toBe(false);
+    expect(refused.code).toBe("STATE_MODIFIED_EXTERNALLY");
+    expect(await journalOf(runId)).not.toContain("gate_decided");
+    await s.close();
+  });
+
+  test("t_decisions_agent_accept_change_is_refused_on_a_state_changed_outside_kodel", async () => {
+    const s = await connect({ pipelineChange: true });
+    const started = await s.call("pipeline_start", { task: "add a file" });
+    const runId = started.run_id as string;
+    await writeFile(join(dir, ".kodel", "pipelines", "demo.yaml"), DEMO("write another file"));
+    const step = await s.call("pipeline_next_step", { run_id: runId });
+    const path = join(dir, ".kodel", "runs", runId, "state.json");
+    const state = JSON.parse(await readFile(path, "utf8"));
+    state.nodes.write.attempts = 0;
+    await writeFile(path, JSON.stringify(state));
+
+    const refused = await s.call("pipeline_accept_change", {
+      run_id: runId,
+      change_hash: step.node.pipeline_change.hash,
+      instruction: "yes",
+    });
+    expect(refused.ok).toBe(false);
+    expect(await journalOf(runId)).not.toContain("pipeline_accepted");
+    await s.close();
+  });
+});
+
+describe("t_decisions: the dialog and the agent's decision never both decide the same thing", () => {
+  const fakeRun = (seen: { deciding: number[] }, state: DialogState) =>
+    ({
+      state: async () => ({ active: [{ node: "approve", phase: "human", attempt: 1 }] }),
+      pendingChange: async () => undefined,
+      changesSinceGate: async () => ({ kind: "no_repo" }),
+      gateResults: async () => undefined,
+      decideHuman: async () => {
+        seen.deciding.push(state.deciding);
+        return { ok: true };
+      },
+    }) as unknown as HumanRun;
+  const service = { nextStep: async () => ({ ok: false }) } as unknown as PipelineService;
+  const input = {
+    run_id: "r_000000000_aaaa",
+    node_slug: "approve",
+    attempt: 1,
+    decision: "approved" as const,
+    instruction: "yes",
+  };
+
+  test("t_decisions_agent_decision_claims_the_state_while_it_is_applied", async () => {
+    const state = newDialogState();
+    const seen = { deciding: [] as number[] };
+    const decider = createAgentDecider({ open: async () => fakeRun(seen, state) }, state);
+    const done = await decider.decideGate(service, input);
+    expect(done).toMatchObject({ ok: true, decided_by: "agent" });
+    expect(seen.deciding).toEqual([1]);
+    expect(state).toEqual({ open: 0, deciding: 0 });
+  });
+
+  test("t_decisions_agent_decision_waits_when_a_dialog_is_held_before_it_applies", async () => {
+    const state = newDialogState();
+    const seen = { deciding: [] as number[] };
+    const decider = createAgentDecider({ open: async () => fakeRun(seen, state) }, state);
+    state.open = 1;
+    const answer = await decider.decideGate(service, input);
+    expect(answer).toMatchObject({ ok: true, waiting: { reason: "dialog_open" } });
+    expect(seen.deciding).toEqual([]);
+    expect(state.deciding).toBe(0);
+  });
+
+  test("t_decisions_a_dialog_is_not_started_while_the_agent_is_deciding", async () => {
+    const state = newDialogState();
+    state.deciding = 1;
+    let asked = 0;
+    const server = {
+      getClientCapabilities: () => ({ elicitation: { form: {} } }),
+      elicitInput: async () => {
+        asked++;
+        return { action: "decline" };
+      },
+    } as unknown as Parameters<typeof createElicitor>[0];
+    const hook = createElicitor(server, { open: async () => ({}) as HumanRun }, service, { state });
+    const answer = await hook({
+      tool: "pipeline_complete_step",
+      args: { run_id: input.run_id },
+      result: {
+        ok: true,
+        next: { waiting: { reason: "gate", node_slug: "approve", prompt: "ok?" } },
+      },
+      signal: new AbortController().signal,
+    });
+    expect(answer).toBeUndefined();
+    expect(asked).toBe(0);
+    expect(state.open).toBe(0);
   });
 });
 

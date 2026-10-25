@@ -180,14 +180,15 @@ the instruction is quoted into the journal), not a defence against a hostile age
   from the same read of the config as the tools and the instructions, so an answer never names a tool
   the server does not offer (a config edited mid-session changes nothing until the server restarts).
 - `PipelineChange.hash` was added so the waiting answer carries the `change_hash` the tool needs.
-- The report marks only an accepted change of the pipeline as made by the agent; a gate decision is in
-  the journal (`decided_by`, `instruction`) but the report does not list gates.
+- The report lists the decisions the agent made (`agent_decisions`: gates and accepted changes of the
+  pipeline), and an accepted change is also marked in `pipeline_changes[].by`.
 - The case "approval when the files could not be checked" is tested with a host whose
   `changesSinceGate` says `unavailable`.
 - `pipeline_decide_gate` takes `node_slug` and `attempt` (from the waiting answer) so that a decision is
   about the visit the agent was told about; a stale attempt is refused (`ATTEMPT_MISMATCH`).
-- The dialog flag the tools read is set only while a form is shown (not for the whole hook), and the
-  tools look at it again right before they apply a decision. It is global to the server, not per run.
+- `DialogState` is two counters (`open`: dialogs held from the first look at an answer that needs the
+  person; `deciding`: agent decisions being applied), each side changing it in the same tick as it looks,
+  so exactly one wins. It is global to the server, not per run.
 - `byAgent.instruction` is redacted in `redactEvent` like the other free text.
 - Second review round: every gate `waiting` answer now carries `attempt` (it used to only with a `results`
   spec); the report has `agent_decisions` (gates and pipeline changes the agent decided) and
@@ -195,3 +196,6 @@ the instruction is quoted into the journal), not a defence against a hostile age
   `pipeline_accept_change` only for a change that has a hash and was not refused; AGENTS.md forbids the
   agent to edit the `decisions` block; docs/decisions.md says the dialog guard is global to the server and
   that an unreadable config means everything off.
+- Third review round: tests for a state changed outside kodel (the engine refuses the agent's gate and
+  change decisions, even with `confirm_unverified`), and for both orders of the dialog/decision race;
+  the instruction rule says which of the two decisions stays with the person.

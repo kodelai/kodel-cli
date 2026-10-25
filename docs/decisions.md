@@ -48,13 +48,15 @@ comments), an approval when the engine could not tell what changed needs `confir
 change is taken only if it is still the version named by `change_hash`. The waiting text offers
 `pipeline_accept_change` only for a change that has a hash and was not refused.
 
-While a dialog is open the tools answer `waiting` and decide nothing. The check is for the whole server,
-not per run: a form open for one run holds the agent's decisions on every run until it is answered. It
-matters only for a call the agent makes at the same time as the form is shown; the engine's refusal of a
-second decision for the same step is what finally keeps a gate from being decided twice.
+The tools work with the dialog off too (then they never wait on a form). With it on, the dialog and the
+agent's decision never both decide: from the moment an answer needs the person until the form is dealt
+with, the tools answer `waiting` and decide nothing; while the agent is applying a decision, no form is
+started for it. The check is for the whole server, not per run: a form open for one run holds the agent's
+decisions on every run until it is answered. A state changed outside kodel is refused for the agent as
+for anyone: only `ack` accepts it, and that stays with the person.
 
 A decision made this way is written to the journal with `decided_by: agent` and the `instruction`
-(redacted like any other text). `kodel report` lists such decisions, gates and accepted changes of the
+(redacted like any other text; at most 1000 characters, and 2000 for the `reason`). `kodel report` lists such decisions, gates and accepted changes of the
 pipeline alike, and `kodel status <run>` shows a `by agent:` line for each. A person's decision is written
 as before and carries no mark.
 

@@ -16,7 +16,7 @@ import {
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createAgentDecider } from "./agent-decisions";
-import { createElicitor, type DialogState, type HumanHost } from "./elicit";
+import { createElicitor, type HumanHost, newDialogState } from "./elicit";
 
 /** A host that can also stop the work it started (the local host does); it says how much it stopped. */
 export type StoppableHost = PipelineHost & { stop?(): number };
@@ -84,7 +84,7 @@ export function createServer(
     : base;
   const server = new McpServer({ name: "kodel", version }, { instructions });
   const service = new PipelineService(host, { engineVersion: version });
-  const state: DialogState = { open: false };
+  const state = newDialogState();
   registerPipelineTools(server, service, {
     taskLink: tasks !== undefined && runLink !== undefined,
     ...(humans && dialog
