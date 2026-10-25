@@ -110,6 +110,46 @@ describe("an agent driving a run through MCP, with the real adapters", () => {
     await close();
   });
 
+  test("bmbd_feedback_with_and_without_check_over_mcp", async () => {
+    const { call, close } = await connect();
+    const started = await call("pipeline_start", { task: "add a file" });
+    const runId = started.body.run_id as string;
+    const lied = await call("pipeline_complete_step", {
+      run_id: runId,
+      node_slug: "write",
+      attempt: 1,
+    });
+    expect(lied.body.next.node.reentry_feedback).toContain("(write/diff#1)");
+
+    const base = { run_id: runId, node_slug: "write", message: "fired for nothing" };
+    const named = await call("pipeline_feedback", {
+      ...base,
+      category: "wrong_check",
+      check: "write/diff#1",
+    });
+    expect(named.body).toMatchObject({ ok: true });
+    const plain = await call("pipeline_feedback", { ...base, category: "wrong_check" });
+    expect(plain.body).toMatchObject({ ok: true });
+
+    const wrong = await call("pipeline_feedback", {
+      ...base,
+      category: "wrong_check",
+      check: "build/command#1",
+    });
+    expect(wrong.body).toMatchObject({ ok: false, code: "INVALID_ARGUMENTS" });
+    expect(JSON.stringify(wrong.body)).toContain("write/diff#1");
+
+    const lines = (await readFile(join(dir, ".kodel", "runs", runId, "journal.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((r) => r.event === "feedback_reported");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatchObject({ node: "write", check: "write/diff#1" });
+    expect(lines[1]).not.toHaveProperty("check");
+    await close();
+  });
+
   test("starting the same task again says it is terminal; restart begins a new run", async () => {
     const { host, call, close } = await connect();
     const first = await call("pipeline_start", { task: "t" });

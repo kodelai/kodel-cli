@@ -6,6 +6,7 @@
  */
 import {
   type ChangeSet,
+  checkIdOf,
   DEFAULT_STALE_MS,
   type Decision,
   decide,
@@ -116,6 +117,13 @@ export class MemoryEngine implements ScenarioEngine {
         const slug = args.node_slug;
         if (typeof slug === "string" && !this.spec.nodes.some((n) => n.slug === slug)) {
           return { ok: false, code: "UNKNOWN_NODE", message: `the pipeline has no node "${slug}"` };
+        }
+        if (typeof args.check === "string") {
+          const node = this.spec.nodes.find((n) => n.slug === slug);
+          const ids = (node?.checks ?? []).map((_, i) => (node ? checkIdOf(node, i) : undefined));
+          if (args.category !== "wrong_check" || !ids.includes(args.check)) {
+            return { ok: false, code: "INVALID_ARGUMENTS", message: "not a check of the node" };
+          }
         }
         this.journal.push("feedback_reported");
         this.feedbackCount += 1;

@@ -123,6 +123,7 @@ export class LocalScenarioEngine implements ScenarioEngine {
           ...(slug === undefined ? {} : { node: slug }),
           category: String(args.category ?? "other"),
           message: String(args.message ?? ""),
+          ...(typeof args.check === "string" ? { check: args.check } : {}),
         });
         if (!result.ok)
           return { ok: false, code: result.error.code, message: result.error.message };
