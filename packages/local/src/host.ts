@@ -11,6 +11,7 @@ import { mkdir, readFile, realpath } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import {
+  type Caller,
   type ChangeSet,
   type CheckVerdict,
   canonicalPipeline,
@@ -21,6 +22,7 @@ import {
   diffPipelines,
   type Effect,
   type EngineOptions,
+  type ExecutorRecord,
   evaluateCommand,
   evaluateDiff,
   evaluateResult,
@@ -47,12 +49,14 @@ import {
   renderDeep,
   rowsToCsv,
   runSlug,
+  type ServedSurface,
   type StepResult,
   summarizeRun,
   validateReport,
 } from "@kodel-ai/pipeline-core";
 import { type CommandOptions, type CommandResult, runCommand } from "./command";
 import { loadConfig, type WorktreeConfig } from "./config";
+import { type BuildInfo, engineRecord, observeExecutor, UNKNOWN_BUILD } from "./executor";
 import { GitSnapshotter, repoPrefix } from "./git";
 import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integrity";
 import { FileStore, META_VERSION, newRunId, type RunMeta } from "./store";
@@ -124,6 +128,10 @@ export interface HostOptions {
    * A function is asked on first use, so a host that never meets a task never reads the task config.
    */
   runTaskLink?: RunTaskLink | (() => Promise<RunTaskLink | undefined>);
+  /** The program that serves the runs, for the `engine` record; absent: `unknown`. */
+  build?: BuildInfo;
+  /** The environment the session id is read from; this process's by default (tests replace it). */
+  environment?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -279,6 +287,10 @@ export class LocalHost {
       pipelineCopy?: { path: string; text: string };
       /** The key of the task the run is for, already resolved by the tracker. */
       taskKey?: string;
+      /** Who the transport says is calling. */
+      caller?: Caller;
+      /** What the agent was given when it connected, for the `engine` record. */
+      surface?: ServedSurface;
     } = {},
   ): Promise<{ run: LocalRun; reused: boolean; terminal: boolean; workdir?: Workdir }> {
     const registry = this.engine.registry ?? defaultRegistry();
@@ -366,6 +378,18 @@ export class LocalHost {
         if (this.options.source !== undefined)
           await this.store.writeSpec(runId, specHash, this.options.source);
         const run = new LocalRun(this, runId);
+        const recordsExecutor = history?.executor.enabled === true;
+        const executor = recordsExecutor
+          ? await observeExecutor(options.caller, {
+              root: this.options.root,
+              dirs: [
+                ...(options.cwd === undefined ? [] : [options.cwd]),
+                ...(workdir ? [workdir.path] : []),
+                this.options.root,
+              ],
+              ...(this.options.environment === undefined ? {} : { env: this.options.environment }),
+            })
+          : undefined;
         const result = await run.apply({
           type: "start",
           runId,
@@ -379,6 +403,12 @@ export class LocalHost {
             : { pipelineFile: this.options.pipelineFile }),
           ...(options.taskKey === undefined ? {} : { taskKey: options.taskKey }),
           ...(history === undefined ? {} : { history }),
+          ...(executor === undefined
+            ? {}
+            : {
+                executor,
+                engine: engineRecord(this.options.build ?? UNKNOWN_BUILD, options.surface),
+              }),
         });
         if (!result.ok) throw result.error;
         return { run, reused: false, terminal: false, ...(workdir ? { workdir } : {}) };
@@ -1458,7 +1488,13 @@ export class LocalRun {
     return this.apply(deadOwners.length > 0 ? { type: "tick", deadOwners } : { type: "tick" });
   }
 
-  async completeStep(node: string, attempt: number, summary?: string, outcome?: string) {
+  async completeStep(
+    node: string,
+    attempt: number,
+    summary?: string,
+    outcome?: string,
+    caller?: Caller,
+  ) {
     // A change of the pipeline that waits for a person is met here: what the step is judged by may be
     // about to change, so it is not judged yet. The agent is told to wait for the person.
     const held = await this.pendingChange();
@@ -1471,17 +1507,46 @@ export class LocalRun {
         noop: true,
       } satisfies Decision;
     }
+    const executor = await this.executorNow(caller);
     const decision = await this.apply({
       type: "agent_completed",
       node,
       attempt,
       ...(summary === undefined ? {} : { summary }),
       ...(outcome === undefined ? {} : { outcome }),
+      ...(executor === undefined ? {} : executor),
     });
     if (!decision.ok) {
       await this.recordRefusal("complete_step", node, attempt, decision.error);
     }
     return decision;
+  }
+
+  /**
+   * Who is completing the step, and this engine's version, unless the run was started with
+   * `history.executor` off. A state that cannot be read here is left to `apply` to refuse.
+   */
+  private async executorNow(
+    caller: Caller | undefined,
+  ): Promise<{ executor: ExecutorRecord; engineVersion: string } | undefined> {
+    try {
+      const state = await this.state();
+      if (state.history?.executor.enabled !== true) return undefined;
+      const options = this.host.options;
+      return {
+        executor: await observeExecutor(caller, {
+          root: options.root,
+          dirs: [
+            ...(state.workdir === undefined ? [] : [await this.inProject(state.workdir)]),
+            options.root,
+          ],
+          ...(options.environment === undefined ? {} : { env: options.environment }),
+        }),
+        engineVersion: (options.build ?? UNKNOWN_BUILD).version,
+      };
+    } catch {
+      return undefined;
+    }
   }
 
   /**

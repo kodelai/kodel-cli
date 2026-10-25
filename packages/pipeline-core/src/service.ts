@@ -4,8 +4,10 @@
  * The agent protocol (what the tools return, what they refuse, how long they wait) lives here, so
  * every host answers an agent the same way.
  */
+
 import { docTopics } from "./docs";
 import { type ErrorCode, KodelError } from "./errors";
+import type { Caller } from "./executor";
 import { MAX_WAIT_S, type NextStep, type PipelineChange } from "./next-step";
 import type { PipelineSpec } from "./pipeline";
 import type { NodeDiff } from "./pipeline-diff";
@@ -80,6 +82,8 @@ export interface RunHandle {
     attempt: number,
     summary?: string,
     outcome?: string,
+    /** Who the transport says is calling; the host adds what else it observes. */
+    caller?: Caller,
   ): Promise<Decision>;
   /** `replace` starts the stored report over instead of adding the rows to it. */
   reportResult(
@@ -173,6 +177,10 @@ export interface PipelineHost {
     /** The task to tie the run to, as the person named it; `restart_task` allows a task that is done. */
     task_key?: string;
     restart_task?: boolean;
+    /** Who the transport says is calling. Never read from the tool's arguments. */
+    caller?: Caller;
+    /** What the agent was told and given when it connected, as text for the host to hash. */
+    surface?: ServedSurface;
   }): Promise<StartOutcome>;
   open(runId: string): Promise<RunHandle | undefined>;
 }
@@ -212,12 +220,23 @@ async function guarded(work: () => Promise<ToolResult>): Promise<ToolResult> {
   }
 }
 
+/** The texts the agent reads when it connects: the instructions and a description of the tools. */
+export interface ServedSurface {
+  instructions: string;
+  tools: string;
+  contract_version: number;
+}
+
 export interface ServiceOptions {
   /** How long `complete_step` waits for the engine's work before answering "still running". */
   waitBudgetMs?: number;
   registry?: Registry;
   /** The version of the program that serves the tools, shown by `pipeline_docs`. */
   engineVersion?: string;
+  /** The client of the connection, asked at each call: the handshake comes after the service is built. */
+  caller?: () => Caller | undefined;
+  /** What this connection serves; the host hashes it into the run's `engine` record. */
+  surface?: ServedSurface;
 }
 
 export const DEFAULT_WAIT_BUDGET_MS = 20_000;
@@ -226,6 +245,8 @@ export class PipelineService {
   private readonly budget: number;
   private readonly registry: Registry;
   private readonly engineVersion: string;
+  private readonly caller: () => Caller | undefined;
+  private readonly surface: ServedSurface | undefined;
 
   constructor(
     private readonly host: PipelineHost,
@@ -234,6 +255,13 @@ export class PipelineService {
     this.budget = options.waitBudgetMs ?? DEFAULT_WAIT_BUDGET_MS;
     this.registry = options.registry ?? defaultRegistry();
     this.engineVersion = options.engineVersion ?? "unknown";
+    this.caller = options.caller ?? (() => undefined);
+    this.surface = options.surface;
+  }
+
+  private who(): { caller?: Caller } {
+    const caller = this.caller();
+    return caller === undefined ? {} : { caller };
   }
 
   private async run(runId: string): Promise<RunHandle> {
@@ -461,6 +489,8 @@ export class PipelineService {
           ...(input.title === undefined ? {} : { title: input.title }),
           ...(input.task_key === undefined ? {} : { task_key: input.task_key }),
           ...(input.restart_task === true ? { restart_task: true } : {}),
+          ...this.who(),
+          ...(this.surface === undefined ? {} : { surface: this.surface }),
         });
       } catch (error) {
         // No run exists yet: the answer has no run_id, only what the person has to decide.
@@ -533,6 +563,7 @@ export class PipelineService {
         input.attempt,
         input.summary,
         input.outcome,
+        this.caller(),
       );
       if (!decision.ok)
         return failure(decision.error.code, decision.error.message, decision.error.issues);

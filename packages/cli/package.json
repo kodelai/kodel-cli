@@ -1,6 +1,6 @@
 {
   "name": "kodel",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
@@ -11,7 +11,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "bun build src/main.ts --target node --outfile dist/kodel.js --banner '#!/usr/bin/env node' && bun build src/hook-bin.ts --target node --outfile dist/kodel-hook.js --banner '#!/usr/bin/env node' && chmod +x dist/kodel.js dist/kodel-hook.js"
+    "build": "node ../../scripts/build-cli.mjs"
   },
   "dependencies": {
     "@kodel-ai/local": "workspace:*",

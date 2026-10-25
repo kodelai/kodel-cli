@@ -6,6 +6,7 @@
 import { mkdir, readdir, readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import {
+  type Caller,
   ChoiceNeeded,
   canonicalPipeline,
   commandsOf,
@@ -30,6 +31,7 @@ import {
   type RunState,
   type RunTaskLink,
   redactText,
+  type ServedSurface,
   type StartOutcome,
 } from "@kodel-ai/pipeline-core";
 import { loadConfig, type ProjectConfig, type WorktreeConfig } from "./config";
@@ -470,6 +472,8 @@ export class LocalPipelineHost implements PipelineHost {
     title?: string;
     task_key?: string;
     restart_task?: boolean;
+    caller?: Caller;
+    surface?: ServedSurface;
   }): Promise<StartOutcome> {
     let found = await this.find(input.pipeline);
     if (!found)
@@ -542,6 +546,8 @@ export class LocalPipelineHost implements PipelineHost {
       history,
       ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
       ...(pipelineCopy === undefined ? {} : { pipelineCopy }),
+      ...(input.caller === undefined ? {} : { caller: input.caller }),
+      ...(input.surface === undefined ? {} : { surface: input.surface }),
     });
     // An existing run goes on with the pipeline it started with, which may no longer be the file's.
     const known = reused || terminal ? await this.open(run.runId) : run;

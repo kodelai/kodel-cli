@@ -135,3 +135,26 @@ the events are a little below the agent's own. On a clean one-turn session the t
 4. Run `agentHistoryContract` on it, as `packages/testkit/test/agent-history.test.ts` does for Claude Code and for a
    fake agent whose files look nothing like Claude Code's.
 5. Register it in `defaultHistoryRegistry`.
+
+## Who ran a run (`executor` and `engine`)
+
+With `history.executor` on (the default), the journal says who acted and which engine served the run. Nothing in
+it comes from the agent's own word: the tools take no such argument, and one that is sent is ignored. Every value
+is `{ value, source }`, and a part that cannot be observed is left out, never guessed.
+
+| where | what |
+| --- | --- |
+| `run_started.engine` | `version`, `commit`, `record_version`, `meta_version`, `contract_version`, `instructions_hash`, `tools_hash` |
+| `run_started.executor`, `agent_completed.executor` | `client` (name and version), `session`, `model` |
+| `agent_completed.engine_version` | only when the engine that completed the step is not the one that started the run |
+
+| source | meaning |
+| --- | --- |
+| `observed` | the transport says it (the MCP handshake: the client's name and version) |
+| `observed-env` | the environment of the server (`CLAUDE_CODE_SESSION_ID`); exact, since the agent starts a server per session |
+| `observed-hook` | the newest session the hooks registered in `.kodel/sessions.jsonl` for the run's directories; used when the environment has none |
+| `derived` | read out of the session's own log (the model of its last answer) |
+
+Strings from outside are stripped of control characters and cut at 200 characters, and the store redacts them like
+everything else it writes. `instructions_hash` and `tools_hash` change when the instructions or a tool (its name,
+description or arguments) change. With `history.executor: false` none of these fields is written.

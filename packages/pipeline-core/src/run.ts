@@ -9,6 +9,7 @@
  */
 import { canonicalNode, checkIdOf, type NodeForms, stableJson } from "./canonical";
 import { type ErrorCode, KodelError } from "./errors";
+import type { EngineRecord, ExecutorRecord } from "./executor";
 import type { HistoryConfig } from "./history-config";
 import type { NodeSpec, PipelineSpec } from "./pipeline";
 import { diffPipelines } from "./pipeline-diff";
@@ -155,6 +156,10 @@ export interface RunState {
    * state and not in `meta.json`, which an agent can write.
    */
   pipelineFile?: string;
+  /** The `history` settings the run was started with. */
+  history?: HistoryConfig;
+  /** The version of the engine that started the run; a later record from another one says so. */
+  engineVersion?: string;
 }
 
 /** How many refused calls a run journals: enough to see what was tried, too few to be a way to fill the disk. */
@@ -183,12 +188,19 @@ export type RunEvent =
       taskKey?: string;
       /** The effective `history` settings, fixed for the run. */
       history?: HistoryConfig;
+      /** The engine that serves the run; the host leaves it out when `history.executor` is off. */
+      engine?: EngineRecord;
+      /** Who started the run; same rule as `engine`. */
+      executor?: ExecutorRecord;
     }
   | {
       type: "agent_completed";
       node: string;
       attempt: number;
       summary?: string;
+      /** Who completed the step, and the version of the engine if it is not the one that began the run. */
+      executor?: ExecutorRecord;
+      engineVersion?: string;
       /** One of the node's other outcomes (`outcomes:`), instead of the usual `passed`. */
       outcome?: string;
     }
@@ -749,6 +761,10 @@ class Machine {
           attempt: event.attempt,
           outcome: visit.declared ?? "passed",
           summary: event.summary ?? null,
+          ...(event.executor === undefined ? {} : { executor: event.executor }),
+          ...(event.engineVersion === undefined || event.engineVersion === this.s.engineVersion
+            ? {}
+            : { engine_version: event.engineVersion }),
         });
         this.afterWork(visit);
         return;
@@ -869,6 +885,8 @@ class Machine {
       ...(event.pipelineFile === undefined ? {} : { pipelineFile: event.pipelineFile }),
       ...(event.taskKey === undefined ? {} : { task_key: event.taskKey }),
       ...(event.history === undefined ? {} : { history: event.history }),
+      ...(event.engine === undefined ? {} : { engine: event.engine }),
+      ...(event.executor === undefined ? {} : { executor: event.executor }),
     });
     const needsRunBaseline = this.spec.nodes.some((n) =>
       n.checks.some((c) => this.registry.check(c.kind)?.baseline?.(c.params) === "run"),
@@ -1085,6 +1103,8 @@ export function decide(
     if (event.workdir !== undefined) draft.workdir = event.workdir;
     if (event.pipelineFile !== undefined) draft.pipelineFile = event.pipelineFile;
     if (event.taskKey !== undefined) draft.taskKey = event.taskKey;
+    if (event.history !== undefined) draft.history = event.history;
+    if (event.engine !== undefined) draft.engineVersion = event.engine.version;
   }
   const machine = new Machine(spec, draft, now, options);
   try {
