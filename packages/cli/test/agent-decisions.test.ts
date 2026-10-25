@@ -383,6 +383,52 @@ describe("t_decisions: the agent accepts a change of the pipeline on the person'
   });
 });
 
+describe("t_decisions: the answers give the agent what the tools need", () => {
+  test("t_decisions_every_gate_answer_has_the_attempt_even_without_comment_columns", async () => {
+    const s = await connect({ gate: true });
+    const { done } = await toGate(s);
+    expect(done.next.waiting.reason).toBe("gate");
+    expect(done.next.waiting.node_slug).toBe("approve");
+    expect(done.next.waiting.attempt).toBe(1);
+    expect(done.next.waiting.result_spec).toBeUndefined();
+    await s.close();
+  });
+
+  test("t_decisions_the_agent_does_not_decide_a_gate_a_pending_change_holds", async () => {
+    const s = await connect({ gate: true });
+    const { runId } = await toGate(s);
+    await writeFile(join(dir, ".kodel", "pipelines", "demo.yaml"), DEMO("write another file"));
+    const refused = await s.call("pipeline_decide_gate", decide(runId));
+    expect(refused).toMatchObject({ ok: false, code: "PIPELINE_CHANGE_REFUSED" });
+    expect(await journalOf(runId)).not.toContain("gate_decided");
+    await s.close();
+  });
+
+  test("t_decisions_a_refused_change_is_not_offered_to_the_agent_and_not_taken", async () => {
+    const s = await connect({ pipelineChange: true });
+    const started = await s.call("pipeline_start", { task: "add a file" });
+    const runId = started.run_id as string;
+    // The name of a pipeline cannot change in a run that has started, so the engine refuses it.
+    await writeFile(
+      join(dir, ".kodel", "pipelines", "demo.yaml"),
+      DEMO("write a file").replace("name: demo", "name: renamed"),
+    );
+    const step = await s.call("pipeline_next_step", { run_id: runId });
+    const change = step.node?.pipeline_change as { hash?: string; refused?: string } | undefined;
+    expect(change?.refused).toBeDefined();
+    if (change?.refused !== undefined) {
+      const refused = await s.call("pipeline_accept_change", {
+        run_id: runId,
+        change_hash: change.hash,
+        instruction: "yes",
+      });
+      expect(refused).toMatchObject({ ok: false, code: "PIPELINE_CHANGE_REFUSED" });
+      expect(await journalOf(runId)).not.toContain("pipeline_accepted");
+    }
+    await s.close();
+  });
+});
+
 describe("t_decisions: what the agent says it was told is redacted and shown", () => {
   test("t_decisions_a_secret_in_the_instruction_never_reaches_the_journal", async () => {
     const s = await connect({ gate: true });
@@ -397,6 +443,28 @@ describe("t_decisions: what the agent says it was told is redacted and shown", (
     expect(journal).not.toContain(secret);
     expect(journal).toContain("[REDACTED:api-key]");
     expect(journal).toContain('"decided_by":"agent"');
+    await s.close();
+  });
+
+  test("t_decisions_the_report_lists_a_gate_the_agent_decided", async () => {
+    const s = await connect({ gate: true });
+    const { runId } = await toGate(s);
+    await s.call("pipeline_decide_gate", decide(runId, { instruction: "go ahead" }));
+    const run = await s.host.open(runId);
+    const report = summarizeRun(await run!.state(), await run!.journal());
+    expect(report.agent_decisions).toMatchObject([
+      { what: "gate", node: "approve", decision: "approved", instruction: "go ahead" },
+    ]);
+    await s.close();
+  });
+
+  test("t_decisions_a_person_gate_decision_is_not_in_agent_decisions", async () => {
+    const s = await connect({ gate: true });
+    const { runId } = await toGate(s);
+    await (await s.host.open(runId))?.decideHuman("approve", "approved");
+    const run = await s.host.open(runId);
+    const report = summarizeRun(await run!.state(), await run!.journal());
+    expect(report.agent_decisions).toEqual([]);
     await s.close();
   });
 

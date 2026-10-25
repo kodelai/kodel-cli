@@ -446,6 +446,14 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       env.out(`trail:     ${state.trail.map(plain).join(" > ")}\n`);
       const pending = await pendingLine(run);
       if (pending) env.out(`pipeline:  ${pending}\n`);
+      // A decision the agent made on the person's instruction is not one the person made: say so here.
+      for (const made of (await run.report().catch(() => undefined))?.agent_decisions ?? []) {
+        const what =
+          made.what === "gate"
+            ? `gate ${plain(made.node ?? "?")} ${plain(made.decision ?? "")}`
+            : "change of the pipeline accepted";
+        env.out(`by agent:  ${what} (told: "${plain(made.instruction).slice(0, 120)}")\n`);
+      }
       // Read-only: looking at a run must not restart its work or write anything. A state that
       // cannot be read as a step (it names a node that is not there) is said to be unreadable
       // rather than ending the command, since this is the command one uses to find out what is wrong.

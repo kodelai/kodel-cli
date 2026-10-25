@@ -40,6 +40,17 @@ export interface PipelineChangeReport {
   by?: "agent";
 }
 
+/** A decision a person would make that the agent made on their instruction (the config allowed it). */
+export interface AgentDecisionReport {
+  at: number;
+  what: "gate" | "pipeline_change";
+  /** The gate's step, and what was decided there. */
+  node?: string;
+  decision?: string;
+  /** The words the agent says it was given. */
+  instruction: string;
+}
+
 export interface NodeReport {
   node: string;
   /** A person decides at this node, so its time is waiting for a person, not work. */
@@ -76,6 +87,8 @@ export interface RunReport {
   extra_attempts: number;
   /** The versions of the pipeline a person accepted while the run went, in order. */
   pipeline_changes: PipelineChangeReport[];
+  /** Gates and pipeline changes the agent decided, in order; empty when a person decided them all. */
+  agent_decisions: AgentDecisionReport[];
 }
 
 const seconds = (from: number, to: number) => Math.max(0, Math.round((to - from) / 100) / 10);
@@ -102,6 +115,7 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
 
   const refusals: RunReport["refusals"] = [];
   const pipelineChanges: PipelineChangeReport[] = [];
+  const agentDecisions: AgentDecisionReport[] = [];
   const attemptOf = (name: string, attempt: number) =>
     nodes.get(name)?.attempts.find((a) => a.attempt === attempt);
 
@@ -142,9 +156,27 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
           ...(typeof record.reason === "string" ? { reason: record.reason } : {}),
           ...(record.decided_by === "agent" ? { by: "agent" as const } : {}),
         });
+        if (record.decided_by === "agent") {
+          agentDecisions.push({
+            at: record.ts,
+            what: "pipeline_change",
+            instruction: String(record.instruction ?? ""),
+          });
+        }
         break;
       case "gate_waiting":
         if (name) gates.add(name);
+        break;
+      case "gate_decided":
+        if (record.decided_by === "agent") {
+          agentDecisions.push({
+            at: record.ts,
+            what: "gate",
+            ...(name ? { node: name } : {}),
+            decision: String(record.decision),
+            instruction: String(record.instruction ?? ""),
+          });
+        }
         break;
       case "task_link":
         if (record.what === "restarted" || record.restarting === true) taskRestarted = true;
@@ -273,5 +305,6 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
     refusals,
     extra_attempts: all.reduce((total, n) => total + Math.max(0, n.attempts.length - 1), 0),
     pipeline_changes: pipelineChanges,
+    agent_decisions: agentDecisions,
   };
 }

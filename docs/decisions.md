@@ -13,7 +13,11 @@ decisions:
     pipeline_change: false # the agent may accept a change of a run's pipeline when told to
 ```
 
-The server reads the block when it starts, so a change applies the next time the agent connects.
+The server reads the block when it starts, so a change applies the next time the agent connects. If the
+config cannot be read (a typo in a key, for example), the server starts with everything off and the
+dialog off, without an error; a command that reads the config names the problem. Only the person edits this block:
+a project should tell its agent not to (this repository does, in `AGENTS.md`), since a switch the agent
+can turn on for itself protects nothing.
 
 ## `decisions.dialog`
 
@@ -37,16 +41,22 @@ The agent is told to call a tool only when the person has said so in the chat, a
 as `instruction`. The engine cannot check that. These switches are protection against a mistake, not
 against an agent that ignores its instructions: turn one on only where you accept that.
 
-The gate tool takes the step's `node_slug` and `attempt` from the `waiting` answer. What the engine does check
-is the same as for the command: the run is waiting at that step and attempt,
-no other change of the pipeline holds the run, a rejection has a reason (or recorded comments), an approval
-when the engine could not tell what changed needs `confirm_unverified`, and a change is taken only if it
-is still the version named by `change_hash`. While a dialog is open for the run, the tools answer
-`waiting` and decide nothing.
+The gate tool takes the step's `node_slug` and `attempt` from the `waiting` answer (every gate answer
+has both). What the engine does check is the same as for the command: the run is waiting at that step
+and attempt, no other change of the pipeline holds the run, a rejection has a reason (or recorded
+comments), an approval when the engine could not tell what changed needs `confirm_unverified`, and a
+change is taken only if it is still the version named by `change_hash`. The waiting text offers
+`pipeline_accept_change` only for a change that has a hash and was not refused.
 
-A decision made this way is written to the journal with `decided_by: agent` and the `instruction`, and
-`kodel report` marks an accepted change of the pipeline as made by the agent. A person's decision is
-written as before.
+While a dialog is open the tools answer `waiting` and decide nothing. The check is for the whole server,
+not per run: a form open for one run holds the agent's decisions on every run until it is answered. It
+matters only for a call the agent makes at the same time as the form is shown; the engine's refusal of a
+second decision for the same step is what finally keeps a gate from being decided twice.
+
+A decision made this way is written to the journal with `decided_by: agent` and the `instruction`
+(redacted like any other text). `kodel report` lists such decisions, gates and accepted changes of the
+pipeline alike, and `kodel status <run>` shows a `by agent:` line for each. A person's decision is written
+as before and carries no mark.
 
 There is no switch for `ack`, `resume` or `seal`: they stay with a person, and the config refuses a key
 for them. An agent that can propose a change of the pipeline and also accept it can weaken the checks

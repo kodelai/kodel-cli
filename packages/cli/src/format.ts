@@ -201,6 +201,20 @@ export function formatReport(
       );
     }
   }
+  if (report.agent_decisions.length > 0) {
+    lines.push(
+      "",
+      "decided by the agent, on what it says the person told it (the engine cannot check that):",
+    );
+    for (const decision of report.agent_decisions) {
+      const when = new Date(decision.at).toISOString().replace("T", " ").slice(0, 19);
+      const what =
+        decision.what === "gate"
+          ? `gate ${plain(decision.node ?? "?")}: ${plain(decision.decision ?? "?")}`
+          : "accepted a change of the pipeline";
+      lines.push(`  ${when}  ${what}  "${plain(decision.instruction).slice(0, 200)}"`);
+    }
+  }
   if (changed.length > 0) {
     lines.push("", "attempts that ran on another definition than the one before:", ...changed);
   }

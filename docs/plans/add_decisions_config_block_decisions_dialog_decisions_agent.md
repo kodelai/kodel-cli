@@ -189,3 +189,9 @@ the instruction is quoted into the journal), not a defence against a hostile age
 - The dialog flag the tools read is set only while a form is shown (not for the whole hook), and the
   tools look at it again right before they apply a decision. It is global to the server, not per run.
 - `byAgent.instruction` is redacted in `redactEvent` like the other free text.
+- Second review round: every gate `waiting` answer now carries `attempt` (it used to only with a `results`
+  spec); the report has `agent_decisions` (gates and pipeline changes the agent decided) and
+  `kodel status <run>` prints a `by agent:` line for each; the waiting text offers
+  `pipeline_accept_change` only for a change that has a hash and was not refused; AGENTS.md forbids the
+  agent to edit the `decisions` block; docs/decisions.md says the dialog guard is global to the server and
+  that an unreadable config means everything off.

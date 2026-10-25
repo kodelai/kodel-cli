@@ -249,12 +249,18 @@ export function nextStep(
   const add =
     waiting.reason === "gate" && may.gate
       ? AGENT_MAY_DECIDE_GATE
-      : waiting.reason === "pipeline_changed" && may.pipelineChange
+      : waiting.reason === "pipeline_changed" && may.pipelineChange && acceptable(waiting)
         ? AGENT_MAY_ACCEPT_CHANGE
         : "";
   return add === ""
     ? step
     : { waiting: { ...waiting, tell_the_person: waiting.tell_the_person + add } };
+}
+
+/** A change the agent can name and the engine can take: it has a hash and was not refused. */
+function acceptable(waiting: { pipeline_change?: PipelineChange }): boolean {
+  const change = waiting.pipeline_change;
+  return change !== undefined && change.refused === undefined && change.hash !== undefined;
 }
 
 function nextStepBase(
@@ -372,9 +378,10 @@ function baseStep(
         ...(begin?.needs === "human" && begin.instructions !== undefined
           ? { instructions: begin.instructions }
           : {}),
-        ...(begin?.needs === "human" && begin.results
-          ? { attempt: humanVisit.attempt, result_spec: begin.results }
-          : {}),
+        // The attempt names this very visit; the agent's own decision tool (when the config allows it)
+        // and the comments both need it, so it is always there.
+        attempt: humanVisit.attempt,
+        ...(begin?.needs === "human" && begin.results ? { result_spec: begin.results } : {}),
         how_to_decide: { cli: `kodel gate approve|reject ${state.runId} --reason "..."` },
         tell_the_person:
           (begin?.needs === "human" && begin.results
