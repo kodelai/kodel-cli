@@ -203,6 +203,16 @@ export function createElicitor(
   let busy = false;
 
   async function ask(question: Question, signal: AbortSignal): Promise<Outcome> {
+    // Only while a form is really shown: the agent's own decisions wait for it, not for any call.
+    if (options.state) options.state.open = true;
+    try {
+      return await askRounds(question, signal);
+    } finally {
+      if (options.state) options.state.open = false;
+    }
+  }
+
+  async function askRounds(question: Question, signal: AbortSignal): Promise<Outcome> {
     let note: string | undefined;
     for (let round = 0; round < MAX_ROUNDS; round++) {
       let reply: Awaited<ReturnType<Server["elicitInput"]>>;
@@ -341,12 +351,10 @@ export function createElicitor(
     if (!server.getClientCapabilities()?.elicitation?.form) return undefined;
     if (busy) return undefined;
     busy = true;
-    if (options.state) options.state.open = true;
     try {
       return await handle(call);
     } finally {
       busy = false;
-      if (options.state) options.state.open = false;
     }
   };
 }

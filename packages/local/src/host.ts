@@ -187,6 +187,14 @@ function redactEvent(event: RunEvent, rules: RedactRule[]): RunEvent {
     const value = copy[field];
     if (typeof value === "string") copy[field] = redactText(value, rules);
   }
+  // The words the agent says the person gave it are the agent's input like any other text.
+  const by = copy["byAgent"];
+  if (typeof by === "object" && by !== null && "instruction" in by) {
+    const { instruction } = by as { instruction: unknown };
+    if (typeof instruction === "string") {
+      copy["byAgent"] = { ...by, instruction: redactText(instruction, rules) };
+    }
+  }
   return copy as unknown as RunEvent;
 }
 

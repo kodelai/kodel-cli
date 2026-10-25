@@ -37,7 +37,8 @@ The agent is told to call a tool only when the person has said so in the chat, a
 as `instruction`. The engine cannot check that. These switches are protection against a mistake, not
 against an agent that ignores its instructions: turn one on only where you accept that.
 
-What the engine does check is the same as for the command: the run is waiting at that step and attempt,
+The gate tool takes the step's `node_slug` and `attempt` from the `waiting` answer. What the engine does check
+is the same as for the command: the run is waiting at that step and attempt,
 no other change of the pipeline holds the run, a rejection has a reason (or recorded comments), an approval
 when the engine could not tell what changed needs `confirm_unverified`, and a change is taken only if it
 is still the version named by `change_hash`. While a dialog is open for the run, the tools answer

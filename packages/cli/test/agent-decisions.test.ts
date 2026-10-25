@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalPipelineHost } from "@kodel-ai/local";
+import { summarizeRun } from "@kodel-ai/pipeline-core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -379,6 +380,56 @@ describe("t_decisions: the agent accepts a change of the pipeline on the person'
     expect(waiting.next?.waiting?.reason ?? waiting.waiting?.reason).toBe("pipeline_changed");
     expect(JSON.stringify(waiting)).not.toContain("pipeline_accept_change");
     await off.close();
+  });
+});
+
+describe("t_decisions: what the agent says it was told is redacted and shown", () => {
+  test("t_decisions_a_secret_in_the_instruction_never_reaches_the_journal", async () => {
+    const s = await connect({ gate: true });
+    const { runId } = await toGate(s);
+    const secret = "sk-abcdefghijklmnopqrstuvwxyz0123";
+    const done = await s.call(
+      "pipeline_decide_gate",
+      decide(runId, { instruction: `approve it, my key is ${secret}` }),
+    );
+    expect(done.ok).toBe(true);
+    const journal = await journalOf(runId);
+    expect(journal).not.toContain(secret);
+    expect(journal).toContain("[REDACTED:api-key]");
+    expect(journal).toContain('"decided_by":"agent"');
+    await s.close();
+  });
+
+  test("t_decisions_the_report_marks_a_change_the_agent_accepted", async () => {
+    const s = await connect({ pipelineChange: true });
+    const started = await s.call("pipeline_start", { task: "add a file" });
+    const runId = started.run_id as string;
+    await writeFile(join(dir, ".kodel", "pipelines", "demo.yaml"), DEMO("write another file"));
+    const step = await s.call("pipeline_next_step", { run_id: runId });
+    await s.call("pipeline_accept_change", {
+      run_id: runId,
+      change_hash: step.node.pipeline_change.hash,
+      instruction: "yes",
+    });
+    const run = await s.host.open(runId);
+    const report = summarizeRun(await run!.state(), await run!.journal());
+    expect(report.pipeline_changes.map((c) => c.by)).toEqual(["agent"]);
+    await s.close();
+  });
+
+  test("t_decisions_a_person_accepting_a_change_leaves_no_agent_mark", async () => {
+    const s = await connect({ pipelineChange: true });
+    const started = await s.call("pipeline_start", { task: "add a file" });
+    const runId = started.run_id as string;
+    await writeFile(join(dir, ".kodel", "pipelines", "demo.yaml"), DEMO("write another file"));
+    const run = await s.host.open(runId);
+    const found = await run?.pendingChange();
+    await run?.acceptChange({ source: found?.info.source ?? "file", text: found?.text ?? "" });
+    const report = summarizeRun(await run!.state(), await run!.journal());
+    expect(report.pipeline_changes).toHaveLength(1);
+    expect(report.pipeline_changes[0]?.by).toBeUndefined();
+    expect(await journalOf(runId)).not.toContain("decided_by");
+    await s.close();
   });
 });
 

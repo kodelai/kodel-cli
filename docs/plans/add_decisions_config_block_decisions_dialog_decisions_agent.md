@@ -184,3 +184,8 @@ the instruction is quoted into the journal), not a defence against a hostile age
   the journal (`decided_by`, `instruction`) but the report does not list gates.
 - The case "approval when the files could not be checked" is tested with a host whose
   `changesSinceGate` says `unavailable`.
+- `pipeline_decide_gate` takes `node_slug` and `attempt` (from the waiting answer) so that a decision is
+  about the visit the agent was told about; a stale attempt is refused (`ATTEMPT_MISMATCH`).
+- The dialog flag the tools read is set only while a form is shown (not for the whole hook), and the
+  tools look at it again right before they apply a decision. It is global to the server, not per run.
+- `byAgent.instruction` is redacted in `redactEvent` like the other free text.

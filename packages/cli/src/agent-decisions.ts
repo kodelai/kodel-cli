@@ -16,7 +16,13 @@ import { blockingChange, type DialogState, type HumanHost } from "./elicit";
 import { plain } from "./plain";
 
 const WHILE_DIALOG =
-  "The person has a dialog open for this run and may be answering it. Nothing was decided. Do not decide it yourself; end your turn and call pipeline_next_step when they have answered.";
+  "The person has a dialog open and may be answering it. Nothing was decided. Do not decide it yourself; end your turn and call pipeline_next_step when they have answered.";
+
+/** The answer while a dialog is open; it reads like the other `waiting` answers. */
+const dialogOpen = (): ToolResult => ({
+  ok: true,
+  waiting: { reason: "dialog_open", message: WHILE_DIALOG, tell_the_person: WHILE_DIALOG },
+});
 
 /** The run as it is after the decision, with the mark that the agent made it. */
 async function after(
@@ -33,9 +39,7 @@ async function after(
 export function createAgentDecider(humans: HumanHost, dialog: DialogState): AgentDecider {
   return {
     async decideGate(service, input) {
-      if (dialog.open) {
-        return { ok: true, waiting: { reason: "dialog_open", message: WHILE_DIALOG } };
-      }
+      if (dialog.open) return dialogOpen();
       const run = await humans.open(input.run_id);
       if (!run) return failure("UNKNOWN_RUN", `there is no run ${plain(input.run_id)}`);
       const node = input.node_slug;
@@ -75,6 +79,8 @@ export function createAgentDecider(humans: HumanHost, dialog: DialogState): Agen
         return failure("INVALID_ARGUMENTS", "a rejection needs a reason");
       }
       const by: AgentDecision = { instruction: input.instruction };
+      // A dialog may have opened while the checks above ran; the person's form comes first.
+      if (dialog.open) return dialogOpen();
       const done = await run.decideHuman(
         node,
         input.decision,
@@ -86,9 +92,7 @@ export function createAgentDecider(humans: HumanHost, dialog: DialogState): Agen
     },
 
     async acceptChange(service, input) {
-      if (dialog.open) {
-        return { ok: true, waiting: { reason: "dialog_open", message: WHILE_DIALOG } };
-      }
+      if (dialog.open) return dialogOpen();
       const run = await humans.open(input.run_id);
       if (!run) return failure("UNKNOWN_RUN", `there is no run ${plain(input.run_id)}`);
       const found = await run.pendingChange();
@@ -108,6 +112,7 @@ export function createAgentDecider(humans: HumanHost, dialog: DialogState): Agen
         );
       }
       const reason = input.reason?.trim() ?? "";
+      if (dialog.open) return dialogOpen();
       const done = await run.acceptChange({
         source: found.info.source,
         text: found.text,
