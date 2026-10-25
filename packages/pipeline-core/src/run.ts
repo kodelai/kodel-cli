@@ -182,6 +182,13 @@ export const MAX_LOGGED_PROPOSALS = 100;
 
 // ── events in, effects out ──────────────────────────────────────────────────
 
+/** A file in the run folder that holds what a command printed; `bytes` counts what is stored. */
+export interface OutputRef {
+  ref: string;
+  bytes: number;
+  truncated: boolean;
+}
+
 export type RunEvent =
   | {
       type: "start";
@@ -230,6 +237,9 @@ export type RunEvent =
       /** What the command exited with and how long it ran, for the journal. */
       exit?: number;
       duration_ms?: number;
+      /** Where the host kept what the command printed, or why it could not. */
+      output?: OutputRef;
+      output_error?: string;
       /** The pipeline version the work ran under; a result of another version is dropped. */
       specHash?: string;
     }
@@ -242,6 +252,10 @@ export type RunEvent =
       reason: string;
       exit?: number;
       duration_ms?: number;
+      /** For a check that ran a command: its text, and where the host kept what it printed. */
+      command?: string;
+      output?: OutputRef;
+      output_error?: string;
       /** The pipeline version the check ran under; a result of another version is dropped. */
       specHash?: string;
     }
@@ -832,6 +846,8 @@ class Machine {
           passed: event.passed,
           ...(event.exit === undefined ? {} : { exit: event.exit }),
           ...(event.duration_ms === undefined ? {} : { duration_ms: event.duration_ms }),
+          ...(event.output === undefined ? {} : { output: event.output }),
+          ...(event.output_error === undefined ? {} : { output_error: event.output_error }),
           ...(event.passed ? {} : { reason: event.reason }),
         });
         if (event.passed) this.afterWork(visit);
@@ -857,6 +873,9 @@ class Machine {
           passed: event.passed,
           ...(event.exit === undefined ? {} : { exit: event.exit }),
           ...(event.duration_ms === undefined ? {} : { duration_ms: event.duration_ms }),
+          ...(event.command === undefined ? {} : { command: event.command }),
+          ...(event.output === undefined ? {} : { output: event.output }),
+          ...(event.output_error === undefined ? {} : { output_error: event.output_error }),
           ...(event.passed ? {} : { reason: event.reason }),
         });
         if (event.passed) {

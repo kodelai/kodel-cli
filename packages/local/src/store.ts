@@ -35,6 +35,7 @@ import {
   type ResultReport,
   type RunState,
   redactDeep,
+  redactText,
 } from "@kodel-ai/pipeline-core";
 import { sha256 } from "./integrity";
 
@@ -102,6 +103,24 @@ const specFileName = (hash: string): string => {
   }
   return `${hash}.yaml`;
 };
+
+/**
+ * A node name as a file name: nothing outside `[A-Za-z0-9._-]`, never empty or a dot name. A name
+ * that had to change gets a short hash of the original, so two names cannot meet in one file.
+ */
+export function artifactFileName(node: string): string {
+  const clean = node.replace(/[^A-Za-z0-9._-]/g, "_");
+  // Names Windows will not take as a file name, and names too long to be one.
+  const reserved =
+    /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i.test(clean) || /[. ]$/.test(clean);
+  const dots = clean === "" || /^\.+$/.test(clean);
+  const short = clean.length > 64;
+  const safe = dots ? "_" : short ? clean.slice(0, 64) : clean;
+  // Case-insensitive file systems would put `Build` and `build` into one file.
+  return safe === node && !reserved && node === node.toLowerCase()
+    ? safe
+    : `${safe}-${sha256(node).slice(0, 8)}`;
+}
 
 const isMissing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
 
@@ -598,6 +617,28 @@ export class FileStore {
     attempt: number,
   ): Promise<ResultReport | undefined> {
     return this.readJson<ResultReport>(this.reportPath(runId, node, attempt));
+  }
+
+  /**
+   * Keep what a command printed, redacted, in `artifacts/`. `part` is `command` or `check<i>`; the
+   * attempt is in the name, so a retried node does not overwrite the output of the attempt before.
+   * Returns the path relative to the run folder and the size of what is stored.
+   */
+  async writeArtifact(
+    runId: string,
+    node: string,
+    attempt: number,
+    part: string,
+    text: string,
+  ): Promise<{ ref: string; bytes: number }> {
+    if (!/^(command|check\d+)$/.test(part)) {
+      throw new KodelError("INVALID_ARGUMENTS", `"${part}" is not an artifact part`);
+    }
+    const ref = `artifacts/${artifactFileName(node)}-${attempt}-${part}.txt`;
+    const content = redactText(text, this.rules);
+    await mkdir(join(this.runDir(runId), "artifacts"), { recursive: true });
+    await this.writeAtomic(join(this.runDir(runId), ref), content);
+    return { ref, bytes: Buffer.byteLength(content) };
   }
 
   // locking

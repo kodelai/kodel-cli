@@ -341,4 +341,68 @@ describe("the report reads them", () => {
     expect(report.refusals).toEqual([]);
     expect(report.nodes[0]?.attempts[0]?.summary).toBeUndefined();
   });
+
+  test("cnz6_the_output_of_a_command_and_of_a_check_reaches_the_journal_when_given", () => {
+    const s = session();
+    s.send({ type: "agent_completed", node: "work", attempt: 1 });
+    const check = { ref: "artifacts/work-1-check0.txt", bytes: 12, truncated: false };
+    s.send({
+      type: "check_finished",
+      node: "work",
+      attempt: 1,
+      index: 0,
+      passed: false,
+      reason: "no",
+      command: "make check",
+      output: check,
+    });
+    expect(s.lines("check_finished")[0]).toMatchObject({ command: "make check", output: check });
+  });
+
+  test("cnz6_a_command_that_kept_its_output_or_failed_to_says_so_in_the_journal", () => {
+    const passed = (extra: Partial<RunEvent>) => {
+      const s = session();
+      s.send({ type: "agent_completed", node: "work", attempt: 1 });
+      s.send({
+        type: "check_finished",
+        node: "work",
+        attempt: 1,
+        index: 0,
+        passed: true,
+        reason: "",
+      });
+      s.send({
+        type: "work_finished",
+        node: "build",
+        attempt: 1,
+        passed: true,
+        reason: "",
+        ...extra,
+      } as RunEvent);
+      return s;
+    };
+    const output = { ref: "artifacts/build-1-command.txt", bytes: 3, truncated: true };
+    expect(passed({ output } as Partial<RunEvent>).lines("command_finished")[0]).toMatchObject({
+      output,
+    });
+    const failedWrite = passed({ output_error: "disk full" } as Partial<RunEvent>);
+    expect(failedWrite.lines("command_finished")[0]).toMatchObject({ output_error: "disk full" });
+    expect(failedWrite.lines("command_finished")[0]).not.toHaveProperty("output");
+  });
+
+  test("cnz6_a_run_whose_journal_has_no_output_fields_still_summarises", () => {
+    const s = session();
+    s.send({ type: "agent_completed", node: "work", attempt: 1 });
+    s.send({
+      type: "check_finished",
+      node: "work",
+      attempt: 1,
+      index: 0,
+      passed: true,
+      reason: "",
+    });
+    s.send({ type: "work_finished", node: "build", attempt: 1, passed: true, reason: "", exit: 0 });
+    expect(s.lines("command_finished")[0]).not.toHaveProperty("output");
+    expect(() => summarizeRun(s.state, s.journal)).not.toThrow();
+  });
 });
