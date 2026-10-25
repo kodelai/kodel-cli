@@ -276,6 +276,8 @@ export type RunEvent =
       category: string;
       message: string;
       suggestion?: string;
+      /** The `check_id` of the check the note is about (`wrong_check` only). */
+      check?: string;
     }
   /**
    * The agent proposed another version of the pipeline (`withdrawn`: took its proposal back).
@@ -375,6 +377,30 @@ class Machine {
     const node = this.nodes.get(slug);
     if (!node) throw fail("UNKNOWN_NODE", `the pipeline has no node "${slug}"`);
     return node;
+  }
+
+  /** A note names a check only as `wrong_check`, and only one of the checks of its node. */
+  private checkOfNote(check: string, category: string, slug: string | undefined) {
+    if (category !== "wrong_check")
+      throw new KodelError("INVALID_ARGUMENTS", "check is only for the category wrong_check", [
+        { field: "check" },
+      ]);
+    if (slug === undefined)
+      throw new KodelError(
+        "INVALID_ARGUMENTS",
+        "check needs node_slug when no single step is running",
+        [{ field: "node_slug" }],
+      );
+    const node = this.node(slug);
+    const ids = node.checks.map((_, i) => checkIdOf(node, i));
+    if (!ids.includes(check))
+      throw new KodelError(
+        "INVALID_ARGUMENTS",
+        ids.length === 0
+          ? `node "${slug}" has no checks`
+          : `"${check}" is not a check of node "${slug}"`,
+        [{ field: "check", valid: ids }],
+      );
   }
 
   private run(slug: string): NodeRun {
@@ -672,12 +698,15 @@ class Machine {
       // A note is about the pipeline as it was when it was written, and the pipeline may change
       // under a run, so it says which version and, when only one step is going, which step.
       const only = this.s.active.length === 1 ? this.s.active[0]?.node : undefined;
+      if (event.check !== undefined)
+        this.checkOfNote(event.check, event.category, event.node ?? only);
       this.log("feedback_reported", {
         node: event.node ?? only ?? null,
         attempt: event.attempt ?? null,
         category: event.category,
         message: event.message,
         suggestion: event.suggestion ?? null,
+        ...(event.check === undefined ? {} : { check: event.check }),
         spec: this.s.specHash,
       });
       return;

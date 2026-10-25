@@ -1610,6 +1610,7 @@ export class LocalRun {
     category: string;
     message: string;
     suggestion?: string;
+    check?: string;
   }) {
     const decision = await this.apply({ type: "feedback", ...input });
     if (!decision.ok)
