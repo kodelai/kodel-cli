@@ -203,6 +203,43 @@ export function formatReport(
   if (changed.length > 0) {
     lines.push("", "attempts that ran on another definition than the one before:", ...changed);
   }
+  if (report.checks.length > 0) {
+    lines.push("", "checks:");
+    const idWidth = Math.max(5, ...report.checks.map((c) => plain(c.check_id).length));
+    lines.push(
+      `  ${"check".padEnd(idWidth)}  runs  fails  wrong  changed  after a change`,
+      ...report.checks.map((c) => {
+        const after =
+          c.params_changes === 0
+            ? "-"
+            : `${c.after_change.passed} passed, ${c.after_change.failed} failed`;
+        return `  ${plain(c.check_id).padEnd(idWidth)}  ${String(c.runs).padStart(4)}  ${String(c.fails).padStart(5)}  ${String(c.wrong_check).padStart(5)}  ${String(c.params_changes).padStart(7)}  ${after}`;
+      }),
+    );
+  }
+  if (report.task_size !== undefined) {
+    const size = report.task_size;
+    if ("not_collected" in size) {
+      lines.push("", "task size: not_collected");
+    } else {
+      const top = (items: { files: number }[], name: (i: never) => string) =>
+        items
+          .slice(0, 5)
+          .map((i) => `${plain(name(i as never))} ${i.files}`)
+          .join(", ");
+      lines.push(
+        "",
+        `task size: ${size.files} file(s), +${size.added} -${size.removed} lines` +
+          (size.binary_files > 0 ? `, ${size.binary_files} binary` : ""),
+      );
+      if (size.files > 0) {
+        lines.push(
+          `  directories: ${top(size.top_dirs, (i: { dir: string }) => i.dir)}`,
+          `  languages: ${top(size.languages, (i: { ext: string }) => i.ext)}`,
+        );
+      }
+    }
+  }
   const failures = report.nodes.flatMap((node) =>
     node.attempts
       .filter((a) => a.failure)

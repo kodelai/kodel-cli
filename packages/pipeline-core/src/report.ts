@@ -4,6 +4,7 @@
  */
 import type { JournalRecord, RunState } from "./run";
 import { runSlug } from "./slug";
+import type { TaskSize } from "./task-size";
 
 export interface AttemptReport {
   attempt: number;
@@ -37,6 +38,24 @@ export interface PipelineChangeReport {
   effect: string;
   reason?: string;
 }
+
+/** How one check fared over the run, from the journal; a run before `check_id` has none. */
+export interface CheckReport {
+  check_id: string;
+  kind: string;
+  node?: string;
+  runs: number;
+  fails: number;
+  /** Notes from the agent that this check fired for nothing (`wrong_check`), one per note. */
+  wrong_check: number;
+  /** Times the declared params of the check differed from its previous result. */
+  params_changes: number;
+  /** How the result right after such a change ended. */
+  after_change: { passed: number; failed: number };
+}
+
+/** The size of the task, or why it is not known (no patch was kept for the run). */
+export type TaskSizeReport = TaskSize | { not_collected: true };
 
 export interface NodeReport {
   node: string;
@@ -74,6 +93,13 @@ export interface RunReport {
   extra_attempts: number;
   /** The versions of the pipeline a person accepted while the run went, in order. */
   pipeline_changes: PipelineChangeReport[];
+  /**
+   * Per check, in the order each first ran. Checks removed from the pipeline keep their row. A
+   * `check_id` is positional, so a check inserted or moved mid-run shares its row with the one it displaced.
+   */
+  checks: CheckReport[];
+  /** Added by a host that can read the run's patch; absent when the report is made from the journal alone. */
+  task_size?: TaskSizeReport;
 }
 
 const seconds = (from: number, to: number) => Math.max(0, Math.round((to - from) / 100) / 10);
@@ -94,6 +120,26 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
     if (!found) {
       found = { node: name, gate: false, attempts: [], seconds: 0 };
       nodes.set(name, found);
+    }
+    return found;
+  };
+
+  const checks = new Map<string, CheckReport>();
+  const lastHash = new Map<string, string>();
+  const checkOf = (id: string, kind: string, node?: string): CheckReport => {
+    let found = checks.get(id);
+    if (!found) {
+      found = {
+        check_id: id,
+        kind,
+        ...(node === undefined ? {} : { node }),
+        runs: 0,
+        fails: 0,
+        wrong_check: 0,
+        params_changes: 0,
+        after_change: { passed: 0, failed: 0 },
+      };
+      checks.set(id, found);
     }
     return found;
   };
@@ -179,6 +225,24 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
         break;
       }
       case "check_finished": {
+        if (typeof record.check_id === "string") {
+          const row = checkOf(
+            record.check_id,
+            typeof record.kind === "string" ? record.kind : "unknown",
+            name,
+          );
+          if (row.kind === "unknown" && typeof record.kind === "string") row.kind = record.kind;
+          row.runs += 1;
+          if (record.passed !== true) row.fails += 1;
+          if (typeof record.params_hash === "string") {
+            const before = lastHash.get(record.check_id);
+            if (before !== undefined && before !== record.params_hash) {
+              row.params_changes += 1;
+              row.after_change[record.passed === true ? "passed" : "failed"] += 1;
+            }
+            lastHash.set(record.check_id, record.params_hash);
+          }
+        }
         const found = name && attempt !== undefined ? attemptOf(name, attempt) : undefined;
         if (found && typeof record.index === "number") {
           found.checks = [
@@ -223,6 +287,11 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
         break;
       case "feedback_reported":
         feedback += 1;
+        if (record.category === "wrong_check" && typeof record.check === "string") {
+          // only a check that ran has a row: a mistyped id is not a check
+          const row = checks.get(record.check);
+          if (row) row.wrong_check += 1;
+        }
         break;
     }
   }
@@ -270,5 +339,6 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
     refusals,
     extra_attempts: all.reduce((total, n) => total + Math.max(0, n.attempts.length - 1), 0),
     pipeline_changes: pipelineChanges,
+    checks: [...checks.values()],
   };
 }
