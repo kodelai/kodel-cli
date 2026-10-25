@@ -5,13 +5,16 @@ import {
   PipelineService,
   type RunTaskLink,
   type TaskService,
+  toolsFingerprint,
 } from "@kodel-ai/pipeline-core";
 import {
+  CONTRACT_VERSION,
   decisionTools,
   registerPipelineTools,
   registerTaskTools,
   serverInstructions,
   taskInstructions,
+  toolsFor,
 } from "@kodel-ai/pipeline-core/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -83,10 +86,24 @@ export function createServer(
     ? `${base}\n\n${taskInstructions(runLink?.mode ?? "disabled", runLink !== undefined)}`
     : base;
   const server = new McpServer({ name: "kodel", version }, { instructions });
-  const service = new PipelineService(host, { engineVersion: version });
+  const taskLink = tasks !== undefined && runLink !== undefined;
   const state = newDialogState();
+  const decisions = humans ? decisionTools(agentDecisions, createAgentDecider(humans, state)) : [];
+  const service = new PipelineService(host, {
+    engineVersion: version,
+    // Asked at each call: the client's name comes with the handshake, after the server is built.
+    caller: () => {
+      const client = server.server.getClientVersion();
+      return client === undefined ? undefined : { name: client.name, version: client.version };
+    },
+    surface: {
+      instructions,
+      tools: toolsFingerprint([...toolsFor({ taskLink }), ...decisions]),
+      contract_version: CONTRACT_VERSION,
+    },
+  });
   registerPipelineTools(server, service, {
-    taskLink: tasks !== undefined && runLink !== undefined,
+    taskLink,
     ...(humans && dialog
       ? {
           afterTool: createElicitor(server.server, humans, service, {
@@ -97,9 +114,7 @@ export function createServer(
           }),
         }
       : {}),
-    ...(humans
-      ? { extraTools: decisionTools(agentDecisions, createAgentDecider(humans, state)) }
-      : {}),
+    extraTools: decisions,
   });
   if (tasks) registerTaskTools(server, tasks);
   return server;

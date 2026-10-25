@@ -1,0 +1,60 @@
+name: release
+run-name: Publish kodel ${{ inputs.version }} (${{ inputs.tag }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, e.g. 0.1.0-beta.0"
+        required: true
+        type: string
+      tag:
+        description: "npm dist-tag"
+        required: true
+        default: beta
+        type: choice
+        options: [beta, latest]
+
+permissions:
+  contents: read
+  id-token: write # npm trusted publishing (OIDC) and provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Check the version
+        env:
+          VERSION: ${{ inputs.version }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "not a semver version: $VERSION"; exit 1
+          fi
+          if [ "$TAG" = latest ] && echo "$VERSION" | grep -q -- '-'; then
+            echo "a prerelease must not go to the latest tag"; exit 1
+          fi
+          if [ "$TAG" != latest ] && ! echo "$VERSION" | grep -q -- '-'; then
+            echo "a stable version must go to the latest tag"; exit 1
+          fi
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run lint
+      - run: bun test
+      - name: Set the version
+        # Not `npm version`: it resolves the dependency tree and fails on the workspace: protocol.
+        run: npm pkg set version="${{ inputs.version }}"
+        working-directory: packages/cli
+      - run: bun run build
+      - run: node scripts/check-artifact.mjs
+      - name: Add LICENSE and README to the package
+        run: cp LICENSE README.md packages/cli/
+      - name: Publish
+        run: npm publish --tag "${{ inputs.tag }}" --provenance --access public
+        working-directory: packages/cli

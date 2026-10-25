@@ -9,6 +9,7 @@
  */
 import { canonicalNode, checkIdOf, type NodeForms, stableJson } from "./canonical";
 import { type ErrorCode, KodelError } from "./errors";
+import type { EngineRecord, ExecutorRecord } from "./executor";
 import type { HistoryConfig } from "./history-config";
 import type { NodeSpec, PipelineSpec } from "./pipeline";
 import { diffPipelines } from "./pipeline-diff";
@@ -167,6 +168,10 @@ export interface RunState {
    * state and not in `meta.json`, which an agent can write.
    */
   pipelineFile?: string;
+  /** The `history` settings the run was started with. */
+  history?: HistoryConfig;
+  /** The version of the engine that started the run; a later record from another one says so. */
+  engineVersion?: string;
 }
 
 /** How many refused calls a run journals: enough to see what was tried, too few to be a way to fill the disk. */
@@ -189,6 +194,13 @@ export interface AgentDecision {
 const decidedBy = (by: AgentDecision | undefined): Record<string, unknown> =>
   by === undefined ? {} : { decided_by: "agent", instruction: by.instruction };
 
+/** A file in the run folder that holds what a command printed; `bytes` counts what is stored. */
+export interface OutputRef {
+  ref: string;
+  bytes: number;
+  truncated: boolean;
+}
+
 export type RunEvent =
   | {
       type: "start";
@@ -207,6 +219,10 @@ export type RunEvent =
       taskKey?: string;
       /** The effective `history` settings, fixed for the run. */
       history?: HistoryConfig;
+      /** The engine that serves the run; the host leaves it out when `history.executor` is off. */
+      engine?: EngineRecord;
+      /** Who started the run; same rule as `engine`. */
+      executor?: ExecutorRecord;
       /** The commit the run's work began at; absent without a repository or a commit. */
       baseCommit?: string;
     }
@@ -215,6 +231,9 @@ export type RunEvent =
       node: string;
       attempt: number;
       summary?: string;
+      /** Who completed the step, and the version of the engine if it is not the one that began the run. */
+      executor?: ExecutorRecord;
+      engineVersion?: string;
       /** One of the node's other outcomes (`outcomes:`), instead of the usual `passed`. */
       outcome?: string;
       /** HEAD of the run's directory when the step was handed in, as the host read it. */
@@ -230,6 +249,9 @@ export type RunEvent =
       /** What the command exited with and how long it ran, for the journal. */
       exit?: number;
       duration_ms?: number;
+      /** Where the host kept what the command printed, or why it could not. */
+      output?: OutputRef;
+      output_error?: string;
       /** The pipeline version the work ran under; a result of another version is dropped. */
       specHash?: string;
     }
@@ -242,6 +264,10 @@ export type RunEvent =
       reason: string;
       exit?: number;
       duration_ms?: number;
+      /** For a check that ran a command: its text, and where the host kept what it printed. */
+      command?: string;
+      output?: OutputRef;
+      output_error?: string;
       /** The pipeline version the check ran under; a result of another version is dropped. */
       specHash?: string;
     }
@@ -820,6 +846,10 @@ class Machine {
           attempt: event.attempt,
           outcome: visit.declared ?? "passed",
           summary: event.summary ?? null,
+          ...(event.executor === undefined ? {} : { executor: event.executor }),
+          ...(event.engineVersion === undefined || event.engineVersion === this.s.engineVersion
+            ? {}
+            : { engine_version: event.engineVersion }),
           ...(event.head === undefined ? {} : { head: event.head }),
         });
         this.afterWork(visit);
@@ -835,6 +865,8 @@ class Machine {
           passed: event.passed,
           ...(event.exit === undefined ? {} : { exit: event.exit }),
           ...(event.duration_ms === undefined ? {} : { duration_ms: event.duration_ms }),
+          ...(event.output === undefined ? {} : { output: event.output }),
+          ...(event.output_error === undefined ? {} : { output_error: event.output_error }),
           ...(event.passed ? {} : { reason: event.reason }),
         });
         if (event.passed) this.afterWork(visit);
@@ -860,6 +892,9 @@ class Machine {
           passed: event.passed,
           ...(event.exit === undefined ? {} : { exit: event.exit }),
           ...(event.duration_ms === undefined ? {} : { duration_ms: event.duration_ms }),
+          ...(event.command === undefined ? {} : { command: event.command }),
+          ...(event.output === undefined ? {} : { output: event.output }),
+          ...(event.output_error === undefined ? {} : { output_error: event.output_error }),
           ...(event.passed ? {} : { reason: event.reason }),
         });
         if (event.passed) {
@@ -942,6 +977,8 @@ class Machine {
       ...(event.pipelineFile === undefined ? {} : { pipelineFile: event.pipelineFile }),
       ...(event.taskKey === undefined ? {} : { task_key: event.taskKey }),
       ...(event.history === undefined ? {} : { history: event.history }),
+      ...(event.engine === undefined ? {} : { engine: event.engine }),
+      ...(event.executor === undefined ? {} : { executor: event.executor }),
       ...(event.baseCommit === undefined ? {} : { base_commit: event.baseCommit }),
     });
     const needsRunBaseline = this.spec.nodes.some((n) =>
@@ -1161,6 +1198,8 @@ export function decide(
     if (event.workdir !== undefined) draft.workdir = event.workdir;
     if (event.pipelineFile !== undefined) draft.pipelineFile = event.pipelineFile;
     if (event.taskKey !== undefined) draft.taskKey = event.taskKey;
+    if (event.history !== undefined) draft.history = event.history;
+    if (event.engine !== undefined) draft.engineVersion = event.engine.version;
   }
   const machine = new Machine(spec, draft, now, options, facts);
   try {

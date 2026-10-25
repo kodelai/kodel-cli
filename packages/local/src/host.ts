@@ -12,6 +12,7 @@ import { hostname } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import {
   type AgentDecision,
+  type Caller,
   type ChangeSet,
   type CheckVerdict,
   canonicalPipeline,
@@ -22,6 +23,7 @@ import {
   diffPipelines,
   type Effect,
   type EngineOptions,
+  type ExecutorRecord,
   evaluateCommand,
   evaluateDiff,
   evaluateResult,
@@ -32,6 +34,7 @@ import {
   mergeReports,
   type NextStep,
   nextStep,
+  type OutputRef,
   type PendingChange,
   type PipelineChange,
   type PipelineSpec,
@@ -49,12 +52,14 @@ import {
   renderDeep,
   rowsToCsv,
   runSlug,
+  type ServedSurface,
   type StepResult,
   summarizeRun,
   validateReport,
 } from "@kodel-ai/pipeline-core";
 import { type CommandOptions, type CommandResult, runCommand } from "./command";
 import { loadConfig, type WorktreeConfig } from "./config";
+import { type BuildInfo, engineRecord, observeExecutor, UNKNOWN_BUILD } from "./executor";
 import { GitSnapshotter, readHead, readRunCommits, repoPrefix } from "./git";
 import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integrity";
 import { FileStore, META_VERSION, newRunId, type RunMeta } from "./store";
@@ -91,7 +96,17 @@ export interface CheckContext {
 }
 
 /** How a kind of check gathers its facts and reaches a verdict. Plugin kinds add one. */
-export type CheckRunner = (effect: RunCheckEffect, context: CheckContext) => Promise<CheckVerdict>;
+export type CheckRunner = (
+  effect: RunCheckEffect,
+  context: CheckContext,
+) => Promise<CheckVerdict & KeptOutput>;
+
+/** What a check that ran a command tells the event beyond its verdict. */
+export interface KeptOutput {
+  command?: string;
+  output?: OutputRef;
+  output_error?: string;
+}
 
 export interface HostOptions {
   /** The working directory commands run in; usually the repository root. */
@@ -132,6 +147,10 @@ export interface HostOptions {
    * A function is asked on first use, so a host that never meets a task never reads the task config.
    */
   runTaskLink?: RunTaskLink | (() => Promise<RunTaskLink | undefined>);
+  /** The program that serves the runs, for the `engine` record; absent: `unknown`. */
+  build?: BuildInfo;
+  /** The environment the session id is read from; this process's by default (tests replace it). */
+  environment?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -251,6 +270,10 @@ export class LocalHost {
   readonly checkRunners: Record<string, CheckRunner>;
   readonly heartbeatMs: number;
   readonly maxTailBytes: number | undefined;
+  private readonly outputSettingsCache = new Map<
+    string,
+    { enabled: boolean; maxKb: number } | null
+  >();
   readonly integrity: IntegrityStore;
   readonly ownerId: string;
   readonly isOwnerAlive: (owner: string) => boolean;
@@ -278,6 +301,65 @@ export class LocalHost {
   }
 
   /**
+   * What the run recorded for `history.output` when it started, or undefined for a run that recorded
+   * nothing (an older run, a test host): then no output is kept. Read once per run; the recorded value
+   * is the one in force, so editing the config mid-run changes nothing.
+   */
+  async outputSettings(runId: string): Promise<{ enabled: boolean; maxKb: number } | undefined> {
+    const cached = this.outputSettingsCache.get(runId);
+    if (cached !== undefined) return cached ?? undefined;
+    const started = (await this.store.readJournal(runId)).find((r) => r.event === "run_started");
+    const output = (
+      started?.history as { output?: { enabled?: unknown; max_kb?: unknown } } | undefined
+    )?.output;
+    const settings =
+      output &&
+      typeof output.enabled === "boolean" &&
+      typeof output.max_kb === "number" &&
+      output.max_kb >= 1
+        ? { enabled: output.enabled, maxKb: output.max_kb }
+        : null;
+    this.outputSettingsCache.set(runId, settings);
+    return settings ?? undefined;
+  }
+
+  /** The tail limit for a command of this run: the injected one (tests), else the recorded one. */
+  async tailLimit(runId: string): Promise<number | undefined> {
+    if (this.maxTailBytes !== undefined) return this.maxTailBytes;
+    // A journal that cannot be read must not change the verdict of a command: the default limit
+    // applies here, and `keepOutput` records the same failure as `output_error` instead of a file.
+    const settings = await this.outputSettings(runId).catch(() => undefined);
+    return settings?.enabled ? settings.maxKb * 1024 : undefined;
+  }
+
+  /**
+   * Keep what a command printed when the run asks for it. A write that fails is reported, never
+   * thrown: the verdict of the command stands, whatever happens to the file.
+   */
+  async keepOutput(
+    runId: string,
+    node: string,
+    attempt: number,
+    part: string,
+    result: CommandResult,
+  ): Promise<{ output?: OutputRef; output_error?: string }> {
+    try {
+      const settings = await this.outputSettings(runId);
+      if (!settings?.enabled) return {};
+      const kept = await this.store.writeArtifact(runId, node, attempt, part, result.tail);
+      return { output: { ...kept, truncated: result.truncated } };
+    } catch (error) {
+      // Short and without the folder: the journal is read by people and by other tools.
+      return {
+        output_error: redactText(
+          describeError(error).replaceAll(this.options.root, "."),
+          this.rules,
+        ).slice(0, 200),
+      };
+    }
+  }
+
+  /**
    * The active run for this task, or a new one. If the task already ran to its end, that run comes
    * back with `terminal: true` and nothing new starts, unless `restart` says the user wants another.
    */
@@ -295,6 +377,10 @@ export class LocalHost {
       pipelineCopy?: { path: string; text: string };
       /** The key of the task the run is for, already resolved by the tracker. */
       taskKey?: string;
+      /** Who the transport says is calling. */
+      caller?: Caller;
+      /** What the agent was given when it connected, for the `engine` record. */
+      surface?: ServedSurface;
     } = {},
   ): Promise<{ run: LocalRun; reused: boolean; terminal: boolean; workdir?: Workdir }> {
     const registry = this.engine.registry ?? defaultRegistry();
@@ -382,6 +468,14 @@ export class LocalHost {
         if (this.options.source !== undefined)
           await this.store.writeSpec(runId, specHash, this.options.source);
         const run = new LocalRun(this, runId);
+        const recordsExecutor = history?.executor.enabled === true;
+        const executor = recordsExecutor
+          ? await observeExecutor(options.caller, {
+              root: this.options.root,
+              dirs: [...(workdir ? [workdir.path] : []), this.options.root],
+              ...(this.options.environment === undefined ? {} : { env: this.options.environment }),
+            })
+          : undefined;
         // None without a repository or before the first commit.
         const baseCommit = workdir
           ? (workdir.base ?? (await readHead(workdir.path)))
@@ -399,6 +493,12 @@ export class LocalHost {
             : { pipelineFile: this.options.pipelineFile }),
           ...(options.taskKey === undefined ? {} : { taskKey: options.taskKey }),
           ...(history === undefined ? {} : { history }),
+          ...(executor === undefined
+            ? {}
+            : {
+                executor,
+                engine: engineRecord(this.options.build ?? UNKNOWN_BUILD, options.surface),
+              }),
           ...(baseCommit === undefined ? {} : { baseCommit }),
         });
         if (!result.ok) throw result.error;
@@ -1287,8 +1387,9 @@ export class LocalRun {
     timeout: number | undefined,
     step: { node: string; attempt: number },
     cwd: string,
+    maxTailBytes: number | undefined,
   ): CommandOptions {
-    const { rules, maxTailBytes } = this.host;
+    const { rules } = this.host;
     return {
       cwd,
       // Told only to a run that works somewhere other than the root: for the rest nothing changes.
@@ -1314,7 +1415,13 @@ export class LocalRun {
     const { specHash } = await this.state();
     const result = await this.host.runner(
       effect.command,
-      this.commandOptions(signal, effect.timeout, effect, cwd),
+      this.commandOptions(
+        signal,
+        effect.timeout,
+        effect,
+        cwd,
+        await this.host.tailLimit(this.runId),
+      ),
       {
         runId: this.runId,
         node: effect.node,
@@ -1328,6 +1435,13 @@ export class LocalRun {
       effect.expect,
       effect.timeout ?? DEFAULT_COMMAND_TIMEOUT_S,
     );
+    const kept = await this.host.keepOutput(
+      this.runId,
+      effect.node,
+      effect.attempt,
+      "command",
+      result,
+    );
     return {
       type: "work_finished",
       node: effect.node,
@@ -1336,6 +1450,7 @@ export class LocalRun {
       reason: verdict.reason,
       exit: result.exit,
       duration_ms: result.durationMs,
+      ...kept,
       specHash,
     };
   }
@@ -1345,7 +1460,7 @@ export class LocalRun {
     const started = Date.now();
     const cwd = await this.cwd();
     const { specHash } = await this.state();
-    const verdict: CheckVerdict = runner
+    const verdict: CheckVerdict & KeptOutput = runner
       ? await runner(effect, {
           runId: this.runId,
           signal,
@@ -1363,6 +1478,7 @@ export class LocalRun {
       reason: verdict.reason,
       ...(verdict.exit === undefined ? {} : { exit: verdict.exit }),
       duration_ms: Date.now() - started,
+      ...keptFields(verdict, this.host.rules),
       specHash,
     };
   }
@@ -1526,7 +1642,13 @@ export class LocalRun {
     return this.apply(deadOwners.length > 0 ? { type: "tick", deadOwners } : { type: "tick" });
   }
 
-  async completeStep(node: string, attempt: number, summary?: string, outcome?: string) {
+  async completeStep(
+    node: string,
+    attempt: number,
+    summary?: string,
+    outcome?: string,
+    caller?: Caller,
+  ) {
     // A change of the pipeline that waits for a person is met here: what the step is judged by may be
     // about to change, so it is not judged yet. The agent is told to wait for the person.
     const held = await this.pendingChange();
@@ -1539,6 +1661,7 @@ export class LocalRun {
         noop: true,
       } satisfies Decision;
     }
+    const executor = await this.executorNow(caller);
     // HEAD of the run's own directory: the root may be somewhere else entirely.
     const head = await this.cwd()
       .then(readHead)
@@ -1550,11 +1673,39 @@ export class LocalRun {
       ...(head === undefined ? {} : { head }),
       ...(summary === undefined ? {} : { summary }),
       ...(outcome === undefined ? {} : { outcome }),
+      ...(executor === undefined ? {} : executor),
     });
     if (!decision.ok) {
       await this.recordRefusal("complete_step", node, attempt, decision.error);
     }
     return decision;
+  }
+
+  /**
+   * Who is completing the step, and this engine's version, unless the run was started with
+   * `history.executor` off. A state that cannot be read here is left to `apply` to refuse.
+   */
+  private async executorNow(
+    caller: Caller | undefined,
+  ): Promise<{ executor: ExecutorRecord; engineVersion: string } | undefined> {
+    try {
+      const state = await this.state();
+      if (state.history?.executor.enabled !== true) return undefined;
+      const options = this.host.options;
+      return {
+        executor: await observeExecutor(caller, {
+          root: options.root,
+          dirs: [
+            ...(state.workdir === undefined ? [] : [await this.inProject(state.workdir)]),
+            options.root,
+          ],
+          ...(options.environment === undefined ? {} : { env: options.environment }),
+        }),
+        engineVersion: (options.build ?? UNKNOWN_BUILD).version,
+      };
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -1754,6 +1905,34 @@ export function doneHint(root: string, workdir: string, branch: string): string 
   ].join("\n");
 }
 
+/** A file name `writeArtifact` could have made: one level under artifacts/, no dot segments. */
+const ARTIFACT_REF = /^artifacts\/[A-Za-z0-9._-]+\.txt$/;
+const KEPT_TEXT_MAX = 2000;
+
+/**
+ * Only the shapes the journal expects from a check runner, whoever wrote the runner: texts are
+ * redacted and bounded, and a `ref` that does not name a file under artifacts/ is dropped.
+ */
+function keptFields(kept: KeptOutput, rules: RedactRule[]): KeptOutput {
+  const out = kept.output;
+  const text = (value: string) => redactText(value, rules).slice(0, KEPT_TEXT_MAX);
+  return {
+    ...(typeof kept.command === "string" ? { command: text(kept.command) } : {}),
+    ...(out &&
+    typeof out.ref === "string" &&
+    ARTIFACT_REF.test(out.ref) &&
+    !out.ref.includes("..") &&
+    Number.isInteger(out.bytes) &&
+    out.bytes >= 0 &&
+    typeof out.truncated === "boolean"
+      ? { output: { ref: out.ref, bytes: out.bytes, truncated: out.truncated } }
+      : {}),
+    ...(typeof kept.output_error === "string"
+      ? { output_error: text(kept.output_error).slice(0, 200) }
+      : {}),
+  };
+}
+
 function commandVerdict(
   result: CommandResult,
   expect: { exit: number },
@@ -1791,6 +1970,7 @@ function builtinCheckRunners(host: LocalHost): Record<string, CheckRunner> {
     async command(effect, context) {
       const command = String(effect.params.command);
       const timeout = (effect.params.timeout as number | undefined) ?? DEFAULT_COMMAND_TIMEOUT_S;
+      const maxTailBytes = await host.tailLimit(context.runId);
       const result = await host.runner(
         command,
         {
@@ -1805,7 +1985,7 @@ function builtinCheckRunners(host: LocalHost): Record<string, CheckRunner> {
           signal: context.signal,
           redact: (text) => redactText(text, host.rules),
           timeoutMs: timeout * 1000,
-          ...(host.maxTailBytes === undefined ? {} : { maxTailBytes: host.maxTailBytes }),
+          ...(maxTailBytes === undefined ? {} : { maxTailBytes }),
         },
         {
           runId: context.runId,
@@ -1816,11 +1996,22 @@ function builtinCheckRunners(host: LocalHost): Record<string, CheckRunner> {
           restart: effect.restart,
         },
       );
-      return commandVerdict(
+      const verdict = commandVerdict(
         result,
         (effect.params.expect as { exit: number } | undefined) ?? { exit: 0 },
         timeout,
       );
+      // Only a failed check keeps its output: a passing one has nothing to explain.
+      const kept = verdict.passed
+        ? {}
+        : await host.keepOutput(
+            context.runId,
+            effect.node,
+            effect.attempt,
+            `check${effect.index}`,
+            result,
+          );
+      return { ...verdict, command: redactText(command, host.rules), ...kept };
     },
 
     async result(effect, context) {

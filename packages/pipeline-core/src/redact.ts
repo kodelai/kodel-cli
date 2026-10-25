@@ -93,6 +93,23 @@ export function redactText(text: string, extra: RedactRule[] = []): string {
   return out.replace(ENTROPY_WORD, (word) => (looksRandom(word) ? tag("high-entropy") : word));
 }
 
+const PRIVATE_KEY_BEGIN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/;
+const PRIVATE_KEY_END = /-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/;
+
+/**
+ * For text whose beginning was cut off: a private key whose header went with the cut leaves its
+ * body and footer, which no rule matches. Everything up to such a footer is replaced; a footer that
+ * has its header in the text is left for `redactText`. Other secrets are short enough for the
+ * margin the caller keeps before the cut.
+ */
+export function redactCutPrivateKey(text: string): string {
+  const end = PRIVATE_KEY_END.exec(text);
+  if (!end) return text;
+  const begin = PRIVATE_KEY_BEGIN.exec(text);
+  if (begin && begin.index < end.index) return text;
+  return `${tag("private-key")}${text.slice(end.index + end[0].length)}`;
+}
+
 /** Redact every string inside a JSON-like value (keys are left alone). */
 export function redactDeep<T>(value: T, extra: RedactRule[] = []): T {
   if (typeof value === "string") return redactText(value, extra) as T;
