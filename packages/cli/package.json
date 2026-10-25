@@ -1,5 +1,5 @@
 {
-  "name": "kodel",
+  "name": "@kodel-ai/kodel",
   "version": "0.1.0",
   "description": "Kodel: a local MCP engine that runs spec-driven pipelines inside your coding agent",
   "license": "Apache-2.0",
