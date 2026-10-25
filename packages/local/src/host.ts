@@ -1421,8 +1421,14 @@ export class LocalRun {
 
   /** Where the time went and what was redone, from the run's own state and journal. */
   async report(): Promise<RunReport> {
-    const report = summarizeRun(await this.state(), await this.host.store.readJournal(this.runId));
-    const patch = await this.host.store.readRunPatch(this.runId);
+    const journal = await this.host.store.readJournal(this.runId);
+    const report = summarizeRun(await this.state(), journal);
+    // A run that did not record changes has no patch to measure, whatever file may be lying there.
+    const started = journal.find((r) => r.event === "run_started");
+    const changesOff =
+      (started?.history as { changes?: { enabled?: boolean } } | undefined)?.changes?.enabled ===
+      false;
+    const patch = changesOff ? undefined : await this.host.store.readRunPatch(this.runId);
     const sized: RunReport = {
       ...report,
       task_size: patch === undefined ? { not_collected: true } : measurePatch(patch),

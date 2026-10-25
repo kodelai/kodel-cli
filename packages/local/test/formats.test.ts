@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { cp, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -219,6 +219,22 @@ describe("every stored format is opened by the current engine", () => {
       expect(report?.checks).toEqual([]);
       expect(report?.task_size).toEqual({ not_collected: true });
     }
+  });
+
+  test("jspb_a_run_without_recorded_changes_is_not_sized_even_if_a_patch_lies_there", async () => {
+    await copyRuns("v1");
+    const [id] = Object.keys(V1_RUNS);
+    const dir = join(runsDir(), id as string);
+    const journal = join(dir, "journal.jsonl");
+    const lines = (await readFile(journal, "utf8")).split("\n");
+    const at = lines.findIndex((l) => l.includes('"run_started"'));
+    const started = JSON.parse(lines[at] as string);
+    lines[at] = JSON.stringify({ ...started, history: { changes: { enabled: false } } });
+    await writeFile(journal, lines.join("\n"));
+    await mkdir(join(dir, "changes"), { recursive: true });
+    await writeFile(join(dir, "changes", "run.patch"), "diff --git a/x b/x\n");
+    const report = await (await hostFor().open(id as string))?.report();
+    expect(report?.task_size).toEqual({ not_collected: true });
   });
 
   test("hp9r_v1_check_results_without_check_id_and_params_hash_are_read", async () => {

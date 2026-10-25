@@ -155,4 +155,47 @@ describe("jspb_task_size_from_patch_text", () => {
     expect(size.languages[0]).toEqual({ ext: "ts", files: 2 });
     expect(size.languages.map((l) => l.ext)).toContain("(none)");
   });
+
+  test("a patch cut off inside a hunk does not swallow the files after it", () => {
+    const one = (path: string) => [
+      `diff --git a/${path} b/${path}`,
+      `--- a/${path}`,
+      `+++ b/${path}`,
+      "@@ -1 +1 @@",
+      "-a",
+      "+b",
+    ];
+    const size = measurePatch(
+      patch(
+        "diff --git a/x.ts b/x.ts",
+        "--- a/x.ts",
+        "+++ b/x.ts",
+        "@@ -1,5 +1,5 @@",
+        "-a",
+        "+b",
+        ...one("y.ts"),
+        ...one("z.ts"),
+      ),
+    );
+    expect(size).toMatchObject({ files: 3, added: 3, removed: 3 });
+  });
+
+  test("a no-newline marker and a file with no content are not lines", () => {
+    const size = measurePatch(
+      patch(
+        "diff --git a/a.txt b/a.txt",
+        "--- a/a.txt",
+        "+++ b/a.txt",
+        "@@ -1 +1 @@",
+        "-a",
+        "\\ No newline at end of file",
+        "+b",
+        "\\ No newline at end of file",
+        "diff --git a/empty b/empty",
+        "new file mode 100644",
+        "index 0000000..e69de29",
+      ),
+    );
+    expect(size).toMatchObject({ files: 2, added: 1, removed: 1 });
+  });
 });

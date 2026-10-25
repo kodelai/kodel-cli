@@ -105,3 +105,12 @@ Names carry the task key (`jspb_...`).
   additive and optional where a reader of an old report may lack them.
 - A huge or hostile patch: the parser is single pass, constant memory per line, no regex backtracking.
 - `report --all` (several runs) is explicitly out of scope: it comes with the failure-codes task.
+
+## Notes from implementation
+
+- `readRunPatch` lives only on `FileStore` (not in `backend.ts`): the host already depends on the concrete
+  store, and a server backend has no use for it until it keeps patches too.
+- `report()` answers `not_collected` when the journaled `run_started.history.changes.enabled` is false,
+  even if a `changes/run.patch` is lying there.
+- A `wrong_check` note counts only for a `check_id` that has a `check_finished` row; a mistyped id is not a check.
+- The patch parser ends a hunk at the next `diff --git ` line, so a truncated patch loses only the cut file.

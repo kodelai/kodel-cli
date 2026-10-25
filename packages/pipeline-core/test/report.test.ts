@@ -203,9 +203,14 @@ describe("jspb_report_per_check", () => {
     expect(rows[0]?.wrong_check).toBe(2);
   });
 
-  test("a note about a check that never ran still has a row, and the kind is filled in later", () => {
-    const rows = checksOf(note("wrong_check", "late"), finished("late", true, undefined, "diff"));
-    expect(rows[0]).toMatchObject({ check_id: "late", kind: "diff", runs: 1, wrong_check: 1 });
+  test("a note naming a check that never ran is not a check and gets no row", () => {
+    const rows = checksOf(note("wrong_check", "typo"), finished("real", true));
+    expect(rows.map((r) => [r.check_id, r.wrong_check])).toEqual([["real", 0]]);
+  });
+
+  test("a check that is gone from the pipeline keeps its row from the journal", () => {
+    const rows = checksOf(finished("old", false, "h1"), finished("new", true, "h9"));
+    expect(rows.map((r) => r.check_id)).toEqual(["old", "new"]);
   });
 
   test("no checks, and a journal from before check_id, give no rows", () => {

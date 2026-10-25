@@ -23,7 +23,17 @@ interface FileEntry {
   binary: boolean;
 }
 
-const SIMPLE_ESCAPES: Record<string, number> = { n: 10, t: 9, r: 13, '"': 34, "\\": 92 };
+const SIMPLE_ESCAPES: Record<string, number> = {
+  a: 7,
+  b: 8,
+  f: 12,
+  n: 10,
+  r: 13,
+  t: 9,
+  v: 11,
+  '"': 34,
+  "\\": 92,
+};
 
 /** Git quotes a path with special characters in C style: `"a/\303\244"` with octal bytes. */
 function unquote(text: string): string {
@@ -88,6 +98,11 @@ export function measurePatch(patch: string): TaskSize {
     const line = patch.slice(from, end === -1 ? patch.length : end);
     from = end === -1 ? patch.length + 1 : end + 1;
 
+    // A patch cut off inside a hunk must not swallow the files after it.
+    if ((oldLeft > 0 || newLeft > 0) && line.startsWith("diff --git ")) {
+      oldLeft = 0;
+      newLeft = 0;
+    }
     if (oldLeft > 0 || newLeft > 0) {
       const mark = line.charAt(0);
       if (mark === "+") {

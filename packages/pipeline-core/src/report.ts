@@ -93,7 +93,10 @@ export interface RunReport {
   extra_attempts: number;
   /** The versions of the pipeline a person accepted while the run went, in order. */
   pipeline_changes: PipelineChangeReport[];
-  /** Per check, in the order each first ran. Checks removed from the pipeline keep their row. */
+  /**
+   * Per check, in the order each first ran. Checks removed from the pipeline keep their row. A
+   * `check_id` is positional, so a check inserted or moved mid-run shares its row with the one it displaced.
+   */
   checks: CheckReport[];
   /** Added by a host that can read the run's patch; absent when the report is made from the journal alone. */
   task_size?: TaskSizeReport;
@@ -285,7 +288,9 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
       case "feedback_reported":
         feedback += 1;
         if (record.category === "wrong_check" && typeof record.check === "string") {
-          checkOf(record.check, "unknown", name).wrong_check += 1;
+          // only a check that ran has a row: a mistyped id is not a check
+          const row = checks.get(record.check);
+          if (row) row.wrong_check += 1;
         }
         break;
     }
