@@ -68,28 +68,53 @@ const json = async (rel: string) => JSON.parse(await read(rel));
 const KODEL_CONFIG = ".kodel/config.yaml";
 
 describe("kodel init", () => {
-  test("claude_code_gets_the_server_the_permission_and_the_config", async () => {
+  test("claude_code_gets_the_server_and_the_config_but_no_permission", async () => {
     const { code, out } = await init({}, "--agent", "claude-code");
     expect(code).toBe(0);
     expect((await json(".mcp.json")).mcpServers.kodel).toEqual({ command: "kodel", args: ["mcp"] });
-    const settings = await json(".claude/settings.json");
-    expect(settings.enabledMcpjsonServers).toEqual(["kodel"]);
-    expect(settings.permissions.allow).toEqual(["mcp__kodel"]);
+    await expect(read(".claude/settings.json")).rejects.toThrow();
+    const local = await read(".claude/settings.local.json");
+    expect(local).not.toContain("enabledMcpjsonServers");
+    expect(local).not.toContain("mcp__kodel");
     expect(await read(KODEL_CONFIG)).toContain("enabled: false");
     expect(await read(".gitignore")).toContain("/.kodel/runs");
     expect(out).toContain("created");
+
+    await rm(join(dir, ".claude"), { recursive: true });
+    await init({}, "--agent", "claude-code", "--no-hooks");
+    await expect(read(".claude/settings.json")).rejects.toThrow();
+    await expect(read(".claude/settings.local.json")).rejects.toThrow();
+  });
+
+  test("init_tells_the_person_to_enable_the_server_and_allow_its_tools", async () => {
+    const { out } = await init({}, "--agent", "claude-code");
+    expect(out).toContain("note: Claude Code:");
+    expect(out).toContain("enabledMcpjsonServers");
+    expect(out).toContain("mcp__kodel");
+    expect(out).toContain("settings.local.json");
+
+    const others = await init({}, "--agent", "codex,opencode");
+    expect(others.out).not.toContain("enabledMcpjsonServers");
+    expect(others.out).not.toContain("mcp__kodel");
+
+    const mixed = await init({}, "--agent", "claude-code,codex");
+    expect(mixed.out.split("mcp__kodel").length - 1).toBe(1);
+    expect((await init({}, "--agent", "claude-code", "--dry-run")).out).toContain("mcp__kodel");
+  });
+
+  test("the_next_line_asks_to_approve_the_server_for_claude_code", async () => {
+    expect((await init({}, "--agent", "claude-code")).out).toContain(
+      "next: approve the kodel server",
+    );
+    const codexOnly = await init({}, "--agent", "codex");
+    expect(codexOnly.out).toContain("next: restart the agent");
+    expect(codexOnly.out).not.toContain("approve");
   });
 
   test("a_second_run_changes_nothing", async () => {
     const args = ["--agent", "claude-code,codex,opencode"];
     await init({}, ...args);
-    const files = [
-      ".mcp.json",
-      ".claude/settings.json",
-      ".codex/config.toml",
-      "opencode.json",
-      ".gitignore",
-    ];
+    const files = [".mcp.json", ".codex/config.toml", "opencode.json", ".gitignore"];
     const before = await Promise.all(files.map(read));
     const again = await init({}, ...args);
     expect(await Promise.all(files.map(read))).toEqual(before);
@@ -107,12 +132,10 @@ describe("kodel init", () => {
       JSON.stringify({ permissions: { allow: ["Bash(ls)"], deny: ["Read(.env)"] }, model: "m" }),
     );
     await writeFile(join(dir, ".gitignore"), "node_modules\n");
+    const mineSettings = await read(".claude/settings.json");
     await init({}, "--agent", "claude-code");
     expect(Object.keys((await json(".mcp.json")).mcpServers)).toEqual(["other", "kodel"]);
-    const settings = await json(".claude/settings.json");
-    expect(settings.model).toBe("m");
-    expect(settings.permissions.allow).toEqual(["Bash(ls)", "mcp__kodel"]);
-    expect(settings.permissions.deny).toEqual(["Read(.env)"]);
+    expect(await read(".claude/settings.json")).toBe(mineSettings);
     expect(await read(".gitignore")).toMatch(/^node_modules\n\n# Kodel/);
   });
 
@@ -141,6 +164,17 @@ describe("kodel init", () => {
     expect((await json("opencode.json")).mcp.kodel.command).toEqual(["kodel", "mcp"]);
   });
 
+  test("an_old_grant_written_by_an_earlier_init_stays", async () => {
+    await mkdir(join(dir, ".claude"));
+    const old = JSON.stringify({
+      enabledMcpjsonServers: ["kodel"],
+      permissions: { allow: ["mcp__kodel"] },
+    });
+    await writeFile(join(dir, ".claude/settings.json"), old);
+    await init({}, "--agent", "claude-code");
+    expect(await read(".claude/settings.json")).toBe(old);
+  });
+
   test("settings_are_not_touched_when_the_server_entry_is_kept", async () => {
     await writeFile(
       join(dir, ".mcp.json"),
@@ -148,16 +182,19 @@ describe("kodel init", () => {
     );
     const { out } = await init({}, "--agent", "claude-code");
     await expect(read(".claude/settings.json")).rejects.toThrow();
-    expect(out).toContain("settings.json was not changed either");
+    expect(out).not.toContain("mcp__kodel");
+    expect(out).toContain("a different");
   });
 
-  test("a_value_of_the_wrong_type_is_not_replaced", async () => {
-    await mkdir(join(dir, ".claude"));
-    const mine = JSON.stringify({ permissions: { allow: "Bash(ls)" } });
-    await writeFile(join(dir, ".claude/settings.json"), mine);
+  test("no_enable_hint_when_mcp_json_is_not_plain_json", async () => {
+    await writeFile(join(dir, ".mcp.json"), '{ // mine\n "mcpServers": {} }');
+    const { out } = await init({}, "--agent", "claude-code");
+    expect(out).not.toContain("mcp__kodel");
+  });
+
+  test("a_json_value_of_the_wrong_type_is_not_replaced", async () => {
     await writeFile(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: [] }));
     const { out } = await init({}, "--agent", "claude-code");
-    expect(await read(".claude/settings.json")).toBe(mine);
     expect(await read(".mcp.json")).toBe(JSON.stringify({ mcpServers: [] }));
     expect(out).toContain("is not an object");
   });
@@ -283,7 +320,13 @@ describe("kodel init", () => {
 describe("skills", () => {
   const skill: Skill = { name: "kodel-x", text: "---\nname: kodel-x\n---\nbody\n" };
   const claude = AGENTS[0] as (typeof AGENTS)[number];
-  const ctx = (force = false) => ({ root: dir, dryRun: false, force, changes: [] as Change[] });
+  const ctx = (force = false) => ({
+    root: dir,
+    dryRun: false,
+    force,
+    changes: [] as Change[],
+    hints: [] as string[],
+  });
   const file = ".claude/skills/kodel-x/SKILL.md";
 
   const launcher = () => SKILLS.find((s) => s.name === "kodel-run")?.text ?? "";

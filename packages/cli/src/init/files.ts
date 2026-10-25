@@ -21,6 +21,8 @@ export interface Context {
   /** Overwrite a file that is not ours, or that someone edited. */
   force: boolean;
   changes: Change[];
+  /** What the person has to do by hand afterwards; printed as `note:` lines. */
+  hints: string[];
 }
 
 /** The new text of a file, or the reason it is left as it is. */
