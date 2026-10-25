@@ -210,7 +210,13 @@ describe("vh9g history: the Claude Code reading of a session", () => {
     const collector = claudeCodeCollector({ configDir });
     for (const ref of await collector.locate(root)) {
       const text = (await collect(collector.read(ref)))
-        .map((e) => JSON.stringify(e).replaceAll(root, "__CWD__"))
+        // Whether the redactor takes the temporary path for a random token depends on where the
+        // test runs (its length, the characters of mkdtemp); the golden holds the redacted form.
+        .map((e) =>
+          JSON.stringify(e)
+            .replaceAll(root, "__CWD__")
+            .replace('"cwd":"__CWD__"', '"cwd":"[REDACTED:high-entropy]"'),
+        )
         .join("\n");
       const file = join(
         GOLDEN,
