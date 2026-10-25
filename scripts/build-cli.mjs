@@ -6,13 +6,16 @@ import { fileURLToPath } from "node:url";
 
 const cli = join(dirname(fileURLToPath(import.meta.url)), "..", "packages", "cli");
 
+const git = (args) =>
+  execFileSync("git", args, { cwd: cli, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+
+// A build from files that are not committed says so, so two different builds do not share a commit.
 const commit = (() => {
   try {
-    return execFileSync("git", ["rev-parse", "--short=12", "HEAD"], {
-      cwd: cli,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    const head = git(["rev-parse", "--short=12", "HEAD"]).trim();
+    return git(["status", "--porcelain", "--untracked-files=no"]).trim() === ""
+      ? head
+      : `${head}-dirty`;
   } catch {
     return "unknown";
   }

@@ -36,7 +36,7 @@ if (version === "0.0.0" || pkg.version === "0.0.0")
 if (version !== pkg.version) fail(`--version printed "${version}", expected "${pkg.version}"`);
 
 // The commit comes from scripts/build-cli.mjs; an artifact built another way would record `dev`.
-const stamped = /BUILD_COMMIT = "([^"]+)"/.exec(readFileSync(artifact, "utf8"))?.[1];
+const stamped = /BUILD_COMMIT\s*=\s*"([^"]+)"/.exec(readFileSync(artifact, "utf8"))?.[1];
 if (stamped === undefined || stamped === "dev")
   fail("the artifact has no commit stamped in it: build it with `bun run build`");
 

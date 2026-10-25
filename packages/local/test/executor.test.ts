@@ -13,7 +13,7 @@ import {
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { LocalPipelineHost } from "../src";
+import { engineRecord, LocalPipelineHost, modelFromLog } from "../src";
 import { projectFolderName } from "../src/history/claude-code/locate";
 
 const PIPELINE = [
@@ -322,6 +322,78 @@ describe("the switch history.executor", () => {
     expect(completed[0]).not.toHaveProperty("executor");
     expect(text).not.toContain("s-3");
     expect(text).not.toContain("9.1.0");
+    await close();
+  });
+});
+
+describe("what the host will not trust or cannot read", () => {
+  test("t5btp_a_directory_the_agent_names_does_not_choose_the_session", async () => {
+    const other = await mkdtemp(join(tmpdir(), "kodel-other-"));
+    await writeFile(
+      join(dir, ".kodel", "sessions.jsonl"),
+      `${JSON.stringify({ session_id: "theirs", agent: "claude-code", cwd: other, ts: "2026-01-01T00:00:00.000Z" })}\n`,
+    );
+    const host = newHost();
+    const { call, close } = await connect(host);
+    const started = await call("pipeline_start", { task: "t", pipeline: "two", cwd: other });
+    const { started: record } = await records(host, started.run_id);
+    expect(record?.executor).not.toHaveProperty("session");
+    await close();
+    await rm(other, { recursive: true, force: true });
+  });
+
+  test("t5btp_a_session_id_that_is_not_an_id_is_never_put_into_a_path", async () => {
+    await transcript("x", [{ type: "assistant", message: { model: "claude-test-1" } }]);
+    const host = newHost({
+      environment: { CLAUDE_CONFIG_DIR: claude, CLAUDE_CODE_SESSION_ID: "../x" },
+    });
+    const { call, close } = await connect(host);
+    const { started } = await records(host, await startRun(call));
+    expect(started?.executor).not.toHaveProperty("model");
+    await close();
+  });
+
+  test("t5btp_a_config_dir_that_cannot_be_read_does_not_fail_the_start", async () => {
+    const host = newHost({
+      environment: { CLAUDE_CONFIG_DIR: "/dev/null/nope\u0000", CLAUDE_CODE_SESSION_ID: "s-9" },
+    });
+    const { call, close } = await connect(host);
+    const runId = await startRun(call);
+    const { started } = await records(host, runId);
+    expect(started?.executor.client?.value.name).toBe("agent");
+    await close();
+  });
+
+  test("t5btp_the_model_follows_the_log_when_the_log_grows", async () => {
+    await transcript("s-5", [{ type: "assistant", message: { model: "claude-test-1" } }]);
+    const path = join(claude, "projects", projectFolderName(dir), "s-5.jsonl");
+    expect(await modelFromLog(path)).toBe("claude-test-1");
+    await writeFile(
+      path,
+      `${JSON.stringify({ type: "assistant", message: { model: "claude-test-1" } })}\n${JSON.stringify({ type: "assistant", message: { model: "claude-test-2" } })}\n`,
+    );
+    expect(await modelFromLog(path)).toBe("claude-test-2");
+  });
+
+  test("t5btp_without_what_the_agent_was_served_the_engine_record_has_no_hashes", () => {
+    const record = engineRecord(BUILD, undefined);
+    expect(record).toEqual({
+      version: "1.2.3",
+      commit: "abc123def456",
+      record_version: 1,
+      meta_version: 2,
+    });
+  });
+
+  test("t5btp_a_run_with_executor_records_is_reported_like_any_other", async () => {
+    const host = newHost({
+      environment: { CLAUDE_CONFIG_DIR: claude, CLAUDE_CODE_SESSION_ID: "s-6" },
+    });
+    const { call, close } = await connect(host);
+    const runId = await startRun(call);
+    await call("pipeline_complete_step", { run_id: runId, node_slug: "a", attempt: 1 });
+    const report = await (await host.open(runId))?.report();
+    expect(report?.runId).toBe(runId);
     await close();
   });
 });

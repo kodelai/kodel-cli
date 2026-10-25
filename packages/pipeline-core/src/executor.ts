@@ -45,11 +45,12 @@ export interface EngineRecord {
   commit: string;
   record_version: number;
   meta_version: number;
-  contract_version: number;
+  /** The three below are there when the host knows what the agent was served. */
+  contract_version?: number;
   /** Hash of the instructions the agent was given when it connected. */
-  instructions_hash: string;
+  instructions_hash?: string;
   /** Hash of the tools the agent was given: names, descriptions and arguments. */
-  tools_hash: string;
+  tools_hash?: string;
 }
 
 /** Longest value kept from outside: a name or an id is short, and a long one is an attack or a bug. */
@@ -88,7 +89,10 @@ export function sameExecutor(
   return stableJson(a ?? null) === stableJson(b ?? null);
 }
 
-/** The text a hash of the tools is made of: what the agent reads of them, in a fixed order. */
+/**
+ * The text a hash of the tools is made of: what the agent reads of them, in a fixed order. The type name
+ * is zod v3's own (the project is pinned to v3); a field without one still hashes, as `unknown`.
+ */
 export function toolsFingerprint(
   tools: readonly { name: string; description: string; shape: z.ZodRawShape }[],
 ): string {
@@ -100,7 +104,7 @@ export function toolsFingerprint(
         .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
         .map(([name, field]) => ({
           name,
-          type: field._def.typeName,
+          type: (field._def as { typeName?: string }).typeName ?? "unknown",
           optional: field.isOptional(),
           description: field.description ?? "",
         })),

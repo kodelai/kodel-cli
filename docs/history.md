@@ -156,5 +156,6 @@ is `{ value, source }`, and a part that cannot be observed is left out, never gu
 | `derived` | read out of the session's own log (the model of its last answer) |
 
 Strings from outside are stripped of control characters and cut at 200 characters, and the store redacts them like
-everything else it writes. `instructions_hash` and `tools_hash` change when the instructions or a tool (its name,
+everything else it writes. `contract_version`, `instructions_hash` and `tools_hash` are there when the host knows what
+the agent was served; they change when the instructions or a tool (its name,
 description or arguments) change. With `history.executor: false` none of these fields is written.

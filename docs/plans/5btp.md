@@ -142,6 +142,19 @@ and the report
 - `RunState` gained two optional fields (`history`, `engineVersion`) so `completeStep` knows the switch and the
   version the run began on; old states read as before.
 - Not done: the real-agent test in `tests/agents` (needs a Claude Code run on the person's machine). The
-  handshake, session, model, switch, two-clients and upgraded-engine cases are covered with the real local host.
+  handshake, session, model, switch, two-clients and upgraded-engine cases are covered with the real local host,
+  and `packages/cli/test/executor.test.ts` drives the real `createServer` (client from the handshake, hashes of
+  what it serves). The adversarial case is the scenario `feature/agent-claims-an-executor` in the testkit plus a
+  local test that the journal holds none of the claimed values. The golden fixtures of `fixtures/formats/v1` are
+  opened by `formats.test.ts` (unchanged and passing); the new state fields are optional.
+- After the review: the agent's `cwd` argument is no longer used to look for the session (only the directories the
+  host chose); the hook index is read from its tail and a session log is re-read only when it changed; the whole
+  observation never fails the call (it falls back to what it has); a session id that is not an id is never put in
+  a path; `contract_version` and the two hashes are left out when the host was not given what the agent was served
+  (no made-up zero); a build from uncommitted files is stamped `<commit>-dirty`.
+- Left as it is: the source `declared` is defined for the later tasks that read the project config, and
+  `engine_version` on a step records the version only (the commit is in `run_started.engine`).
+- Plan wording that the code does not follow: "hook session preferred over env" in the host tests; the code takes
+  the environment first (see above), and the tests say so.
 - The version is now `0.1.0` in `packages/cli/package.json` (and `bun.lock`); `scripts/build-cli.mjs` stamps the
   commit, and `check-artifact` fails on `0.0.0` and on an artifact with no commit stamped.

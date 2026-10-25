@@ -382,11 +382,7 @@ export class LocalHost {
         const executor = recordsExecutor
           ? await observeExecutor(options.caller, {
               root: this.options.root,
-              dirs: [
-                ...(options.cwd === undefined ? [] : [options.cwd]),
-                ...(workdir ? [workdir.path] : []),
-                this.options.root,
-              ],
+              dirs: [...(workdir ? [workdir.path] : []), this.options.root],
               ...(this.options.environment === undefined ? {} : { env: this.options.environment }),
             })
           : undefined;
