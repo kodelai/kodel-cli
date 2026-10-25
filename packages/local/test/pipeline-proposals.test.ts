@@ -359,6 +359,6 @@ describe("a record that cannot be trusted", () => {
     expect(await store.createFile(path, "first")).toBe(true);
     expect(await store.createFile(path, "second")).toBe(false);
     expect(await readFile(path, "utf8")).toBe("first");
-    expect(await written()).toEqual(["demo.yaml", "exclusive.yaml"]); // no temporary file is left
+    expect((await written()).sort()).toEqual(["demo.yaml", "exclusive.yaml"]); // no temporary file is left
   });
 });
