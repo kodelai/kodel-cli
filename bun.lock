@@ -16,12 +16,15 @@
       "version": "0.0.0",
       "bin": {
         "kodel": "dist/kodel.js",
+        "kodel-hook": "dist/kodel-hook.js",
       },
       "dependencies": {
-        "@kodel-ai/local": "workspace:*",
-        "@kodel-ai/pipeline-core": "workspace:*",
         "@modelcontextprotocol/sdk": "^1.31.0",
         "commander": "^14.0.0",
+      },
+      "devDependencies": {
+        "@kodel-ai/local": "workspace:*",
+        "@kodel-ai/pipeline-core": "workspace:*",
       },
     },
     "packages/local": {
