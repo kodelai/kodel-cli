@@ -128,8 +128,16 @@ No repository (or an unborn branch) means no such fields. Old runs have none of 
 
 - All new tests are in `packages/local/test/run-commits.test.ts` (git helpers, base commit, end-to-end journal,
   event unit tests, hardening) instead of being spread over `worktree.test.ts`, `git.test.ts`, `host.test.ts` and
-  `hardening.test.ts`; the cases listed above are all covered there. The cap test builds 203 commits with one
-  `git fast-import`.
+  `hardening.test.ts`. They cover: base commit at start (new worktree, reused one, mode off, detached HEAD, no
+  repository, no commit, root HEAD moved afterwards); two commits, amend, reset, no commits, detached HEAD, renamed
+  and deleted branch, reflog off, a real shallow clone, cap; that only the end of a run runs `rev-list`/`reflog`
+  (a `git` shim in `PATH` records the calls); that repository hooks and config programs (`core.fsmonitor`,
+  `log.showSignature` + `gpg.program`, `core.pager`, `post-checkout`, `reference-transaction`, `post-commit`) do not
+  run; that the golden v1 runs carry none of the fields (`formats.test.ts` opens them with `status`/`report`).
+  The cap test builds 203 commits with one `git fast-import`.
+- The reflog lists where HEAD went, so commits the agent only checked out or merged in are listed with its own
+  (the code comment says so). The reflog read is limited to 800 entries; `commits_truncated` is also set when that
+  limit cuts into the run.
 - `decide` takes the facts as a sixth argument (`RunFacts`), not inside `EngineOptions`, since they belong to one
   call, not to the engine.
 - The run's journal is read once at the end of a run to find `run_started.base_commit`; the state does not carry it.

@@ -1,8 +1,19 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { decide, parsePipeline } from "@kodel-ai/pipeline-core";
 import {
   LocalPipelineHost,
@@ -127,6 +138,37 @@ describe("reading the commits of a run", () => {
     expect(await readRunCommits(dir, base, past)).toEqual({ head: one, commits: [one] });
   });
 
+  test("t4r84_a_branch_deleted_by_the_agent_changes_nothing", async () => {
+    const dir = await makeRepo();
+    const base = head(dir);
+    const branch = git(dir, "branch", "--show-current");
+    git(dir, "checkout", "-q", "--detach");
+    git(dir, "branch", "-q", "-D", branch);
+    commit(dir, "on nothing");
+    const tip = head(dir);
+    expect(await readRunCommits(dir, base, past)).toEqual({ head: tip, commits: [tip] });
+  });
+
+  test("t4r84_a_shallow_clone_is_read_like_any_other_repository", async () => {
+    const source = await makeRepo();
+    commit(source, "two");
+    commit(source, "three");
+    const dir = await makeDir();
+    git(dir, "clone", "-q", "--depth", "1", `file://${source}`, "clone");
+    const clone = join(dir, "clone");
+    git(clone, "config", "user.email", "t@example.com");
+    git(clone, "config", "user.name", "T");
+    const base = head(clone);
+    commit(clone, "mine");
+    const mine = head(clone);
+    expect(await readRunCommits(clone, base, past)).toEqual({ head: mine, commits: [mine] });
+    // a base that lies beyond the shallow boundary is unknown here: nothing throws
+    const beyond = git(source, "rev-parse", "HEAD~2");
+    const found = await readRunCommits(clone, beyond, past);
+    expect(found.head).toBe(mine);
+    expect(found.commits).toContain(mine);
+  });
+
   test("t4r84_a_base_the_repository_does_not_have_leaves_head_alone", async () => {
     const dir = await makeRepo();
     const found = await readRunCommits(dir, "0".repeat(40), past);
@@ -249,6 +291,7 @@ describe("the base commit of a run", () => {
     // the person moves HEAD in the root while the run is going
     commit(root, "person's own");
     const started = (await readJournal(root, run.runId)).find((r) => r.event === "run_started");
+    expect(head(root)).not.toBe(before);
     expect(started?.base_commit).toBe(before);
     expect(git(root, "rev-parse", `kodel/${run.runId}`)).toBe(before);
     expect(head(workdir?.path ?? root)).toBe(before);
@@ -276,6 +319,18 @@ describe("the base commit of a run", () => {
     const { run } = await startAgent(host);
     const started = (await readJournal(root, run)).find((r) => r.event === "run_started");
     expect(started?.base_commit).toBe(head(root));
+  });
+
+  test("t4r84_a_detached_head_at_start_is_the_base", async () => {
+    const root = await projectWith(true);
+    commit(root, "second");
+    git(root, "checkout", "-q", "--detach", "HEAD~1");
+    const detached = head(root);
+    const host = hostFor(root);
+    const { run } = await startAgent(host);
+    const started = (await readJournal(root, run)).find((r) => r.event === "run_started");
+    expect(started?.base_commit).toBe(detached);
+    expect(git(root, "rev-parse", `kodel/${run.runId}`)).toBe(detached);
   });
 
   test("t4r84_no_repository_means_no_field", async () => {
@@ -432,5 +487,114 @@ describe("the events carry the fields", () => {
     const finished = done.journal.find((r) => r.event === "run_finished") ?? {};
     expect(Object.keys(finished).sort()).toEqual(["event", "seq", "status", "ts", "v"]);
     expect("head" in (done.journal.find((r) => r.event === "agent_completed") ?? {})).toBe(false);
+  });
+});
+
+const TWO_STEPS = [
+  "name: two",
+  "nodes:",
+  "  - slug: a",
+  "    kind: agent",
+  "    prompt: first",
+  "  - slug: b",
+  "    kind: agent",
+  "    prompt: second",
+  "edges:",
+  "  - { from: a, to: b }",
+  "",
+].join("\n");
+
+describe("when git is asked for the commits of a run", () => {
+  test("t4r84_only_the_end_of_a_run_reads_the_commits", async () => {
+    const root = await projectWith(true);
+    await writeFile(join(root, ".kodel", "pipelines", "two.yaml"), TWO_STEPS);
+    // a git that writes down what it was asked, then does it
+    const shim = await makeDir();
+    const log = join(shim, "calls.log");
+    const real = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    await writeFile(join(shim, "git"), `#!/bin/sh\necho "$@" >> "${log}"\nexec "${real}" "$@"\n`);
+    await chmod(join(shim, "git"), 0o755);
+    const calls = async () => (await readFile(log, "utf8").catch(() => "")).split("\n");
+    const reads = async () =>
+      (await calls()).filter((c) => c.includes("rev-list") || c.includes("reflog"));
+
+    const previous = process.env.PATH;
+    process.env.PATH = `${shim}:${previous}`;
+    try {
+      const host = hostFor(root);
+      const out = await host.start({ pipeline: "two", task: "t", restart: false });
+      const run = out.run as LocalRun;
+      await run.tick();
+      expect((await run.state()).status).toBe("running");
+      const first = await run.completeStep("a", (await run.state()).nodes.a?.attempt ?? 1, "a");
+      expect(first.ok).toBe(true);
+      await run.tick();
+      expect((await run.state()).status).toBe("running");
+      expect(await reads()).toEqual([]);
+
+      const last = await run.completeStep("b", (await run.state()).nodes.b?.attempt ?? 1, "b");
+      expect(last.ok).toBe(true);
+      await run.settle();
+      expect((await run.state()).status).toBe("completed");
+      expect((await reads()).length).toBeGreaterThan(0);
+      // a repeat of the last step ends nothing and reads nothing more
+      const seen = (await reads()).length;
+      await run.completeStep("b", 1, "b");
+      expect((await reads()).length).toBe(seen);
+    } finally {
+      process.env.PATH = previous;
+    }
+  });
+});
+
+describe("the start and the end of a run cannot make a repository run something", () => {
+  test("t4r84_hardening_hooks_of_the_repository_do_not_run_on_start_or_on_the_end_of_a_run", async () => {
+    const root = await projectWith(true);
+    const marker = join(root, "hook-ran");
+    for (const name of ["post-checkout", "reference-transaction", "post-commit"]) {
+      const path = join(root, ".git", "hooks", name);
+      await mkdir(join(root, ".git", "hooks"), { recursive: true });
+      await writeFile(path, `#!/bin/sh\ntouch "${marker}"\n`);
+      await chmod(path, 0o755);
+    }
+    git(root, "config", "core.fsmonitor", join(root, ".git", "hooks", "post-checkout"));
+    const host = hostFor(root);
+    const { run } = await startAgent(host);
+    await run.completeStep("write", 1, "done");
+    await run.settle();
+    expect((await run.state()).status).toBe("completed");
+    await expect(stat(marker)).rejects.toThrow();
+  });
+});
+
+describe("runs written before these fields", () => {
+  test("t4r84_the_golden_runs_have_none_of_the_fields_and_still_open", async () => {
+    const formats = resolve(
+      fileURLToPath(import.meta.url),
+      "..",
+      "..",
+      "..",
+      "..",
+      "fixtures",
+      "formats",
+      "v1",
+    );
+    const ids = (await readdir(formats, { withFileTypes: true }))
+      .filter((e) => e.isDirectory() && e.name.startsWith("r_"))
+      .map((e) => e.name);
+    expect(ids.length).toBeGreaterThan(0);
+    for (const id of ids) {
+      const text = await readFile(join(formats, id, "journal.jsonl"), "utf8");
+      const records = text
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+      for (const r of records) {
+        for (const key of ["base_commit", "head", "commits", "commits_truncated"]) {
+          expect(key in r).toBe(false);
+        }
+      }
+    }
+    // opening them with `status` and `report` is formats.test.ts's job, and it runs on these same files
   });
 });

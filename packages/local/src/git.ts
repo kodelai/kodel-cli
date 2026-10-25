@@ -83,6 +83,8 @@ export function git(
 /** The most commits a run's journal names; the rest is counted as cut off. */
 export const MAX_RUN_COMMITS = 200;
 
+const MAX_REFLOG_ENTRIES = MAX_RUN_COMMITS * 4;
+
 const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 
 /** The commit HEAD points at in `cwd`; none for no repository, no git, or a branch without commits. */
@@ -108,8 +110,9 @@ export interface RunCommits {
  * HEAD of `cwd` and the commits made since `base`: first those reachable from HEAD, then the ones
  * the HEAD reflog shows were left behind (amended, reset away). The reflog of a worktree is its own;
  * in the repository root it also holds older moves, so only entries from `sinceSeconds` on count.
- * With the reflog off or expired the first part stands alone. Nothing here throws: these facts are
- * a record, they never fail a step.
+ * With the reflog off or expired the first part stands alone. The reflog also shows where HEAD went
+ * by a checkout or a merge, so commits the agent only moved onto are listed with its own. Nothing
+ * here throws: these facts are a record, they never fail a step.
  */
 export async function readRunCommits(
   cwd: string,
@@ -137,6 +140,7 @@ export async function readRunCommits(
   } catch {
     // base unknown to this repository (a shallow clone, say): the reflog may still tell
   }
+  let reflogCut = false;
   try {
     const { stdout } = await git(
       [
@@ -144,21 +148,27 @@ export async function readRunCommits(
         "show",
         "--date=unix",
         "--format=%H %gd",
-        `--max-count=${MAX_RUN_COMMITS * 4}`,
+        `--max-count=${MAX_REFLOG_ENTRIES}`,
         "HEAD",
       ],
       cwd,
       env,
     );
-    for (const line of stdout.split("\n")) {
+    const rows = stdout.split("\n").filter(Boolean);
+    let oldest = Number.POSITIVE_INFINITY;
+    for (const line of rows) {
       const [sha, selector] = line.trim().split(" ");
       const at = Number(/@\{(\d+)\}$/.exec(selector ?? "")?.[1]);
-      if (Number.isFinite(at) && at >= sinceSeconds) add(sha);
+      if (!Number.isFinite(at)) continue;
+      oldest = Math.min(oldest, at);
+      if (at >= sinceSeconds) add(sha);
     }
+    // Cut only if what was read still reaches back into the run; older entries are not the run's.
+    reflogCut = rows.length >= MAX_REFLOG_ENTRIES && oldest >= sinceSeconds;
   } catch {
     // no reflog (core.logAllRefUpdates=false, or nothing yet)
   }
-  const truncated = commits.length > MAX_RUN_COMMITS;
+  const truncated = commits.length > MAX_RUN_COMMITS || reflogCut;
   return { head, commits: commits.slice(0, MAX_RUN_COMMITS), ...(truncated ? { truncated } : {}) };
 }
 
