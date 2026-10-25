@@ -191,6 +191,7 @@ export function formatReport(
       const how = change.source === "proposal" ? "the agent's proposal" : "a change in the file";
       lines.push(
         `  ${when}  ${how}  ${steps.join(", ") || "no step differs"}  then: ${plain(change.effect)}` +
+          (change.by === "agent" ? "  (accepted by the agent on the person's instruction)" : "") +
           (change.reason ? `  (${plain(change.reason)})` : ""),
       );
     }
@@ -198,6 +199,20 @@ export function formatReport(
       lines.push(
         `  NOTE: the checks of ${[...checked].join(", ")} were changed during this run; what passed may have passed a different check than the pipeline file has now`,
       );
+    }
+  }
+  if (report.agent_decisions.length > 0) {
+    lines.push(
+      "",
+      "decided by the agent, on what it says the person told it (the engine cannot check that):",
+    );
+    for (const decision of report.agent_decisions) {
+      const when = new Date(decision.at).toISOString().replace("T", " ").slice(0, 19);
+      const what =
+        decision.what === "gate"
+          ? `gate ${plain(decision.node ?? "?")}: ${plain(decision.decision ?? "?")}`
+          : "accepted a change of the pipeline";
+      lines.push(`  ${when}  ${what}  "${plain(decision.instruction).slice(0, 200)}"`);
     }
   }
   if (changed.length > 0) {

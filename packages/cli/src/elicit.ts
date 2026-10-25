@@ -12,6 +12,7 @@
  */
 import type { ChangeReport, PendingFound } from "@kodel-ai/local";
 import type {
+  AgentDecision,
   Decision,
   PipelineService,
   PipelineSpec,
@@ -35,17 +36,38 @@ export interface HumanRun {
   pendingChange(state?: RunState, only?: "file" | "proposal"): Promise<PendingFound | undefined>;
   changesSinceGate(node: string): Promise<ChangeReport>;
   gateResults(node: string): Promise<{ csv: string; count: number } | undefined>;
-  decideHuman(node: string, decision: "approved" | "rejected", reason?: string): Promise<Decision>;
+  decideHuman(
+    node: string,
+    decision: "approved" | "rejected",
+    reason?: string,
+    byAgent?: AgentDecision,
+  ): Promise<Decision>;
   resume(): Promise<Decision>;
   acknowledge(note?: string): Promise<Decision>;
   acceptChange(input: {
     source: "file" | "proposal";
     text: string;
     reason?: string;
+    byAgent?: AgentDecision;
   }): Promise<Decision>;
   discardProposal(): Promise<boolean>;
   restoreFile(hash?: string): Promise<{ path: string; hash: string }>;
 }
+
+/**
+ * Who is deciding right now, so that the person's dialog and the agent's own decision tools never
+ * decide the same thing at once. Both sides change it in the same tick as they look at it (no
+ * `await` between), so exactly one of them wins: a dialog that starts while the agent is deciding is
+ * skipped, and an agent decision that starts while a dialog is held is answered `waiting`.
+ */
+export interface DialogState {
+  /** Dialogs held: from the moment an answer needs the person until it has been asked and applied. */
+  open: number;
+  /** Agent decisions being applied. */
+  deciding: number;
+}
+
+export const newDialogState = (): DialogState => ({ open: 0, deciding: 0 });
 
 /** A host that can also decide for a person (the local one); a host that cannot passes nothing. */
 export interface HumanHost {
@@ -179,7 +201,7 @@ export function createElicitor(
   server: Server,
   humans: HumanHost,
   service: PipelineService,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; state?: DialogState } = {},
 ): AfterTool {
   const timeout = options.timeoutMs ?? ELICIT_TIMEOUT_MS;
   const asked = new Set<string>();
@@ -273,7 +295,7 @@ export function createElicitor(
     }
   }
 
-  async function handle(call: ToolCall): Promise<ToolResult | undefined> {
+  async function handle(call: ToolCall, claim: () => boolean): Promise<ToolResult | undefined> {
     const runId = runIdOf(call);
     if (runId === undefined) return undefined;
     const run = await humans.open(runId);
@@ -283,6 +305,8 @@ export function createElicitor(
     for (let link = 0; link < MAX_CHAIN; link++) {
       const what = wanted(result);
       if (!what) break;
+      // The agent is deciding this itself right now: no form for something already being decided.
+      if (!claim()) break;
       const question = await build(runId, run, what);
       if (!question) break;
       const provoked = what.kind === "change" || what.kind === "ack";
@@ -326,10 +350,23 @@ export function createElicitor(
     if (!server.getClientCapabilities()?.elicitation?.form) return undefined;
     if (busy) return undefined;
     busy = true;
+    // Held from the first look at an answer that needs the person until the last form is dealt with.
+    const state = options.state;
+    let held = false;
+    const claim = () => {
+      if (!state) return true;
+      if (state.deciding > 0) return false;
+      if (!held) {
+        state.open++;
+        held = true;
+      }
+      return true;
+    };
     try {
-      return await handle(call);
+      return await handle(call, claim);
     } finally {
       busy = false;
+      if (held && state) state.open--;
     }
   };
 }
@@ -375,7 +412,7 @@ function boundedComments(comments: { csv: string; count: number }): {
   };
 }
 
-async function blockingChange(run: HumanRun, state: RunState): Promise<boolean> {
+export async function blockingChange(run: HumanRun, state: RunState): Promise<boolean> {
   const found = await run.pendingChange(state).catch(() => undefined);
   return found?.info.blocking === true;
 }

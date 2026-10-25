@@ -46,6 +46,23 @@ export interface AgentHintsConfig {
   wait: boolean;
 }
 
+export interface DecisionsConfig {
+  /**
+   * Whether a client that can show a form is asked there at a gate, a pause, a change of a run's
+   * pipeline and a state changed outside kodel. Off: the agent's answer is `waiting` and the person
+   * decides with a command, so they can talk to the agent first.
+   */
+  dialog: boolean;
+  /**
+   * What the agent may decide itself, on the person's instruction in the chat. There is no key for
+   * `ack`: that stays with a person.
+   */
+  agent: {
+    gate: boolean;
+    pipeline_change: boolean;
+  };
+}
+
 export interface TasksConfig {
   /** Off by default: the MCP server then has no task tools at all. */
   enabled: boolean;
@@ -68,6 +85,7 @@ export interface ProjectConfig {
   worktree: WorktreeConfig;
   pipeline: PipelineConfig;
   agent_hints: AgentHintsConfig;
+  decisions: DecisionsConfig;
   tasks: TasksConfig;
   history: HistoryConfig;
 }
@@ -75,6 +93,10 @@ export interface ProjectConfig {
 export const DEFAULT_WORKTREE: WorktreeConfig = { mode: "auto", dir: DEFAULT_WORKTREE_DIR };
 export const DEFAULT_PIPELINE: PipelineConfig = { uncommitted: "ask" };
 export const DEFAULT_AGENT_HINTS: AgentHintsConfig = { wait: true };
+export const DEFAULT_DECISIONS: DecisionsConfig = {
+  dialog: false,
+  agent: { gate: false, pipeline_change: false },
+};
 export const DEFAULT_TASKS: TasksConfig = {
   enabled: false,
   adapter: "local",
@@ -142,6 +164,19 @@ const configSchema = z
       })
       .strict()
       .optional(),
+    decisions: z
+      .object({
+        dialog: z.boolean().optional(),
+        agent: z
+          .object({
+            gate: z.boolean().optional(),
+            pipeline_change: z.boolean().optional(),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict()
+      .optional(),
     tasks: z
       .object({
         enabled: z.boolean().optional(),
@@ -175,6 +210,7 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
         worktree: { ...DEFAULT_WORKTREE },
         pipeline: { ...DEFAULT_PIPELINE },
         agent_hints: { ...DEFAULT_AGENT_HINTS },
+        decisions: { dialog: false, agent: { ...DEFAULT_DECISIONS.agent } },
         tasks: { ...DEFAULT_TASKS, on_run: { ...DEFAULT_TASKS.on_run }, adapters: {} },
         history: defaultHistory(),
       };
@@ -226,6 +262,14 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
     },
     pipeline: { uncommitted: parsed.data.pipeline?.uncommitted ?? DEFAULT_PIPELINE.uncommitted },
     agent_hints: { wait: parsed.data.agent_hints?.wait ?? DEFAULT_AGENT_HINTS.wait },
+    decisions: {
+      dialog: parsed.data.decisions?.dialog ?? DEFAULT_DECISIONS.dialog,
+      agent: {
+        gate: parsed.data.decisions?.agent?.gate ?? DEFAULT_DECISIONS.agent.gate,
+        pipeline_change:
+          parsed.data.decisions?.agent?.pipeline_change ?? DEFAULT_DECISIONS.agent.pipeline_change,
+      },
+    },
     tasks: {
       enabled: parsed.data.tasks?.enabled ?? DEFAULT_TASKS.enabled,
       adapter: parsed.data.tasks?.adapter ?? DEFAULT_TASKS.adapter,
