@@ -57,6 +57,18 @@ export interface Feedback {
   check_id?: string;
 }
 
+/**
+ * What git says about the run's directory when the run ends, read by the host: the core reads no
+ * file system. Each field is left out when it could not be read.
+ */
+export interface RunFacts {
+  head?: string;
+  /** The commits made during the run: those reachable from HEAD first, then amended or reset away ones. */
+  commits?: string[];
+  /** There were more commits than `commits` holds. */
+  commitsTruncated?: boolean;
+}
+
 export interface NodeRun {
   slug: string;
   status: NodeStatus;
@@ -192,6 +204,8 @@ export type RunEvent =
       engine?: EngineRecord;
       /** Who started the run; same rule as `engine`. */
       executor?: ExecutorRecord;
+      /** The commit the run's work began at; absent without a repository or a commit. */
+      baseCommit?: string;
     }
   | {
       type: "agent_completed";
@@ -203,6 +217,8 @@ export type RunEvent =
       engineVersion?: string;
       /** One of the node's other outcomes (`outcomes:`), instead of the usual `passed`. */
       outcome?: string;
+      /** HEAD of the run's directory when the step was handed in, as the host read it. */
+      head?: string;
     }
   /** The engine work of a node (its own command) finished. The host judged the exit code. */
   | {
@@ -272,6 +288,8 @@ export type RunEvent =
       category: string;
       message: string;
       suggestion?: string;
+      /** The `check_id` of the check the note is about (`wrong_check` only). */
+      check?: string;
     }
   /**
    * The agent proposed another version of the pipeline (`withdrawn`: took its proposal back).
@@ -356,6 +374,7 @@ class Machine {
     readonly s: RunState,
     private readonly now: number,
     options: EngineOptions,
+    private readonly facts: RunFacts = {},
   ) {
     this.nodes = new Map(spec.nodes.map((n) => [n.slug, n]));
     this.registry = options.registry ?? defaultRegistry();
@@ -370,6 +389,30 @@ class Machine {
     const node = this.nodes.get(slug);
     if (!node) throw fail("UNKNOWN_NODE", `the pipeline has no node "${slug}"`);
     return node;
+  }
+
+  /** A note names a check only as `wrong_check`, and only one of the checks of its node. */
+  private checkOfNote(check: string, category: string, slug: string | undefined) {
+    if (category !== "wrong_check")
+      throw new KodelError("INVALID_ARGUMENTS", "check is only for the category wrong_check", [
+        { field: "check" },
+      ]);
+    if (slug === undefined)
+      throw new KodelError(
+        "INVALID_ARGUMENTS",
+        "check needs node_slug when no single step is running",
+        [{ field: "node_slug" }],
+      );
+    const node = this.node(slug);
+    const ids = node.checks.map((_, i) => checkIdOf(node, i));
+    if (!ids.includes(check))
+      throw new KodelError(
+        "INVALID_ARGUMENTS",
+        ids.length === 0
+          ? `node "${slug}" has no checks`
+          : `"${check}" is not a check of node "${slug}"`,
+        [{ field: "check", valid: ids }],
+      );
   }
 
   private run(slug: string): NodeRun {
@@ -636,7 +679,13 @@ class Machine {
     this.s.status = status;
     this.s.finishedAt = this.now;
     this.s.active = [];
-    this.log("run_finished", reason === undefined ? { status } : { status, reason });
+    this.log("run_finished", {
+      status,
+      ...(reason === undefined ? {} : { reason }),
+      ...(this.facts.head === undefined ? {} : { head: this.facts.head }),
+      ...(this.facts.commits === undefined ? {} : { commits: this.facts.commits }),
+      ...(this.facts.commitsTruncated === true ? { commits_truncated: true } : {}),
+    });
   }
 
   // events
@@ -661,12 +710,15 @@ class Machine {
       // A note is about the pipeline as it was when it was written, and the pipeline may change
       // under a run, so it says which version and, when only one step is going, which step.
       const only = this.s.active.length === 1 ? this.s.active[0]?.node : undefined;
+      if (event.check !== undefined)
+        this.checkOfNote(event.check, event.category, event.node ?? only);
       this.log("feedback_reported", {
         node: event.node ?? only ?? null,
         attempt: event.attempt ?? null,
         category: event.category,
         message: event.message,
         suggestion: event.suggestion ?? null,
+        ...(event.check === undefined ? {} : { check: event.check }),
         spec: this.s.specHash,
       });
       return;
@@ -765,6 +817,7 @@ class Machine {
           ...(event.engineVersion === undefined || event.engineVersion === this.s.engineVersion
             ? {}
             : { engine_version: event.engineVersion }),
+          ...(event.head === undefined ? {} : { head: event.head }),
         });
         this.afterWork(visit);
         return;
@@ -887,6 +940,7 @@ class Machine {
       ...(event.history === undefined ? {} : { history: event.history }),
       ...(event.engine === undefined ? {} : { engine: event.engine }),
       ...(event.executor === undefined ? {} : { executor: event.executor }),
+      ...(event.baseCommit === undefined ? {} : { base_commit: event.baseCommit }),
     });
     const needsRunBaseline = this.spec.nodes.some((n) =>
       n.checks.some((c) => this.registry.check(c.kind)?.baseline?.(c.params) === "run"),
@@ -1087,6 +1141,7 @@ export function decide(
   event: RunEvent,
   now: number,
   options: EngineOptions = {},
+  facts?: RunFacts,
 ): Decision {
   if (event.type === "start") {
     if (state) return { ok: false, error: fail("NODE_NOT_RUNNING", "the run has already started") };
@@ -1106,7 +1161,7 @@ export function decide(
     if (event.history !== undefined) draft.history = event.history;
     if (event.engine !== undefined) draft.engineVersion = event.engine.version;
   }
-  const machine = new Machine(spec, draft, now, options);
+  const machine = new Machine(spec, draft, now, options, facts);
   try {
     machine.apply(event);
   } catch (error) {

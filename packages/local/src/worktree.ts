@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { KodelError } from "@kodel-ai/pipeline-core";
 import { DEFAULT_WORKTREE, type WorktreeConfig } from "./config";
-import { git } from "./git";
+import { git, readHead } from "./git";
 
 export interface Workdir {
   /** Absolute, as the file system names it (symbolic links resolved). */
@@ -25,6 +25,8 @@ export interface Workdir {
   created: boolean;
   /** Something the agent and the person should know about it. */
   note?: string;
+  /** The commit the work began at; none for a directory without commits. */
+  base?: string;
 }
 
 export interface WorkdirProvider {
@@ -134,7 +136,8 @@ export class GitWorktreeProvider implements WorkdirProvider {
       if (!sameDir(await commonDir(top), await commonDir(this.root))) return undefined;
       // Only the folder the person set aside for worktrees: their own feature worktrees are not ours to run in.
       if (!isInside(await this.resolveDir(), top)) return undefined;
-      return { path: top, created: false };
+      const base = await readHead(top);
+      return { path: top, created: false, ...(base === undefined ? {} : { base }) };
     } catch {
       return undefined;
     }
@@ -167,13 +170,20 @@ export class GitWorktreeProvider implements WorkdirProvider {
     let made = false;
     try {
       await mkdir(dir, { recursive: true });
-      await git(["worktree", "add", "-b", branch, path, "HEAD"], this.root, {
+      // The branch starts at the SHA that is recorded, not at whatever HEAD is a moment later.
+      const base = await readHead(this.root);
+      await git(["worktree", "add", "-b", branch, path, base ?? "HEAD"], this.root, {
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "core.hooksPath",
         GIT_CONFIG_VALUE_0: hooks,
       });
       made = true;
-      const workdir: Workdir = { path: await realpath(path), branch, created: true };
+      const workdir: Workdir = {
+        path: await realpath(path),
+        branch,
+        created: true,
+        ...(base === undefined ? {} : { base }),
+      };
       if (await this.rootIsDirty().catch(() => false)) {
         workdir.note =
           "the repository root has uncommitted changes; the worktree starts from HEAD and does not have them";

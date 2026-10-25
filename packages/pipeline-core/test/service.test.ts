@@ -658,7 +658,7 @@ describe("where a run works", () => {
 
 describe("the tool surface", () => {
   test("these tools exist, in this order, and the surface is versioned", () => {
-    expect(CONTRACT_VERSION).toBe(1);
+    expect(CONTRACT_VERSION).toBe(2);
     expect(TOOLS.map((t) => t.name)).toEqual([
       "pipeline_list",
       "pipeline_docs",
@@ -704,7 +704,15 @@ describe("the tool surface", () => {
         "metrics",
       ],
       pipeline_complete_step: ["run_id", "node_slug", "attempt", "summary", "outcome"],
-      pipeline_feedback: ["run_id", "node_slug", "attempt", "category", "message", "suggestion"],
+      pipeline_feedback: [
+        "run_id",
+        "node_slug",
+        "attempt",
+        "category",
+        "message",
+        "suggestion",
+        "check",
+      ],
       pipeline_propose_change: ["run_id", "pipeline", "summary", "name"],
     });
   });

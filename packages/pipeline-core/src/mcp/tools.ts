@@ -10,7 +10,7 @@ import { RUN_ID_PATTERN } from "../run-id";
 import type { PipelineService, ToolResult } from "../service";
 
 /** Bump when a tool is renamed or its arguments change; a snapshot test pins the surface. */
-export const CONTRACT_VERSION = 1;
+export const CONTRACT_VERSION = 2;
 
 /**
  * What the agent is told about this server when it connects (the MCP `instructions` field), so the
@@ -37,9 +37,9 @@ export function serverInstructions(options: { waitHint?: boolean; dialog?: boole
     "4. At a `waiting` answer, do what `tell_the_person` says: write the person what they are asked to decide, a summary of what was done and changed, what to look at, and the command to decide with. Then end your turn. You cannot approve, reject or resume anything yourself, and you must not try: those commands are for the person and refuse to run for an agent." +
       wait,
     "5. Do not read or edit the run files in .kodel/runs, and do not edit the pipeline files while a run is going: the only way for you to change the pipeline of a run is pipeline_propose_change, and a person accepts it.",
-    "6. If a step's description or a check looks wrong or unclear, say so with pipeline_feedback; it never blocks the run. If you think the pipeline of a run should change for this run, first ask the person: change it now (the run stops at the end of the current step until they accept it), or only note it with pipeline_feedback and decide another way. Propose it only if they say now.",
+    "6. If a step's description or a check looks wrong or unclear, say so with pipeline_feedback; it never blocks the run. If you think the pipeline of a run should change for this run, first ask the person: change it now (the run stops at the end of the current step until they accept it), or only note it with pipeline_feedback and decide another way. Propose it only if they say now. When a check failed and you think it fired for nothing, or the person says so, offer to record it with pipeline_feedback (category wrong_check, `check` the check_id the retry text names), and record it only after they agree.",
     "7. If the answer to pipeline_start names a `workdir`, do all your work for the run in that directory (read and write files there, not in the directory you started in): the engine runs the commands and checks there.",
-    "8. If you are asked to write or change a pipeline, read pipeline_docs first: it is the reference for this engine version. To add a pipeline, or to change one outside a run (start from the `yaml` of pipeline_resolve), call pipeline_propose_change without run_id: a person accepts it with a command. Never put a file in .kodel/pipelines yourself and never run that command.",
+    "8. If you are asked to write or change a pipeline, read pipeline_docs first: it is the reference for this engine version. To add a pipeline, or to change one outside a run (start from the `yaml` of pipeline_resolve), call pipeline_propose_change without run_id: a person accepts it with a command. Never put a file in .kodel/pipelines yourself and never run that command. When the change is about a check, the summary names its check_id and what should get better.",
     "9. If an answer tells you that the pipeline of the run was changed and a person has to accept it (a `waiting` answer about the change, or a note about it on a `node` answer), do what `tell_the_person` says. If the change was made by editing the pipeline file and not through pipeline_propose_change, put the file back as it was and propose it instead.",
     ...(options.dialog === true ? [DIALOG_RULE] : []),
   ].join("\n");
@@ -299,7 +299,8 @@ export const TOOLS: ToolDescriptor[] = [
     description:
       "Report a problem you noticed in a step description: an unclear or contradictory prompt, a check that " +
       "looks wrong, a missing step, a tool problem. It never blocks the run. Use it when it would help improve " +
-      "the pipeline, not for every small remark.",
+      "the pipeline, not for every small remark. For a check that fired for nothing, use category " +
+      "wrong_check and name the check in `check`; a check of another node is refused with the valid ids.",
     shape: {
       run_id: runId,
       node_slug: nodeSlug.optional(),
@@ -311,6 +312,14 @@ export const TOOLS: ToolDescriptor[] = [
         .max(LIMITS.text)
         .describe("What is wrong, with enough detail to act on."),
       suggestion: z.string().max(LIMITS.text).optional().describe("How you would change it."),
+      check: z
+        .string()
+        .min(1)
+        .max(LIMITS.name)
+        .optional()
+        .describe(
+          "Only with category wrong_check: the check_id of the check that fired for nothing, as the retry text names it (for example plan/diff#1). It must be a check of the node.",
+        ),
     },
     readOnly: false,
     idempotent: false,

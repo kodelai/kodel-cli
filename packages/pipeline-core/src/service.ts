@@ -39,6 +39,7 @@ export interface FeedbackInput {
   category: string;
   message: string;
   suggestion?: string;
+  check?: string;
 }
 
 export type ProposeOutcome =
@@ -593,6 +594,7 @@ export class PipelineService {
     category: string;
     message: string;
     suggestion?: string;
+    check?: string;
   }): Promise<ToolResult> {
     return guarded(async () => {
       const run = await this.run(input.run_id);
