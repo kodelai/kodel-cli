@@ -38,7 +38,15 @@ export async function repoPrefix(cwd: string): Promise<string> {
 }
 
 /** Configuration that would let the repository run something on our behalf, switched off. */
-export const SAFE_CONFIG = ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"];
+export const SAFE_CONFIG = [
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "core.untrackedCache=false",
+  // A log read would otherwise run the `gpg.program` the repository names to show a signature.
+  "-c",
+  "log.showSignature=false",
+];
 
 /** Run git with the hardened configuration; the one place the local adapters start it. */
 export function git(
@@ -70,6 +78,88 @@ export function git(
     child.stdin?.on("error", () => undefined); // a failing git reports through the callback
     child.stdin?.end(input ?? "");
   });
+}
+
+/** The most commits a run's journal names; the rest is counted as cut off. */
+export const MAX_RUN_COMMITS = 200;
+
+const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+
+/** The commit HEAD points at in `cwd`; none for no repository, no git, or a branch without commits. */
+export async function readHead(cwd: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await git(["rev-parse", "--verify", "--quiet", "HEAD"], cwd, {
+      GIT_OPTIONAL_LOCKS: "0",
+    });
+    const sha = stdout.trim();
+    return SHA.test(sha) ? sha : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export interface RunCommits {
+  head?: string;
+  commits?: string[];
+  truncated?: boolean;
+}
+
+/**
+ * HEAD of `cwd` and the commits made since `base`: first those reachable from HEAD, then the ones
+ * the HEAD reflog shows were left behind (amended, reset away). The reflog of a worktree is its own;
+ * in the repository root it also holds older moves, so only entries from `sinceSeconds` on count.
+ * With the reflog off or expired the first part stands alone. Nothing here throws: these facts are
+ * a record, they never fail a step.
+ */
+export async function readRunCommits(
+  cwd: string,
+  base: string | undefined,
+  sinceSeconds: number,
+): Promise<RunCommits> {
+  const head = await readHead(cwd);
+  if (head === undefined) return {};
+  if (base === undefined || !SHA.test(base)) return { head };
+  const env = { GIT_OPTIONAL_LOCKS: "0" };
+  const seen = new Set<string>([base]);
+  const commits: string[] = [];
+  const add = (sha: string | undefined) => {
+    if (sha === undefined || !SHA.test(sha) || seen.has(sha)) return;
+    seen.add(sha);
+    commits.push(sha);
+  };
+  try {
+    const { stdout } = await git(
+      ["rev-list", `--max-count=${MAX_RUN_COMMITS + 1}`, `${base}..${head}`],
+      cwd,
+      env,
+    );
+    for (const line of stdout.split("\n")) add(line.trim());
+  } catch {
+    // base unknown to this repository (a shallow clone, say): the reflog may still tell
+  }
+  try {
+    const { stdout } = await git(
+      [
+        "reflog",
+        "show",
+        "--date=unix",
+        "--format=%H %gd",
+        `--max-count=${MAX_RUN_COMMITS * 4}`,
+        "HEAD",
+      ],
+      cwd,
+      env,
+    );
+    for (const line of stdout.split("\n")) {
+      const [sha, selector] = line.trim().split(" ");
+      const at = Number(/@\{(\d+)\}$/.exec(selector ?? "")?.[1]);
+      if (Number.isFinite(at) && at >= sinceSeconds) add(sha);
+    }
+  } catch {
+    // no reflog (core.logAllRefUpdates=false, or nothing yet)
+  }
+  const truncated = commits.length > MAX_RUN_COMMITS;
+  return { head, commits: commits.slice(0, MAX_RUN_COMMITS), ...(truncated ? { truncated } : {}) };
 }
 
 export interface SnapshotterOptions {

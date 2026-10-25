@@ -56,6 +56,18 @@ export interface Feedback {
   check_id?: string;
 }
 
+/**
+ * What git says about the run's directory when the run ends, read by the host: the core reads no
+ * file system. Each field is left out when it could not be read.
+ */
+export interface RunFacts {
+  head?: string;
+  /** The commits made during the run: those reachable from HEAD first, then amended or reset away ones. */
+  commits?: string[];
+  /** There were more commits than `commits` holds. */
+  commitsTruncated?: boolean;
+}
+
 export interface NodeRun {
   slug: string;
   status: NodeStatus;
@@ -183,6 +195,8 @@ export type RunEvent =
       taskKey?: string;
       /** The effective `history` settings, fixed for the run. */
       history?: HistoryConfig;
+      /** The commit the run's work began at; absent without a repository or a commit. */
+      baseCommit?: string;
     }
   | {
       type: "agent_completed";
@@ -191,6 +205,8 @@ export type RunEvent =
       summary?: string;
       /** One of the node's other outcomes (`outcomes:`), instead of the usual `passed`. */
       outcome?: string;
+      /** HEAD of the run's directory when the step was handed in, as the host read it. */
+      head?: string;
     }
   /** The engine work of a node (its own command) finished. The host judged the exit code. */
   | {
@@ -344,6 +360,7 @@ class Machine {
     readonly s: RunState,
     private readonly now: number,
     options: EngineOptions,
+    private readonly facts: RunFacts = {},
   ) {
     this.nodes = new Map(spec.nodes.map((n) => [n.slug, n]));
     this.registry = options.registry ?? defaultRegistry();
@@ -624,7 +641,13 @@ class Machine {
     this.s.status = status;
     this.s.finishedAt = this.now;
     this.s.active = [];
-    this.log("run_finished", reason === undefined ? { status } : { status, reason });
+    this.log("run_finished", {
+      status,
+      ...(reason === undefined ? {} : { reason }),
+      ...(this.facts.head === undefined ? {} : { head: this.facts.head }),
+      ...(this.facts.commits === undefined ? {} : { commits: this.facts.commits }),
+      ...(this.facts.commitsTruncated === true ? { commits_truncated: true } : {}),
+    });
   }
 
   // events
@@ -749,6 +772,7 @@ class Machine {
           attempt: event.attempt,
           outcome: visit.declared ?? "passed",
           summary: event.summary ?? null,
+          ...(event.head === undefined ? {} : { head: event.head }),
         });
         this.afterWork(visit);
         return;
@@ -869,6 +893,7 @@ class Machine {
       ...(event.pipelineFile === undefined ? {} : { pipelineFile: event.pipelineFile }),
       ...(event.taskKey === undefined ? {} : { task_key: event.taskKey }),
       ...(event.history === undefined ? {} : { history: event.history }),
+      ...(event.baseCommit === undefined ? {} : { base_commit: event.baseCommit }),
     });
     const needsRunBaseline = this.spec.nodes.some((n) =>
       n.checks.some((c) => this.registry.check(c.kind)?.baseline?.(c.params) === "run"),
@@ -1069,6 +1094,7 @@ export function decide(
   event: RunEvent,
   now: number,
   options: EngineOptions = {},
+  facts?: RunFacts,
 ): Decision {
   if (event.type === "start") {
     if (state) return { ok: false, error: fail("NODE_NOT_RUNNING", "the run has already started") };
@@ -1086,7 +1112,7 @@ export function decide(
     if (event.pipelineFile !== undefined) draft.pipelineFile = event.pipelineFile;
     if (event.taskKey !== undefined) draft.taskKey = event.taskKey;
   }
-  const machine = new Machine(spec, draft, now, options);
+  const machine = new Machine(spec, draft, now, options, facts);
   try {
     machine.apply(event);
   } catch (error) {

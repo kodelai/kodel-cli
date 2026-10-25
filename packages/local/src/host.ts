@@ -39,6 +39,7 @@ import {
   parseSnapshot,
   type RedactRule,
   type RunEvent,
+  type RunFacts,
   type RunReport,
   type RunState,
   type RunTaskLink,
@@ -53,7 +54,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { type CommandOptions, type CommandResult, runCommand } from "./command";
 import { loadConfig, type WorktreeConfig } from "./config";
-import { GitSnapshotter, repoPrefix } from "./git";
+import { GitSnapshotter, readHead, readRunCommits, repoPrefix } from "./git";
 import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integrity";
 import { FileStore, META_VERSION, newRunId, type RunMeta } from "./store";
 import { GitWorktreeProvider, type Workdir, type WorkdirProvider } from "./worktree";
@@ -366,6 +367,10 @@ export class LocalHost {
         if (this.options.source !== undefined)
           await this.store.writeSpec(runId, specHash, this.options.source);
         const run = new LocalRun(this, runId);
+        // None without a repository or before the first commit.
+        const baseCommit = workdir
+          ? (workdir.base ?? (await readHead(workdir.path)))
+          : await readHead(this.options.root);
         const result = await run.apply({
           type: "start",
           runId,
@@ -379,6 +384,7 @@ export class LocalHost {
             : { pipelineFile: this.options.pipelineFile }),
           ...(options.taskKey === undefined ? {} : { taskKey: options.taskKey }),
           ...(history === undefined ? {} : { history }),
+          ...(baseCommit === undefined ? {} : { baseCommit }),
         });
         if (!result.ok) throw result.error;
         return { run, reused: false, terminal: false, ...(workdir ? { workdir } : {}) };
@@ -916,6 +922,26 @@ export class LocalRun {
     });
   }
 
+  /** HEAD and the commits of the run, from its directory; whatever cannot be read is left out. */
+  private async runFacts(state: RunState): Promise<RunFacts> {
+    try {
+      const dir =
+        state.workdir === undefined ? this.host.options.root : await this.inProject(state.workdir);
+      const started = (await this.host.store.readJournal(this.runId)).find(
+        (r) => r.event === "run_started",
+      );
+      const base = typeof started?.base_commit === "string" ? started.base_commit : undefined;
+      const found = await readRunCommits(dir, base, Math.floor(state.startedAt / 1000));
+      return {
+        ...(found.head === undefined ? {} : { head: found.head }),
+        ...(found.commits === undefined ? {} : { commits: found.commits }),
+        ...(found.truncated === true ? { commitsTruncated: true } : {}),
+      };
+    } catch {
+      return {};
+    }
+  }
+
   private applyLocked(incoming: RunEvent, trust: boolean): Promise<Decision> {
     const { store, engine, clock, integrity, rules } = this.host;
     // Whatever text came with the event (a reason, a message) reaches state and journal redacted.
@@ -952,7 +978,18 @@ export class LocalRun {
       const spec = !state
         ? this.host.spec
         : await this.specFor(event.type === "pipeline_accepted" ? event.to : state.specHash);
-      const decision = decide(spec, state, event, clock(), engine);
+      const now = clock();
+      let decision = decide(spec, state, event, now, engine);
+      // The core reads no git; when this event ends the run, what git says is read here and the same
+      // decision is made again with it. Nothing was written yet, and `decide` is pure.
+      if (
+        decision.ok &&
+        !decision.noop &&
+        state &&
+        decision.journal.some((r) => r.event === "run_finished")
+      ) {
+        decision = decide(spec, state, event, now, engine, await this.runFacts(state));
+      }
       if (!decision.ok || decision.noop) return decision;
       // A tick that found nothing to do changes nothing, so it writes nothing.
       const changed =
@@ -1471,10 +1508,15 @@ export class LocalRun {
         noop: true,
       } satisfies Decision;
     }
+    // HEAD of the run's own directory: the root may be somewhere else entirely.
+    const head = await this.cwd()
+      .then(readHead)
+      .catch(() => undefined);
     const decision = await this.apply({
       type: "agent_completed",
       node,
       attempt,
+      ...(head === undefined ? {} : { head }),
       ...(summary === undefined ? {} : { summary }),
       ...(outcome === undefined ? {} : { outcome }),
     });
