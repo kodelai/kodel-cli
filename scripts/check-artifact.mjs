@@ -5,14 +5,16 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const artifact = join(root, "packages/cli/dist/kodel.js");
@@ -117,5 +119,87 @@ try {
 } finally {
   rmSync(project, { recursive: true, force: true });
 }
+
+// A pipeline run by the built file on plain Node keeps what its commands printed (TASK-CNZ6): once with
+// the default, once with `history.output.enabled: false`.
+const sdk = createRequire(join(root, "packages/cli/package.json"));
+const sdkPath = (file) =>
+  pathToFileURL(
+    sdk.resolve(`@modelcontextprotocol/sdk/${file}`, {
+      paths: [join(root, "packages/cli"), join(root, "packages/pipeline-core"), root],
+    }),
+  ).href;
+const { Client } = await import(sdkPath("client/index.js"));
+const { StdioClientTransport } = await import(sdkPath("client/stdio.js"));
+
+async function runOnce(outputEnabled) {
+  const dir = mkdtempSync(join(tmpdir(), "kodel-artifact-run-"));
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [artifact, "--root", dir, "mcp"],
+    cwd: dir,
+    stderr: "ignore",
+  });
+  const client = new Client({ name: "check-artifact", version: "0" });
+  try {
+    mkdirSync(join(dir, ".kodel", "pipelines"), { recursive: true });
+    writeFileSync(
+      join(dir, ".kodel", "config.yaml"),
+      [
+        "version: 1",
+        "worktree: { mode: off }",
+        `history: { changes: { enabled: false }, output: { enabled: ${outputEnabled} } }`,
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(dir, ".kodel", "pipelines", "p.yaml"),
+      [
+        "name: p",
+        "nodes:",
+        "  - slug: first",
+        "    kind: command",
+        `    command: node -e "console.log('printed by first')"`,
+        "  - slug: second",
+        "    kind: command",
+        `    command: node -e "console.log('printed by second')"`,
+        "edges:",
+        "  - { from: first, to: second }",
+        "  - { from: first, to: second, when: failed }",
+        "  - { from: second, to: first, when: failed }",
+        "",
+      ].join("\n"),
+    );
+    await client.connect(transport);
+    const call = async (name, args) => {
+      const result = await client.callTool({ name, arguments: args });
+      return JSON.parse(result.content[0].text);
+    };
+    const started = await call("pipeline_start", {
+      task: "keep the output",
+      pipeline: "p",
+      cwd: dir,
+      title: "keep-output",
+    });
+    if (!started.run_id) fail(`the run did not start: ${JSON.stringify(started)}`);
+    for (let i = 0; i < 40; i += 1) {
+      const next = await call("pipeline_next_step", { run_id: started.run_id, wait_s: 1 });
+      if (next.done) break;
+      if (i === 39) fail(`the run did not finish: ${JSON.stringify(next)}`);
+    }
+    const artifacts = join(dir, ".kodel", "runs", started.run_id, "artifacts");
+    return existsSync(artifacts) ? readdirSync(artifacts).sort() : [];
+  } finally {
+    await client.close().catch(() => {});
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const kept = await runOnce(true);
+if (kept.join() !== "first-1-command.txt,second-1-command.txt") {
+  fail(`the output of the commands was not kept in artifacts/: ${kept.join() || "(nothing)"}`);
+}
+const none = await runOnce(false);
+if (none.length > 0) fail(`history.output.enabled false still wrote: ${none.join()}`);
 
 console.log(`artifact ok under node ${process.version}: ${size} bytes, version ${version}`);

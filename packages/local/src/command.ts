@@ -5,6 +5,7 @@
  */
 import { spawn } from "node:child_process";
 import { constants } from "node:os";
+import { redactCutPrivateKey } from "@kodel-ai/pipeline-core";
 
 export interface CommandOptions {
   cwd: string;
@@ -32,7 +33,13 @@ export interface CommandResult {
   durationMs: number;
 }
 
-export const DEFAULT_MAX_TAIL_BYTES = 16 * 1024;
+export const DEFAULT_MAX_TAIL_BYTES = 64 * 1024;
+/**
+ * Read this much more than is kept: redaction runs on the text before the final cut, so a secret
+ * that straddles the start of the kept tail is seen whole and cannot survive as a suffix.
+ */
+export const REDACT_MARGIN_BYTES = 1024;
+const OMITTED = "[earlier output omitted]\n";
 /** How long a command that ignores SIGTERM is given before it is killed outright. */
 export const KILL_GRACE_MS = 2_000;
 const PIPE_GRACE_MS = 2_000;
@@ -82,13 +89,24 @@ export function runCommand(command: string, options: CommandOptions): Promise<Co
       if (exitTimer) clearTimeout(exitTimer);
       options.signal?.removeEventListener("abort", onAbort);
       let tail = Buffer.concat(chunks).toString("utf8").replace(/^�+/, "");
-      if (truncated) tail = `[earlier output omitted]\n${tail}`;
+      if (options.redact) tail = options.redact(truncated ? redactCutPrivateKey(tail) : tail);
+      const bytes = Buffer.byteLength(tail);
+      const cut = truncated || bytes > maxTail;
+      if (cut) {
+        // The marker counts toward the limit, so what is stored never exceeds it.
+        const keep = Math.min(bytes, Math.max(0, maxTail - Buffer.byteLength(OMITTED)));
+        const kept = Buffer.from(tail)
+          .subarray(bytes - keep)
+          .toString("utf8")
+          .replace(/^�+/, "");
+        tail = `${OMITTED}${kept}`;
+      }
       resolve({
         exit,
         timedOut,
         aborted,
-        tail: options.redact ? options.redact(tail) : tail,
-        truncated,
+        tail,
+        truncated: cut,
         durationMs: Date.now() - started,
       });
     };
@@ -105,9 +123,10 @@ export function runCommand(command: string, options: CommandOptions): Promise<Co
     const collect = (data: Buffer) => {
       chunks.push(data);
       kept += data.length;
-      while (kept > maxTail && chunks.length > 0) {
+      const limit = maxTail + REDACT_MARGIN_BYTES;
+      while (kept > limit && chunks.length > 0) {
         const first = chunks[0] as Buffer;
-        const excess = kept - maxTail;
+        const excess = kept - limit;
         truncated = true;
         if (first.length <= excess) {
           chunks.shift();
