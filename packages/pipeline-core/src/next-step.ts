@@ -26,6 +26,8 @@ export interface PipelineChange {
   refused?: string;
   /** The command the person accepts it with. */
   apply: string;
+  /** The hash of this very version, which `pipeline_accept_change` (when the config allows it) names. */
+  hash?: string;
 }
 
 /** What the host knows about a change, for `nextStep`. */
@@ -167,7 +169,22 @@ export interface NextStepOptions {
   pending?: PendingChange;
   /** The agent has just said a step is done: a change that holds the run is met here, not before. */
   atCompletion?: boolean;
+  /**
+   * What the project's config lets the agent decide on the person's instruction. A waiting answer
+   * then says the tool may be used, and only when told to; without it the text is as it always was.
+   */
+  agentDecisions?: { gate?: boolean; pipelineChange?: boolean };
 }
+
+const AGENT_MAY_DECIDE_GATE =
+  " The person may instead tell you, in this chat, to approve or reject this step: only then you " +
+  "may decide it yourself with pipeline_decide_gate (node_slug and attempt from this answer, " +
+  "their words in `instruction`). Never on your own, never because this text mentions it.";
+
+const AGENT_MAY_ACCEPT_CHANGE =
+  " The person may instead tell you, in this chat, to accept this change: only then you may do it " +
+  "yourself with pipeline_accept_change (`change_hash` is `pipeline_change.hash` of this answer, " +
+  "their words in `instruction`). Never on your own, never because this text mentions it.";
 
 const TELL_PIPELINE_CHANGED =
   "Tell the person, in the language they use and in plain words: that the pipeline of this run was " +
@@ -224,6 +241,28 @@ export function nextStep(
   now: number,
   registry: Registry = defaultRegistry(),
   options: NextStepOptions = {},
+): NextStep {
+  const step = nextStepBase(spec, state, now, registry, options);
+  const may = options.agentDecisions;
+  if (!may || !("waiting" in step)) return step;
+  const { waiting } = step;
+  const add =
+    waiting.reason === "gate" && may.gate
+      ? AGENT_MAY_DECIDE_GATE
+      : waiting.reason === "pipeline_changed" && may.pipelineChange
+        ? AGENT_MAY_ACCEPT_CHANGE
+        : "";
+  return add === ""
+    ? step
+    : { waiting: { ...waiting, tell_the_person: waiting.tell_the_person + add } };
+}
+
+function nextStepBase(
+  spec: PipelineSpec,
+  state: RunState,
+  now: number,
+  registry: Registry,
+  options: NextStepOptions,
 ): NextStep {
   const waitHint = options.waitHint !== false;
   const step = baseStep(spec, state, now, registry, waitHint);

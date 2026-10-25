@@ -7,6 +7,7 @@ import {
   type TaskService,
 } from "@kodel-ai/pipeline-core";
 import {
+  decisionTools,
   registerPipelineTools,
   registerTaskTools,
   serverInstructions,
@@ -14,7 +15,8 @@ import {
 } from "@kodel-ai/pipeline-core/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { createElicitor, type HumanHost } from "./elicit";
+import { createAgentDecider } from "./agent-decisions";
+import { createElicitor, type DialogState, type HumanHost } from "./elicit";
 
 /** A host that can also stop the work it started (the local host does); it says how much it stopped. */
 export type StoppableHost = PipelineHost & { stop?(): number };
@@ -45,11 +47,16 @@ export interface ServerOptions {
   /** Whether the answers offer the agent `kodel wait` (the project config can turn it off). */
   waitHint?: boolean;
   /**
-   * A host that can decide for a person (the local one). With it, a client that can show a form is
-   * asked there at a gate, a pause, a change of the pipeline and a state changed outside kodel; a
-   * client that cannot is answered as before.
+   * A host that can decide for a person (the local one). With `dialog`, a client that can show a
+   * form is asked there at a gate, a pause, a change of the pipeline and a state changed outside
+   * kodel; a client that cannot is answered as before. Without `dialog` the person decides with the
+   * commands, and the agent decides only what `agentDecisions` lets it.
    */
   humans?: HumanHost;
+  /** Whether `humans` is asked through the client (`decisions.dialog`); off unless the config says so. */
+  dialog?: boolean;
+  /** What the config lets the agent decide on the person's instruction; needs `humans`. */
+  agentDecisions?: { gate?: boolean; pipelineChange?: boolean };
   /** How long a dialog may stay open, in milliseconds; the default is long enough to read the changes. */
   dialogTimeoutMs?: number;
 }
@@ -68,22 +75,30 @@ export function createServer(
   options: ServerOptions = {},
 ): McpServer {
   const { humans } = options;
-  const base = serverInstructions({ ...options, dialog: humans !== undefined });
+  const dialog = humans !== undefined && options.dialog === true;
+  // Without a host that can decide there is nothing for the agent's tools to do, so none is served.
+  const agentDecisions = humans === undefined ? {} : (options.agentDecisions ?? {});
+  const base = serverInstructions({ ...options, dialog, decisions: agentDecisions });
   const instructions = tasks
     ? `${base}\n\n${taskInstructions(runLink?.mode ?? "disabled", runLink !== undefined)}`
     : base;
   const server = new McpServer({ name: "kodel", version }, { instructions });
   const service = new PipelineService(host, { engineVersion: version });
+  const state: DialogState = { open: false };
   registerPipelineTools(server, service, {
     taskLink: tasks !== undefined && runLink !== undefined,
-    ...(humans
+    ...(humans && dialog
       ? {
           afterTool: createElicitor(server.server, humans, service, {
+            state,
             ...(options.dialogTimeoutMs === undefined
               ? {}
               : { timeoutMs: options.dialogTimeoutMs }),
           }),
         }
+      : {}),
+    ...(humans
+      ? { extraTools: decisionTools(agentDecisions, createAgentDecider(humans, state)) }
       : {}),
   });
   if (tasks) registerTaskTools(server, tasks);

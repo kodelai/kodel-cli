@@ -12,6 +12,7 @@
  */
 import type { ChangeReport, PendingFound } from "@kodel-ai/local";
 import type {
+  AgentDecision,
   Decision,
   PipelineService,
   PipelineSpec,
@@ -35,16 +36,30 @@ export interface HumanRun {
   pendingChange(state?: RunState, only?: "file" | "proposal"): Promise<PendingFound | undefined>;
   changesSinceGate(node: string): Promise<ChangeReport>;
   gateResults(node: string): Promise<{ csv: string; count: number } | undefined>;
-  decideHuman(node: string, decision: "approved" | "rejected", reason?: string): Promise<Decision>;
+  decideHuman(
+    node: string,
+    decision: "approved" | "rejected",
+    reason?: string,
+    byAgent?: AgentDecision,
+  ): Promise<Decision>;
   resume(): Promise<Decision>;
   acknowledge(note?: string): Promise<Decision>;
   acceptChange(input: {
     source: "file" | "proposal";
     text: string;
     reason?: string;
+    byAgent?: AgentDecision;
   }): Promise<Decision>;
   discardProposal(): Promise<boolean>;
   restoreFile(hash?: string): Promise<{ path: string; hash: string }>;
+}
+
+/**
+ * Whether the server has a question open with the person right now. The agent's own decision tools
+ * read it: while a person may be answering a dialog, the agent does not decide the same thing.
+ */
+export interface DialogState {
+  open: boolean;
 }
 
 /** A host that can also decide for a person (the local one); a host that cannot passes nothing. */
@@ -179,7 +194,7 @@ export function createElicitor(
   server: Server,
   humans: HumanHost,
   service: PipelineService,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; state?: DialogState } = {},
 ): AfterTool {
   const timeout = options.timeoutMs ?? ELICIT_TIMEOUT_MS;
   const asked = new Set<string>();
@@ -326,10 +341,12 @@ export function createElicitor(
     if (!server.getClientCapabilities()?.elicitation?.form) return undefined;
     if (busy) return undefined;
     busy = true;
+    if (options.state) options.state.open = true;
     try {
       return await handle(call);
     } finally {
       busy = false;
+      if (options.state) options.state.open = false;
     }
   };
 }
@@ -375,7 +392,7 @@ function boundedComments(comments: { csv: string; count: number }): {
   };
 }
 
-async function blockingChange(run: HumanRun, state: RunState): Promise<boolean> {
+export async function blockingChange(run: HumanRun, state: RunState): Promise<boolean> {
   const found = await run.pendingChange(state).catch(() => undefined);
   return found?.info.blocking === true;
 }

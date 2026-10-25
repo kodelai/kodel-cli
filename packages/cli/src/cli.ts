@@ -282,19 +282,33 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       }
       // The instructions are sent once, when the agent connects: a change of this setting applies
       // when the server is started again. A config that cannot be read leaves the default.
-      const waitHint = await loadConfig(resolved.dataDir)
-        .then((config) => config.agent_hints.wait)
-        .catch(() => true);
+      const settings = await loadConfig(resolved.dataDir)
+        .then((config) => ({
+          waitHint: config.agent_hints.wait,
+          dialog: config.decisions.dialog,
+          agentDecisions: {
+            gate: config.decisions.agent.gate,
+            pipelineChange: config.decisions.agent.pipeline_change,
+          },
+        }))
+        .catch(() => ({
+          waitHint: true,
+          dialog: false,
+          agentDecisions: { gate: false, pipelineChange: false },
+        }));
       const dialogTimeoutMs = dialogTimeoutFrom(env.environment);
       const local = new LocalPipelineHost({
         root: resolved.root,
         storeRoot: resolved.dataDir,
+        agentDecisions: settings.agentDecisions,
         // The same tie the tools were built for; without one the host asks the config itself.
         ...(runLink === undefined ? {} : { runTaskLink: runLink }),
       });
       await serveStdio(local, pkg.version, tasks, runLink, {
-        waitHint,
+        waitHint: settings.waitHint,
         humans: local,
+        dialog: settings.dialog,
+        agentDecisions: settings.agentDecisions,
         ...(dialogTimeoutMs === undefined ? {} : { dialogTimeoutMs }),
       });
     });

@@ -191,6 +191,7 @@ export function formatReport(
       const how = change.source === "proposal" ? "the agent's proposal" : "a change in the file";
       lines.push(
         `  ${when}  ${how}  ${steps.join(", ") || "no step differs"}  then: ${plain(change.effect)}` +
+          (change.by === "agent" ? "  (accepted by the agent on the person's instruction)" : "") +
           (change.reason ? `  (${plain(change.reason)})` : ""),
       );
     }

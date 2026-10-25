@@ -36,6 +36,8 @@ export interface PipelineChangeReport {
   nodes: { slug: string; changes: string[] }[];
   effect: string;
   reason?: string;
+  /** Set when the agent accepted the change on the person's instruction. */
+  by?: "agent";
 }
 
 export interface NodeReport {
@@ -138,6 +140,7 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
           nodes: (record.nodes as PipelineChangeReport["nodes"] | undefined) ?? [],
           effect: String((record.effect as { kind?: string } | undefined)?.kind ?? "none"),
           ...(typeof record.reason === "string" ? { reason: record.reason } : {}),
+          ...(record.decided_by === "agent" ? { by: "agent" as const } : {}),
         });
         break;
       case "gate_waiting":

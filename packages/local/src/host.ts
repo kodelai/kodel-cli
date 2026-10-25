@@ -11,6 +11,7 @@ import { mkdir, readFile, realpath } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import {
+  type AgentDecision,
   type ChangeSet,
   type CheckVerdict,
   canonicalPipeline,
@@ -97,6 +98,12 @@ export interface HostOptions {
   root: string;
   /** Where runs are kept; defaults to `<root>/.kodel`. */
   storeRoot?: string;
+  /**
+   * What the server serves the agent to decide on a person's instruction (`decisions.agent` of the
+   * config, as read when the server started). The texts of the waiting answers name a tool only
+   * when it is here, so they never name one the server does not offer.
+   */
+  agentDecisions?: { gate?: boolean; pipelineChange?: boolean };
   rules?: RedactRule[];
   engine?: EngineOptions;
   clock?: () => number;
@@ -571,6 +578,14 @@ export class LocalRun {
     }
   }
 
+  private agentDecisions(): { gate: boolean; pipelineChange: boolean } {
+    const { agentDecisions } = this.host.options;
+    return {
+      gate: agentDecisions?.gate === true,
+      pipelineChange: agentDecisions?.pipelineChange === true,
+    };
+  }
+
   /** The run's journal, as it is on disk; read-only. */
   journal(): Promise<JournalRecord[]> {
     return this.host.store.readJournal(this.runId);
@@ -779,6 +794,7 @@ export class LocalRun {
         redo: describeEffect(diff.effect),
         ...(diff.refused === undefined ? {} : { refused: diff.refused }),
         apply: `kodel pipeline changes apply ${this.runId}`,
+        hash,
         blocking: diff.refused === undefined,
       },
     };
@@ -878,6 +894,7 @@ export class LocalRun {
     source: "file" | "proposal";
     text: string;
     reason?: string;
+    byAgent?: AgentDecision;
   }): Promise<Decision> {
     const state = await this.state();
     const before = await this.currentSpec(state);
@@ -900,6 +917,7 @@ export class LocalRun {
       source: input.source,
       before,
       ...(input.reason === undefined ? {} : { reason: input.reason }),
+      ...(input.byAgent === undefined ? {} : { byAgent: input.byAgent }),
     });
     if (decision.ok) await this.host.store.removeProposal(this.runId).catch(() => undefined);
     return decision;
@@ -1071,7 +1089,11 @@ export class LocalRun {
       state,
       this.host.clock(),
       this.host.engine.registry ?? defaultRegistry(),
-      { waitHint: await this.waitHint(), ...(pending ? { pending: pending.info } : {}) },
+      {
+        waitHint: await this.waitHint(),
+        agentDecisions: this.agentDecisions(),
+        ...(pending ? { pending: pending.info } : {}),
+      },
     );
   }
 
@@ -1426,6 +1448,7 @@ export class LocalRun {
       this.host.engine.registry ?? defaultRegistry(),
       {
         waitHint: await this.waitHint(),
+        agentDecisions: this.agentDecisions(),
         ...(pending ? { pending: pending.info } : {}),
         ...(options.atCompletion === true ? { atCompletion: true } : {}),
       },
@@ -1579,7 +1602,12 @@ export class LocalRun {
    * A rejection without a reason of its own carries the comments recorded at the step, so the step
    * it returns to sees them; with both, the person's reason comes first.
    */
-  async decideHuman(node: string, decision: "approved" | "rejected", reason?: string) {
+  async decideHuman(
+    node: string,
+    decision: "approved" | "rejected",
+    reason?: string,
+    byAgent?: AgentDecision,
+  ) {
     const comments = decision === "rejected" ? await this.gateResults(node) : undefined;
     const parts = [reason, comments ? `Comments (CSV):\n${comments.csv}` : undefined].filter(
       (part): part is string => part !== undefined && part !== "",
@@ -1590,6 +1618,7 @@ export class LocalRun {
       node,
       decision,
       ...(full === undefined ? {} : { reason: full }),
+      ...(byAgent === undefined ? {} : { byAgent }),
     });
   }
 

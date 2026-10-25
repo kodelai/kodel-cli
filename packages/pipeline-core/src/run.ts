@@ -177,6 +177,18 @@ export const MAX_LOGGED_PROPOSALS = 100;
 
 // ── events in, effects out ──────────────────────────────────────────────────
 
+/**
+ * A decision that a person would make, made by the agent because the project's config allows it and
+ * the person told it to. The engine cannot check that; it keeps the words the agent says it was given.
+ */
+export interface AgentDecision {
+  instruction: string;
+}
+
+/** The journal fields that mark a decision as the agent's; a person's decision has none. */
+const decidedBy = (by: AgentDecision | undefined): Record<string, unknown> =>
+  by === undefined ? {} : { decided_by: "agent", instruction: by.instruction };
+
 export type RunEvent =
   | {
       type: "start";
@@ -245,6 +257,7 @@ export type RunEvent =
       source: "proposal" | "file";
       before: PipelineSpec;
       reason?: string;
+      byAgent?: AgentDecision;
     }
   /** The host accepted the agent's report of findings. Journaled; it changes nothing else. */
   | {
@@ -266,7 +279,13 @@ export type RunEvent =
       code: string;
       message: string;
     }
-  | { type: "human_decided"; node: string; decision: "approved" | "rejected"; reason?: string }
+  | {
+      type: "human_decided";
+      node: string;
+      decision: "approved" | "rejected";
+      reason?: string;
+      byAgent?: AgentDecision;
+    }
   | { type: "heartbeat"; node: string; attempt: number; owner?: string }
   /** The agent noticed a problem in a step description. Journaled; it never changes the run. */
   | {
@@ -862,6 +881,7 @@ class Machine {
           node: event.node,
           decision: event.decision,
           reason: event.reason ?? null,
+          ...decidedBy(event.byAgent),
         });
         this.finish(
           visit,
@@ -1011,6 +1031,7 @@ class Machine {
       nodes: diff.nodes,
       effect: diff.effect,
       ...(event.reason === undefined ? {} : { reason: event.reason }),
+      ...decidedBy(event.byAgent),
     });
 
     const effect = diff.effect;

@@ -4,6 +4,7 @@
  * Transport-free: the CLI adds stdio, the server adds HTTP and auth. Exposed as the
  * `@kodel-ai/pipeline-core/mcp` subpath so the SDK stays out of the main entry's module graph.
  */
+export * from "./decision-tools";
 export * from "./register";
 export * from "./task-tools";
 export * from "./tools";

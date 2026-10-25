@@ -33,6 +33,7 @@ describe("the project config", () => {
       worktree: expected,
       pipeline: { uncommitted: "ask" },
       agent_hints: { wait: true },
+      decisions: { dialog: false, agent: { gate: false, pipeline_change: false } },
       tasks: {
         enabled: false,
         adapter: "local",
@@ -105,6 +106,48 @@ describe("the project config", () => {
     expect((await failure("agent_hints:\n  wait: never\n")).code).toBe("CONFIG_INVALID");
     expect((await failure("agent_hints:\n  waits: false\n")).message).toContain("waits");
     expect((await failure("agent_hint:\n  wait: false\n")).message).toContain("agent_hint");
+  });
+
+  test("t_decisions_defaults_are_all_off", async () => {
+    const off = { dialog: false, agent: { gate: false, pipeline_change: false } };
+    expect((await loadConfig(dir)).decisions).toEqual(off);
+    await write("decisions: {}\n");
+    expect((await loadConfig(dir)).decisions).toEqual(off);
+    await write("decisions:\n  agent: {}\n");
+    expect((await loadConfig(dir)).decisions).toEqual(off);
+  });
+
+  test("t_decisions_each_switch_is_read_on_its_own", async () => {
+    await write("decisions:\n  dialog: true\n");
+    expect((await loadConfig(dir)).decisions).toEqual({
+      dialog: true,
+      agent: { gate: false, pipeline_change: false },
+    });
+    await write("decisions:\n  agent:\n    gate: true\n");
+    expect((await loadConfig(dir)).decisions).toEqual({
+      dialog: false,
+      agent: { gate: true, pipeline_change: false },
+    });
+    await write("decisions:\n  agent:\n    pipeline_change: true\n");
+    expect((await loadConfig(dir)).decisions.agent).toEqual({
+      gate: false,
+      pipeline_change: true,
+    });
+  });
+
+  test("t_decisions_unknown_key_is_refused_and_ack_has_no_key", async () => {
+    expect((await failure("decisions:\n  agent:\n    ack: true\n")).message).toContain("ack");
+    expect((await failure("decisions:\n  agent:\n    pipline_change: true\n")).message).toContain(
+      "pipline_change",
+    );
+    expect((await failure("decisions:\n  dialogs: true\n")).message).toContain("dialogs");
+    expect((await failure("decision:\n  dialog: true\n")).message).toContain("decision");
+  });
+
+  test("t_decisions_non_boolean_is_refused", async () => {
+    expect((await failure("decisions:\n  dialog: sometimes\n")).code).toBe("CONFIG_INVALID");
+    expect((await failure("decisions:\n  agent:\n    gate: 1\n")).code).toBe("CONFIG_INVALID");
+    expect((await failure("decisions:\n  agent: true\n")).code).toBe("CONFIG_INVALID");
   });
 
   test("tNN_config_reads_mode_and_dir", async () => {

@@ -53,10 +53,11 @@ Humans: `bun packages/cli/src/main.ts status` lists runs, `report` shows where t
 until a run stops waiting for a person (see above); the same
 binary has `gate`, `resume`, `ack`, `seal`, and `pipeline changes` (`show`, `apply`, `discard`, `history`,
 `restore`) for a change of the pipeline of a run that is going, and `pipeline proposals` (`show`, `apply`,
-`discard`) for a pipeline the agent proposed outside a run. A client that can show a form (MCP elicitation) is
-also asked there at a gate, a pause, a change of the pipeline of a run and a state changed outside kodel, and
-the person's answer in that dialog is the same decision as the command; the commands stay the way to decide
-when the client has no dialog or the person did not answer in it. A dialog stays open 10 minutes at most;
+`discard`) for a pipeline the agent proposed outside a run. With `decisions: { dialog: true }` in the project
+config (off by default), a client that can show a form (MCP elicitation) is also asked there at a gate, a
+pause, a change of the pipeline of a run and a state changed outside kodel, and the person's answer in that
+dialog is the same decision as the command; the commands stay the way to decide when the dialog is off, the
+client has none or the person did not answer in it. A dialog stays open 10 minutes at most;
 `KODEL_DIALOG_TIMEOUT_S` in the server's environment (`.mcp.json`) changes that for a client that gives up
 on a call sooner.
 
@@ -96,7 +97,7 @@ The engine is meant to be shared with Kodel Server: the server implements the sa
 3. **Redact at every write path.** Nothing reaches history without going through `redact`.
 4. **The engine knows nothing about transport or I/O.** Keep `@kodel-ai/pipeline-core` free of MCP, CLI, `node:fs`, `node:child_process` and clock access; those come in through adapters.
 5. **Side effects behind traits** (clock, filesystem, process execution) so tests can fake them.
-6. **Humans decide trust.** Trust, gate decisions, `ack`, `seal` and accepting a change of a run's pipeline, or a new or changed pipeline outside a run, are never available as agent-callable MCP tools. The agent may propose (`pipeline_propose_change`); only a person's command puts it in place.
+6. **Humans decide trust.** Trust, gate decisions, `ack`, `seal` and accepting a change of a run's pipeline, or a new or changed pipeline outside a run, are never available as agent-callable MCP tools. The agent may propose (`pipeline_propose_change`); only a person's command puts it in place. The one exception is a project that turns it on in its config (`decisions.agent`, off by default, never for `ack`): the server's instructions then say when the agent may decide, and the journal marks it (`docs/decisions.md`).
 7. **Node kinds and check kinds are adapters.** Handlers sit behind traits and are registered by `kind`; the engine never matches on concrete kinds, so a plugin system can be added later without engine changes.
 8. **Formats are versioned** (`version` cascade for user files, `v` on every machine-written record). Never rewrite history on disk.
 
