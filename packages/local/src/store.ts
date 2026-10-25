@@ -566,6 +566,15 @@ export class FileStore {
     );
   }
 
+  /** The patch of the whole run (`changes/run.patch`), or undefined when none was kept. */
+  async readRunPatch(runId: string): Promise<string | undefined> {
+    try {
+      return await readFile(join(this.runDir(runId), "changes", "run.patch"), "utf8");
+    } catch {
+      return undefined;
+    }
+  }
+
   async writeSnapshot(runId: string, key: string, tree: string): Promise<void> {
     const all = await this.readSnapshots(runId);
     all[key] = tree;

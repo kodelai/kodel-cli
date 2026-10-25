@@ -211,6 +211,16 @@ describe("every stored format is opened by the current engine", () => {
     }
   });
 
+  test("jspb_v1_reports_have_no_check_rows_and_no_task_size", async () => {
+    await copyRuns("v1");
+    const host = hostFor();
+    for (const id of Object.keys(V1_RUNS)) {
+      const report = await (await host.open(id))?.report();
+      expect(report?.checks).toEqual([]);
+      expect(report?.task_size).toEqual({ not_collected: true });
+    }
+  });
+
   test("hp9r_v1_check_results_without_check_id_and_params_hash_are_read", async () => {
     await copyRuns("v1");
     const host = hostFor();

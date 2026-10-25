@@ -25,5 +25,6 @@ export * from "./run-task";
 export * from "./service";
 export * from "./slug";
 export * from "./task-service";
+export * from "./task-size";
 export * from "./tasks";
 export * from "./version";
