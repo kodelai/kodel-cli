@@ -48,7 +48,8 @@ jobs:
       - run: bun run lint
       - run: bun test
       - name: Set the version
-        run: npm version "${{ inputs.version }}" --no-git-tag-version --allow-same-version
+        # Not `npm version`: it resolves the dependency tree and fails on the workspace: protocol.
+        run: npm pkg set version="${{ inputs.version }}"
         working-directory: packages/cli
       - run: bun run build
       - run: node scripts/check-artifact.mjs
