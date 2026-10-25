@@ -533,6 +533,29 @@ describe("report", () => {
     expect(json.nodes[0].attempts[0].summary).toBe("made the file and ran the tests");
   });
 
+  test("jspb_json_has_checks_and_the_size_says_not_collected_without_a_patch", async () => {
+    const id = await runAtGate();
+    const parsed = JSON.parse((await cli("report", id, "--json")).out);
+    expect(parsed.checks).toEqual([]);
+    expect(parsed.task_size).toEqual({ not_collected: true });
+    const text = (await cli("report", id)).out;
+    expect(text).not.toContain("checks:");
+    expect(text).toContain("task size: not_collected");
+  });
+
+  test("jspb_the_size_is_read_from_the_runs_patch_when_there_is_one", async () => {
+    const id = await runAtGate();
+    const changes = join(dir, ".kodel", "runs", id, "changes");
+    await mkdir(changes, { recursive: true });
+    await writeFile(
+      join(changes, "run.patch"),
+      "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1,2 @@\n-a\n+b\n+c\n",
+    );
+    expect((await cli("report", id)).out).toContain("task size: 1 file(s), +2 -1 lines");
+    const parsed = JSON.parse((await cli("report", id, "--json")).out);
+    expect(parsed.task_size).toMatchObject({ files: 1, added: 2, removed: 1 });
+  });
+
   test("no runs, or an unknown one, is an error and not a crash", async () => {
     expect(await cli("report")).toMatchObject({ code: 1, err: "kodel: there are no runs yet\n" });
     expect((await cli("report", "r_000000009_aaaa")).code).toBe(1);

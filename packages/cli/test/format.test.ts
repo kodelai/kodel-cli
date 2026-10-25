@@ -28,6 +28,7 @@ const report: RunReport = {
   refusals: [],
   pipeline_changes: [],
   agent_decisions: [],
+  checks: [],
   nodes: [
     {
       node: "impl",
@@ -127,5 +128,59 @@ describe("formatReport", () => {
     );
     expect(loud).not.toContain("\u001b");
     expect(loud).not.toContain("\u0007");
+  });
+});
+
+describe("jspb_format_report_checks_and_size", () => {
+  test("without check rows and without a size nothing about them is printed", () => {
+    const text = formatReport(report, (t) => t);
+    expect(text).not.toContain("checks:");
+    expect(text).not.toContain("task size");
+  });
+
+  test("check rows are a table; escapes in an id go through plain", () => {
+    const text = formatReport(
+      {
+        ...report,
+        checks: [
+          {
+            check_id: "tests\u001b[2J",
+            kind: "command",
+            runs: 3,
+            fails: 2,
+            wrong_check: 1,
+            params_changes: 1,
+            after_change: { passed: 1, failed: 0 },
+          },
+        ],
+      },
+      (t) => t.split("\u001b").join("?"),
+    );
+    expect(text).toContain("checks:");
+    expect(text).toContain("tests?[2J     3      2      1        1  1 passed, 0 failed");
+    expect(text).not.toContain("\u001b");
+  });
+
+  test("the size is a line, or not_collected", () => {
+    expect(formatReport({ ...report, task_size: { not_collected: true } }, (t) => t)).toContain(
+      "task size: not_collected",
+    );
+    const text = formatReport(
+      {
+        ...report,
+        task_size: {
+          files: 2,
+          added: 10,
+          removed: 3,
+          binary_files: 0,
+          top_dirs: [{ dir: "src", files: 2 }],
+          languages: [{ ext: "ts", files: 2 }],
+        },
+      },
+      (t) => t,
+    );
+    expect(text).toContain("task size: 2 file(s), +10 -3 lines");
+    expect(text).toContain("directories: src 2");
+    expect(text).toContain("languages: ts 2");
   });
 });
