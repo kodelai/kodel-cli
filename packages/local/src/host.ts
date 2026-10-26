@@ -1130,12 +1130,16 @@ export class LocalRun {
         return "";
       }
     };
+    const root = this.host.options.root;
     const places: [string, string][] = [
-      [this.host.options.root, "."],
+      [root, "."],
+      [safely(() => realpathOrSame(root)), "."],
       [safely(tmpdir), "<tmp>"],
       [safely(() => realpathOrSame(tmpdir())), "<tmp>"],
       [safely(homedir), "~"],
     ];
+    // Longest first, whichever way they were listed: `/private/var/x` contains `/var/x`.
+    places.sort((a, b) => b[0].length - a[0].length);
     let text = describeError(error);
     for (const [place, name] of places) if (place !== "") text = text.replaceAll(place, name);
     return redactText(text, this.host.rules).slice(0, 200);

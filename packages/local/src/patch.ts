@@ -320,6 +320,9 @@ export async function withIsolatedGit<T>(
     };
     return await fn(iso);
   } finally {
-    await rm(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    // A folder that cannot be removed (a file still open on Windows) must not replace a patch that was made.
+    await rm(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(
+      () => undefined,
+    );
   }
 }

@@ -75,6 +75,9 @@ Each line is a limit and names the test that pins it (`policy`: it cannot be tes
 | A tree id, the tree before it and a redacted patch let someone confirm a guess of a small secret | `t36tw_limit_tree_id_confirms_guess` |
 | The patch files and `snapshots.json` are outside the run's seal (the journal is inside it, so a change of the journal after the run is seen): an agent that can write there can overwrite its own history | `t36tw_limit_an_agent_can_overwrite_a_patch_undetected` |
 | The note of the run's patch is written after the run was sealed, and seals it again; it is not written if the files are no longer as the run left them, and the patch is dropped | `t36tw_changes_recorded_is_not_written_over_a_changed_journal` |
+| An agent that writes two `agent_completed` lines with a `deadline:` error into the journal switches the patches of hand-ins off for the rest of the run (the end patch is unaffected) | policy (the same trust level as blanking its own history) |
+| A quick run of command steps can end before the start of the run is recorded: the patch then has no start tree (an error is recorded) or the work is already in it | policy; `t36tw_d5_missing_start_tree_at_the_end_is_recorded_and_the_task_is_told` for the error |
+| A lock that stays busy, or a state that cannot be read, at the end of the run: no note is written (writing it needs the lock) | policy |
 | The object store and its `alternates` are agent-writable | policy |
 | A tree removed by `git gc` (a run paused longer than `gc.pruneExpire`, two weeks by default) gives `changes_error` for the end of the run and the first hand-in after the pause | `t36tw_d5_a_pruned_start_tree_is_recorded_and_the_next_hand_in_recovers` |
 | Every hand-in leaves unreachable objects, which can bring `git gc --auto` earlier | policy |

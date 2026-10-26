@@ -277,6 +277,10 @@ Rejected or deferred, with the reason:
   root, home and temporary folders. Tests the plan marks M that are still not written: `t36tw_run_patch_for_every_end` for a failed and a
   gate-rejected run, the cases of a pending pipeline change and a damaged state, workdir gone, a per-cwd snapshotter factory, a gate and
   a branch delete in the artifact scenario, and a check that `serveStdio` hands the real host to `stopAndWait`.
+- After the fourth review (no major left): the error text hides the real path of the root and puts the longest place first; a folder
+  that cannot be removed no longer replaces a patch that was made; the three tests that waited a fixed time wait for what they need;
+  tests for the first patch of a dirty start and for a missing start tree at the end with a task link. The merge with `origin/main`
+  (the `served/` files and `decisions`) touched `host.ts` and `store.ts` side by side with this change and needed no change of design.
 - Golden fixture: none was added. The fields are all optional and nothing is renamed or retyped, so rule 1 of "Stored data and
   compatibility" does not ask for one; `t36tw_pipeline_host_settle_waits_for_the_end_patch_and_the_run_reopens` opens a finished run with the
   new fields in a second host and reads its report.

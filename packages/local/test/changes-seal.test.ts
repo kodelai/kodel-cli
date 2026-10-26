@@ -138,8 +138,9 @@ describe("the seal of a finished run", () => {
         "nodes:",
         "  - slug: make",
         "    kind: command",
-        // after the baseline of the run was taken, which is right after the start (a documented limit)
-        `    command: node -e "setTimeout(()=>require('fs').writeFileSync('made.txt','made\\n'),1500)"`,
+        // waits for the test to say go, which it does once the baseline of the run was taken
+        // (right after the start: a documented limit), so the work is certainly after it
+        `    command: node -e "const f=require('fs');const t=Date.now();while(!f.existsSync('go')&&Date.now()-t<30000);f.writeFileSync('made.txt','made\\n')"`,
         "  - slug: after",
         "    kind: command",
         '    command: node -e "0"',
@@ -151,6 +152,7 @@ describe("the seal of a finished run", () => {
       ].join("\n"),
     );
     const { host, run } = await begin(spec);
+    await write("go", "go\n");
     await run.settle();
     expect((await run.state()).status).toBe("completed");
     expect(await readdir(folder(host, run))).toEqual(["run.patch"]);
@@ -250,7 +252,8 @@ describe("when apply throws", () => {
     fake.gate = { on: 2, wait: new Promise<void>((r) => (release = r)) };
     await write("x.txt", "x\n");
     const slow = run.completeStep("a", 1); // stands at its snapshot
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // until it stands there (not a guess at how long that takes)
+    while (fake.calls < 2) await new Promise((resolve) => setTimeout(resolve, 10));
     const quick = await run.completeStep("a", 1); // another session hands the same step in
     expect(quick.ok).toBe(true);
     release();
@@ -277,6 +280,64 @@ describe("a repository that is gone", () => {
     expect(String(recorded?.changes_error).length).toBeGreaterThan(0);
     expect((await run.state()).status).toBe("completed");
     expect(await run.sealStatus()).toBe("sealed");
+  });
+});
+
+describe("the start of the run", () => {
+  test("t36tw_d4_first_patch_starts_at_run_start", async () => {
+    await write("dirty.txt", "there before the run\n"); // not committed: a dirty start
+    const { host, run } = await begin(chain(["a"]));
+    await write("new.txt", "made by the run\n");
+    await run.completeStep("a", 1);
+    const body = await readFile(join(folder(host, run), "a-1.patch"), "utf8");
+    expect(body).toContain("new.txt");
+    expect(body).not.toContain("dirty.txt"); // a base of HEAD would have shown it
+  });
+
+  test("t36tw_d5_missing_start_tree_at_the_end_is_recorded_and_the_task_is_told", async () => {
+    let told = 0;
+    const link: RunTaskLink = {
+      mode: "auto",
+      prepare: async (typed) => ({ key: typed, restarting: false }),
+      begin: async () => ({}),
+      end: async () => {
+        told += 1;
+        return { what: "closed" };
+      },
+    };
+    const host = new LocalHost(chain(["a"]), { root: dir, heartbeatMs: 0, runTaskLink: link });
+    const { run } = await host.start("task", { history: defaultHistory(), taskKey: "K-1" });
+    await writeFile(join(host.store.runDir(run.runId), "snapshots.json"), "{}"); // no start tree
+    await run.completeStep("a", 1);
+    await run.settle();
+    const [recorded] = await records(host, run, "changes_recorded");
+    expect(recorded?.changes).toBeUndefined();
+    expect(String(recorded?.changes_error)).toContain("start of the run was not recorded");
+    // the verdict, the seal and the tie with the task are as they were
+    expect((await run.state()).status).toBe("completed");
+    expect(await run.sealStatus()).toBe("sealed");
+    expect(told).toBe(1);
+  });
+
+  test("t36tw_error_text_hides_the_real_path_of_the_root_and_the_temporary_folder", async () => {
+    class Failing extends GitSnapshotter {
+      calls = 0;
+      override async snapshot(deadline?: Parameters<GitSnapshotter["snapshot"]>[0]) {
+        this.calls += 1;
+        if (this.calls === 2) {
+          throw new Error(`failed in ${await realpath(tmpdir())}/kodel-patch-x and ${dir}/y`);
+        }
+        return super.snapshot(deadline);
+      }
+    }
+    const { host, run } = await begin(chain(["a"]), { snapshotter: new Failing(dir) });
+    await run.completeStep("a", 1);
+    const [done] = await records(host, run, "agent_completed");
+    const text = String(done?.changes_error);
+    expect(text).toContain("<tmp>/kodel-patch-x");
+    expect(text).toContain("./y");
+    expect(text).not.toContain("/private");
+    expect(text).not.toContain(dir);
   });
 });
 
