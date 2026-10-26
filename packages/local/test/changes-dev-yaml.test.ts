@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6,6 +6,9 @@ import { dirname, join } from "node:path";
 import { defaultHistory, parsePipeline } from "@kodel-ai/pipeline-core";
 import { LocalHost, type LocalRun } from "../src";
 import type { CommandResult } from "../src/command";
+
+// git is slow to start on some systems, and these tests start it many times
+setDefaultTimeout(60_000);
 
 // Tests of TASK-36TW: the repository's own pipeline (`.kodel/pipelines/dev.yaml`), driven by a script
 // in place of the agent and with its commands (tests, build, push) answered by a stub, leaves a patch

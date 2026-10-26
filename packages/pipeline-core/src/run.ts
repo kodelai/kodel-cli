@@ -8,7 +8,7 @@
  * attempt of the same visit (rework). Limits: `max_consecutive_failures` and `max_attempts`.
  */
 import { canonicalNode, checkIdOf, type NodeForms, stableJson } from "./canonical";
-import { type ChangesRef, isChangesRef, isTreeId, MAX_CHANGES_ERROR } from "./changes";
+import { type ChangesRef, changesField, isTreeId, MAX_CHANGES_ERROR } from "./changes";
 import { type ErrorCode, KodelError } from "./errors";
 import type { EngineRecord, ExecutorRecord } from "./executor";
 import type { HistoryConfig } from "./history-config";
@@ -771,7 +771,7 @@ class Machine {
     }
     if (event.type === "changes_recorded") {
       this.log("changes_recorded", {
-        ...(isChangesRef(event.changes) ? { changes: event.changes } : {}),
+        ...changesField(event.changes),
         ...(typeof event.changesError === "string"
           ? { changes_error: event.changesError.slice(0, MAX_CHANGES_ERROR) }
           : {}),
@@ -904,7 +904,7 @@ class Machine {
           ...(event.head === undefined ? {} : { head: event.head }),
           // The host made these and checked them; once more here, and a bad value is left out, never a
           // reason to refuse the hand-in (a patch is a record, not a verdict).
-          ...(isChangesRef(event.changes) ? { changes: event.changes } : {}),
+          ...changesField(event.changes),
           ...(typeof event.changesError === "string"
             ? { changes_error: event.changesError.slice(0, MAX_CHANGES_ERROR) }
             : {}),

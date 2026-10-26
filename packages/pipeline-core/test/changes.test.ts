@@ -60,6 +60,21 @@ describe("the shape of what points to a patch", () => {
   });
 });
 
+describe("what a hand-in journals of the host's fields", () => {
+  test("t36tw_changes_keeps_only_the_three_keys", () => {
+    const { journal } = run(START, {
+      type: "agent_completed",
+      node: "a",
+      attempt: 1,
+      // an object with more in it than a reference has: the rest is not journaled
+      changes: { ...ref, extra: "AKIAIOSFODNN7EXAMPLE" } as ChangesRef,
+    });
+    const done = journal.find((r) => r.event === "agent_completed");
+    expect(done?.changes).toEqual(ref);
+    expect(JSON.stringify(done)).not.toContain("AKIA");
+  });
+});
+
 describe("the events", () => {
   test("t36tw_event_fields: a hand-in journals its patch, its error and its tree", () => {
     const { journal } = run(START, {

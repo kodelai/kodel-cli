@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -10,6 +10,9 @@ import {
   parsePipeline,
 } from "@kodel-ai/pipeline-core";
 import { GitSnapshotter, LocalHost, type LocalRun } from "../src";
+
+// git is slow to start on some systems, and these tests start it many times
+setDefaultTimeout(60_000);
 
 // Tests of TASK-36TW: what a patch leaves out (D6), and the failures that are recorded, not fatal (D5).
 
@@ -25,8 +28,12 @@ beforeEach(async () => {
   git("add", "-A");
   git("commit", "-q", "-m", "base");
 });
+const started: LocalRun[] = [];
 afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
+  // A run that ended started a job in the background with git working in `dir`, and a folder that a
+  // program is using cannot be removed on Windows.
+  await Promise.all(started.splice(0).map((run) => run.settle().catch(() => undefined)));
+  await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 const write = async (path: string, content: string) => {
@@ -47,6 +54,7 @@ const chain = (nodes: string[]): PipelineSpec =>
 async function begin(nodes: string[], over: Record<string, unknown> = {}) {
   const host = new LocalHost(chain(nodes), { root: dir, heartbeatMs: 0, ...over });
   const { run } = await host.start("t", { history: defaultHistory() });
+  started.push(run);
   return { host, run };
 }
 const records = async (host: LocalHost, run: LocalRun, event: string) =>

@@ -83,6 +83,16 @@ export const SAFE_CONFIG = [
  */
 export const NO_HOOKS = ["-c", `core.hooksPath=${devNull}`];
 
+/** The git command in an argument list, past options such as `-c key=value`: what an error names. */
+function commandName(args: string[]): string {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] ?? "";
+    if (arg === "-c") i += 1;
+    else if (!arg.startsWith("-")) return arg;
+  }
+  return args[0] ?? "";
+}
+
 /** Run git with the hardened configuration; the one place the local adapters start it. */
 export function git(
   args: string[],
@@ -112,7 +122,7 @@ export function git(
             return;
           }
           const detail = (stderr || error.message).trim();
-          reject(new Error(`git ${args[0]} failed: ${detail}`));
+          reject(new Error(`git ${commandName(args)} failed: ${detail}`));
         } else {
           resolveResult({ stdout });
         }

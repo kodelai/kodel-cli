@@ -444,7 +444,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       if (where?.branch) env.out(`branch:    ${plain(where.branch)}\n`);
       if (state.taskKey !== undefined) env.out(`tracker:   ${plain(state.taskKey)}\n`);
       env.out(`integrity: ${await run.integrityStatus()}\n`);
-      env.out(`seal:      ${await run.sealStatus()}\n`);
+      env.out(`seal:      ${await run.sealStatusSettled()}\n`);
       env.out(`trail:     ${state.trail.map(plain).join(" > ")}\n`);
       const pending = await pendingLine(run);
       if (pending) env.out(`pipeline:  ${pending}\n`);
@@ -873,7 +873,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const report = await run.report();
       // The report is read from the run's own files, so it is only as good as they are: whether they
       // are as kodel last wrote them goes with it.
-      const trust = { integrity: await run.integrityStatus(), seal: await run.sealStatus() };
+      const trust = { integrity: await run.integrityStatus(), seal: await run.sealStatusSettled() };
       env.out(
         opts.json
           ? `${JSON.stringify({ ...report, ...trust }, null, 2)}\n`

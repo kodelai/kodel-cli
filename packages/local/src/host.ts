@@ -1138,6 +1138,10 @@ export class LocalRun {
       [safely(() => realpathOrSame(tmpdir())), "<tmp>"],
       [safely(homedir), "~"],
     ];
+    // Git for Windows prints `C:/Users/x` where Node says `C:\Users\x`: both are named.
+    for (const [place, name] of [...places]) {
+      if (place.includes("\\")) places.push([place.replaceAll("\\", "/"), name]);
+    }
     // Longest first, whichever way they were listed: `/private/var/x` contains `/var/x`.
     places.sort((a, b) => b[0].length - a[0].length);
     // The places are named before the text is redacted: a long path looks like a secret to the entropy
@@ -1463,6 +1467,15 @@ export class LocalRun {
     if (state.status === "running" || state.status === "paused") return "open";
     const trusted = await this.host.integrity.get(`${this.runId}.seal`);
     return this.host.store.checkSeal(this.runId, trusted);
+  }
+
+  /**
+   * The same, for a caller that is not inside the run's lock (`status`, `report`, the next step): a
+   * note written after the end of the run rewrites the state, the journal and the seal one after
+   * the other, and a look in between would call the run changed. Never from inside `apply`.
+   */
+  sealStatusSettled(): Promise<"sealed" | "modified" | "unsealed" | "open"> {
+    return this.host.store.withLock(this.runId, () => this.sealStatus());
   }
 
   /**

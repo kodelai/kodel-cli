@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import {
@@ -23,6 +23,9 @@ import {
 import { DeadlineError, GitSnapshotter, LocalHost, LocalPipelineHost, type LocalRun } from "../src";
 import { patchBetween, withIsolatedGit } from "../src/patch";
 
+// git is slow to start on some systems, and these tests start it many times
+setDefaultTimeout(60_000);
+
 // Tests that need a POSIX shell, file modes or links skip on Windows: Node reports no exec bit there,
 // a symlink needs a privilege, and a `#!/bin/sh` file is not a program. The hardening they stand for is
 // in the code either way.
@@ -41,8 +44,12 @@ beforeEach(async () => {
   git("add", "-A");
   git("commit", "-q", "-m", "base");
 });
+const started: LocalRun[] = [];
 afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
+  // A run that ended started a job in the background with git working in `dir`, and a folder that a
+  // program is using cannot be removed on Windows.
+  await Promise.all(started.splice(0).map((run) => run.settle().catch(() => undefined)));
+  await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 const write = async (path: string, content: string, root = dir) => {
@@ -76,6 +83,7 @@ async function begin(
 ) {
   const host = new LocalHost(spec, { root: dir, heartbeatMs: 0, ...over });
   const { run } = await host.start(task, { history: hist });
+  started.push(run);
   return { host, run };
 }
 const records = async (host: LocalHost, run: LocalRun, event: string) =>
@@ -461,17 +469,55 @@ describe("the limits that are written down", () => {
     expect(body).not.toContain("other.txt");
   });
 
+  /**
+   * The patch the run made, as git wrote it (the control) and as it was kept (redacted), tried on a clean
+   * checkout of the start of the run: the control must apply, so that a refusal of the kept one is the redaction's.
+   */
+  async function appliesOnCleanStart(
+    host: LocalHost,
+    run: LocalRun,
+    start: string,
+  ): Promise<{ control: boolean; kept: boolean }> {
+    const end = await new GitSnapshotter(dir).snapshot();
+    const raw = await patchBetween(dir, start, end, { maxBytes: 1_000_000 });
+    const clean = `${dir}-clean`;
+    const files = `${dir}-patches`;
+    git("worktree", "add", "-q", "--detach", clean, "HEAD");
+    await mkdir(files, { recursive: true });
+    try {
+      await writeFile(join(files, "control.patch"), raw.patch);
+      const tries = (file: string) => {
+        try {
+          execFileSync("git", ["-c", "core.autocrlf=false", "apply", "--check", file], {
+            cwd: clean,
+            stdio: "ignore",
+          });
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      return {
+        control: tries(join(files, "control.patch")),
+        kept: tries(join(changesDir(host, run), "a-1.patch")),
+      };
+    } finally {
+      git("worktree", "remove", "--force", clean);
+      await rm(files, { recursive: true, force: true });
+    }
+  }
+
   test("t36tw_limit_a_redacted_patch_does_not_apply", async () => {
     const secret = ["AKIA", "IOSFODNN7EXAMPLE"].join("");
     await write("conf.txt", `key=${secret}\nplain\n`);
     git("add", "-A");
     git("commit", "-q", "-m", "conf");
+    const start = await new GitSnapshotter(dir).snapshot();
     const { host, run } = await begin(chain(["a"]));
     await write("conf.txt", `key=${secret}\nplain\nadded\n`); // the secret is only context
     await run.completeStep("a", 1);
-    const file = join(changesDir(host, run), "a-1.patch");
-    expect(await readFile(file, "utf8")).toContain("[REDACTED");
-    expect(() => git("apply", "--check", file)).toThrow();
+    expect(await readFile(join(changesDir(host, run), "a-1.patch"), "utf8")).toContain("[REDACTED");
+    expect(await appliesOnCleanStart(host, run, start)).toEqual({ control: true, kept: false });
   });
 
   test("t36tw_limit_multi_line_redaction_breaks_the_hunk", async () => {
@@ -481,13 +527,13 @@ describe("the limits that are written down", () => {
       "-----END PRIVATE KEY-----",
       "",
     ].join("\n");
+    const start = await new GitSnapshotter(dir).snapshot();
     const { host, run } = await begin(chain(["a"]));
     await write("key.pem", pem);
     await run.completeStep("a", 1);
-    const file = join(changesDir(host, run), "a-1.patch");
-    const body = await readFile(file, "utf8");
+    const body = await readFile(join(changesDir(host, run), "a-1.patch"), "utf8");
     expect(body).not.toContain("MIIEvQIBADAN");
-    expect(() => git("apply", "--check", file)).toThrow();
+    expect(await appliesOnCleanStart(host, run, start)).toEqual({ control: true, kept: false });
   });
 
   test("t36tw_limit_task_size_of_a_cut_patch_is_low", async () => {

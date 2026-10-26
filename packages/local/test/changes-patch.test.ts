@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
@@ -6,6 +6,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DeadlineError, deadlineIn, GitSnapshotter } from "../src/git";
 import { patchBetween } from "../src/patch";
+
+// git is slow to start on some systems, and these tests start it many times
+setDefaultTimeout(60_000);
 
 // Tests that need a POSIX shell, file modes or links skip on Windows: Node reports no exec bit there,
 // a symlink needs a privilege, and a `#!/bin/sh` file is not a program. The hardening they stand for is

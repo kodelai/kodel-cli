@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import {
@@ -26,6 +26,9 @@ import {
 import { z } from "zod";
 import { GitSnapshotter, LocalHost, type LocalRun, loadConfig } from "../src";
 
+// git is slow to start on some systems, and these tests start it many times
+setDefaultTimeout(60_000);
+
 // Tests of TASK-36TW added after the second review: the seal, the races around it, a kind of node
 // that is not `agent`, and what happens when `apply` throws.
 
@@ -40,8 +43,12 @@ beforeEach(async () => {
   git("add", "-A");
   git("commit", "-q", "-m", "base");
 });
+const started: LocalRun[] = [];
 afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
+  // A run that ended started a job in the background with git working in `dir`, and a folder that a
+  // program is using cannot be removed on Windows.
+  await Promise.all(started.splice(0).map((run) => run.settle().catch(() => undefined)));
+  await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 const write = async (path: string, content: string) => {
@@ -63,6 +70,7 @@ const chain = (nodes: string[], registry = defaultRegistry(), kind = "agent"): P
 async function begin(spec: PipelineSpec, over: Record<string, unknown> = {}, task = "t") {
   const host = new LocalHost(spec, { root: dir, heartbeatMs: 0, ...over });
   const { run } = await host.start(task, { history: defaultHistory() });
+  started.push(run);
   return { host, run };
 }
 const records = async (host: LocalHost, run: LocalRun, event: string) =>
@@ -120,6 +128,7 @@ describe("the seal of a finished run", () => {
         history: defaultHistory(),
         taskKey: `K-${i}`,
       });
+      started.push(run);
       await run.completeStep("a", 1);
       await run.settle();
       const events = (await host.store.readJournal(run.runId)).map((r: JournalRecord) => r.event);
@@ -307,6 +316,7 @@ describe("the start of the run", () => {
     };
     const host = new LocalHost(chain(["a"]), { root: dir, heartbeatMs: 0, runTaskLink: link });
     const { run } = await host.start("task", { history: defaultHistory(), taskKey: "K-1" });
+    started.push(run);
     await writeFile(join(host.store.runDir(run.runId), "snapshots.json"), "{}"); // no start tree
     await run.completeStep("a", 1);
     await run.settle();
@@ -383,9 +393,15 @@ describe("limits of what is kept", () => {
 
   test("t36tw_settle_is_bounded_by_its_deadline_even_when_the_queue_is_stuck", async () => {
     const { run } = await begin(chain(["a"]));
-    (run as unknown as { queue: Promise<unknown> }).queue = new Promise(() => undefined);
-    const started = Date.now();
-    await run.settle(() => 0, Date.now() + 150);
-    expect(Date.now() - started).toBeLessThan(3_000);
+    const hook = run as unknown as { queue: Promise<unknown> };
+    const real = hook.queue;
+    hook.queue = new Promise(() => undefined);
+    try {
+      const started = Date.now();
+      await run.settle(() => 0, Date.now() + 150);
+      expect(Date.now() - started).toBeLessThan(3_000);
+    } finally {
+      hook.queue = real; // the cleanup after the test waits for it too
+    }
   });
 });

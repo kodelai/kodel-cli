@@ -287,6 +287,13 @@ Rejected or deferred, with the reason:
   named reason", the reason being written beside each. Also: `snapshot()` gives the deadline to its first `git` call (`isRepo`) and no
   longer lets a failed cleanup replace the tree it made; the error text ignores a place of fewer than four
   characters (a `HOME` of `/` mangled every path; the places are named before the redaction, because the entropy rule wipes a long path); the "still being recorded" note is only for a run with a worktree of its own.
+- After the sixth review (three majors, all about the tests on CI): the files that start git many times set a 60 s default timeout; the
+  checkout of the base in `changes-worktree.test.ts` pins `core.autocrlf=false`; every test file that ends runs settles them before the
+  folder is removed (Windows will not remove a folder a program is using) and removes it with retries; the two limits of redaction are
+  shown on a clean checkout of the start with a control that applies. Also: a git error names the command, not `-c`; the core rebuilds
+  `changes` from its three keys; `kodel status` and `report` look at the seal under the lock (`sealStatusSettled`); the places in an error
+  text are also named with forward slashes. Not changed: 8.3 short names on Windows are not expanded, and `changes-dev-yaml.test.ts` lists
+  the nodes of `dev.yaml` (a change to that pipeline has to update it).
 - Golden fixture: none was added. The fields are all optional and nothing is renamed or retyped, so rule 1 of "Stored data and
   compatibility" does not ask for one; `t36tw_pipeline_host_settle_waits_for_the_end_patch_and_the_run_reopens` opens a finished run with the
   new fields in a second host and reads its report.

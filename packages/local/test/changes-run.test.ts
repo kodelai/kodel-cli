@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
@@ -15,6 +15,9 @@ import {
 import { DeadlineError, GitSnapshotter, LocalHost, type LocalRun } from "../src";
 import { FileStore } from "../src/store";
 
+// git is slow to start on some systems, and these tests start it many times
+setDefaultTimeout(60_000);
+
 // Tests of TASK-36TW: the patch of each handed-in attempt and of the run, kept in `changes/`.
 // Test ids: `t36tw`, and `d<N>` for the decision of the plan the test is about.
 
@@ -30,8 +33,12 @@ beforeEach(async () => {
   git("add", "-A");
   git("commit", "-q", "-m", "base");
 });
+const started: LocalRun[] = [];
 afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
+  // A run that ended started a job in the background with git working in `dir`, and a folder that a
+  // program is using cannot be removed on Windows.
+  await Promise.all(started.splice(0).map((run) => run.settle().catch(() => undefined)));
+  await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 const write = async (path: string, content: string) => {
@@ -76,6 +83,7 @@ async function begin(
 ) {
   const host = new LocalHost(spec, { root: dir, heartbeatMs: 0, ...over });
   const { run } = await host.start(task, hist === null ? {} : { history: hist });
+  started.push(run);
   return { host, run };
 }
 

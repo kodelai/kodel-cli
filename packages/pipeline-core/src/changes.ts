@@ -17,6 +17,15 @@ export function isTreeId(value: unknown): value is string {
   return typeof value === "string" && TREE_ID.test(value);
 }
 
+/**
+ * The `changes` field of an event, rebuilt from its three known keys, or nothing for a value that is
+ * not one. Whatever else a value carries is not journaled (and is not exempt from redaction).
+ */
+export function changesField(value: unknown): { changes?: ChangesRef } {
+  if (!isChangesRef(value)) return {};
+  return { changes: { ref: value.ref, bytes: value.bytes, truncated: value.truncated } };
+}
+
 const MAX_REF_LENGTH = 200;
 
 /** The shape of a patch reference: inside `changes/`, nothing that climbs out or is absolute. */

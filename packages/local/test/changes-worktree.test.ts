@@ -1,9 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { LocalPipelineHost, type LocalRun } from "../src";
+
+// git is slow to start on some systems, and these tests start it many times
+setDefaultTimeout(60_000);
 
 // Tests of TASK-36TW in a run of its own worktree, the way a real run goes, and with the human gate
 // decided by a second host, the way `kodel gate` does it.
@@ -38,6 +41,7 @@ beforeEach(async () => {
   git(root, "init", "-q");
   git(root, "config", "user.email", "t@example.com");
   git(root, "config", "user.name", "T");
+  git(root, "config", "core.autocrlf", "false"); // Windows would write CRLF and fail the comparisons
   await writeFile(join(root, "tracked.txt"), "one\n");
   git(root, "add", "-A");
   git(root, "commit", "-q", "-m", "initial");
