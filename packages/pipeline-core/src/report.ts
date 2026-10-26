@@ -37,6 +37,19 @@ export interface PipelineChangeReport {
   nodes: { slug: string; changes: string[] }[];
   effect: string;
   reason?: string;
+  /** Set when the agent accepted the change on the person's instruction. */
+  by?: "agent";
+}
+
+/** A decision a person would make that the agent made on their instruction (the config allowed it). */
+export interface AgentDecisionReport {
+  at: number;
+  what: "gate" | "pipeline_change";
+  /** The gate's step, and what was decided there. */
+  node?: string;
+  decision?: string;
+  /** The words the agent says it was given. */
+  instruction: string;
 }
 
 /** How one check fared over the run, from the journal; a run before `check_id` has none. */
@@ -56,6 +69,12 @@ export interface CheckReport {
 
 /** The size of the task, or why it is not known (no patch was kept for the run). */
 export type TaskSizeReport = TaskSize | { not_collected: true };
+
+/**
+ * How many different answers the agent was shown and kept (`served/`), or that the run kept none: it is
+ * older than the record, or it was started with `history.prompts` off.
+ */
+export type PromptsReport = { served: number } | { not_collected: true };
 
 export interface NodeReport {
   node: string;
@@ -93,6 +112,8 @@ export interface RunReport {
   extra_attempts: number;
   /** The versions of the pipeline a person accepted while the run went, in order. */
   pipeline_changes: PipelineChangeReport[];
+  /** Gates and pipeline changes the agent decided, in order; empty when a person decided them all. */
+  agent_decisions: AgentDecisionReport[];
   /**
    * Per check, in the order each first ran. Checks removed from the pipeline keep their row. A
    * `check_id` is positional, so a check inserted or moved mid-run shares its row with the one it displaced.
@@ -100,6 +121,7 @@ export interface RunReport {
   checks: CheckReport[];
   /** Added by a host that can read the run's patch; absent when the report is made from the journal alone. */
   task_size?: TaskSizeReport;
+  prompts: PromptsReport;
 }
 
 const seconds = (from: number, to: number) => Math.max(0, Math.round((to - from) / 100) / 10);
@@ -145,7 +167,9 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
   };
 
   const refusals: RunReport["refusals"] = [];
+  let served = 0;
   const pipelineChanges: PipelineChangeReport[] = [];
+  const agentDecisions: AgentDecisionReport[] = [];
   const attemptOf = (name: string, attempt: number) =>
     nodes.get(name)?.attempts.find((a) => a.attempt === attempt);
 
@@ -184,10 +208,29 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
           nodes: (record.nodes as PipelineChangeReport["nodes"] | undefined) ?? [],
           effect: String((record.effect as { kind?: string } | undefined)?.kind ?? "none"),
           ...(typeof record.reason === "string" ? { reason: record.reason } : {}),
+          ...(record.decided_by === "agent" ? { by: "agent" as const } : {}),
         });
+        if (record.decided_by === "agent") {
+          agentDecisions.push({
+            at: record.ts,
+            what: "pipeline_change",
+            instruction: String(record.instruction ?? ""),
+          });
+        }
         break;
       case "gate_waiting":
         if (name) gates.add(name);
+        break;
+      case "gate_decided":
+        if (record.decided_by === "agent") {
+          agentDecisions.push({
+            at: record.ts,
+            what: "gate",
+            ...(name ? { node: name } : {}),
+            decision: String(record.decision),
+            instruction: String(record.instruction ?? ""),
+          });
+        }
         break;
       case "task_link":
         if (record.what === "restarted" || record.restarting === true) taskRestarted = true;
@@ -279,6 +322,9 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
           message: typeof record.message === "string" ? record.message : "",
         });
         break;
+      case "step_served":
+        served += 1;
+        break;
       case "node_restarted":
         restarts += 1;
         break;
@@ -339,6 +385,9 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
     refusals,
     extra_attempts: all.reduce((total, n) => total + Math.max(0, n.attempts.length - 1), 0),
     pipeline_changes: pipelineChanges,
+    agent_decisions: agentDecisions,
     checks: [...checks.values()],
+    // The state key is there from the start of a run that keeps prompts, so a run of zero serves says so.
+    prompts: state.served === undefined ? { not_collected: true } : { served },
   };
 }

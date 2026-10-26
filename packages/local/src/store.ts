@@ -129,6 +129,9 @@ export function artifactFileName(node: string): string {
     : `${safe}-${sha256(node).slice(0, 8)}`;
 }
 
+/** A name the run machine gives a served file: a node slug, the attempt and the number. */
+const SERVED_REF = /^served\/[a-z0-9][a-z0-9-]{0,62}-\d{1,6}-\d{1,6}\.json$/;
+
 const isMissing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
 
 export class FileStore {
@@ -155,6 +158,11 @@ export class FileStore {
 
   private redact<T>(value: T): T {
     return redactDeep(value, this.rules);
+  }
+
+  /** A value with the project's secrets taken out, as it would be written; for what is hashed and then written. */
+  redactAnswer<T>(value: T): T {
+    return this.redact(value);
   }
 
   /** Write a file so that a reader sees the old content or the new, never half of it. */
@@ -721,6 +729,24 @@ export class FileStore {
     } catch {
       // a leftover file with no reference in the journal is ignored by everything that reads
     }
+  }
+
+  /**
+   * Keep what the agent was shown. `ref` is the name the run machine gave (`served/<node>-<attempt>-<n>.json`);
+   * it is checked here too, so a record in the journal can never point out of the run's folder. The
+   * content is already redacted by whoever hashed it.
+   */
+  async writeServed(runId: string, ref: string, content: unknown): Promise<void> {
+    if (!SERVED_REF.test(ref)) {
+      throw new KodelError("INVALID_ARGUMENTS", `"${ref}" is not a served file`);
+    }
+    await mkdir(join(this.runDir(runId), "served"), { recursive: true });
+    await this.writeAtomic(join(this.runDir(runId), ref), `${JSON.stringify(content, null, 2)}\n`);
+  }
+
+  async readServed(runId: string, ref: string): Promise<unknown> {
+    if (!SERVED_REF.test(ref)) return undefined;
+    return this.readJson<unknown>(join(this.runDir(runId), ref));
   }
 
   // locking

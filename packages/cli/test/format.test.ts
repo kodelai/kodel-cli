@@ -27,7 +27,9 @@ const report: RunReport = {
   refused: 0,
   refusals: [],
   pipeline_changes: [],
+  agent_decisions: [],
   checks: [],
+  prompts: { served: 3 },
   nodes: [
     {
       node: "impl",

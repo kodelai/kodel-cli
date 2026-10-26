@@ -173,6 +173,14 @@ export interface RunState {
   history?: HistoryConfig;
   /** The version of the engine that started the run; a later record from another one says so. */
   engineVersion?: string;
+  /**
+   * What the agent was shown, per `node:attempt`: a short hash of each answer-and-client already
+   * kept (never the client or the session themselves: the state is not redacted). Present only for a
+   * run that records prompts, so its absence says "not collected".
+   */
+  served?: Record<string, string[]>;
+  /** How many `step_served` and `served_write_failed` events were journaled; there is a limit. */
+  servedEvents?: number;
 }
 
 /** How many refused calls a run journals: enough to see what was tried, too few to be a way to fill the disk. */
@@ -181,7 +189,25 @@ export const MAX_LOGGED_REFUSALS = 100;
 /** How many proposals to change the pipeline a run journals. */
 export const MAX_LOGGED_PROPOSALS = 100;
 
+/** How many different answers of one attempt are kept: one per client, so a loop cannot fill the disk. */
+export const MAX_SERVED_PER_ATTEMPT = 20;
+
+/** How many `step_served` and `served_write_failed` events a run journals. */
+export const MAX_SERVED_EVENTS = 500;
+
 // ── events in, effects out ──────────────────────────────────────────────────
+
+/**
+ * A decision that a person would make, made by the agent because the project's config allows it and
+ * the person told it to. The engine cannot check that; it keeps the words the agent says it was given.
+ */
+export interface AgentDecision {
+  instruction: string;
+}
+
+/** The journal fields that mark a decision as the agent's; a person's decision has none. */
+const decidedBy = (by: AgentDecision | undefined): Record<string, unknown> =>
+  by === undefined ? {} : { decided_by: "agent", instruction: by.instruction };
 
 /** A file in the run folder that holds what a command printed; `bytes` counts what is stored. */
 export interface OutputRef {
@@ -278,6 +304,7 @@ export type RunEvent =
       source: "proposal" | "file";
       before: PipelineSpec;
       reason?: string;
+      byAgent?: AgentDecision;
     }
   /** The host accepted the agent's report of findings. Journaled; it changes nothing else. */
   | {
@@ -299,7 +326,13 @@ export type RunEvent =
       code: string;
       message: string;
     }
-  | { type: "human_decided"; node: string; decision: "approved" | "rejected"; reason?: string }
+  | {
+      type: "human_decided";
+      node: string;
+      decision: "approved" | "rejected";
+      reason?: string;
+      byAgent?: AgentDecision;
+    }
   | { type: "heartbeat"; node: string; attempt: number; owner?: string }
   /** The agent noticed a problem in a step description. Journaled; it never changes the run. */
   | {
@@ -317,6 +350,20 @@ export type RunEvent =
    * Journaled; changes nothing else: only a person's `pipeline_accepted` moves the run.
    */
   | { type: "change_proposed"; hash: string; summary: string; withdrawn?: boolean }
+  /**
+   * The agent was handed the step of this attempt. `key` is a short hash of the answer and the client
+   * (the host builds it); the machine decides whether it is new, and gives it a number and a file name.
+   */
+  | {
+      type: "step_served";
+      node: string;
+      attempt: number;
+      key: string;
+      promptHash: string;
+      executor?: ExecutorRecord;
+    }
+  /** The file of a `step_served` event could not be written. */
+  | { type: "served_write_failed"; node: string; attempt: number; n: number; message: string }
   /** A human accepted a change made to the run's files outside kodel. Journaled; changes nothing else. */
   | { type: "acknowledge"; note?: string }
   /**
@@ -797,6 +844,8 @@ class Machine {
       });
       return;
     }
+    if (event.type === "step_served") return this.stepServed(event);
+    if (event.type === "served_write_failed") return this.servedWriteFailed(event);
     if (event.type === "cancel") {
       if (this.s.status === "running" || this.s.status === "paused") this.end("canceled");
       else throw new Repeat();
@@ -925,6 +974,7 @@ class Machine {
           node: event.node,
           decision: event.decision,
           reason: event.reason ?? null,
+          ...decidedBy(event.byAgent),
         });
         this.finish(
           visit,
@@ -975,6 +1025,7 @@ class Machine {
         visitId: 0,
       };
     }
+    if (event.history?.prompts.enabled === true) this.s.served = {};
     this.log("run_started", {
       run: event.runId,
       task: event.task,
@@ -994,6 +1045,48 @@ class Machine {
     );
     if (needsRunBaseline) this.effects.push({ type: "take_snapshot", key: "run" });
     this.enter(this.spec.entry, false);
+  }
+
+  /**
+   * Keep a record of what the agent was handed, once per answer and client. Anything that does not
+   * hold (the run is not running, the step moved on, a run that does not record prompts, a repeat, a
+   * limit) is a quiet no-op: the agent has the answer already and recording must never refuse it.
+   */
+  private stepServed(event: Extract<RunEvent, { type: "step_served" }>) {
+    const served = this.s.served;
+    if (served === undefined || this.s.status !== "running") throw new Repeat();
+    const visit = this.s.active.find((v) => v.node === event.node);
+    if (visit?.attempt !== event.attempt || visit.phase !== "agent") throw new Repeat();
+    const so_far = this.s.servedEvents ?? 0;
+    if (so_far >= MAX_SERVED_EVENTS) throw new Repeat();
+    const id = `${event.node}:${event.attempt}`;
+    const keys = served[id] ?? [];
+    if (keys.includes(event.key) || keys.length >= MAX_SERVED_PER_ATTEMPT) throw new Repeat();
+    served[id] = [...keys, event.key];
+    this.s.servedEvents = so_far + 1;
+    const n = keys.length + 1;
+    this.log("step_served", {
+      node: event.node,
+      attempt: event.attempt,
+      n,
+      // A node slug is lowercase letters, digits and dashes (`pipeline.ts`), so it is a safe file name.
+      ref: `served/${event.node}-${event.attempt}-${n}.json`,
+      prompt_hash: event.promptHash,
+      ...(event.executor === undefined ? {} : { executor: event.executor }),
+    });
+  }
+
+  private servedWriteFailed(event: Extract<RunEvent, { type: "served_write_failed" }>) {
+    if (this.s.served === undefined || this.s.status !== "running") throw new Repeat();
+    const so_far = this.s.servedEvents ?? 0;
+    if (so_far >= MAX_SERVED_EVENTS) throw new Repeat();
+    this.s.servedEvents = so_far + 1;
+    this.log("served_write_failed", {
+      node: event.node.slice(0, 100),
+      attempt: event.attempt,
+      n: event.n,
+      message: event.message.slice(0, 200),
+    });
   }
 
   private restart(visit: Visit, ownerGone = false) {
@@ -1076,6 +1169,7 @@ class Machine {
       nodes: diff.nodes,
       effect: diff.effect,
       ...(event.reason === undefined ? {} : { reason: event.reason }),
+      ...decidedBy(event.byAgent),
     });
 
     const effect = diff.effect;

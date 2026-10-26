@@ -12,11 +12,14 @@ import { mkdir, readFile, realpath } from "node:fs/promises";
 import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import {
+  type AgentDecision,
   type Caller,
   type ChangeSet,
   type ChangesRef,
   type CheckVerdict,
   canonicalPipeline,
+  cleanExecutorText,
+  clientOf,
   type Decision,
   decide,
   defaultRegistry,
@@ -62,7 +65,14 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { type CommandOptions, type CommandResult, runCommand } from "./command";
 import { loadConfig, type WorktreeConfig } from "./config";
-import { type BuildInfo, engineRecord, observeExecutor, UNKNOWN_BUILD } from "./executor";
+import {
+  type BuildInfo,
+  type ExecutorContext,
+  engineRecord,
+  observeExecutor,
+  SESSION_ENV,
+  UNKNOWN_BUILD,
+} from "./executor";
 import {
   checkTreeId,
   deadlineIn,
@@ -74,6 +84,7 @@ import {
 import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integrity";
 import { patchBetween } from "./patch";
 import { MAX_PATCH_KB, PATCH_READ_MARGIN } from "./patch-text";
+import { fitServed, promptHashOf, type ServedNode, servedKeyOf } from "./served";
 import { artifactFileName, FileStore, META_VERSION, newRunId, type RunMeta } from "./store";
 import { GitWorktreeProvider, type Workdir, type WorkdirProvider } from "./worktree";
 
@@ -125,6 +136,12 @@ export interface HostOptions {
   root: string;
   /** Where runs are kept; defaults to `<root>/.kodel`. */
   storeRoot?: string;
+  /**
+   * What the server serves the agent to decide on a person's instruction (`decisions.agent` of the
+   * config, as read when the server started). The texts of the waiting answers name a tool only
+   * when it is here, so they never name one the server does not offer.
+   */
+  agentDecisions?: { gate?: boolean; pipelineChange?: boolean };
   rules?: RedactRule[];
   engine?: EngineOptions;
   clock?: () => number;
@@ -231,6 +248,14 @@ function redactEvent(event: RunEvent, rules: RedactRule[]): RunEvent {
   for (const field of FREE_TEXT_FIELDS) {
     const value = copy[field];
     if (typeof value === "string") copy[field] = redactText(value, rules);
+  }
+  // The words the agent says the person gave it are the agent's input like any other text.
+  const by = copy["byAgent"];
+  if (typeof by === "object" && by !== null && "instruction" in by) {
+    const { instruction } = by as { instruction: unknown };
+    if (typeof instruction === "string") {
+      copy["byAgent"] = { ...by, instruction: redactText(instruction, rules) };
+    }
   }
   return copy as unknown as RunEvent;
 }
@@ -717,6 +742,14 @@ export class LocalRun {
     }
   }
 
+  private agentDecisions(): { gate: boolean; pipelineChange: boolean } {
+    const { agentDecisions } = this.host.options;
+    return {
+      gate: agentDecisions?.gate === true,
+      pipelineChange: agentDecisions?.pipelineChange === true,
+    };
+  }
+
   /** The run's journal, as it is on disk; read-only. */
   journal(): Promise<JournalRecord[]> {
     return this.host.store.readJournal(this.runId);
@@ -925,6 +958,7 @@ export class LocalRun {
         redo: describeEffect(diff.effect),
         ...(diff.refused === undefined ? {} : { refused: diff.refused }),
         apply: `kodel pipeline changes apply ${this.runId}`,
+        hash,
         blocking: diff.refused === undefined,
       },
     };
@@ -1024,6 +1058,7 @@ export class LocalRun {
     source: "file" | "proposal";
     text: string;
     reason?: string;
+    byAgent?: AgentDecision;
   }): Promise<Decision> {
     const state = await this.state();
     const before = await this.currentSpec(state);
@@ -1046,6 +1081,7 @@ export class LocalRun {
       source: input.source,
       before,
       ...(input.reason === undefined ? {} : { reason: input.reason }),
+      ...(input.byAgent === undefined ? {} : { byAgent: input.byAgent }),
     });
     if (decision.ok) await this.host.store.removeProposal(this.runId).catch(() => undefined);
     return decision;
@@ -1434,7 +1470,11 @@ export class LocalRun {
       state,
       this.host.clock(),
       this.host.engine.registry ?? defaultRegistry(),
-      { waitHint: await this.waitHint(), ...(pending ? { pending: pending.info } : {}) },
+      {
+        waitHint: await this.waitHint(),
+        agentDecisions: this.agentDecisions(),
+        ...(pending ? { pending: pending.info } : {}),
+      },
     );
   }
 
@@ -1800,7 +1840,9 @@ export class LocalRun {
   // what callers do
 
   /** What the agent should do next. Throws `STATE_MODIFIED_EXTERNALLY` if the files were tampered with. */
-  async nextStep(options: { atCompletion?: boolean } = {}): Promise<NextStep> {
+  async nextStep(
+    options: { atCompletion?: boolean; serve?: { caller?: Caller } } = {},
+  ): Promise<NextStep> {
     const tick = await this.tick();
     if (!tick.ok && tick.error.code === "STATE_MODIFIED_EXTERNALLY") throw tick.error;
     // Under the lock: a note being written after the end of the run (the patch, the task) rewrites the
@@ -1821,6 +1863,7 @@ export class LocalRun {
       this.host.engine.registry ?? defaultRegistry(),
       {
         waitHint: await this.waitHint(),
+        agentDecisions: this.agentDecisions(),
         ...(pending ? { pending: pending.info } : {}),
         ...(options.atCompletion === true ? { atCompletion: true } : {}),
       },
@@ -1851,7 +1894,77 @@ export class LocalRun {
         if (omitted > 0) step.waiting.changes_omitted = omitted;
       }
     }
+    if (options.serve !== undefined && "node" in step) {
+      await this.recordServed(step.node, options.serve.caller, state);
+    }
     return step;
+  }
+
+  /**
+   * Keep what the agent is about to be shown (`served/`), once per answer and client, unless the run was
+   * started with `history.prompts` off. It never changes what the agent is told: whatever goes wrong
+   * here, the answer still goes out. The run machine numbers the file under the run's lock; the file is
+   * written after the event was accepted, so no file is without an event.
+   */
+  private async recordServed(
+    node: ServedNode,
+    caller: Caller | undefined,
+    state: RunState,
+  ): Promise<void> {
+    try {
+      const served = state.served;
+      if (served === undefined) return;
+      // The answer as it will be stored; the hash, the key and the file all come from this one value.
+      const answer = this.host.store.redactAnswer(node);
+      const promptHash = promptHashOf(answer);
+      const recordsExecutor = state.history?.executor.enabled === true;
+      // The session counts only when the environment gives it: the hook index only knows which session
+      // of the directory started last, which changes with the window the person looks at.
+      const env = this.host.options.environment ?? process.env;
+      const client = recordsExecutor ? clientOf(caller)?.value : undefined;
+      const session = recordsExecutor ? cleanExecutorText(env[SESSION_ENV]) : undefined;
+      const key = servedKeyOf(promptHash, client, session);
+      if (served[`${node.slug}:${node.attempt}`]?.includes(key)) return;
+      const executor = recordsExecutor
+        ? await observeExecutor(caller, await this.executorContext(state))
+        : undefined;
+      const decision = await this.apply({
+        type: "step_served",
+        node: node.slug,
+        attempt: node.attempt,
+        key,
+        promptHash,
+        ...(executor === undefined ? {} : { executor }),
+      });
+      if (!decision.ok || decision.noop) return;
+      const record = decision.journal.find((r) => r.event === "step_served");
+      if (typeof record?.ref !== "string" || typeof record.n !== "number") return;
+      try {
+        await this.host.store.writeServed(
+          this.runId,
+          record.ref,
+          fitServed({
+            v: 1,
+            node: node.slug,
+            attempt: node.attempt,
+            n: record.n,
+            prompt_hash: promptHash,
+            answer: answer as unknown as Record<string, unknown>,
+          }),
+        );
+      } catch (error) {
+        // Short and without the folder, like `output_error`: the journal is read by people and tools.
+        await this.apply({
+          type: "served_write_failed",
+          node: node.slug,
+          attempt: node.attempt,
+          n: record.n,
+          message: describeError(error).replaceAll(this.host.options.root, "."),
+        });
+      }
+    } catch {
+      // The answer is what the agent needs; a record that could not be made is not worth failing it.
+    }
   }
 
   /** Where the time went and what was redone, from the run's own state and journal. */
@@ -1976,21 +2089,26 @@ export class LocalRun {
     try {
       const state = await this.state();
       if (state.history?.executor.enabled !== true) return undefined;
-      const options = this.host.options;
       return {
-        executor: await observeExecutor(caller, {
-          root: options.root,
-          dirs: [
-            ...(state.workdir === undefined ? [] : [await this.inProject(state.workdir)]),
-            options.root,
-          ],
-          ...(options.environment === undefined ? {} : { env: options.environment }),
-        }),
-        engineVersion: (options.build ?? UNKNOWN_BUILD).version,
+        executor: await observeExecutor(caller, await this.executorContext(state)),
+        engineVersion: (this.host.options.build ?? UNKNOWN_BUILD).version,
       };
     } catch {
       return undefined;
     }
+  }
+
+  /** Where who is acting is looked for: the run's directory first, then the project root. */
+  private async executorContext(state: RunState): Promise<ExecutorContext> {
+    const options = this.host.options;
+    return {
+      root: options.root,
+      dirs: [
+        ...(state.workdir === undefined ? [] : [await this.inProject(state.workdir)]),
+        options.root,
+      ],
+      ...(options.environment === undefined ? {} : { env: options.environment }),
+    };
   }
 
   /**
@@ -2046,7 +2164,12 @@ export class LocalRun {
    * A rejection without a reason of its own carries the comments recorded at the step, so the step
    * it returns to sees them; with both, the person's reason comes first.
    */
-  async decideHuman(node: string, decision: "approved" | "rejected", reason?: string) {
+  async decideHuman(
+    node: string,
+    decision: "approved" | "rejected",
+    reason?: string,
+    byAgent?: AgentDecision,
+  ) {
     const comments = decision === "rejected" ? await this.gateResults(node) : undefined;
     const parts = [reason, comments ? `Comments (CSV):\n${comments.csv}` : undefined].filter(
       (part): part is string => part !== undefined && part !== "",
@@ -2057,6 +2180,7 @@ export class LocalRun {
       node,
       decision,
       ...(full === undefined ? {} : { reason: full }),
+      ...(byAgent === undefined ? {} : { byAgent }),
     });
   }
 

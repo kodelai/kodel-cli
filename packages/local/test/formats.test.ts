@@ -191,6 +191,19 @@ describe("every stored format is opened by the current engine", () => {
     }
   });
 
+  test("v75e_old_run_reports_not_collected", async () => {
+    await copyRuns("v1");
+    const host = hostFor();
+    for (const id of Object.keys(V1_RUNS)) {
+      const report = await (await host.open(id))?.report();
+      expect(report?.prompts).toEqual({ not_collected: true });
+    }
+    // reading a run does not make the folder of what the agent was shown
+    for (const id of Object.keys(V1_RUNS)) {
+      expect(await readdir(join(runsDir(), id))).not.toContain("served");
+    }
+  });
+
   test("formats_v1_reports_count_what_the_runs_did", async () => {
     await copyRuns("v1");
     const host = hostFor();

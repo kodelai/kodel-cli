@@ -71,6 +71,8 @@ interface ConnectOptions {
   capabilities?: Record<string, unknown>;
   /** A server whose host cannot decide for a person. */
   withoutHumans?: boolean;
+  /** `decisions.dialog`: these tests are about the dialog, so it is on unless a test turns it off. */
+  dialog?: boolean;
 }
 
 /** `reply` is what the person does in the dialog; undefined means the client cannot show one. */
@@ -81,6 +83,7 @@ async function connect(
   const host = new LocalPipelineHost({ root: options.root ?? dir, heartbeatMs: 0 });
   const server = createServer(host, "0.0.0", undefined, undefined, {
     ...(options.withoutHumans ? {} : { humans: options.humans ? options.humans(host) : host }),
+    dialog: options.dialog ?? true,
     ...(options.dialogTimeoutMs === undefined ? {} : { dialogTimeoutMs: options.dialogTimeoutMs }),
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
@@ -194,6 +197,22 @@ describe("t_elicit: a person decides at a gate in the client's own dialog", () =
     expect(done.body.dialog).toMatchObject({ answer: "decided" });
     expect(done.body.next.node).toMatchObject({ slug: "write", attempt: 2 });
     expect(done.body.next.node.reentry_feedback).toContain("the file is empty");
+    await s.close();
+  });
+
+  test("v75e_dialog_next_step_is_a_serve", async () => {
+    const s = await connect(() => ({
+      action: "accept",
+      content: { decision: "reject", reason: "the file is empty" },
+    }));
+    const runId = await start(s);
+    const done = await toGate(s, runId);
+    // the answer the dialog path handed to the agent is the one that was kept
+    expect(done.body.next.node).toMatchObject({ slug: "write", attempt: 2 });
+    const file = JSON.parse(
+      await readFile(join(dir, ".kodel", "runs", runId, "served", "write-2-1.json"), "utf8"),
+    ) as { answer: { reentry_feedback: string } };
+    expect(file.answer.reentry_feedback).toBe(done.body.next.node.reentry_feedback);
     await s.close();
   });
 
