@@ -626,7 +626,7 @@ export class LocalPipelineHost implements PipelineHost {
    */
   async settle(ms: number): Promise<void> {
     const deadline = Date.now() + ms;
-    await Promise.all([...this.runs.values()].map((run) => run.settle(() => 0, deadline)));
+    await Promise.all([...this.runs.values()].map((run) => run.settleEndJobs(deadline)));
   }
 
   /** Whether a start for this task would pick up a run that exists, instead of making one. */

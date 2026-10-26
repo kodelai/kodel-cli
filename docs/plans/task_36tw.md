@@ -294,6 +294,12 @@ Rejected or deferred, with the reason:
   `changes` from its three keys; `kodel status` and `report` look at the seal under the lock (`sealStatusSettled`); the places in an error
   text are also named with forward slashes. Not changed: 8.3 short names on Windows are not expanded, and `changes-dev-yaml.test.ts` lists
   the nodes of `dev.yaml` (a change to that pipeline has to update it).
+- After the seventh review (one major: the clean-checkout control of the redaction limits fails on a runner with `core.autocrlf=true`): every
+  test repository sets `core.autocrlf=false`; the isolated runner names the git command like `git()` does; a leaving server waits for the end
+  jobs only (`LocalRun.settleEndJobs`), not for work a late call has just started; `sealStatusSettled` falls back to a plain look when the lock
+  cannot be had (a busy lock, a read-only folder); the three remaining test files settle and remove their folders with retries; the table of
+  limits names the two forged-line forms. Not done: `status` and `report` still take the lock for one look (they only wait while a note is
+  being written).
 - Golden fixture: none was added. The fields are all optional and nothing is renamed or retyped, so rule 1 of "Stored data and
   compatibility" does not ask for one; `t36tw_pipeline_host_settle_waits_for_the_end_patch_and_the_run_reopens` opens a finished run with the
   new fields in a second host and reads its report.

@@ -21,6 +21,7 @@ const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, encodin
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "kodel-limits-"));
   git("init", "-q");
+  git("config", "core.autocrlf", "false"); // a Windows runner would check files out with CRLF
   git("config", "user.email", "test@example.com");
   git("config", "user.name", "Test");
   await writeFile(join(dir, ".gitignore"), "ignored.txt\n");

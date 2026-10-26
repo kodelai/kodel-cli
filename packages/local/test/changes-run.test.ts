@@ -27,6 +27,7 @@ const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, encodin
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "kodel-changes-"));
   git("init", "-q");
+  git("config", "core.autocrlf", "false"); // a Windows runner would check files out with CRLF
   git("config", "user.email", "test@example.com");
   git("config", "user.name", "Test");
   await writeFile(join(dir, "base.txt"), "base\n");

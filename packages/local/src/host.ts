@@ -1475,7 +1475,9 @@ export class LocalRun {
    * the other, and a look in between would call the run changed. Never from inside `apply`.
    */
   sealStatusSettled(): Promise<"sealed" | "modified" | "unsealed" | "open"> {
-    return this.host.store.withLock(this.runId, () => this.sealStatus());
+    return this.host.store
+      .withLock(this.runId, () => this.sealStatus())
+      .catch(() => this.sealStatus()); // a busy lock, or a folder that cannot be written: look without it
   }
 
   /**
@@ -1774,6 +1776,27 @@ export class LocalRun {
       ...keptFields(verdict, this.host.rules),
       specHash,
     };
+  }
+
+  /**
+   * Wait for the jobs that record the patch of a run that has ended, but no longer than the deadline. Not
+   * for anything else in `pending`: a server that is leaving has stopped that work, and work a late call
+   * started meanwhile must not be waited for (nor left running by the exit that follows).
+   */
+  async settleEndJobs(deadline: number): Promise<void> {
+    while (this.endJobs.size > 0) {
+      const left = deadline - Date.now();
+      if (left <= 0) return;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const wake = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, left);
+      });
+      try {
+        await Promise.race([...this.endJobs, wake]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
   }
 
   /** The nodes whose engine work is running in this process. */

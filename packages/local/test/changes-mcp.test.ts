@@ -21,6 +21,7 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "kodel-chg-mcp-"));
   const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
   git("init", "-q");
+  git("config", "core.autocrlf", "false"); // a Windows runner would check files out with CRLF
   git("config", "user.email", "t@example.com");
   git("config", "user.name", "T");
   git("commit", "-q", "--allow-empty", "-m", "initial");
@@ -44,7 +45,7 @@ beforeEach(async () => {
   await writeFile(join(dir, ".kodel", "config.yaml"), "worktree:\n  mode: off\n");
 });
 afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
+  await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 test("t36tw_no_new_agent_tool_or_argument_and_agent_answers_do_not_leak_patch_data", async () => {
@@ -104,6 +105,7 @@ test("t36tw_no_new_agent_tool_or_argument_and_agent_answers_do_not_leak_patch_da
     expect(answers).not.toContain(".patch");
     expect(answers).not.toContain("kodel-patch");
   } finally {
+    await host.settle(30_000); // the end of the run is recorded in the background
     await Promise.all([client.close(), server.close()]);
   }
 });

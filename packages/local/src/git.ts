@@ -84,7 +84,7 @@ export const SAFE_CONFIG = [
 export const NO_HOOKS = ["-c", `core.hooksPath=${devNull}`];
 
 /** The git command in an argument list, past options such as `-c key=value`: what an error names. */
-function commandName(args: string[]): string {
+export function commandName(args: string[]): string {
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] ?? "";
     if (arg === "-c") i += 1;

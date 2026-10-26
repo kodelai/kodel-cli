@@ -51,7 +51,9 @@ beforeEach(async () => {
   git(root, "commit", "-q", "-m", "pipeline");
 });
 afterEach(async () => {
-  for (const dir of cleanup.splice(0)) await rm(dir, { recursive: true, force: true });
+  for (const dir of cleanup.splice(0)) {
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
 });
 
 const hostFor = () =>

@@ -10,7 +10,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { minimatch } from "minimatch";
-import { checkTreeId, type Deadline, DeadlineError, git } from "./git";
+import { checkTreeId, commandName, type Deadline, DeadlineError, git } from "./git";
 
 /**
  * The text of `git diff` from the tree `from` to the tree `to`, paths relative to the project
@@ -209,10 +209,7 @@ function runIsolated(
       if (timer) clearTimeout(timer);
       if (timedOut) reject(new DeadlineError());
       else if (cut) resolveResult({ stdout: Buffer.concat(chunks), cut: true });
-      else if (code !== 0)
-        reject(
-          new Error(`git ${args.find((a) => !a.startsWith("-")) ?? ""} failed: ${stderr.trim()}`),
-        );
+      else if (code !== 0) reject(new Error(`git ${commandName(args)} failed: ${stderr.trim()}`));
       else resolveResult({ stdout: Buffer.concat(chunks), cut: false });
     });
     child.stdin.on("error", () => undefined); // a failing git reports through its exit

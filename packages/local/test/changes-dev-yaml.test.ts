@@ -19,6 +19,7 @@ const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, encodin
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "kodel-devyaml-"));
   git("init", "-q");
+  git("config", "core.autocrlf", "false"); // a Windows runner would check files out with CRLF
   git("config", "user.email", "t@example.com");
   git("config", "user.name", "T");
   await writeFile(join(dir, "README.md"), "readme\n");
@@ -26,7 +27,7 @@ beforeEach(async () => {
   git("commit", "-q", "-m", "base");
 });
 afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
+  await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 const write = async (path: string, content: string) => {
