@@ -16,7 +16,7 @@ import {
   LocalHost,
   type LocalRun,
 } from "@kodel-ai/local";
-import { DEFAULT_STALE_MS } from "@kodel-ai/pipeline-core";
+import { DEFAULT_STALE_MS, defaultHistory, type HistoryConfig } from "@kodel-ai/pipeline-core";
 import type {
   Production,
   ScenarioEngine,
@@ -25,6 +25,19 @@ import type {
   StartContext,
   ToolResponse,
 } from "./types";
+
+/**
+ * What a scenario run keeps: only the prompts the agent was shown. The rest stays off, so a scenario
+ * neither needs a patch nor looks at the machine's own agent session.
+ */
+function scenarioHistory(): HistoryConfig {
+  const history = defaultHistory();
+  history.changes.enabled = false;
+  history.output.enabled = false;
+  history.executor.enabled = false;
+  history.tool_log.enabled = false;
+  return history;
+}
 
 export class LocalScenarioEngine implements ScenarioEngine {
   readonly name = "local";
@@ -55,9 +68,10 @@ export class LocalScenarioEngine implements ScenarioEngine {
       root: this.dir,
       clock: () => this.clock,
       heartbeatMs: 0,
+      environment: {},
       runCommand: (command, options, ctx) => this.scriptedCommand(command, options, ctx),
     });
-    const { run } = await this.host.start(context.task);
+    const { run } = await this.host.start(context.task, { history: scenarioHistory() });
     this.run = run;
     await this.drive();
     return { runId: run.runId };
@@ -131,10 +145,24 @@ export class LocalScenarioEngine implements ScenarioEngine {
         return { ok: true, id: `f-${this.feedbackCount}` };
       }
       case "pipeline_next_step":
-        return { ok: true, ...(await this.run.nextStep()) };
+        return { ok: true, ...(await this.run.nextStep({ serve: {} })) };
       default:
         return { ok: false, code: "UNKNOWN_TOOL", message: `unknown tool "${tool}"` };
     }
+  }
+
+  /** The files of what the agent was shown, in the order the journal numbered them. */
+  async servedFiles(): Promise<{ ref: string; content: unknown }[]> {
+    const journal = await this.host.store.readJournal(this.run.runId);
+    const out: { ref: string; content: unknown }[] = [];
+    for (const record of journal) {
+      if (record.event !== "step_served" || typeof record.ref !== "string") continue;
+      out.push({
+        ref: record.ref,
+        content: await this.host.store.readServed(this.run.runId, record.ref),
+      });
+    }
+    return out;
   }
 
   async readState(): Promise<ScenarioState> {
@@ -227,7 +255,7 @@ export class LocalScenarioEngine implements ScenarioEngine {
   private async drive() {
     for (let i = 0; i < 300; i++) {
       await this.run.settle(() => this.parked);
-      const step = await this.run.nextStep();
+      const step = await this.run.nextStep({ serve: {} });
       if (!("node" in step)) {
         await this.run.settle(() => this.parked);
         return;

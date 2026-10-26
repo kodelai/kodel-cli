@@ -247,6 +247,8 @@ describe("t_decisions: the agent decides a gate on the person's instruction", ()
     await s.close();
   });
 
+  // v75e_dialog_and_agent_decision_next_step_are_serves: the agent-decision half is the end of the
+  // test below, the dialog half is in elicit.test.ts (v75e_dialog_next_step_is_a_serve)
   test("t_decisions_agent_rejection_needs_a_reason", async () => {
     const s = await connect({ gate: true });
     const { runId } = await toGate(s);
@@ -258,6 +260,11 @@ describe("t_decisions: the agent decides a gate on the person's instruction", ()
     );
     expect(done).toMatchObject({ ok: true, decision: "rejected" });
     expect(await journalOf(runId)).toContain("not what I asked");
+    // what the agent is shown next is kept, though it came through this path
+    const kept = JSON.parse(
+      await readFile(join(dir, ".kodel", "runs", runId, "served", "write-2-1.json"), "utf8"),
+    ) as { answer: { reentry_feedback: string } };
+    expect(kept.answer.reentry_feedback).toBe(done.next.node.reentry_feedback);
     await s.close();
   });
 
