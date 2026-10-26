@@ -11,6 +11,7 @@ import {
   cpSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -427,6 +428,24 @@ export function journalEvents(sandbox: Sandbox, runId: string): string[] {
     .split("\n")
     .filter(Boolean)
     .map((line) => (JSON.parse(line) as { event: string }).event);
+}
+
+/** The records of a run's journal, whole and in order (`journalEvents` gives only their names). */
+export function journalRecords(sandbox: Sandbox, runId: string): Record<string, unknown>[] {
+  const text = readFileSync(join(sandbox.dir, ".kodel", "runs", runId, "journal.jsonl"), "utf8");
+  return text
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+/** The names of the files in the run's `served/` folder, sorted; none when the folder is not there. */
+export function servedFiles(sandbox: Sandbox, runId: string): string[] {
+  try {
+    return readdirSync(join(sandbox.dir, ".kodel", "runs", runId, "served")).sort();
+  } catch {
+    return [];
+  }
 }
 
 /** The agent's calls to one kodel tool, in order. */

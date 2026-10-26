@@ -29,6 +29,7 @@ const report: RunReport = {
   pipeline_changes: [],
   agent_decisions: [],
   checks: [],
+  prompts: { served: 3 },
   nodes: [
     {
       node: "impl",

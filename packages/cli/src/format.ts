@@ -255,6 +255,12 @@ export function formatReport(
       }
     }
   }
+  lines.push(
+    "",
+    "served" in report.prompts
+      ? `prompts: ${report.prompts.served} served`
+      : "prompts: not_collected",
+  );
   const failures = report.nodes.flatMap((node) =>
     node.attempts
       .filter((a) => a.failure)
