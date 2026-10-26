@@ -11,7 +11,8 @@ What reads a log is a **collector**, one per agent. Adding an agent means adding
 - The conformance suite every collector must pass is `agentHistoryContract` in `@kodel-ai/testkit`.
 
 Only the normalized events are meant to be kept, never the raw log. Every text in an event is a preview of at
-most 500 characters, and every string goes through `redact` before it leaves the collector.
+most 500 characters, and every string goes through `redact` before it leaves the collector. (The 500 is the
+current behaviour: the per-kind caps decided in "Capture decisions" at the end of this page are not built yet.)
 
 ## The event
 
@@ -65,8 +66,8 @@ These are the rules a collector follows, learned from real logs. Each is covered
   takes the earlier one's time, because `from`/`to` windows rely on the order. Times outside years 0001-9999 are
   treated as missing. A time without a zone is read as UTC, never in the zone of the machine, so the same log gives
   the same events everywhere. `started`, `ended` and `duration_ms` follow the same rule as `ts`.
-- **Text is redacted, then cut.** A preview is redacted before it is cut to 500 characters, so a secret that
-  straddles the cut cannot survive as a prefix.
+- **Text is redacted, then cut.** A preview is redacted before it is cut to 500 characters (the current cap; see
+  "Capture decisions" for the planned per-kind caps), so a secret that straddles the cut cannot survive as a prefix.
 - **A response can be split by other lines.** A `user` or `system` line (a tool result, a hook summary) can come
   between the lines of one response; in real logs about 6% of responses are written like that. The fold keeps the
   response open until another response starts, and the events of the lines in between wait behind its `usage`,
@@ -192,3 +193,60 @@ answers are not.
 - **Old runs.** A run has the `served` key in its state only if it was started with `history.prompts` on by an engine
   that records this. The report says `prompts: <n> served` for such a run and `prompts: not_collected` for any other
   (an older run, a switch off at its start, or a run started before this record existed and continued after).
+
+## Capture decisions
+
+**Planned defaults, not yet built.** They were decided in TASK-52A8 and are built in TASK-3BK2 (the agent log) and
+TASK-9JRS (cost and prices). Until those land, the behaviour described above stays: previews of at most 500
+characters, and no `agent_log/` in a run. The plan is `docs/plans/task_52a8.md`.
+
+**The agent log is on, and it is `full`.** Each run keeps the session of its agent in `agent_log/` of the run folder,
+as normalized events with redacted text previews, with no opt-in (like the other history categories that are on by
+default). The aim is that a judge can compare the logs of two runs of the same prompt and state and see why one is
+better. The raw log is never copied, so the log cannot replay a run; the run's input (the step prompt and the base
+commit) is kept by the engine. The run folder is committed when the project tracks `.kodel/runs` (this repository ignores
+it, and `kodel init` does not write `.gitignore`). **Projects that upgrade start storing full sessions.**
+
+| kind | default cap (characters) | measured p90 / p95 / p99 |
+| --- | --- | --- |
+| message from the person | 4 000 | 6 224 / 11 049 / 18 037 |
+| message from the agent | 4 000 | 1 550 / 2 438 / 4 390 |
+| tool input | 4 000 | 2 011 / 4 108 / 10 822 |
+| tool result | 8 000 | 4 864 / 7 789 / 19 430 |
+
+The caps are `history.agent_log.preview_chars` in `config.yaml`, per kind or as one number; `0` empties a kind. The
+subagent description and `system.detail` keep 500. The percentiles come from 647 session files of one developer; with
+these caps a median session is about 163 KB of events (38 KB gzipped), a p90 session 2.4 MB, the largest 12.9 MB.
+`max_kb` (default 20480, bytes after redaction and cut) limits the events of one run, split per step so that a long run
+does not lose its end; when a step's share is full, whole events are dropped, one marker event counts them, and the
+report names the step. `mode: metadata` keeps the envelope, usage, tool names, times and sizes and no text;
+`enabled: false` stores nothing.
+
+- **Which session.** Only a session proven to have called `pipeline_*` with the run's id; a session known only from
+  the hook index is not stored ("session unknown"). Only events from the response that issued `pipeline_start` to the end of the run.
+- **When.** At the end of each step and of the run, up to the last closed response; nothing is written to a finished
+  run, so the tail of the last response may be missing, and the report says so.
+- **Switches.** `agent_log` is the privacy switch of this data. `usage` and `tool_calls` read the log themselves;
+  `agent_log` stores no tool events when `tool_log` is off.
+- **Frozen at the start.** The keys, and the price override, are journaled in `run_started.history`; an edit of the
+  config during a run changes nothing for that run. A run without them reads as "not captured".
+- **Display data.** `agent_log/` is outside the seal and shown as unverified. It is information only: usage and cost never
+  feed a check, a route or a gate.
+
+**Prices.** A table in code (`pipeline-core`, plain data): `format`, `revision` (a date), per model the prices of input,
+output, cache read and cache write, and `effectiveFrom`, `sourceUrl`, `checkedAt`. The entry is chosen by the time of
+the usage event. A project can override it in `history.usage.prices`; an entry replaces the shipped one of that model
+whole, and the cost records `source: shipped | config`. A cost is computed when the usage is collected, stored with the
+`revision`, and not recomputed with a later table. A total over a model without a price is `partial`, never `$0`. Every
+cost from the table is an estimate. The check of the table (a script with a network mode and a `--local` mode, and a
+skill for the maintainers) is built with it. Claude Code's own `cost-state` entry totals a whole session, is written once
+when it ends and is always above the event totals; only the `--local` check reads it.
+
+**Residual risk.** `redact` catches known patterns and 32+ character mixed high-entropy words. It does not catch hex-only or
+short secrets, a secret split across two events is redacted per event, and `history.changes.exclude` does not apply to
+the agent log. A tool that reads an `.env` puts up to 8 000 characters of it into the log; in a tracked history that is
+permanent. Lower it with `preview_chars: 0` for a kind, `mode: metadata` or `enabled: false`.
+
+**Constraint.** The format changes this needs (optional `revision`/`source` on `usage.cost`, `text_preview` optional in
+`metadata`, a new cut marker, new `run_started.history` keys) are allowed under `v: 1` only before the first release, so
+the release waits for them, or the version is bumped with a reader of the previous format.
