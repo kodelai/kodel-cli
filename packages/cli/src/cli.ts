@@ -470,6 +470,15 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     });
 
   program
+    .command("tui")
+    .description("Open the terminal UI (a layout prototype with sample data)")
+    .action(async () => {
+      requireHuman();
+      const { runTui } = await import("./tui/run");
+      await runTui(process.stdin, process.stdout);
+    });
+
+  program
     .command("wait <run>")
     .description(
       "Stay until a run stops waiting for a person, print one line, and exit; it changes nothing",
