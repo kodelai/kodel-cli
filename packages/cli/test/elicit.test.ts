@@ -200,6 +200,22 @@ describe("t_elicit: a person decides at a gate in the client's own dialog", () =
     await s.close();
   });
 
+  test("v75e_dialog_next_step_is_a_serve", async () => {
+    const s = await connect(() => ({
+      action: "accept",
+      content: { decision: "reject", reason: "the file is empty" },
+    }));
+    const runId = await start(s);
+    const done = await toGate(s, runId);
+    // the answer the dialog path handed to the agent is the one that was kept
+    expect(done.body.next.node).toMatchObject({ slug: "write", attempt: 2 });
+    const file = JSON.parse(
+      await readFile(join(dir, ".kodel", "runs", runId, "served", "write-2-1.json"), "utf8"),
+    ) as { answer: { reentry_feedback: string } };
+    expect(file.answer.reentry_feedback).toBe(done.body.next.node.reentry_feedback);
+    await s.close();
+  });
+
   test("a rejection without a reason is shown again, then applied once it has one", async () => {
     const s = await connect((_form, n) =>
       n === 1

@@ -76,8 +76,11 @@ export interface RunHandle {
    * What to do next. Throws `KodelError` (for example when the state was tampered with).
    * `atCompletion`: the agent has just said its step is done; a change of the pipeline that holds
    * the run is answered here, not while the agent is still working.
+   * `serve`: the answer goes to the agent, so the host may keep a record of what it was shown (it
+   * decides whether, per the run's settings); `caller` is who the transport says is asking. A call
+   * without it is the host looking at the run for itself and records nothing.
    */
-  nextStep(options?: { atCompletion?: boolean }): Promise<NextStep>;
+  nextStep(options?: { atCompletion?: boolean; serve?: { caller?: Caller } }): Promise<NextStep>;
   completeStep(
     node: string,
     attempt: number,
@@ -509,7 +512,7 @@ export class PipelineService {
         ...(outcome.workdir?.branch === undefined ? {} : { branch: outcome.workdir.branch }),
         ...(outcome.workdir?.note === undefined ? {} : { note: outcome.workdir.note }),
         ...(outcome.task === undefined ? {} : { task: outcome.task }),
-        next: await outcome.run.nextStep(),
+        next: await outcome.run.nextStep({ serve: this.who() }),
       };
     });
   }
@@ -521,10 +524,10 @@ export class PipelineService {
   nextStep(input: { run_id: string; wait_s?: number }): Promise<ToolResult> {
     return guarded(async () => {
       const run = await this.run(input.run_id);
-      let step = await run.nextStep();
+      let step = await run.nextStep({ serve: this.who() });
       if (input.wait_s !== undefined && input.wait_s > 0 && "running" in step) {
         await run.waitForRest(Math.min(input.wait_s, MAX_WAIT_S) * 1000);
-        step = await run.nextStep();
+        step = await run.nextStep({ serve: this.who() });
       }
       return { ok: true, ...step };
     });
@@ -582,7 +585,7 @@ export class PipelineService {
         ...(checkFailed && failed
           ? { failed_check: { kind: failed.source.slice("check:".length), reason: failed.reason } }
           : {}),
-        next: await run.nextStep({ atCompletion: true }),
+        next: await run.nextStep({ atCompletion: true, serve: this.who() }),
       };
     });
   }

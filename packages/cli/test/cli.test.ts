@@ -1377,4 +1377,16 @@ describe("a store made from the golden runs of the stored formats", () => {
     const parsed = JSON.parse((await cli("report", "r_0mviewgvl_i1ig", "--json")).out);
     expect(parsed).toMatchObject({ status: "completed", extra_attempts: 9, feedback: 1 });
   });
+
+  test("v75e_old_run_report_line_in_cli", async () => {
+    for (const id of RUNS) {
+      const report = await cli("report", id);
+      expect(report.out).toContain("prompts: not_collected");
+      expect(report.out.indexOf("prompts: not_collected")).toBeGreaterThan(
+        report.out.indexOf("final-approval"),
+      );
+    }
+    const parsed = JSON.parse((await cli("report", "r_0mviewgvl_i1ig", "--json")).out);
+    expect(parsed.prompts).toEqual({ not_collected: true });
+  });
 });

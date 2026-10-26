@@ -159,3 +159,36 @@ Strings from outside are stripped of control characters and cut at 200 character
 everything else it writes. `contract_version`, `instructions_hash` and `tools_hash` are there when the host knows what
 the agent was served; they change when the instructions or a tool (its name,
 description or arguments) change. With `history.executor: false` none of these fields is written.
+
+## What the agent was shown (`served/`)
+
+With `history.prompts` on (the default), the run keeps the text the agent was handed at each step, so it can be
+read after the engine's templates have changed. Every `node` answer that the tools `pipeline_start`,
+`pipeline_next_step` and `pipeline_complete_step` return is kept, whichever way it reached the agent (a gate
+decided in the client's dialog, or by the agent on the person's word, included). `waiting`, `running` and `done`
+answers are not.
+
+| where | what |
+| --- | --- |
+| `served/<node>-<attempt>-<n>.json` | `v`, `node`, `attempt`, `n`, `prompt_hash` and `answer`: the step as the engine built it (`prompt`, `reentry_feedback`, `result_spec`, `outcomes`, `execution`, a waiting `pipeline_change`), redacted |
+| `step_served` (journal) | `node`, `attempt`, `n`, `ref` (the file), `prompt_hash` (sha256 of the redacted answer), `executor` (as above, when `history.executor` is on) |
+| `served_write_failed` (journal) | the file of a `step_served` could not be written: `node`, `attempt`, `n`, a short `message` |
+
+- **Once per answer and client.** The same answer to the same client is kept once, however often `pipeline_next_step`
+  is called. The key is the hash of the answer, the client (name and version) and the session when the environment
+  gives it (`CLAUDE_CODE_SESSION_ID`). A session found only through the hook index is written into `executor` but is
+  not part of the key: it is the newest session of the directory and changes with the window in front. With
+  `history.executor: false` the key is the hash alone. The state keeps only a short hash of each key.
+- **Bounded.** At most 20 files per attempt, 500 `step_served` and `served_write_failed` events per run, 256 KiB per
+  file. The answer is redacted first; a file over the limit has its biggest field shortened (a text, with a marker) or
+  replaced (`result_spec`, `pipeline_change`: `{"omitted": true}`) and says `truncated: true`. `prompt_hash` is that of
+  the whole answer, so a cut file cannot be checked against it.
+- **The run machine numbers the files.** `n` and the file name come from the machine under the run's lock, and the
+  file is written after the event was accepted: there is no file without an event. A crash between the two, or a write
+  error (`served_write_failed`), leaves an event without a file; read that as "not stored". The agent still has the
+  answer: recording never changes what it is told.
+- **Not guaranteed to be complete.** An answer built just before the run is paused or ended, or the step is completed
+  by another client, is handed to the agent but not recorded.
+- **Old runs.** A run has the `served` key in its state only if it was started with `history.prompts` on by an engine
+  that records this. The report says `prompts: <n> served` for such a run and `prompts: not_collected` for any other
+  (an older run, a switch off at its start, or a run started before this record existed and continued after).

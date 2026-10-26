@@ -70,6 +70,12 @@ export interface CheckReport {
 /** The size of the task, or why it is not known (no patch was kept for the run). */
 export type TaskSizeReport = TaskSize | { not_collected: true };
 
+/**
+ * How many different answers the agent was shown and kept (`served/`), or that the run kept none: it is
+ * older than the record, or it was started with `history.prompts` off.
+ */
+export type PromptsReport = { served: number } | { not_collected: true };
+
 export interface NodeReport {
   node: string;
   /** A person decides at this node, so its time is waiting for a person, not work. */
@@ -115,6 +121,7 @@ export interface RunReport {
   checks: CheckReport[];
   /** Added by a host that can read the run's patch; absent when the report is made from the journal alone. */
   task_size?: TaskSizeReport;
+  prompts: PromptsReport;
 }
 
 const seconds = (from: number, to: number) => Math.max(0, Math.round((to - from) / 100) / 10);
@@ -160,6 +167,7 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
   };
 
   const refusals: RunReport["refusals"] = [];
+  let served = 0;
   const pipelineChanges: PipelineChangeReport[] = [];
   const agentDecisions: AgentDecisionReport[] = [];
   const attemptOf = (name: string, attempt: number) =>
@@ -314,6 +322,9 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
           message: typeof record.message === "string" ? record.message : "",
         });
         break;
+      case "step_served":
+        served += 1;
+        break;
       case "node_restarted":
         restarts += 1;
         break;
@@ -376,5 +387,7 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
     pipeline_changes: pipelineChanges,
     agent_decisions: agentDecisions,
     checks: [...checks.values()],
+    // The state key is there from the start of a run that keeps prompts, so a run of zero serves says so.
+    prompts: state.served === undefined ? { not_collected: true } : { served },
   };
 }
