@@ -77,7 +77,6 @@ describe("kodel init", () => {
     expect(local).not.toContain("enabledMcpjsonServers");
     expect(local).not.toContain("mcp__kodel");
     expect(await read(KODEL_CONFIG)).toContain("enabled: false");
-    expect(await read(".gitignore")).toContain("/.kodel/runs");
     expect(out).toContain("created");
 
     await rm(join(dir, ".claude"), { recursive: true });
@@ -111,10 +110,31 @@ describe("kodel init", () => {
     expect(codexOnly.out).not.toContain("approve");
   });
 
+  test("gy2n_init_never_creates_or_changes_gitignore", async () => {
+    for (const extra of [[], ["--no-hooks"]]) {
+      const agents = ["--agent", "claude-code,codex,opencode", ...extra];
+      const fresh = await init({}, ...agents);
+      await expect(read(".gitignore")).rejects.toThrow();
+      expect(fresh.out).not.toContain(".gitignore");
+
+      const mine = "node_modules\n";
+      await writeFile(join(dir, ".gitignore"), mine);
+      const again = await init({}, ...agents);
+      expect(await read(".gitignore")).toBe(mine);
+      expect(again.out).not.toContain(".gitignore");
+      await rm(join(dir, ".gitignore"));
+    }
+    await rm(join(dir, ".git"), { recursive: true });
+    const outside = await init({}, "--agent", "claude-code");
+    await expect(read(".gitignore")).rejects.toThrow();
+    expect(outside.out).not.toContain(".gitignore");
+    expect(outside.out).not.toContain("not the top of a git repository");
+  });
+
   test("a_second_run_changes_nothing", async () => {
     const args = ["--agent", "claude-code,codex,opencode"];
     await init({}, ...args);
-    const files = [".mcp.json", ".codex/config.toml", "opencode.json", ".gitignore"];
+    const files = [".mcp.json", ".codex/config.toml", "opencode.json"];
     const before = await Promise.all(files.map(read));
     const again = await init({}, ...args);
     expect(await Promise.all(files.map(read))).toEqual(before);
@@ -136,7 +156,7 @@ describe("kodel init", () => {
     await init({}, "--agent", "claude-code");
     expect(Object.keys((await json(".mcp.json")).mcpServers)).toEqual(["other", "kodel"]);
     expect(await read(".claude/settings.json")).toBe(mineSettings);
-    expect(await read(".gitignore")).toMatch(/^node_modules\n\n# Kodel/);
+    expect(await read(".gitignore")).toBe("node_modules\n");
   });
 
   test("a_file_that_is_not_plain_json_is_left_alone", async () => {
@@ -216,13 +236,6 @@ describe("kodel init", () => {
     expect(await read(".codex/config.toml")).toBe(mine);
   });
 
-  test("outside_a_git_root_the_ignore_lines_are_reported", async () => {
-    await rm(join(dir, ".git"), { recursive: true });
-    const { out } = await init({}, "--agent", "claude-code");
-    expect(out).toContain("not the top of a git repository");
-    await expect(read(".gitignore")).rejects.toThrow();
-  });
-
   test("an_existing_config_is_not_rewritten", async () => {
     await mkdir(join(dir, ".kodel"));
     await writeFile(join(dir, KODEL_CONFIG), "# mine\nworktree:\n  mode: off\n");
@@ -264,6 +277,7 @@ describe("kodel init", () => {
   test("dry_run_writes_nothing", async () => {
     const { out } = await init({}, "--agent", "claude-code", "--dry-run");
     expect(out).toContain("would be created");
+    expect(out).not.toContain(".gitignore");
     await expect(read(".mcp.json")).rejects.toThrow();
   });
 
@@ -454,10 +468,6 @@ describe("kodel init hooks", () => {
     const hooks = await claudeHooks();
     expect(Object.keys(hooks)).toEqual(["SessionStart"]);
     expect(commandsOf(hooks.SessionStart ?? [])).toEqual(["kodel-hook claude-code"]);
-    const ignore = await read(".gitignore");
-    for (const line of [SETTINGS, ".kodel/sessions.jsonl", ".kodel/hooks.log"]) {
-      expect(ignore.split("\n")).toContain(`/${line}`);
-    }
   });
 
   test("t_elicit_init_never_registers_a_hook_that_could_answer_a_dialog_for_the_person", async () => {
@@ -478,12 +488,11 @@ describe("kodel init hooks", () => {
     expect(Object.keys(await claudeHooks())).toEqual(["SessionStart"]);
   });
 
-  test("no_hooks_leaves_every_hook_file_and_ignore_line_alone", async () => {
+  test("no_hooks_leaves_every_hook_file_alone", async () => {
     const { out } = await init({}, "--agent", "claude-code,codex,opencode", "--no-hooks");
     await expect(read(SETTINGS)).rejects.toThrow();
     await expect(read(".codex/hooks.json")).rejects.toThrow();
     await expect(read(".opencode/plugins/kodel-hooks.ts")).rejects.toThrow();
-    expect(await read(".gitignore")).not.toContain("sessions.jsonl");
     expect(out).not.toContain("trust");
   });
 
@@ -511,7 +520,7 @@ describe("kodel init hooks", () => {
     expect(out).toContain(".codex/hooks.json");
     expect(out).toContain(".opencode/plugins/kodel-hooks.ts");
     await expect(read(SETTINGS)).rejects.toThrow();
-    await expect(read(".gitignore")).rejects.toThrow();
+    expect(out).not.toContain(".gitignore");
   });
 
   test("the_persons_own_hooks_stay_and_ours_is_added_once", async () => {
@@ -538,14 +547,12 @@ describe("kodel init hooks", () => {
     expect(again.out).toMatch(/unchanged\s+\.claude\/settings\.local\.json/);
   });
 
-  test("a_rerun_changes_nothing_and_the_ignore_lines_are_added_once", async () => {
+  test("a_rerun_changes_nothing", async () => {
     await init({}, "--agent", "claude-code,codex,opencode");
-    const files = [SETTINGS, ".codex/hooks.json", ".opencode/plugins/kodel-hooks.ts", ".gitignore"];
+    const files = [SETTINGS, ".codex/hooks.json", ".opencode/plugins/kodel-hooks.ts"];
     const before = await Promise.all(files.map(read));
     await init({}, "--agent", "claude-code,codex,opencode");
     expect(await Promise.all(files.map(read))).toEqual(before);
-    const ignore = (await read(".gitignore")).split("\n");
-    expect(ignore.filter((line) => line === "/.kodel/sessions.jsonl")).toHaveLength(1);
   });
 
   test("broken_json_and_comments_are_skipped_with_a_note", async () => {

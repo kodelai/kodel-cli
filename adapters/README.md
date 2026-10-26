@@ -22,7 +22,7 @@ that is already registered needs no change of the agent's configuration.
 - The registry (`registry.ts`, the single source of truth for which events are registered), the session registrar
   (`.kodel/sessions.jsonl`), the project lookup and `runHook`: `packages/local/src/hooks/`.
 - Registration: `kodel init` does it by default (`--no-hooks` turns it off) in `.claude/settings.local.json`,
-  `.codex/hooks.json` and `.opencode/plugins/kodel-hooks.ts`, all personal and gitignored. Running `init` again adds the
+  `.codex/hooks.json` and `.opencode/plugins/kodel-hooks.ts`, all personal files. Running `init` again adds the
   events of handlers added since; the hook notes in `.kodel/hooks.log` when events are missing.
 - The hook always exits 0 and prints nothing unless a handler that may print asks for it. It does nothing outside a
   directory that holds the project config (`.kodel/config.yaml`).
