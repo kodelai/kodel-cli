@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DeadlineError, deadlineIn, GitSnapshotter } from "../src/git";
 import { patchBetween } from "../src/patch";
+
+// Tests that need a POSIX shell, file modes or links skip on Windows: Node reports no exec bit there,
+// a symlink needs a privilege, and a `#!/bin/sh` file is not a program. The hardening they stand for is
+// in the code either way.
+const posixTest = process.platform === "win32" ? test.skip : test;
 
 // Test ids carry `t36tw` (TASK-36TW) and the number of the plan's decision where there is one.
 
@@ -87,14 +92,21 @@ describe("a patch between two snapshots", () => {
     await rm(join(dir, "old name.txt"));
     await write("new 'quoted' name.txt", lines(4));
     await write("ünï.txt", "u\n");
-    await chmod(join(dir, "run.sh"), 0o755);
-    await symlink("plain.txt", join(dir, "link"));
+    // The mode and the link are skipped on Windows: Node reports no exec bit there and a symlink
+    // needs a privilege.
+    const modes = process.platform !== "win32";
+    if (modes) {
+      await chmod(join(dir, "run.sh"), 0o755);
+      await symlink("plain.txt", join(dir, "link"));
+    }
     const after = await s.snapshot();
     const body = text(await patchBetween(s.root, before, after, { maxBytes: MAX }));
     expect(body).toContain("deleted file mode");
-    expect(body).toContain("old mode 100644");
-    expect(body).toContain("new mode 100755");
-    expect(body).toContain("new file mode 120000");
+    if (modes) {
+      expect(body).toContain("old mode 100644");
+      expect(body).toContain("new mode 100755");
+      expect(body).toContain("new file mode 120000");
+    }
     expect(applyToTree(before, body)).toBe(after);
   });
 
@@ -303,7 +315,7 @@ describe("a patch is not influenced by what the agent wrote into the repository"
     expect(body).toContain(" line 2\n"); // three lines of context, whatever diff.context says
   });
 
-  test("t36tw_hardening_textconv_and_external_diff_never_run", async () => {
+  posixTest("t36tw_hardening_textconv_and_external_diff_never_run", async () => {
     const { s, before, after } = await states();
     const marker = join(dir, "payload-ran");
     const script = join(dir, "payload.sh");
@@ -320,7 +332,7 @@ describe("a patch is not influenced by what the agent wrote into the repository"
     expect(existsSync(marker)).toBe(false);
   });
 
-  test("t36tw_hardening_fsmonitor_and_hooks_never_run", async () => {
+  posixTest("t36tw_hardening_fsmonitor_and_hooks_never_run", async () => {
     const { s, before, after } = await states();
     const marker = join(dir, "payload-ran");
     const script = join(dir, "payload.sh");
@@ -389,9 +401,9 @@ describe("a patch is not influenced by what the agent wrote into the repository"
   test("t36tw_hardening_private_dir_is_removed", async () => {
     const { s, before, after } = await states();
     const listing = () =>
-      execFileSync("ls", [tmpdir()], { encoding: "utf8" })
-        .split("\n")
-        .filter((n) => n.startsWith("kodel-patch-") && !n.startsWith("kodel-patch-test-"));
+      readdirSync(tmpdir()).filter(
+        (n) => n.startsWith("kodel-patch-") && !n.startsWith("kodel-patch-test-"),
+      );
     const was = listing();
     await patchBetween(s.root, before, after, { maxBytes: MAX });
     await expect(patchBetween(s.root, before, "0".repeat(40), { maxBytes: MAX })).rejects.toThrow();
@@ -442,7 +454,7 @@ describe("limits of the work git does", () => {
     expect(await s.snapshot(deadlineIn(60_000))).toMatch(/^[0-9a-f]{40,64}$/);
   });
 
-  test("t36tw_deadline_kills_a_hung_git", async () => {
+  posixTest("t36tw_deadline_kills_a_hung_git", async () => {
     await write("a.txt", "a\n");
     git("add", "-A");
     git("commit", "-q", "-m", "x");

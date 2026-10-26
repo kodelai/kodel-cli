@@ -319,6 +319,31 @@ describe("the start of the run", () => {
     expect(told).toBe(1);
   });
 
+  test("t36tw_error_text_is_not_mangled_by_a_home_of_one_character", async () => {
+    class Failing extends GitSnapshotter {
+      calls = 0;
+      override async snapshot(deadline?: Parameters<GitSnapshotter["snapshot"]>[0]) {
+        this.calls += 1;
+        if (this.calls === 2) throw new Error("failed in /srv/app/data and /var/lib/x");
+        return super.snapshot(deadline);
+      }
+    }
+    const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+    try {
+      process.env.HOME = "/"; // some containers
+      process.env.USERPROFILE = "/";
+      const { host, run } = await begin(chain(["a"]), { snapshotter: new Failing(dir) });
+      await run.completeStep("a", 1);
+      const [done] = await records(host, run, "agent_completed");
+      expect(String(done?.changes_error)).toBe("failed in /srv/app/data and /var/lib/x");
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   test("t36tw_error_text_hides_the_real_path_of_the_root_and_the_temporary_folder", async () => {
     class Failing extends GitSnapshotter {
       calls = 0;

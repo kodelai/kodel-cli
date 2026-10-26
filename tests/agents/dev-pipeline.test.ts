@@ -150,8 +150,8 @@ describe("the repository's own pipeline, on a real agent", () => {
 
       // The work was kept (TASK-36TW): a patch for each agent step that was handed in, and one for
       // the whole run. The run's patch is written in the background after the run ended.
-      // The run ended in the agent's server, not in this process, so there is nothing here to wait for:
-      // the journal says when the note is written.
+      // The note is written by the process that ended the run (the agent's server, or this one when the
+      // gate was decided here), so the journal is what says when it is there, whoever wrote it.
       const noted = () => journalEvents(sandbox, runId).includes("changes_recorded");
       for (let i = 0; i < 120 && !noted(); i += 1) await new Promise((r) => setTimeout(r, 500));
       const changesDir = join(sandbox.dir, ".kodel", "runs", runId, "changes");

@@ -281,6 +281,12 @@ Rejected or deferred, with the reason:
   that cannot be removed no longer replaces a patch that was made; the three tests that waited a fixed time wait for what they need;
   tests for the first patch of a dirty start and for a missing start tree at the end with a task link. The merge with `origin/main`
   (the `served/` files and `decisions`) touched `host.ts` and `store.ts` side by side with this change and needed no change of design.
+- After the fifth review (one major: tests that could not pass on Windows CI): the tests that need a `#!/bin/sh` payload, an exec bit or a
+  link are skipped on Windows (`posixTest`, the mode and link part of the corner test, the folder link of the writer test) and
+  `t36tw_hardening_private_dir_is_removed` lists the folder with `readdirSync`; they are the part of the plan that "skips on Windows with a
+  named reason", the reason being written beside each. Also: `snapshot()` gives the deadline to its first `git` call (`isRepo`) and no
+  longer lets a failed cleanup replace the tree it made; the error text ignores a place of fewer than four
+  characters (a `HOME` of `/` mangled every path; the places are named before the redaction, because the entropy rule wipes a long path); the "still being recorded" note is only for a run with a worktree of its own.
 - Golden fixture: none was added. The fields are all optional and nothing is renamed or retyped, so rule 1 of "Stored data and
   compatibility" does not ask for one; `t36tw_pipeline_host_settle_waits_for_the_end_patch_and_the_run_reopens` opens a finished run with the
   new fields in a second host and reads its report.

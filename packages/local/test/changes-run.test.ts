@@ -400,7 +400,9 @@ describe("the end of the run", () => {
     expect(existsSync(join(changesDir(host, run), "run.patch"))).toBe(false);
     const step = await run.nextStep();
     expect("done" in step).toBe(true);
-    expect(JSON.stringify(step)).toContain("still being recorded");
+    // A run in the root has no worktree to protect, so there is nothing to withhold (the worktree
+    // case is in changes-review.test.ts).
+    expect(JSON.stringify(step)).not.toContain("still being recorded");
     release();
     await run.settle();
     expect(await patch(host, run, "run.patch")).toContain("x.txt");
@@ -475,6 +477,8 @@ describe("what is stored", () => {
     for (const bad of ["../escape", "a/b", "", ".hidden", "a\\b"]) {
       await expect(host.store.writeChanges(run.runId, bad, raw, opts)).rejects.toThrow();
     }
+    // A folder link needs a privilege on Windows: that half of the test is for the other systems.
+    if (process.platform === "win32") return;
     const elsewhere = await mkdtemp(join(tmpdir(), "kodel-elsewhere-"));
     try {
       await rm(changesDir(host, run), { recursive: true, force: true });

@@ -23,6 +23,11 @@ import {
 import { DeadlineError, GitSnapshotter, LocalHost, LocalPipelineHost, type LocalRun } from "../src";
 import { patchBetween, withIsolatedGit } from "../src/patch";
 
+// Tests that need a POSIX shell, file modes or links skip on Windows: Node reports no exec bit there,
+// a symlink needs a privilege, and a `#!/bin/sh` file is not a program. The hardening they stand for is
+// in the code either way.
+const posixTest = process.platform === "win32" ? test.skip : test;
+
 // Tests of TASK-36TW added after the review of the first version of the change.
 
 let dir: string;
@@ -97,7 +102,7 @@ class FakeGit extends GitSnapshotter {
 }
 
 describe("a snapshot runs no hook of the repository", () => {
-  test("t36tw_hardening_snapshot_runs_no_hook", async () => {
+  posixTest("t36tw_hardening_snapshot_runs_no_hook", async () => {
     const marker = join(dir, "hook-ran");
     const hook = join(dir, ".git", "hooks", "post-index-change");
     await writeFile(hook, `#!/bin/sh\necho ran >> "${marker}"\n`);
@@ -112,7 +117,7 @@ describe("a snapshot runs no hook of the repository", () => {
     expect(existsSync(marker)).toBe(false);
   });
 
-  test("t36tw_hardening_hookspath_and_attributesfile_never_take_part", async () => {
+  posixTest("t36tw_hardening_hookspath_and_attributesfile_never_take_part", async () => {
     const s = new GitSnapshotter(dir);
     await write("a.ts", "one\ntwo\nthree\n");
     git("add", "-A");
@@ -408,7 +413,7 @@ describe("through the host the server uses", () => {
     let release!: () => void;
     fake.gate = { on: 3, wait: new Promise<void>((r) => (release = r)) };
     // The first process ends the run (like `kodel gate`) and is slow with the end tree.
-    const first = await pipelines({ snapshotter: fake, worktree: { mode: "off", dir: "x" } });
+    const first = await pipelines({ snapshotter: fake });
     const out = await first.start({ pipeline: "dev", task: "two", restart: false });
     await (out.run as LocalRun).completeStep("a", 1);
     // The second process (the server the agent talks to) knows nothing of that job.

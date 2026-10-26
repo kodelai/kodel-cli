@@ -234,11 +234,19 @@ export class GitSnapshotter {
     this.exclude = options.exclude ?? [".kodel"];
   }
 
-  async isRepo(): Promise<boolean> {
+  async isRepo(timeoutMs?: number): Promise<boolean> {
     try {
-      const { stdout } = await git(["rev-parse", "--is-inside-work-tree"], this.root);
+      const { stdout } = await git(
+        ["rev-parse", "--is-inside-work-tree"],
+        this.root,
+        {},
+        undefined,
+        timeoutMs,
+      );
       return stdout.trim() === "true";
-    } catch {
+    } catch (error) {
+      // Out of time is not "not a repository": it is what the deadline is for.
+      if (error instanceof DeadlineError) throw error;
       return false;
     }
   }
@@ -260,7 +268,9 @@ export class GitSnapshotter {
       if (left <= 0) return Promise.reject(new DeadlineError());
       return git(full, this.root, env, input, left);
     };
-    if (!(await this.isRepo())) {
+    if (
+      !(await this.isRepo(deadline === undefined ? undefined : Math.max(deadline.remainingMs(), 1)))
+    ) {
       throw new Error(`the diff check needs a git repository, and ${this.root} is not inside one`);
     }
     // The listing is relative to the directory we are in; the index wants paths from the top of the
@@ -327,7 +337,11 @@ export class GitSnapshotter {
       const { stdout: tree } = await call(["write-tree"], env);
       return tree.trim();
     } finally {
-      await rm(scratch, { recursive: true, force: true });
+      // A folder that cannot be removed (a file still open on Windows) must not replace the tree that
+      // was made: a snapshot is taken at every hand-in now.
+      await rm(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(
+        () => undefined,
+      );
     }
   }
 

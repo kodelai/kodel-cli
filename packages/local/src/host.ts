@@ -1140,8 +1140,11 @@ export class LocalRun {
     ];
     // Longest first, whichever way they were listed: `/private/var/x` contains `/var/x`.
     places.sort((a, b) => b[0].length - a[0].length);
+    // The places are named before the text is redacted: a long path looks like a secret to the entropy
+    // rule and would be wiped whole. A place of a few characters (a `HOME` of `/`) would mangle every
+    // path and word, so it is left as it is.
     let text = describeError(error);
-    for (const [place, name] of places) if (place !== "") text = text.replaceAll(place, name);
+    for (const [place, name] of places) if (place.length >= 4) text = text.replaceAll(place, name);
     return redactText(text, this.host.rules).slice(0, 200);
   }
 
@@ -1874,12 +1877,12 @@ export class LocalRun {
     );
     if ("done" in step && step.run_status === "completed") {
       const where = await this.locationForDisplay();
-      if (await this.endPatchPending(state)) {
-        // The end tree is read from the run's directory: deleting it now would lose the patch.
-        step.tell_the_person =
-          "The changes of the run are still being recorded: do not remove the run's worktree or branch yet. This note goes away by itself once they are written; there is nothing to poll for.";
-      } else if (where?.branch !== undefined) {
-        step.tell_the_person = doneHint(this.host.options.root, where.path, where.branch);
+      // Only a run with a worktree of its own has something to protect: the end tree is read from it,
+      // and removing it now would lose the patch.
+      if (where?.branch !== undefined) {
+        step.tell_the_person = (await this.endPatchPending(state))
+          ? "The changes of the run are still being recorded: do not remove the run's worktree or branch yet. This note goes away by itself once they are written; there is nothing to poll for."
+          : doneHint(this.host.options.root, where.path, where.branch);
       }
       if (state.taskKey !== undefined && (await this.host.taskLink())?.mode === "ask") {
         const ask = `The run was started for task ${state.taskKey} and the engine does not close it by itself (tasks.on_run.mode is ask): ask the person whether to close it, and if they agree call task_update with the done status from task_schema.`;
