@@ -202,32 +202,33 @@ characters, and no `agent_log/` in a run. The plan is `docs/plans/task_52a8.md`.
 
 **The agent log is on, and it is `full`.** Each run keeps the session of its agent in `agent_log/` of the run folder,
 as normalized events with redacted text previews, with no opt-in (like the other history categories that are on by
-default). The aim is that a judge can compare the logs of two runs of the same prompt and state and see why one is
-better. The raw log is never copied, so the log cannot replay a run; the run's input (the step prompt and the base
-commit) is kept by the engine. The run folder is committed when the project tracks `.kodel/runs` (this repository ignores
-it, and `kodel init` does not write `.gitignore`). **Projects that upgrade start storing full sessions.**
+default). The raw log is never copied. The run folder is committed when the project tracks `.kodel/runs` (this
+repository ignores it, and `kodel init` does not write `.gitignore`). **Projects that upgrade start storing full
+sessions.**
 
-| kind | default cap (characters) | measured p90 / p95 / p99 |
-| --- | --- | --- |
-| message from the person | 4 000 | 6 224 / 11 049 / 18 037 |
-| message from the agent | 4 000 | 1 550 / 2 438 / 4 390 |
-| tool input | 4 000 | 2 011 / 4 108 / 10 822 |
-| tool result | 8 000 | 4 864 / 7 789 / 19 430 |
+| kind | key in `preview_chars` | default cap (characters) | measured p90 / p95 / p99 |
+| --- | --- | --- | --- |
+| message from the person | `user` | 4 000 | 6 224 / 11 049 / 18 037 |
+| message from the agent | `agent` | 4 000 | 1 550 / 2 438 / 4 390 |
+| tool input | `tool_input` | 4 000 | 2 011 / 4 108 / 10 822 |
+| tool result | `tool_result` | 8 000 | 4 864 / 7 789 / 19 430 |
 
-The caps are `history.agent_log.preview_chars` in `config.yaml`, per kind or as one number; `0` empties a kind. The
-subagent description and `system.detail` keep 500. The percentiles come from 647 session files of one developer; with
-these caps a median session is about 163 KB of events (38 KB gzipped), a p90 session 2.4 MB, the largest 12.9 MB.
-`max_kb` (default 20480, bytes after redaction and cut) limits the events of one run, split per step so that a long run
-does not lose its end; when a step's share is full, whole events are dropped, one marker event counts them, and the
-report names the step. `mode: metadata` keeps the envelope, usage, tool names, times and sizes and no text;
-`enabled: false` stores nothing.
+The caps are `history.agent_log.preview_chars` in `config.yaml`, per kind (the keys above) or as one number; `0` empties
+a kind. The subagent description and `system.detail` keep 500. The percentiles come from 647 session files; with these
+caps a median session is about 163 KB of events (38 KB gzipped), a p90 session 2.4 MB, the largest 12.9 MB.
+`max_kb` (default 20480, bytes after redaction and cut) limits the events of one run. It is split per step so that a
+long run does not lose its end: each step may use `max_kb` divided by the number of nodes of the pipeline, and what a
+step does not use carries over to the next ones. When a step's share is full, whole events are dropped, one marker event
+counts them, and the report names the step. `mode: metadata` keeps the envelope, usage, tool names, times and sizes and
+no text; `enabled: false` stores nothing.
 
 - **Which session.** Only a session proven to have called `pipeline_*` with the run's id; a session known only from
   the hook index is not stored ("session unknown"). Only events from the response that issued `pipeline_start` to the end of the run.
 - **When.** At the end of each step and of the run, up to the last closed response; nothing is written to a finished
   run, so the tail of the last response may be missing, and the report says so.
 - **Switches.** `agent_log` is the privacy switch of this data. `usage` and `tool_calls` read the log themselves;
-  `agent_log` stores no tool events when `tool_log` is off.
+  `tool_log` stays the switch of the hooks, and `agent_log` stores no tool events when `tool_log` is off. A kind is
+  silenced with `preview_chars: 0`, not with `prompts` or `output`.
 - **Frozen at the start.** The keys, and the price override, are journaled in `run_started.history`; an edit of the
   config during a run changes nothing for that run. A run without them reads as "not captured".
 - **Display data.** `agent_log/` is outside the seal and shown as unverified. It is information only: usage and cost never
@@ -240,7 +241,9 @@ whole, and the cost records `source: shipped | config`. A cost is computed when 
 `revision`, and not recomputed with a later table. A total over a model without a price is `partial`, never `$0`. Every
 cost from the table is an estimate. The check of the table (a script with a network mode and a `--local` mode, and a
 skill for the maintainers) is built with it. Claude Code's own `cost-state` entry totals a whole session, is written once
-when it ends and is always above the event totals; only the `--local` check reads it.
+when it ends, is missing from about half of the session files and is always above the event totals. It is not an event,
+is never in a run and is never shown as a run's cost; only the `--local` check reads it, with the same project scoping
+as the collectors (Kodel projects only).
 
 **Residual risk.** `redact` catches known patterns and 32+ character mixed high-entropy words. It does not catch hex-only or
 short secrets, a secret split across two events is redacted per event, and `history.changes.exclude` does not apply to
