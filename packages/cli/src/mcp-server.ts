@@ -20,7 +20,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { createElicitor, type HumanHost } from "./elicit";
 
 /** A host that can also stop the work it started (the local host does); it says how much it stopped. */
-export type StoppableHost = PipelineHost & { stop?(): number };
+export type StoppableHost = PipelineHost & {
+  stop?(): number;
+  /** Wait for what the host still writes about its runs, but no longer than the given milliseconds. */
+  settle?(ms: number): Promise<void>;
+};
+
+/** How long leaving the server waits for the changes of a run that has just ended to be recorded. */
+export const SHUTDOWN_SETTLE_MS = 30_000;
 
 /** A host for a server started outside a project: every tool answers with the same error. */
 export function noProjectHost(error: KodelError): StoppableHost {
@@ -111,9 +118,25 @@ export function createServer(
  * ignores the polite request is killed after `KILL_GRACE_MS`, by a timer this process has to stay
  * alive for. Exiting at once would leave that command running with nobody to report to.
  */
-async function stopAndWait(host: StoppableHost): Promise<void> {
+export async function stopAndWait(
+  host: StoppableHost,
+  settleMs = SHUTDOWN_SETTLE_MS,
+): Promise<void> {
   const stopped = host.stop?.() ?? 0;
   if (stopped > 0) await new Promise((resolve) => setTimeout(resolve, KILL_GRACE_MS + 300));
+  // The patch of a run that just ended is written in the background; leaving now would cut it off.
+  // Bounded twice: the host stops waiting at the deadline, and a host that does not is not waited for.
+  if (host.settle) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, settleMs + 1_000);
+    });
+    try {
+      await Promise.race([host.settle(settleMs).catch(() => undefined), late]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 }
 
 /**

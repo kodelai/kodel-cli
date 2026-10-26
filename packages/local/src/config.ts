@@ -18,6 +18,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { parse } from "yaml";
 import { z } from "zod";
+import { MAX_PATCH_KB } from "./patch-text";
 import { CONFIG_FILE } from "./project-locate";
 
 export const DEFAULT_WORKTREE_DIR = ".kodel/worktrees";
@@ -101,7 +102,8 @@ const historySchema = z
           .array(z.string().refine(isValidGlob, { message: "not a valid glob" }))
           .max(MAX_EXCLUDE_GLOBS)
           .optional(),
-        max_kb: maxKb.optional(),
+        // A patch is read whole to be redacted, and the report reads it back: it has an upper bound.
+        max_kb: maxKb.max(MAX_PATCH_KB).optional(),
       })
       .strict()
       .optional(),

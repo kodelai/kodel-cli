@@ -15,6 +15,7 @@
 import { randomUUID } from "node:crypto";
 import {
   link,
+  lstat,
   mkdir,
   open,
   readdir,
@@ -26,7 +27,9 @@ import {
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
+  isChangesRef,
   isRunId,
+  isTreeId,
   type JournalRecord,
   KodelError,
   proposalNameProblem,
@@ -38,6 +41,10 @@ import {
   redactText,
 } from "@kodel-ai/pipeline-core";
 import { sha256 } from "./integrity";
+import { MAX_PATCH_KB, preparePatch } from "./patch-text";
+
+/** The most of a patch the report reads: patches are cut at `max_kb`, so a larger file is not ours. */
+const MAX_READ_PATCH_BYTES = (MAX_PATCH_KB + 64) * 1024;
 
 /** The layout of a run directory. Runs written before versioned pipelines have no `v: 2`. */
 export const META_VERSION = 2;
@@ -541,7 +548,17 @@ export class FileStore {
 
   async appendJournal(runId: string, records: JournalRecord[]): Promise<void> {
     if (records.length === 0) return;
-    const lines = records.map((r) => `${JSON.stringify(this.redact(r))}\n`).join("");
+    const lines = records
+      .map((r) => {
+        const redacted = this.redact(r) as Record<string, unknown>;
+        // A tree id carries no secret, and a project rule such as `[0-9a-f]{32,}` would make the
+        // chain of patches unreadable from the second hand-in on.
+        if (isTreeId(r.tree)) redacted.tree = r.tree;
+        // Nor does the path of a patch, and a record that points nowhere is of no use.
+        if (isChangesRef(r.changes)) redacted.changes = r.changes;
+        return `${JSON.stringify(redacted)}\n`;
+      })
+      .join("");
     const handle = await open(join(this.runDir(runId), "journal.jsonl"), "a");
     try {
       await handle.writeFile(lines);
@@ -588,7 +605,14 @@ export class FileStore {
   /** The patch of the whole run (`changes/run.patch`), or undefined when none was kept. */
   async readRunPatch(runId: string): Promise<string | undefined> {
     try {
-      return await readFile(join(this.runDir(runId), "changes", "run.patch"), "utf8");
+      // The folder is the agent's to write in: a link in its place, or a file of any size, is not read.
+      const dir = join(this.runDir(runId), "changes");
+      const folder = await lstat(dir);
+      if (folder.isSymbolicLink() || !folder.isDirectory()) return undefined;
+      const file = join(dir, "run.patch");
+      const info = await lstat(file);
+      if (!info.isFile() || info.size > MAX_READ_PATCH_BYTES) return undefined;
+      return await readFile(file, "utf8");
     } catch {
       return undefined;
     }
@@ -648,6 +672,55 @@ export class FileStore {
     await mkdir(join(this.runDir(runId), "artifacts"), { recursive: true });
     await this.writeAtomic(join(this.runDir(runId), ref), content);
     return { ref, bytes: Buffer.byteLength(content) };
+  }
+
+  /**
+   * Keep the patch of a handed-in attempt or of the whole run in `changes/`. The text is already
+   * made fit (`preparePatch`). A node's patch never replaces a file: if the name is taken (a node
+   * removed and added again starts at attempt 1, two sessions hand in the same step) the next free
+   * `~<n>` is used, and the journal's `ref` says which. The run's patch is one file, replaced whole.
+   * Returns the path relative to the run folder and the size of what is stored.
+   */
+  async writeChanges(
+    runId: string,
+    name: string,
+    raw: Buffer,
+    options: { cutByGit: boolean; maxKb: number },
+  ): Promise<{ ref: string; bytes: number; truncated: boolean }> {
+    if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,150}$/.test(name)) {
+      throw new KodelError("INVALID_ARGUMENTS", `"${name}" is not a patch name`);
+    }
+    const dir = join(this.runDir(runId), "changes");
+    await mkdir(dir, { recursive: true });
+    // The agent can write here: a link in the place of the folder must not take a patch elsewhere.
+    const info = await lstat(dir);
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      throw new KodelError("INVALID_ARGUMENTS", "changes/ is not a plain folder");
+    }
+    // Redaction is here, where everything else that is written is redacted.
+    const { text: content, truncated } = preparePatch(raw, { ...options, rules: this.rules });
+    const bytes = Buffer.byteLength(content);
+    if (name === "run") {
+      await this.writeAtomic(join(dir, "run.patch"), content);
+      return { ref: "changes/run.patch", bytes, truncated };
+    }
+    for (let n = 0; n < 50; n++) {
+      const file = n === 0 ? `${name}.patch` : `${name}~${n}.patch`;
+      if (await this.createFile(join(dir, file), content)) {
+        return { ref: `changes/${file}`, bytes, truncated };
+      }
+    }
+    throw new KodelError("INVALID_ARGUMENTS", `too many patches named "${name}"`);
+  }
+
+  /** Remove a patch this process made for a call that was then refused. Never throws. */
+  async deleteChanges(runId: string, ref: string): Promise<void> {
+    try {
+      if (!/^changes\/[A-Za-z0-9_~-][A-Za-z0-9._~-]*\.patch$/.test(ref)) return;
+      await rm(join(this.runDir(runId), ref), { force: true });
+    } catch {
+      // a leftover file with no reference in the journal is ignored by everything that reads
+    }
   }
 
   // locking

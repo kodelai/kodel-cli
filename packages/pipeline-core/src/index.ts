@@ -4,6 +4,7 @@
  */
 export * from "./agent-history";
 export * from "./canonical";
+export * from "./changes";
 export * from "./checks";
 export * from "./docs";
 export * from "./errors";

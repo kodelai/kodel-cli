@@ -620,6 +620,15 @@ export class LocalPipelineHost implements PipelineHost {
     return stopped;
   }
 
+  /**
+   * Wait for what this process still writes about its runs (the patch of a run that has just ended),
+   * but no longer than `ms`. Called when the server goes away, so the record is not cut off by the exit.
+   */
+  async settle(ms: number): Promise<void> {
+    const deadline = Date.now() + ms;
+    await Promise.all([...this.runs.values()].map((run) => run.settle(() => 0, deadline)));
+  }
+
   /** Whether a start for this task would pick up a run that exists, instead of making one. */
   private async runExists(name: string, input: { task: string; restart: boolean }) {
     const task = normalizeTask(input.task, this.options.rules ?? []);

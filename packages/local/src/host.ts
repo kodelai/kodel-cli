@@ -7,12 +7,14 @@
  * work without a heartbeat and restarts it; the state on disk is all that is needed for that.
  */
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { mkdir, readFile, realpath } from "node:fs/promises";
-import { hostname } from "node:os";
+import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import {
   type Caller,
   type ChangeSet,
+  type ChangesRef,
   type CheckVerdict,
   canonicalPipeline,
   type Decision,
@@ -28,6 +30,7 @@ import {
   evaluateResult,
   type HistoryConfig,
   isRunEnd,
+  isTreeId,
   type JournalRecord,
   KodelError,
   measurePatch,
@@ -60,9 +63,18 @@ import {
 import { type CommandOptions, type CommandResult, runCommand } from "./command";
 import { loadConfig, type WorktreeConfig } from "./config";
 import { type BuildInfo, engineRecord, observeExecutor, UNKNOWN_BUILD } from "./executor";
-import { GitSnapshotter, readHead, readRunCommits, repoPrefix } from "./git";
+import {
+  checkTreeId,
+  deadlineIn,
+  GitSnapshotter,
+  readHead,
+  readRunCommits,
+  repoPrefix,
+} from "./git";
 import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integrity";
-import { FileStore, META_VERSION, newRunId, type RunMeta } from "./store";
+import { patchBetween } from "./patch";
+import { MAX_PATCH_KB, PATCH_READ_MARGIN } from "./patch-text";
+import { artifactFileName, FileStore, META_VERSION, newRunId, type RunMeta } from "./store";
 import { GitWorktreeProvider, type Workdir, type WorkdirProvider } from "./worktree";
 
 export interface CommandContext {
@@ -191,8 +203,28 @@ export function processIsAlive(owner: string): boolean {
 
 export const DEFAULT_COMMAND_TIMEOUT_S = 3_600;
 
+/**
+ * How long recording the changes of a hand-in may take (snapshot and patch together). The agent waits
+ * for the call, and the engine then waits for the checks up to its own budget, so this is kept
+ * short: a hand-in that cannot be recorded in time is handed in without a patch, and says why.
+ */
+export const HAND_IN_DEADLINE_MS = 20_000;
+
+/** The same for the end of the run; nobody waits for it on the agent's call. */
+export const END_DEADLINE_MS = 120_000;
+
+/** After this many hand-ins in a row that ran out of time, the next ones are not tried. */
+const DEADLINE_BACKOFF = 2;
+
 /** The text fields an event carries from outside; the rest is structure and is left alone. */
-const FREE_TEXT_FIELDS = ["reason", "summary", "message", "suggestion", "note"] as const;
+const FREE_TEXT_FIELDS = [
+  "reason",
+  "summary",
+  "message",
+  "suggestion",
+  "note",
+  "changesError",
+] as const;
 
 function redactEvent(event: RunEvent, rules: RedactRule[]): RunEvent {
   const copy = { ...event } as Record<string, unknown>;
@@ -202,6 +234,15 @@ function redactEvent(event: RunEvent, rules: RedactRule[]): RunEvent {
   }
   return copy as unknown as RunEvent;
 }
+
+/** The real path of a folder, or the same text when it cannot be told. */
+const realpathOrSame = (path: string): string => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+};
 
 /** An error as text for a person or an agent; the code of the engine's own errors goes first. */
 const describeError = (error: unknown): string =>
@@ -583,6 +624,10 @@ export class LocalRun {
     { controller: AbortController; node: string; attempt: number }
   >();
   private readonly pending = new Set<Promise<void>>();
+  /** The jobs that record the patch of the run after it ended (also in `pending`). */
+  private readonly endJobs = new Set<Promise<void>>();
+  /** The job that records the patch of the run gave up (the files changed, the state could not be read). */
+  private endPatchGaveUp = false;
 
   private recorded: Promise<RunMeta | undefined> | undefined;
 
@@ -1018,9 +1063,216 @@ export class LocalRun {
     this.queue = step;
     // After the lock is let go: the tracker may be slow, and it must not hold up the run's files.
     return step.then(async (decision) => {
+      // Started before the tracker is asked, so the end tree is not taken after a slow call, and
+      // not awaited: nobody who ends a run waits for a whole-tree snapshot.
+      this.startEndJob(decision);
       await this.tieEnd(decision);
       return decision;
     });
+  }
+
+  /** The `history.changes` settings the run recorded when it started; none when it keeps no patches. */
+  private async changesSettings(): Promise<{ maxKb: number; exclude: string[] } | undefined> {
+    const changes = (await this.state().catch(() => undefined))?.history?.changes;
+    // The state is read before anything checks it: a value edited into it is clamped, not believed.
+    const maxKb = Math.min(Math.max(Math.trunc(Number(changes?.max_kb)) || 512, 1), MAX_PATCH_KB);
+    return changes?.enabled === true
+      ? { maxKb, exclude: Array.isArray(changes.exclude) ? changes.exclude : [] }
+      : undefined;
+  }
+
+  /** An error of the patch machinery as a short, redacted text without the repository's path. */
+  private changesErrorText(error: unknown): string {
+    // Longest first: the root is often inside the temporary folder or the home folder. Git prints the
+    // real path of a folder, which on macOS is not the one `tmpdir()` gives.
+    // This runs in the `catch` of code that must never throw: a missing home folder (a container with
+    // no `HOME` and no passwd entry makes `homedir()` throw) is not a reason to lose the record.
+    const safely = (find: () => string): string => {
+      try {
+        return find();
+      } catch {
+        return "";
+      }
+    };
+    const places: [string, string][] = [
+      [this.host.options.root, "."],
+      [safely(tmpdir), "<tmp>"],
+      [safely(() => realpathOrSame(tmpdir())), "<tmp>"],
+      [safely(homedir), "~"],
+    ];
+    let text = describeError(error);
+    for (const [place, name] of places) if (place !== "") text = text.replaceAll(place, name);
+    return redactText(text, this.host.rules).slice(0, 200);
+  }
+
+  /**
+   * Whether the patch of the run is still being written, here or in another process (`kodel gate`
+   * ends a run in its own). Another process says it is done in the journal; one that was killed never
+   * does, so the wait ends after the time the job is allowed to take.
+   */
+  private async endPatchPending(state: RunState): Promise<boolean> {
+    if (this.endJobs.size > 0) return true;
+    if (this.endPatchGaveUp) return false;
+    if (state.history?.changes?.enabled !== true) return false;
+    const journal = await this.host.store.readJournal(this.runId).catch(() => []);
+    if (journal.some((r) => r.event === "changes_recorded")) return false;
+    return this.host.clock() - (state.finishedAt ?? 0) < END_DEADLINE_MS + 30_000;
+  }
+
+  /**
+   * When this event ended the run, record the patch of the whole run in the background. The job is
+   * in `pending`, so `settle()` covers it, and in `endJobs`, so the answer that says the run is done
+   * does not tell the person to delete the worktree while the end tree is still being read.
+   */
+  private startEndJob(decision: Decision): void {
+    if (!decision.ok || decision.noop) return;
+    if (!isRunEnd(decision.state.status)) return;
+    if (!decision.journal.some((r) => r.event === "run_finished")) return;
+    // A state a person accepted after editing may have no `changes`: not a reason to fail the call.
+    if (decision.state.history?.changes?.enabled !== true) return;
+    const job = this.recordRunPatch().catch(() => undefined);
+    this.pending.add(job);
+    this.endJobs.add(job);
+    void job.finally(() => {
+      this.pending.delete(job);
+      this.endJobs.delete(job);
+    });
+  }
+
+  /** The patch of the run, start tree to now, and the note in the journal that says what came of it. */
+  private async recordRunPatch(): Promise<void> {
+    const settings = await this.changesSettings();
+    if (!settings) {
+      this.endPatchGaveUp = true; // nothing will be written, so nothing is waited for
+      return;
+    }
+    const { store } = this.host;
+    // A patch that was recorded is not replaced by one taken against a later tree.
+    const journal = await store.readJournal(this.runId).catch(() => []);
+    if (journal.some((r) => r.event === "changes_recorded")) return;
+    // Writing the note seals the run again: a run whose files were changed since it ended gets no note
+    // (and no file), so that change is still seen as one.
+    // Under the lock, like the check in `applyLocked`: the note of the task is written at the same
+    // moment, in three steps (state, journal, seal), and a look in between is not a change.
+    const seal = await store
+      .withLock(this.runId, () => this.sealStatus())
+      .catch(() => "modified" as const);
+    if (seal !== "sealed") {
+      this.endPatchGaveUp = true;
+      return;
+    }
+    let event: RunEvent;
+    try {
+      const snapshots = await store.readSnapshots(this.runId);
+      const start = snapshots.run;
+      if (!isTreeId(start)) {
+        const why = snapshots["run!"];
+        throw new Error(`the start of the run was not recorded${why ? ` (${why})` : ""}`);
+      }
+      const snapshotter = await this.snapshotter();
+      const deadline = deadlineIn(END_DEADLINE_MS);
+      const end = await snapshotter.snapshot(deadline);
+      const out = await patchBetween(snapshotter.root, start, end, {
+        exclude: settings.exclude,
+        maxBytes: settings.maxKb * 1024 + PATCH_READ_MARGIN,
+        deadline,
+      });
+      const kept = await store.writeChanges(this.runId, "run", out.patch, {
+        cutByGit: out.cut,
+        maxKb: settings.maxKb,
+      });
+      event = { type: "changes_recorded", changes: kept };
+    } catch (error) {
+      event = { type: "changes_recorded", changesError: this.changesErrorText(error) };
+    }
+    const dropFile = async () => {
+      if (event.type === "changes_recorded" && event.changes) {
+        await store.deleteChanges(this.runId, event.changes.ref);
+      }
+    };
+    try {
+      const decision = await this.apply(event);
+      if (!decision.ok) {
+        // Refused (the files changed while the patch was made): nothing points to the file.
+        this.endPatchGaveUp = true;
+        await dropFile();
+      }
+    } catch (error) {
+      // The lock could not be had, or the seal could not be read: the same, and the wait ends.
+      this.endPatchGaveUp = true;
+      await dropFile();
+      throw error;
+    }
+  }
+
+  /**
+   * What to put on the `agent_completed` event about the work since the previous hand-in. It runs
+   * before the checks, so what a check changes is not in this attempt's patch. It never throws and
+   * never decides anything: a failure becomes `changesError`, and the hand-in goes on without a patch.
+   */
+  private async recordHandIn(
+    node: string,
+    attempt: number,
+  ): Promise<{ changes?: ChangesRef; changesError?: string; tree?: string }> {
+    const settings = await this.changesSettings();
+    if (!settings) return {};
+    try {
+      // Only a step that is waiting for this hand-in; anything else is left to `apply` to refuse.
+      const state = await this.state();
+      const visit = state.active.find((v) => v.node === node && v.attempt === attempt);
+      if (visit?.phase !== "agent") return {};
+    } catch {
+      return {};
+    }
+    const { store } = this.host;
+    try {
+      const earlier = (await store.readJournal(this.runId)).filter(
+        (r) => r.event === "agent_completed",
+      );
+      // A skipped hand-in counts too: the back-off holds for the rest of the run, not for one hand-in.
+      const timedOut = (r: JournalRecord) =>
+        typeof r.changes_error === "string" &&
+        (r.changes_error.startsWith("deadline:") || r.changes_error.startsWith("skipped:"));
+      if (earlier.length >= DEADLINE_BACKOFF && earlier.slice(-DEADLINE_BACKOFF).every(timedOut)) {
+        return { changesError: "skipped: earlier hand-ins ran out of time recording the changes" };
+      }
+      // The base is the tree of the hand-in just before this one, whatever node it was; the start of
+      // the run only for the first. A hand-in before this one that has no tree (its snapshot failed,
+      // or it was made before patches existed) leaves no base, never an older one: a patch from an
+      // older tree would hold that node's work.
+      let base: string | undefined;
+      if (earlier.length === 0) {
+        const start = (await store.readSnapshots(this.runId)).run;
+        base = isTreeId(start) ? start : undefined;
+      } else {
+        const previous = earlier[earlier.length - 1]?.tree;
+        base = isTreeId(previous) ? previous : undefined;
+      }
+      const snapshotter = await this.snapshotter();
+      const deadline = deadlineIn(HAND_IN_DEADLINE_MS);
+      // Checked here: core would drop a bad one without a word, and the chain would break unexplained.
+      const tree = checkTreeId(await snapshotter.snapshot(deadline), "the snapshot");
+      if (base === undefined) return { tree, changesError: "no recorded start" };
+      try {
+        const out = await patchBetween(snapshotter.root, base, tree, {
+          exclude: settings.exclude,
+          maxBytes: settings.maxKb * 1024 + PATCH_READ_MARGIN,
+          deadline,
+        });
+        const changes = await store.writeChanges(
+          this.runId,
+          `${artifactFileName(node)}-${attempt}`,
+          out.patch,
+          { cutByGit: out.cut, maxKb: settings.maxKb },
+        );
+        return { changes, tree };
+      } catch (error) {
+        // The tree was taken: the next hand-in can start from it whatever happened to the patch.
+        return { tree, changesError: this.changesErrorText(error) };
+      }
+    } catch (error) {
+      return { changesError: this.changesErrorText(error) };
+    }
   }
 
   /** HEAD and the commits of the run, from its directory; whatever cannot be read is left out. */
@@ -1073,6 +1325,16 @@ export class LocalRun {
             return { ok: false, error } satisfies Decision;
           }
         }
+      }
+      // The note of the run's patch is written long after the run was sealed, and writing it seals the
+      // run again over whatever the files are by then: it must not make a change of the journal look
+      // like the run's own. Under the lock, so nothing is written between the look and the write.
+      if (event.type === "changes_recorded" && !trust && (await this.sealStatus()) !== "sealed") {
+        const error = new KodelError(
+          "STATE_MODIFIED_EXTERNALLY",
+          `the files of run ${this.runId} are not as the run left them; the patch was not recorded`,
+        );
+        return { ok: false, error } satisfies Decision;
       }
       // An event is decided with the pipeline the run is on; the one that moves it to another version,
       // with that other.
@@ -1464,10 +1726,23 @@ export class LocalRun {
    * `parked` says how many tasks are known to be stuck on purpose (tests), so they are not waited for.
    */
   async settle(parked: () => number = () => 0, deadline = Number.POSITIVE_INFINITY): Promise<void> {
+    // The queue too is waited for no longer than the deadline: it may stand behind another process's lock.
+    const queued = async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const left = deadline - Date.now();
+      const late = new Promise<void>((resolve) => {
+        timer = Number.isFinite(left) ? setTimeout(resolve, Math.max(left, 0)) : undefined;
+      });
+      try {
+        await Promise.race([this.queue.catch(() => undefined), late]);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
     for (;;) {
-      await this.queue.catch(() => undefined);
+      await queued();
       if (this.pending.size <= parked()) {
-        await this.queue.catch(() => undefined);
+        await queued();
         if (this.pending.size <= parked()) return;
       }
       const left = deadline - Date.now();
@@ -1528,7 +1803,10 @@ export class LocalRun {
   async nextStep(options: { atCompletion?: boolean } = {}): Promise<NextStep> {
     const tick = await this.tick();
     if (!tick.ok && tick.error.code === "STATE_MODIFIED_EXTERNALLY") throw tick.error;
-    if ((await this.sealStatus()) === "modified") {
+    // Under the lock: a note being written after the end of the run (the patch, the task) rewrites the
+    // state, the journal and the seal one after the other, and a look in between is not a change.
+    const seal = await this.host.store.withLock(this.runId, () => this.sealStatus());
+    if (seal === "modified") {
       throw new KodelError(
         "STATE_MODIFIED_EXTERNALLY",
         `run ${this.runId} finished and was changed afterwards; look at what changed, then accept it with "kodel seal ${this.runId}"`,
@@ -1549,7 +1827,11 @@ export class LocalRun {
     );
     if ("done" in step && step.run_status === "completed") {
       const where = await this.locationForDisplay();
-      if (where?.branch !== undefined) {
+      if (await this.endPatchPending(state)) {
+        // The end tree is read from the run's directory: deleting it now would lose the patch.
+        step.tell_the_person =
+          "The changes of the run are still being recorded: do not remove the run's worktree or branch yet. This note goes away by itself once they are written; there is nothing to poll for.";
+      } else if (where?.branch !== undefined) {
         step.tell_the_person = doneHint(this.host.options.root, where.path, where.branch);
       }
       if (state.taskKey !== undefined && (await this.host.taskLink())?.mode === "ask") {
@@ -1647,15 +1929,37 @@ export class LocalRun {
     const head = await this.cwd()
       .then(readHead)
       .catch(() => undefined);
-    const decision = await this.apply({
-      type: "agent_completed",
-      node,
-      attempt,
-      ...(head === undefined ? {} : { head }),
-      ...(summary === undefined ? {} : { summary }),
-      ...(outcome === undefined ? {} : { outcome }),
-      ...(executor === undefined ? {} : executor),
-    });
+    // Before the checks start: what a check writes belongs to no node's patch.
+    const recorded = await this.recordHandIn(node, attempt);
+    const mine = recorded.changes?.ref;
+    const dropPatch = async () => {
+      if (mine === undefined) return;
+      // `apply` may throw after it has written the journal (a snapshot for a check, the seal): then the
+      // record points to the file, and the file stays.
+      const journal = await this.host.store.readJournal(this.runId).catch(() => undefined);
+      const kept = journal?.some((r) => (r.changes as { ref?: string } | undefined)?.ref === mine);
+      if (!kept) await this.host.store.deleteChanges(this.runId, mine);
+    };
+    let decision: Decision;
+    try {
+      decision = await this.apply({
+        type: "agent_completed",
+        node,
+        attempt,
+        ...(head === undefined ? {} : { head }),
+        ...(summary === undefined ? {} : { summary }),
+        ...(outcome === undefined ? {} : { outcome }),
+        ...(executor === undefined ? {} : executor),
+        ...(recorded.changes === undefined ? {} : { changes: recorded.changes }),
+        ...(recorded.changesError === undefined ? {} : { changesError: recorded.changesError }),
+        ...(recorded.tree === undefined ? {} : { tree: recorded.tree }),
+      });
+    } catch (error) {
+      // A file no event points to is of no use to anyone.
+      await dropPatch();
+      throw error;
+    }
+    if (!decision.ok || decision.noop) await dropPatch();
     if (!decision.ok) {
       await this.recordRefusal("complete_step", node, attempt, decision.error);
     }

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   type AgentTurn,
@@ -147,6 +147,29 @@ describe("the repository's own pipeline, on a real agent", () => {
       expect(
         readFileSync(join(sandbox.dir, ".kodel", "runs", runId, "journal.jsonl"), "utf8"),
       ).toContain("gate_decided");
+
+      // The work was kept (TASK-36TW): a patch for each agent step that was handed in, and one for
+      // the whole run. The run's patch is written in the background after the run ended.
+      // The run ended in the agent's server, not in this process, so there is nothing here to wait for:
+      // the journal says when the note is written.
+      const noted = () => journalEvents(sandbox, runId).includes("changes_recorded");
+      for (let i = 0; i < 120 && !noted(); i += 1) await new Promise((r) => setTimeout(r, 500));
+      const changesDir = join(sandbox.dir, ".kodel", "runs", runId, "changes");
+      const patches = existsSync(changesDir) ? readdirSync(changesDir) : [];
+      expect(patches, `no run.patch${detail}`).toContain("run.patch");
+      for (const node of ["plan", "impl", "review"]) {
+        expect(
+          patches.some((p) => p.startsWith(`${node}-`)),
+          `no patch for ${node} (${patches.join(", ")})${detail}`,
+        ).toBe(true);
+      }
+      const implPatch = patches.find((p) => p.startsWith("impl-")) ?? "";
+      expect(readFileSync(join(changesDir, implPatch), "utf8"), detail).toContain(
+        TASK_FILES.source,
+      );
+      expect(readFileSync(join(changesDir, "run.patch"), "utf8"), detail).toContain(
+        TASK_FILES.source,
+      );
 
       // The report says where the time went: the commands were the engine's, the gates a person's.
       const report = await (await humanHost(sandbox).open(runId))?.report();

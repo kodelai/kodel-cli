@@ -210,4 +210,118 @@ if (kept.join() !== "first-1-command.txt,second-1-command.txt") {
 const none = await runOnce(false);
 if (none.length > 0) fail(`history.output.enabled false still wrote: ${none.join()}`);
 
+// A run of the built file on plain Node keeps the patch of each hand-in and of the run (TASK-36TW):
+// with a rework (a check that fails once), the files survive `git gc --prune=now`, and with
+// `history.changes.enabled: false` there is no `changes/` at all.
+async function runChanges(enabled) {
+  const dir = mkdtempSync(join(tmpdir(), "kodel-artifact-changes-"));
+  const git = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [artifact, "--root", dir, "mcp"],
+    cwd: dir,
+    stderr: "ignore",
+  });
+  const client = new Client({ name: "check-artifact", version: "0" });
+  try {
+    git("init", "-q");
+    git("config", "user.email", "check@example.com");
+    git("config", "user.name", "Check");
+    writeFileSync(join(dir, "base.txt"), "base\n");
+    mkdirSync(join(dir, ".kodel", "pipelines"), { recursive: true });
+    writeFileSync(
+      join(dir, ".kodel", "config.yaml"),
+      `version: 1\nworktree: { mode: off }\nhistory: { changes: { enabled: ${enabled} } }\n`,
+    );
+    writeFileSync(
+      join(dir, ".kodel", "pipelines", "p.yaml"),
+      [
+        "name: p",
+        "nodes:",
+        "  - slug: first",
+        "    kind: agent",
+        "    prompt: first",
+        "    checks:",
+        // fails the first time and leaves a marker, passes the second time
+        "      - { kind: command, command: node check.js }",
+        "  - slug: second",
+        "    kind: agent",
+        "    prompt: second",
+        "edges:",
+        "  - { from: first, to: second }",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(dir, "check.js"),
+      "const fs = require('node:fs');\nif (!fs.existsSync('marker')) { fs.writeFileSync('marker', ''); process.exit(1); }\n",
+    );
+    git("add", "-A");
+    git("commit", "-q", "-m", "base");
+    await client.connect(transport);
+    const call = async (name, args) => {
+      const result = await client.callTool({ name, arguments: args });
+      return JSON.parse(result.content[0].text);
+    };
+    const started = await call("pipeline_start", {
+      task: "keep the changes",
+      pipeline: "p",
+      cwd: dir,
+      title: "keep-changes",
+    });
+    if (!started.run_id) fail(`the run did not start: ${JSON.stringify(started)}`);
+    const handIn = async (slug, attempt, file) => {
+      writeFileSync(join(dir, file), `${file}\n`);
+      const done = await call("pipeline_complete_step", {
+        run_id: started.run_id,
+        node_slug: slug,
+        attempt,
+      });
+      if (done.ok === false) fail(`${slug} was refused: ${JSON.stringify(done)}`);
+    };
+    await handIn("first", 1, "one.txt");
+    await handIn("first", 2, "two.txt");
+    await handIn("second", 1, "three.txt");
+    for (let i = 0; i < 40; i += 1) {
+      const next = await call("pipeline_next_step", { run_id: started.run_id, wait_s: 1 });
+      if (next.done) break;
+      if (i === 39) fail(`the run did not finish: ${JSON.stringify(next)}`);
+    }
+    const changes = join(dir, ".kodel", "runs", started.run_id, "changes");
+    // The end patch is written in the background after the run ended.
+    for (let i = 0; i < 40 && enabled && !existsSync(join(changes, "run.patch")); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    const list = () => (existsSync(changes) ? readdirSync(changes).sort() : []);
+    const before = list();
+    git("gc", "-q", "--prune=now");
+    const text = (file) => readFileSync(join(changes, file), "utf8");
+    return {
+      before,
+      after: list(),
+      first2: enabled ? text("first-2.patch") : "",
+      run: enabled ? text("run.patch") : "",
+    };
+  } finally {
+    await client.close().catch(() => {});
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const withChanges = await runChanges(true);
+const expectedChanges = ["first-1.patch", "first-2.patch", "run.patch", "second-1.patch"];
+if (withChanges.before.join() !== expectedChanges.join()) {
+  fail(`the patches of the run are not as expected: ${withChanges.before.join() || "(nothing)"}`);
+}
+if (withChanges.after.join() !== expectedChanges.join()) fail("the patches did not survive git gc");
+if (!withChanges.first2.includes("two.txt") || withChanges.first2.includes("one.txt"))
+  fail("the patch of the second attempt is not the work of that attempt");
+for (const file of ["one.txt", "two.txt", "three.txt"]) {
+  if (!withChanges.run.includes(file)) fail(`run.patch does not mention ${file}`);
+}
+const withoutChanges = await runChanges(false);
+if (withoutChanges.after.length > 0) {
+  fail(`history.changes.enabled false still wrote: ${withoutChanges.after.join()}`);
+}
+
 console.log(`artifact ok under node ${process.version}: ${size} bytes, version ${version}`);

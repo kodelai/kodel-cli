@@ -16,12 +16,41 @@
  */
 import { execFile } from "node:child_process";
 import { lstat, mkdtemp, readlink, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { devNull, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChangeSet } from "@kodel-ai/pipeline-core";
 
 interface GitResult {
   stdout: string;
+}
+
+/** How much time is left for work made of several git calls. */
+export interface Deadline {
+  remainingMs(): number;
+}
+
+export const deadlineIn = (ms: number): Deadline => {
+  const end = Date.now() + ms;
+  return { remainingMs: () => end - Date.now() };
+};
+
+/** Thrown when the time ran out; its text starts with `deadline:` so the journal says what it was. */
+export class DeadlineError extends Error {
+  constructor() {
+    super("deadline: git took longer than the time allowed for recording the changes");
+  }
+}
+
+// The same rule as `isTreeId` of the core. Not imported: this file is also in the bundle of the hook,
+// which must stay small, and the core is not.
+const OBJECT_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+
+/** A tree id from a file the agent can write must be one before git sees it as an argument. */
+export function checkTreeId(value: unknown, what: string): string {
+  if (typeof value !== "string" || !OBJECT_ID.test(value)) {
+    throw new Error(`${what} is not a git object id`);
+  }
+  return value;
 }
 
 /**
@@ -48,12 +77,19 @@ export const SAFE_CONFIG = [
   "log.showSignature=false",
 ];
 
+/**
+ * Hooks off, for the calls of a snapshot. Only there: the worktrees kodel makes should still run the
+ * hooks of the project the person set up, but a snapshot reads the tree the agent has just been writing.
+ */
+export const NO_HOOKS = ["-c", `core.hooksPath=${devNull}`];
+
 /** Run git with the hardened configuration; the one place the local adapters start it. */
 export function git(
   args: string[],
   cwd: string,
   env: Record<string, string> = {},
   input?: string,
+  timeoutMs?: number,
 ): Promise<GitResult> {
   return new Promise((resolveResult, reject) => {
     const child = execFile(
@@ -65,9 +101,16 @@ export function git(
         maxBuffer: 256 * 1024 * 1024,
         encoding: "utf8",
         windowsHide: true,
+        ...(timeoutMs === undefined ? {} : { timeout: timeoutMs, killSignal: "SIGKILL" as const }),
       },
       (error, stdout, stderr) => {
         if (error) {
+          // `killed` is also set when the output outgrew the buffer; that is not the time running out.
+          const tooMuch = (error as { code?: string }).code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
+          if (timeoutMs !== undefined && (error as { killed?: boolean }).killed && !tooMuch) {
+            reject(new DeadlineError());
+            return;
+          }
           const detail = (stderr || error.message).trim();
           reject(new Error(`git ${args[0]} failed: ${detail}`));
         } else {
@@ -184,7 +227,7 @@ export class GitSnapshotter {
   private readonly exclude: string[];
 
   constructor(
-    private readonly root: string,
+    readonly root: string,
     options: SnapshotterOptions = {},
   ) {
     // Relative to `root`, which is the project folder: a package project excludes its own `.kodel`.
@@ -205,34 +248,42 @@ export class GitSnapshotter {
   }
 
   /** The tree object of the working tree as it is now. */
-  async snapshot(): Promise<string> {
+  async snapshot(deadline?: Deadline): Promise<string> {
+    // One deadline for all the git calls and the loop between them: a tree of thousands of files or
+    // links is many calls, and a limit on each would not bound the whole.
+    // No hooks: `update-index` runs `post-index-change` of the repository even on a private index,
+    // and the agent can write that file. A snapshot is now taken at every hand-in.
+    const call = (args: string[], env: Record<string, string> = {}, input?: string) => {
+      const full = [...NO_HOOKS, ...args];
+      if (deadline === undefined) return git(full, this.root, env, input);
+      const left = deadline.remainingMs();
+      if (left <= 0) return Promise.reject(new DeadlineError());
+      return git(full, this.root, env, input, left);
+    };
     if (!(await this.isRepo())) {
       throw new Error(`the diff check needs a git repository, and ${this.root} is not inside one`);
     }
     // The listing is relative to the directory we are in; the index wants paths from the top of the
     // repository, so the way down to this directory goes in front of each.
-    const { stdout: prefixOut } = await git(["rev-parse", "--show-prefix"], this.root);
+    const { stdout: prefixOut } = await call(["rev-parse", "--show-prefix"]);
     const prefix = prefixOut.trim();
-    const { stdout: listed } = await git(
+    const { stdout: listed } = await call(
       ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-      this.root,
-      { GIT_OPTIONAL_LOCKS: "0" },
+      {
+        GIT_OPTIONAL_LOCKS: "0",
+      },
     );
     const paths = [...new Set(listed.split("\0").filter(Boolean))].filter((p) => !this.excluded(p));
 
     const regular: { path: string; mode: string }[] = [];
     const entries: { mode: string; sha: string; path: string }[] = [];
     for (const path of paths) {
+      if (deadline !== undefined && deadline.remainingMs() <= 0) throw new DeadlineError();
       const info = await lstat(join(this.root, path)).catch(() => undefined);
       if (!info) continue; // tracked, but deleted from the working tree
       if (info.isSymbolicLink()) {
         const target = await readlink(join(this.root, path));
-        const { stdout } = await git(
-          ["hash-object", "-w", "--no-filters", "--stdin"],
-          this.root,
-          {},
-          target,
-        );
+        const { stdout } = await call(["hash-object", "-w", "--no-filters", "--stdin"], {}, target);
         entries.push({ mode: "120000", sha: stdout.trim(), path: `${prefix}${path}` });
       } else if (info.isFile()) {
         regular.push({ path, mode: info.mode & 0o111 ? "100755" : "100644" });
@@ -242,9 +293,8 @@ export class GitSnapshotter {
 
     const plain = regular.filter((f) => !awkwardPath(f.path));
     if (plain.length > 0) {
-      const { stdout } = await git(
+      const { stdout } = await call(
         ["hash-object", "-w", "--no-filters", "--stdin-paths"],
-        this.root,
         {},
         `${plain.map((f) => join(this.root, f.path)).join("\n")}\n`,
       );
@@ -256,23 +306,25 @@ export class GitSnapshotter {
       }
     }
     for (const f of regular.filter((r) => awkwardPath(r.path))) {
-      const { stdout } = await git(
-        ["hash-object", "-w", "--no-filters", "--", join(this.root, f.path)],
-        this.root,
-      );
+      const { stdout } = await call([
+        "hash-object",
+        "-w",
+        "--no-filters",
+        "--",
+        join(this.root, f.path),
+      ]);
       entries.push({ mode: f.mode, sha: stdout.trim(), path: `${prefix}${f.path}` });
     }
 
     const scratch = await mkdtemp(join(tmpdir(), "kodel-index-"));
     try {
       const env = { GIT_INDEX_FILE: join(scratch, "index"), GIT_OPTIONAL_LOCKS: "0" };
-      await git(
+      await call(
         ["update-index", "--add", "-z", "--index-info"],
-        this.root,
         env,
         entries.map((e) => `${e.mode} ${e.sha}\t${e.path}\0`).join(""),
       );
-      const { stdout: tree } = await git(["write-tree"], this.root, env);
+      const { stdout: tree } = await call(["write-tree"], env);
       return tree.trim();
     } finally {
       await rm(scratch, { recursive: true, force: true });
@@ -281,6 +333,10 @@ export class GitSnapshotter {
 
   /** Changed lines per path between two snapshots; a binary file counts as one line. */
   async changes(from: string, to: string): Promise<ChangeSet> {
+    // The ids come from `snapshots.json`, which the agent can write: one like `--output=...` would
+    // make git write a file as the user.
+    checkTreeId(from, "the first snapshot");
+    checkTreeId(to, "the second snapshot");
     const { stdout } = await git(
       [
         "diff",
@@ -290,6 +346,7 @@ export class GitSnapshotter {
         "--no-ext-diff",
         "--relative",
         "-z",
+        "--end-of-options",
         from,
         to,
       ],
