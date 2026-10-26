@@ -4,7 +4,7 @@
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { PipelineService, ToolResult } from "../service";
-import { invokeTool, toolsFor } from "./tools";
+import { invokeTool, type ToolDescriptor, toolsFor } from "./tools";
 
 /** A tool call that has been answered, as the host sees it before the agent does. */
 export interface ToolCall {
@@ -25,6 +25,8 @@ export type AfterTool = (call: ToolCall) => Promise<ToolResult | undefined>;
 export interface RegisterOptions {
   taskLink?: boolean;
   afterTool?: AfterTool;
+  /** Tools the host adds to the usual ones (the decisions the config lets the agent make). */
+  extraTools?: ToolDescriptor[];
 }
 
 export function registerPipelineTools(
@@ -32,7 +34,7 @@ export function registerPipelineTools(
   service: PipelineService,
   options: RegisterOptions = {},
 ): void {
-  const tools = toolsFor(options);
+  const tools = [...toolsFor(options), ...(options.extraTools ?? [])];
   for (const tool of tools) {
     server.registerTool(
       tool.name,

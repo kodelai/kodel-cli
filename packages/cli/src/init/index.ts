@@ -176,7 +176,13 @@ export async function runInit(opts: InitOptions, io: InitIO): Promise<Change[]> 
   const tasks = await chooseTasks(opts, io, canAsk);
   const hooks = await chooseHooks(opts, io, canAsk);
 
-  const ctx: Context = { root: opts.root, dryRun: opts.dryRun, force: opts.force, changes: [] };
+  const ctx: Context = {
+    root: opts.root,
+    dryRun: opts.dryRun,
+    force: opts.force,
+    changes: [],
+    hints: [],
+  };
 
   await setUpConfig(ctx, tasks);
 
@@ -230,6 +236,12 @@ function report(ctx: Context, agents: AgentAdapter[], io: InitIO, hooks: boolean
       `note: the hooks for ${hooksUnverified.join(", ")} are not checked on the real agent yet\n`,
     );
   }
-  for (const note of notes) io.out(`note: ${note}\n`);
-  if (!ctx.dryRun) io.out("next: restart the agent so that it connects the kodel server\n");
+  for (const note of [...ctx.hints, ...notes]) io.out(`note: ${note}\n`);
+  if (!ctx.dryRun) {
+    io.out(
+      agents.some((agent) => agent.id === "claude-code")
+        ? "next: approve the kodel server in the agent, then restart it so that it connects\n"
+        : "next: restart the agent so that it connects the kodel server\n",
+    );
+  }
 }

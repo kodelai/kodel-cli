@@ -4,15 +4,7 @@
  */
 import { access, constants } from "node:fs/promises";
 import { delimiter, join } from "node:path";
-import {
-  addToList,
-  type Context,
-  editFile,
-  editJson,
-  managedBlock,
-  objectAt,
-  SkipEdit,
-} from "./files";
+import { type Context, editFile, editJson, managedBlock, objectAt, SkipEdit } from "./files";
 
 export type AgentId = "claude-code" | "codex" | "opencode";
 
@@ -39,6 +31,8 @@ export interface AgentAdapter {
 }
 
 const MCP_NAME = "kodel";
+
+const CLAUDE_CODE_HINT = `Claude Code: make sure the "${MCP_NAME}" server is approved (Claude Code asks once, or list it in enabledMcpjsonServers; a non-interactive session cannot ask) and that its tools are allowed (permissions.allow: "mcp__${MCP_NAME}"). Put this in .claude/settings.local.json or ~/.claude/settings.json for yourself, or in .claude/settings.json to share it with the team; kodel init does not write it. An earlier kodel init may have added these to .claude/settings.json`;
 
 /** Put our server entry in; one the person set up differently stays unless `--force`. */
 function setServer(
@@ -72,18 +66,8 @@ const claudeCode: AgentAdapter = {
         }),
       ),
     );
-    // Without our server in .mcp.json the permission would apply to whatever `kodel` points to.
-    const connected = ctx.changes.at(-1);
-    if (connected?.status === "skipped") {
-      connected.note = `${connected.note}; .claude/settings.json was not changed either`;
-      return;
-    }
-    await editFile(ctx, ".claude/settings.json", (previous) =>
-      editJson(previous, (settings) => {
-        addToList(settings, "enabledMcpjsonServers", [MCP_NAME]);
-        addToList(objectAt(settings, "permissions"), "allow", [`mcp__${MCP_NAME}`]);
-      }),
-    );
+    // The person approves the server and allows its tools; init grants nothing to the agent.
+    if (ctx.changes.at(-1)?.status !== "skipped") ctx.hints.push(CLAUDE_CODE_HINT);
   },
 };
 
