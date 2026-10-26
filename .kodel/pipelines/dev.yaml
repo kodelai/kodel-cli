@@ -150,7 +150,8 @@ nodes:
       remove). Where the plan and main disagree, follow main and note it at the end of the plan file.
       Then the checks run again. If the pull request already exists, publish only pushes to it.
     checks:
-      - { kind: diff, paths: ["packages/**", "scripts/**", "examples/**", "skills/**", "adapters/**", "tests/**"] }
+      # since: run, so that a return to impl with nothing left to change (a flaky test) can finish again.
+      - { kind: diff, since: run, paths: ["packages/**", "scripts/**", "examples/**", "skills/**", "adapters/**", "tests/**"] }
 
   - slug: verify
     kind: command

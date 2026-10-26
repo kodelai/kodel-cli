@@ -6,7 +6,7 @@
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { loadConfig } from "@kodel-ai/local";
-import { defaultHookRegistry, HOOK_LOG, hookCommand, SESSIONS_INDEX } from "@kodel-ai/local/hooks";
+import { defaultHookRegistry, hookCommand } from "@kodel-ai/local/hooks";
 import {
   AGENT_IDS,
   AGENTS,
@@ -16,7 +16,7 @@ import {
   type ServerCommand,
 } from "./agents";
 import { type Change, type Context, editFile, readIfExists } from "./files";
-import { hookFile, registerHooks } from "./hooks";
+import { registerHooks } from "./hooks";
 import { installSkills } from "./skills";
 
 /** A problem to report to the person without a stack trace. */
@@ -56,9 +56,6 @@ export interface InitOptions {
 }
 
 const KODEL_DIR = ".kodel";
-const IGNORED = ["/.kodel/runs", "/.kodel/worktrees"];
-/** What the hook writes into the project; it is personal, like the run history. */
-const HOOK_IGNORED = [SESSIONS_INDEX, HOOK_LOG].map((file) => `/${file.replaceAll("\\", "/")}`);
 
 function configText(tasks: boolean): string {
   return [
@@ -131,35 +128,11 @@ async function setUpConfig(ctx: Context, tasks: boolean) {
   }
 }
 
-async function ignoreLines(ctx: Context, lines: string[]) {
-  const isGit = await stat(join(ctx.root, ".git")).then(
-    () => true,
-    () => false,
-  );
-  if (!isGit) {
-    ctx.changes.push({
-      path: ".gitignore",
-      status: "skipped",
-      note: `${lines.join(" and ")} are not ignored: this is not the top of a git repository`,
-    });
-    return;
-  }
-  await editFile(ctx, ".gitignore", (previous) => {
-    const have = new Set((previous ?? "").split(/\r?\n/).map((line) => line.trim()));
-    const missing = lines.filter((line) => !have.has(line) && !have.has(line.slice(1)));
-    if (missing.length === 0) return { text: previous ?? "" };
-    const base = previous === undefined || previous === "" ? "" : `${previous.trimEnd()}\n\n`;
-    return {
-      text: `${base}# Kodel: run history, the worktrees of the runs, and what the hooks write.\n${missing.join("\n")}\n`,
-    };
-  });
-}
-
 async function chooseHooks(opts: InitOptions, io: InitIO, canAsk: boolean): Promise<boolean> {
   if (opts.hooks !== undefined) return opts.hooks;
   if (!canAsk) return true;
   return io.confirm(
-    "Register the Kodel hooks? They are what lets Kodel see your agent sessions (personal, not committed).",
+    "Register the Kodel hooks? They are what lets Kodel see your agent sessions.",
     true,
   );
 }
@@ -206,10 +179,6 @@ export async function runInit(opts: InitOptions, io: InitIO): Promise<Change[]> 
   const ctx: Context = { root: opts.root, dryRun: opts.dryRun, force: opts.force, changes: [] };
 
   await setUpConfig(ctx, tasks);
-  await ignoreLines(ctx, [
-    ...IGNORED,
-    ...(hooks ? [...HOOK_IGNORED, ...agents.map((agent) => `/${hookFile(agent.id)}`)] : []),
-  ]);
 
   for (const agent of agents) {
     await agent.connect(ctx, server);

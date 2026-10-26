@@ -50,11 +50,6 @@ function addHooks(
   }
 }
 
-/** The files each agent's hooks go in, for the gitignore and the report. */
-export function hookFile(agent: HookAgent): string {
-  return HOOK_FILES[agent];
-}
-
 /** Register `events` with `agent`; the command is the server command with `hook <agent>` in place of `mcp`. */
 export async function registerHooks(
   ctx: Context,
