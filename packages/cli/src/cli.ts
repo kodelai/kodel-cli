@@ -303,6 +303,8 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         storeRoot: resolved.dataDir,
         agentDecisions: settings.agentDecisions,
         build: BUILD,
+        // This process serves the agent: it copies the agent's log into the runs while they go.
+        agentLogTimer: true,
         // The same tie the tools were built for; without one the host asks the config itself.
         ...(runLink === undefined ? {} : { runTaskLink: runLink }),
       });

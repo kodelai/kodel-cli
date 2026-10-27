@@ -5,6 +5,7 @@
  * Not published.
  */
 export * from "./agent-history-contract";
+export * from "./claude-log-builder";
 export * from "./dsl";
 export * from "./fake-agent-history";
 export * from "./history-fixtures";

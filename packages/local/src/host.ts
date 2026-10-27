@@ -63,6 +63,8 @@ import {
   summarizeRun,
   validateReport,
 } from "@kodel-ai/pipeline-core";
+import { type AgentLogRun, AgentLogWriter } from "./agent-log";
+import type { AgentLogTickers } from "./agent-log-ticker";
 import { type CommandOptions, type CommandResult, runCommand } from "./command";
 import { loadConfig, type WorktreeConfig } from "./config";
 import {
@@ -174,6 +176,16 @@ export interface HostOptions {
   build?: BuildInfo;
   /** The environment the session id is read from; this process's by default (tests replace it). */
   environment?: NodeJS.ProcessEnv;
+  /**
+   * What copies the agent's log into the runs. One per process: the hosts of a process share it, so that a run
+   * opened through two of them is copied by one. A host makes its own when not given one.
+   */
+  agentLog?: AgentLogWriter;
+  /**
+   * The timers that copy the agent's log while runs go: present only in the process that serves the MCP tools, so
+   * that a command a person runs (`status`, `report`, `wait`, `gate`) never starts one.
+   */
+  agentLogTickers?: AgentLogTickers;
 }
 
 /**
@@ -329,6 +341,7 @@ export class LocalHost {
   readonly integrity: IntegrityStore;
   readonly ownerId: string;
   readonly isOwnerAlive: (owner: string) => boolean;
+  readonly agentLog: AgentLogWriter;
 
   constructor(
     readonly spec: PipelineSpec,
@@ -337,6 +350,15 @@ export class LocalHost {
     this.rules = options.rules ?? [];
     const storeRoot = options.storeRoot ?? `${options.root}/.kodel`;
     this.store = new FileStore({ root: storeRoot, rules: this.rules });
+    this.agentLog =
+      options.agentLog ??
+      new AgentLogWriter({
+        store: this.store,
+        root: options.root,
+        rules: this.rules,
+        env: () => options.environment ?? process.env,
+        now: options.clock ?? Date.now,
+      });
     this.integrity =
       options.integrity ??
       new FileIntegrity(options.integrityDir ?? defaultIntegrityDir(), storeRoot);
@@ -1414,6 +1436,10 @@ export class LocalRun {
         await store.appendJournal(this.runId, decision.journal);
         const finished = ["completed", "failed", "canceled"].includes(decision.state.status);
         if (finished) {
+          this.host.options.agentLogTickers?.stop(this.runId);
+          this.host.agentLog.forget(this.runId);
+        }
+        if (finished) {
           const sealHash = await store.writeSeal(this.runId, clock());
           await integrity.set(`${this.runId}.seal`, sealHash);
         }
@@ -1886,6 +1912,8 @@ export class LocalRun {
   async nextStep(
     options: { atCompletion?: boolean; serve?: { caller?: Caller } } = {},
   ): Promise<NextStep> {
+    // Only a call of the agent through the MCP tools starts the copy of its log; looking at a run does not.
+    if (options.serve !== undefined) this.watchAgentLog();
     const tick = await this.tick();
     if (!tick.ok && tick.error.code === "STATE_MODIFIED_EXTERNALLY") throw tick.error;
     // Under the lock: a note being written after the end of the run (the patch, the task) rewrites the
@@ -2080,6 +2108,12 @@ export class LocalRun {
         noop: true,
       } satisfies Decision;
     }
+    this.watchAgentLog();
+    // The agent's log up to its last closed response, copied before the step is judged: once the last step is
+    // completed the run ends, and nothing is written to a run that has ended.
+    await this.host.agentLog
+      .capture(this.agentLogRun(), { why: "step", waitMs: 5_000, step: { node, attempt } })
+      .catch(() => undefined);
     const executor = await this.executorNow(caller);
     // HEAD of the run's own directory: the root may be somewhere else entirely.
     const head = await this.cwd()
@@ -2120,6 +2154,25 @@ export class LocalRun {
       await this.recordRefusal("complete_step", node, attempt, decision.error);
     }
     return decision;
+  }
+
+  /** Start the timer that copies the agent's log, if this process has timers and the run asked for one. */
+  watchAgentLog(): void {
+    void this.host.options.agentLogTickers?.ensure(this.agentLogRun());
+  }
+
+  /** This run as the copy of the agent's log sees it. */
+  agentLogRun(): AgentLogRun {
+    return {
+      runId: this.runId,
+      state: () => this.state(),
+      apply: (event) => this.apply(event),
+      workdir: async () => {
+        const where = await this.location().catch(() => undefined);
+        if (where === undefined) return undefined;
+        return this.inProject(where.path).catch(() => where.path);
+      },
+    };
   }
 
   /**

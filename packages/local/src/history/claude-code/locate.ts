@@ -8,7 +8,7 @@
 import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import type { LocateOptions, SessionRef } from "@kodel-ai/pipeline-core";
+import { type LocateOptions, type SessionRef, toTs } from "@kodel-ai/pipeline-core";
 import { SESSIONS_INDEX } from "../../hooks/session-registrar";
 import { streamJsonl } from "../jsonl";
 import { isFile, isInside, isKodelProject, projectWorkdirs, realOrSelf } from "../scope";
@@ -142,4 +142,50 @@ export async function locateClaudeSessions(
     refs.push(parent, ...(await subagentRefs(parent)));
   }
   return refs;
+}
+
+/**
+ * The log of a session whose id is known, without scanning the store: the folder of each directory given, then
+ * the folders under the first one (a session started in a subdirectory of the project, or in a worktree gone since).
+ * The id must be a safe one; the path is inside `store` by construction and is checked again by whoever opens it.
+ */
+export async function findSessionLog(
+  store: string,
+  dirs: readonly string[],
+  sessionId: string,
+): Promise<string | undefined> {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(sessionId)) return undefined;
+  for (const dir of dirs) {
+    const exact = join(store, projectFolderName(dir), `${sessionId}.jsonl`);
+    if (await isFile(exact)) return exact;
+  }
+  for (const dir of dirs) {
+    for (const folder of await foldersFor(store, dir)) {
+      const path = join(folder, `${sessionId}.jsonl`);
+      if (await isFile(path)) return path;
+    }
+  }
+  return undefined;
+}
+
+/** The logs of the subagents a session started, as files `agent-<id>.jsonl` next to it. */
+export async function subagentLogs(sessionLog: string, sessionId: string): Promise<string[]> {
+  const dir = join(dirname(sessionLog), sessionId, "subagents");
+  try {
+    return (await readdir(dir))
+      .filter((name) => name.startsWith("agent-") && name.endsWith(".jsonl"))
+      .sort()
+      .map((name) => join(dir, name));
+  } catch {
+    return [];
+  }
+}
+
+/** The time of the first entry of a log that has one, from its head. */
+export async function firstTimestamp(path: string): Promise<string | undefined> {
+  for await (const entry of streamJsonl(path, { maxBytes: HEADER_BYTES })) {
+    const stamp = toTs((entry as { timestamp?: unknown } | null)?.timestamp);
+    if (stamp !== undefined) return stamp;
+  }
+  return undefined;
 }

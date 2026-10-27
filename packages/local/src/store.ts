@@ -7,12 +7,15 @@
  *   journal.jsonl   append-only records, redacted on the way in
  *   snapshots.json  working-tree snapshots by key (for `diff` baselines)
  *   reports/        result reports, redacted
+ *   served/         what the agent was shown at each step
+ *   agent_log/      the agent's conversation log, as redacted normalized events (display data, outside the seal)
  *   lock            held while one process changes the run
+ *   agent_log.lock  held while one process copies the agent's log
  *
  * Redaction lives here, in the only code that writes the journal and the reports, so no caller can
  * forget it.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   link,
   lstat,
@@ -72,9 +75,21 @@ export interface StoreOptions {
   lockTimeoutMs?: number;
   /** A lock older than this is taken over even if its holder looks alive. */
   staleLockMs?: number;
+  /** The same for the lock on copying the agent's log, which is held longer than a change to the run. */
+  agentLogStaleMs?: number;
   /** Test hooks. */
   pid?: number;
   isAlive?: (pid: number) => boolean;
+  clock?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** How long a copy of the agent's log may hold its lock before another process takes it over. */
+export const AGENT_LOG_STALE_MS = 300_000;
+
+/** What the holder of a lock can ask: whether it is still the holder (the lock may have been taken over). */
+export interface HeldLock {
+  stillHeld(): Promise<boolean>;
 }
 
 /** A pipeline the agent proposed outside a run; kept until a person accepts it or drops it. */
@@ -90,6 +105,18 @@ export interface PipelineProposalRecord {
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** A session id as the name of a stored log: the guard of the executor record, and no name Windows takes for a device. */
+const SAFE_SESSION_FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const RESERVED_NAME = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i;
+
+/** How many bytes at the end of the stored stream are hashed to tell that it is still the one the journal vouches for. */
+export const AGENT_LOG_TAIL_BYTES = 64;
+
+export type AgentLogAppend =
+  | { ok: true; length: number; tail_hash: string }
+  /** The stored stream is shorter than the journal says, or its end is not the end the journal vouches for. */
+  | { ok: false };
 
 const processIsAlive = (pid: number): boolean => {
   try {
@@ -138,8 +165,11 @@ export class FileStore {
   private readonly rules: RedactRule[];
   private readonly lockTimeoutMs: number;
   private readonly staleLockMs: number;
+  private readonly agentLogStaleMs: number;
   private readonly pid: number;
   private readonly isAlive: (pid: number) => boolean;
+  private readonly clock: () => number;
+  private readonly wait: (ms: number) => Promise<void>;
   private writes = 0;
   private readonly held = new Map<string, Promise<unknown>>();
 
@@ -147,8 +177,11 @@ export class FileStore {
     this.rules = options.rules ?? [];
     this.lockTimeoutMs = options.lockTimeoutMs ?? 10_000;
     this.staleLockMs = options.staleLockMs ?? 60_000;
+    this.agentLogStaleMs = options.agentLogStaleMs ?? AGENT_LOG_STALE_MS;
     this.pid = options.pid ?? process.pid;
     this.isAlive = options.isAlive ?? processIsAlive;
+    this.clock = options.clock ?? Date.now;
+    this.wait = options.sleep ?? sleep;
   }
 
   runDir(runId: string): string {
@@ -781,8 +814,12 @@ export class FileStore {
    * claims to be from the future, or the file was never filled in (the holder died between creating
    * it and writing it, which shows as an old, empty file).
    */
-  private async lockAbandoned(lockPath: string, sameAs?: string): Promise<string | undefined> {
-    const now = Date.now();
+  private async lockAbandoned(
+    lockPath: string,
+    staleMs: number,
+    sameAs?: string,
+  ): Promise<string | undefined> {
+    const now = this.clock();
     let text: string;
     try {
       text = await readFile(lockPath, "utf8");
@@ -807,9 +844,7 @@ export class FileStore {
       return now - modified > UNFINISHED_LOCK_MS ? text : undefined;
     }
     const gone =
-      !this.isAlive(holder.pid) ||
-      now - holder.since > this.staleLockMs ||
-      holder.since > now + this.staleLockMs;
+      !this.isAlive(holder.pid) || now - holder.since > staleMs || holder.since > now + staleMs;
     return gone ? text : undefined;
   }
 
@@ -817,8 +852,8 @@ export class FileStore {
    * Remove an abandoned lock. Only one waiter at a time gets to do it (a second lock file guards the
    * removal), and it looks again once it is in, so a lock that someone took in the meantime stays.
    */
-  private async takeOverAbandoned(lockPath: string): Promise<boolean> {
-    const seen = await this.lockAbandoned(lockPath);
+  private async takeOverAbandoned(lockPath: string, staleMs: number): Promise<boolean> {
+    const seen = await this.lockAbandoned(lockPath, staleMs);
     if (seen === undefined) return false;
     const guardPath = `${lockPath}.takeover`;
     let guard: Awaited<ReturnType<typeof open>>;
@@ -828,16 +863,16 @@ export class FileStore {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const modified = await stat(guardPath).then(
         (s) => s.mtimeMs,
-        () => Date.now(),
+        () => this.clock(),
       );
-      if (Date.now() - modified > UNFINISHED_LOCK_MS) await rm(guardPath, { force: true });
+      if (this.clock() - modified > UNFINISHED_LOCK_MS) await rm(guardPath, { force: true });
       return false;
     }
     try {
       await guard.close();
       // Only the lock that was judged abandoned goes: if its holder let it go and someone took it
       // since, the text is different and it stays.
-      if ((await this.lockAbandoned(lockPath, seen)) === undefined) return false;
+      if ((await this.lockAbandoned(lockPath, staleMs, seen)) === undefined) return false;
       await rm(lockPath, { force: true });
       return true;
     } finally {
@@ -845,35 +880,171 @@ export class FileStore {
     }
   }
 
-  private async lockedRun<T>(name: string, lockPath: string, fn: () => Promise<T>): Promise<T> {
-    const deadline = Date.now() + this.lockTimeoutMs;
+  private async lockedRun<T>(
+    name: string,
+    lockPath: string,
+    fn: (lock: HeldLock) => Promise<T>,
+    params: { timeoutMs: number; staleMs: number } = {
+      timeoutMs: this.lockTimeoutMs,
+      staleMs: this.staleLockMs,
+    },
+  ): Promise<T> {
+    const deadline = this.clock() + params.timeoutMs;
     const token = randomUUID();
     await mkdir(dirname(lockPath), { recursive: true });
     for (;;) {
       try {
         const handle = await open(lockPath, "wx");
         try {
-          await handle.writeFile(JSON.stringify({ pid: this.pid, since: Date.now(), token }));
+          await handle.writeFile(JSON.stringify({ pid: this.pid, since: this.clock(), token }));
         } finally {
           await handle.close();
         }
         break;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        if (await this.takeOverAbandoned(lockPath)) continue;
-        if (Date.now() > deadline) {
+        if (await this.takeOverAbandoned(lockPath, params.staleMs)) continue;
+        if (this.clock() >= deadline) {
           throw new KodelError("STATE_LOCKED", `timed out waiting for the lock on ${name}`);
         }
-        await sleep(20);
+        await this.wait(20);
       }
     }
+    const stillHeld = async (): Promise<boolean> =>
+      (await this.readJson<{ token?: string }>(lockPath).catch(() => undefined))?.token === token;
     try {
-      return await fn();
+      return await fn({ stillHeld });
     } finally {
       // Not ours any more if someone took it over after it went stale; leave theirs alone.
-      const holder = await this.readJson<{ token?: string }>(lockPath).catch(() => undefined);
-      if (holder?.token === token) await rm(lockPath, { force: true });
+      if (await stillHeld()) await rm(lockPath, { force: true });
     }
+  }
+
+  // the agent's log
+
+  private agentLogFile(runId: string, session: string): string {
+    if (!SAFE_SESSION_FILE.test(session) || RESERVED_NAME.test(session) || /[. ]$/.test(session)) {
+      throw new KodelError(
+        "INVALID_ARGUMENTS",
+        `"${session}" is not a session id that can name a file`,
+      );
+    }
+    return join(this.runDir(runId), "agent_log", `${session}.jsonl`);
+  }
+
+  /**
+   * Hold the lock on copying a run's agent log: one process at a time, whatever it does with the run. A
+   * different lock from the one on the run, with its own wait and a longer time before it counts as
+   * abandoned; always taken before the run's, never after. Throws `STATE_LOCKED` when it cannot be had in `waitMs`.
+   * The holder asks `stillHeld()` before each write: a lock that went stale and was taken over is not its own.
+   */
+  async withAgentLogLock<T>(
+    runId: string,
+    waitMs: number,
+    fn: (lock: HeldLock) => Promise<T>,
+  ): Promise<T> {
+    return this.lockedRun(`${runId} agent log`, join(this.runDir(runId), "agent_log.lock"), fn, {
+      timeoutMs: waitMs,
+      staleMs: this.agentLogStaleMs,
+    });
+  }
+
+  /** The hash of the last bytes of the first `length` bytes of the file, or `undefined` if it is shorter. */
+  private async tailHash(path: string, length: number): Promise<string | undefined> {
+    if (length === 0) return sha256("");
+    let handle: Awaited<ReturnType<typeof open>>;
+    try {
+      handle = await open(path, "r");
+    } catch (error) {
+      if (isMissing(error)) return undefined;
+      throw error;
+    }
+    try {
+      if ((await handle.stat()).size < length) return undefined;
+      const size = Math.min(AGENT_LOG_TAIL_BYTES, length);
+      const buffer = Buffer.alloc(size);
+      await handle.read(buffer, 0, size, length - size);
+      return createHash("sha256").update(buffer).digest("hex");
+    } finally {
+      await handle.close();
+    }
+  }
+
+  /** The events as lines, each redacted whole with the project's rules: nothing reaches the file unredacted. */
+  agentLogLines(events: readonly unknown[]): string {
+    return events.map((event) => `${JSON.stringify(this.redact(event))}\n`).join("");
+  }
+
+  /**
+   * Append to the stored stream of a session. The stream is `expect.length` bytes long as far as the journal
+   * knows, ending in bytes that hash to `expect.tail_hash`: anything past that was never vouched for (a pass that
+   * died before it was journaled) and is cut off first. A stream that is shorter, or whose end is another, was
+   * changed since: it is not extended (a gap of zero bytes would be made up history) and `ok: false` says so.
+   * The new length and the hash of the new end are for the next journal record.
+   */
+  async appendAgentLog(
+    runId: string,
+    session: string,
+    expect: { length: number; tail_hash?: string },
+    text: string,
+  ): Promise<AgentLogAppend> {
+    const path = this.agentLogFile(runId, session);
+    if (expect.length > 0) {
+      const tail = await this.tailHash(path, expect.length);
+      if (tail === undefined || tail !== expect.tail_hash) return { ok: false };
+    }
+    await mkdir(dirname(path), { recursive: true });
+    const handle = await open(path, "a+");
+    try {
+      await handle.truncate(expect.length);
+      const bytes = Buffer.from(text, "utf8");
+      let written = 0;
+      while (written < bytes.length) {
+        const { bytesWritten } = await handle.write(
+          bytes,
+          written,
+          bytes.length - written,
+          expect.length + written,
+        );
+        written += bytesWritten;
+      }
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    const length = expect.length + Buffer.byteLength(text, "utf8");
+    return { ok: true, length, tail_hash: (await this.tailHash(path, length)) ?? sha256("") };
+  }
+
+  /** The stored stream of a session up to `length` bytes, which is as far as the journal vouches for it. */
+  async readAgentLog(runId: string, session: string, length: number): Promise<string | undefined> {
+    const path = this.agentLogFile(runId, session);
+    let handle: Awaited<ReturnType<typeof open>>;
+    try {
+      handle = await open(path, "r");
+    } catch (error) {
+      if (isMissing(error)) return undefined;
+      throw error;
+    }
+    try {
+      const size = Math.min(length, (await handle.stat()).size);
+      const buffer = Buffer.alloc(size);
+      await handle.read(buffer, 0, size, 0);
+      return buffer.toString("utf8");
+    } finally {
+      await handle.close();
+    }
+  }
+
+  /** The size of a stored stream on disk, or `undefined` when there is none. */
+  async agentLogSize(runId: string, session: string): Promise<number | undefined> {
+    return stat(this.agentLogFile(runId, session)).then(
+      (s) => s.size,
+      (error) => {
+        if (isMissing(error)) return undefined;
+        throw error;
+      },
+    );
   }
 }
 

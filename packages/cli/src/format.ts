@@ -118,6 +118,30 @@ export function formatProposal(
 }
 
 /** `45 s`, `2m 05s`, `1h 03m`: short enough for a table. */
+/**
+ * One line about the agent's log. The files are display data outside the seal: the line says `unverified`, and
+ * a failure is named by its reason, never as a file that was changed.
+ */
+export function agentLogLine(report: RunReport["agent_log"]): string {
+  if ("not_collected" in report) return `agent log: not_collected (${report.reason})`;
+  if (report.sessions === 0) {
+    return report.failed.length > 0
+      ? `agent log: not_collected (${report.failed.join(", ")})`
+      : "agent log: nothing copied yet";
+  }
+  const parts = [
+    `${report.sessions} session(s)`,
+    `${report.entries} entries`,
+    `${Math.ceil(report.bytes / 1024)} KB`,
+    `mode ${report.mode}`,
+    `copied ${report.passes.step} time(s) at the end of a step and ${report.passes.tick} on the timer`,
+  ];
+  if (report.cut > 0) parts.push(`${report.cut} event(s) left out for want of room`);
+  if (report.final_pass === false) parts.push("ended in the middle of a step");
+  if (report.failed.length > 0) parts.push(`not copied: ${report.failed.join(", ")}`);
+  return `agent log: ${parts.join(", ")} (unverified)`;
+}
+
 export function formatDuration(seconds: number): string {
   const whole = Math.round(seconds);
   if (whole < 60) return `${whole} s`;
@@ -260,6 +284,7 @@ export function formatReport(
     "served" in report.prompts
       ? `prompts: ${report.prompts.served} served`
       : "prompts: not_collected",
+    agentLogLine(report.agent_log),
   );
   const failures = report.nodes.flatMap((node) =>
     node.attempts
