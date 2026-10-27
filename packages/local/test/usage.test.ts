@@ -27,6 +27,7 @@ import {
   type LocalRun,
   UsageWriter,
 } from "../src";
+import { claudeCodeCollector } from "../src/history/claude-code/collector";
 
 const SESSION = "55555555-5555-4555-8555-555555555555";
 
@@ -1152,5 +1153,150 @@ describe("usage pass: edges of the log and of the run", () => {
     expect((await journalOf(r)).length).toBe(before);
     expect(tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage()))).toEqual(kept);
     expect((await stateOf(r)).usage?.attempts["a:1"]).toBeDefined();
+  });
+});
+
+// ── what the second review of the build asked for ───────────────────────────
+
+/** The lines of a log with no time on any entry (the first time found in a log is the one that dates it). */
+const withoutTimes = (text: string): string =>
+  text
+    .split("\n")
+    .map((line) => {
+      if (line.trim() === "") return line;
+      const entry = JSON.parse(line) as Record<string, unknown>;
+      delete entry["timestamp"];
+      return JSON.stringify(entry);
+    })
+    .join("\n");
+
+describe("usage pass: the second review", () => {
+  test("t9jrs_open_response_in_one_stream_whole_in_another_counted_once", async () => {
+    const r = await rig({ task: "open-and-whole" });
+    // main: msg_1 whole, msg_2 open at the end of the log; the subagent's file ends in msg_1, open there
+    const log = sessionLog(r.runId).say("msg_2", "step b", { input: 30, output: 3 });
+    const path = await install(log);
+    await subagentLog(path, "agent-dddd4444", (child) =>
+      child.say("msg_1", "step a", {
+        input: 200,
+        output: 20,
+        cacheRead: 1000,
+        cacheWrite: 300,
+        cacheWrite1h: 100,
+      }),
+    );
+    await r.run.completeStep("a", 1);
+    const total = tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage()));
+    expect(total.api_calls).toBe(3);
+    expect(total.input).toBe(100 + 200 + 30);
+  });
+
+  test("t9jrs_session_id_over_the_length_cap_is_not_looked_at_and_said", async () => {
+    const long = "a".repeat(129);
+    const r = await rig({ task: "long-session", session: long });
+    await install(sessionLog(r.runId, long));
+    await r.run.completeStep("a", 1);
+    const state = await stateOf(r);
+    // nothing is counted for it, and the pass did not end for no visible reason
+    expect(state.usage?.attempts["a:1"]).toBeUndefined();
+    const failed = (await journalOf(r)).filter((rec) => rec.event === "usage_failed");
+    expect(failed.map((rec) => rec["reason"])).toEqual(["session_unknown"]);
+  });
+
+  test("t9jrs_a_record_the_run_refuses_is_said_once_not_a_silent_end", async () => {
+    const r = await rig({ task: "refused-record" });
+    await install(sessionLog(r.runId));
+    const applied: string[] = [];
+    const run: AgentLogRun = {
+      ...runWith(r, () => r.store.readJournal(r.runId)),
+      apply: async (event) => {
+        applied.push(event.type);
+        // the machine refuses every usage record
+        if (event.type === "usage_recorded") return { ok: false };
+        return r.run.apply(event);
+      },
+    };
+    const done = await r.writer.capture(run, { node: "a", attempt: 1 }, held);
+    expect(done.recorded).toBe(0);
+    expect(done.failures).toEqual(["record_refused"]);
+    expect(applied).toContain("usage_failed");
+  });
+
+  test("t9jrs_subagent_log_without_any_time_is_said_not_skipped_silently", async () => {
+    const r = await rig({ task: "no-time" });
+    const path = await install(sessionLog(r.runId));
+    await subagentLog(path, "agent-eeee5555", (child) =>
+      child.say("sub_9", "looking", { input: 40, output: 4 }),
+    );
+    const file = join(dirname(path), SESSION, "subagents", "agent-eeee5555.jsonl");
+    await writeFile(file, withoutTimes(await readFile(file, "utf8")));
+    await r.run.completeStep("a", 1);
+    const failed = (await journalOf(r)).filter((rec) => rec.event === "usage_failed");
+    expect(failed.map((rec) => rec["reason"])).toEqual(["unreadable"]);
+    // the main log is still counted, and the subagent's use is not guessed at
+    const total = tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage()));
+    expect(total.input).toBe(100 + 200);
+  });
+
+  test("t9jrs_step_end_takes_the_pass_lock_once_for_both_passes", async () => {
+    const r = await rig({ task: "one-lock" });
+    await install(sessionLog(r.runId));
+    const original = r.store.withAgentLogLock.bind(r.store);
+    let taken = 0;
+    r.store.withAgentLogLock = ((...args: Parameters<typeof original>) => {
+      taken += 1;
+      return original(...args);
+    }) as typeof r.store.withAgentLogLock;
+    await r.run.completeStep("a", 1);
+    // both the copy and the usage pass ran...
+    const events = (await journalOf(r)).map((rec) => rec.event);
+    expect(events).toContain("agent_log_saved");
+    expect(events).toContain("usage_recorded");
+    // ...under one acquisition of the lock
+    expect(taken).toBe(1);
+  });
+
+  test("t9jrs_switch_off_does_not_even_build_a_collector_or_read", async () => {
+    let built = 0;
+    const env: NodeJS.ProcessEnv = { CLAUDE_CONFIG_DIR: claude, CLAUDE_CODE_SESSION_ID: SESSION };
+    const writerFor = () =>
+      new UsageWriter({
+        root: dir,
+        rules: [],
+        env: () => env,
+        collector: (configDir) => {
+          built += 1;
+          return claudeCodeCollector({ configDir });
+        },
+      });
+    const hostFor = (usage: UsageWriter, config: Partial<UsageConfig>) =>
+      new LocalPipelineHost({
+        root: dir,
+        heartbeatMs: 0,
+        environment: env,
+        history: historyOf({ usage: config }),
+        usage,
+      });
+    const off = (
+      await hostFor(writerFor(), { enabled: false }).start({
+        pipeline: "two",
+        task: "off",
+        restart: false,
+      })
+    ).run as LocalRun;
+    await install(sessionLog(off.runId));
+    await off.completeStep("a", 1);
+    expect(built).toBe(0);
+    // with it on, the same setup does read
+    const on = (
+      await hostFor(writerFor(), {}).start({
+        pipeline: "two",
+        task: "on",
+        restart: false,
+      })
+    ).run as LocalRun;
+    await install(sessionLog(on.runId));
+    await on.completeStep("a", 1);
+    expect(built).toBe(1);
   });
 });

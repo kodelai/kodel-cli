@@ -46,6 +46,7 @@ import {
   type UsageDelta,
   type UsageEvent,
   type UsageFailure,
+  usageDedupeKey,
 } from "@kodel-ai/pipeline-core";
 import type { AgentLogRun } from "./agent-log";
 import { SESSION_ENV } from "./executor";
@@ -292,7 +293,12 @@ export class UsageWriter {
           const born = await firstTimestamp(log);
           const from = memo.start?.ts;
           // A subagent that began before the run's first call belongs to what came before.
-          if (born === undefined || (from !== undefined && born < from)) continue;
+          if (born === undefined) {
+            // Without a time on its first entry it cannot be told from one that began before the run: not guessed.
+            await this.fail(run, result, "unreadable", id);
+            continue;
+          }
+          if (from !== undefined && born < from) continue;
           child.start = { offset: 0 };
         }
         if ((await this.credit(ctx, id, candidate.session, child)) === "abort") return result;
@@ -476,9 +482,11 @@ export class UsageWriter {
       ...(subagent ? { subagent: true } : {}),
     };
     let stepDelta: UsageDelta = buildDelta(toStep, ctx.context, options);
-    if (provisional !== undefined && !ctx.seen.has(responseKey(provisional))) {
+    // The set of repeats holds the key of every response already counted in this pass, from any stream: one that is
+    // open here and whole in another file (or already counted from this one) is not counted again.
+    if (provisional !== undefined && !ctx.seen.has(usageDedupeKey(provisional))) {
       const key = responseKey(provisional);
-      ctx.seen.add(key);
+      ctx.seen.add(usageDedupeKey(provisional));
       // The same response that was open at the last pass and still is: only what it added since is counted.
       const piece =
         stored?.flushed?.key === key
@@ -538,7 +546,11 @@ export class UsageWriter {
             delta: stepDelta,
             cursor,
           });
-          if (!decision.ok || decision.noop === true) return "abort";
+          if (!decision.ok || decision.noop === true) {
+            // Said once, not left as a pass that ends for no visible reason.
+            await this.fail(run, ctx.result, "record_refused", session);
+            return "abort";
+          }
           ctx.result.recorded += 1;
           if (!ctx.result.sessions.includes(session)) ctx.result.sessions.push(session);
         }
@@ -550,7 +562,11 @@ export class UsageWriter {
             delta: outsideDelta,
             cursor,
           });
-          if (!decision.ok || decision.noop === true) return "abort";
+          if (!decision.ok || decision.noop === true) {
+            // Said once, not left as a pass that ends for no visible reason.
+            await this.fail(run, ctx.result, "record_refused", session);
+            return "abort";
+          }
           ctx.result.recorded += 1;
           if (!ctx.result.sessions.includes(session)) ctx.result.sessions.push(session);
         }

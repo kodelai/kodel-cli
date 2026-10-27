@@ -467,9 +467,11 @@ export interface ReadOptions {
    */
   holdBack?: boolean;
   /**
-   * For a consumer that counts usage: `usage` events carry `cache_write_1h` when the log says it, and a read that was
-   * stopped (`shouldStop`) does not release the response it was in the middle of, so no response is counted with the
-   * usage of its first line. A read that reaches the end of the log still releases it.
+   * For a consumer that counts usage: `usage` events carry `cache_write_1h` when the log says it. Without `holdBack`, a
+   * read that was stopped (`shouldStop`) also does not release the response it was in the middle of, so no response is
+   * counted with the usage of its first line; a read that reaches the end of the log still releases it. The usage pass
+   * of the engine reads with `holdBack` (and flushes the open response itself, at the end of the log only), so it does
+   * not rely on the second part; it is a guard for a consumer that reads without `holdBack`.
    */
   usageDetail?: boolean;
   /** Start at this byte offset of the log with a fresh state (the start of a window). `seq` counts from there. */

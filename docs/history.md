@@ -42,7 +42,9 @@ The fields of each kind:
     already, never added to it.
   - `cache_write_1h?` is the part of `cache_write` written with the 1-hour lifetime (priced higher than the
     5-minute one). It is inside `cache_write`, never added to it, and only a read made for usage
-    (`ReadOptions.usageDetail`) carries it; the events other readers get have no such field.
+    (`ReadOptions.usageDetail`) carries it; the events other readers get have no such field. The same option makes
+    a stopped read without `holdBack` keep back the response it was in the middle of; the engine's own usage pass
+    reads with `holdBack` and does not need that, so it is a guard for other consumers.
   - `cost` is `{ amount?, basis }`; `basis` is `reported` (the agent wrote it), `reported_zero`, `computed` or
     `unknown`. Collectors do not compute a cost: a log that does not carry one gives `unknown`.
 - `tool_call`: `id`, `name`, `mcp_server?` (from `mcp__<server>__<tool>`), `input_preview?`, `started`.
@@ -341,7 +343,8 @@ dated entries with the prices of input, output, cache read, cache write and the 
 twice the input price), `effectiveFrom`, `sourceUrl`, `checkedAt`. The entry is chosen by the time of the usage event; a model
 that is not in the table (a Bedrock or Vertex id, an alias) has no price, and a total over it is `partial`, never `$0`. An entry in
 `history.usage.prices` replaces the shipped entry of that model whole, and the report says the cost was priced from the config.
-Long context (more than 200 000 prompt tokens in one request, priced higher by some models) is not modelled: such calls are
+Long context (more than 200 000 prompt tokens in one request, or the model's own `long_context_tokens` when the table gives one,
+priced higher by some models) is not modelled: such calls are
 counted in `long_context` and flagged, and the cost may be low. A cost is computed when the usage is read, stored in the delta
 with the table's `revision`, and never recomputed with a later table, so a run that crossed a table update lists both revisions.
 **Every cost is an estimate**, not a bill. Claude Code's own `cost-state` entry totals a whole session, is written once when it
@@ -353,12 +356,14 @@ calls and the estimated cost with the table revisions, and the flags `complete`,
 `long_context`, `incomplete`, `includes subagents`; or `not_collected` with a reason: `not_captured` (the run did not ask for it),
 `disabled`, `session_unknown`, `log_missing`, `refused`, `unreadable`, `busy` (the lock was taken by another pass; said once, and
 nothing is lost because the cursor did not move; also said when the pass could not run or lost the lock), `agent_unsupported` (the
-run's agent has no collector), and, next to a report that has numbers, `cap` (the run journaled as many records as it may). A record written in a
+run's agent has no collector), and, next to a report that has numbers, `cap` (the run journaled as many records as it may) and
+`record_refused` (the run's account refused a record, so the pass stopped; said once). A subagent log with no time on any entry cannot be
+told from one that began before the run: it is not guessed at and reads `unreadable`. A record written in a
 format this engine does not know reads `cannot read (format X)`, never "modified".
 
 **Limits.** At most 16 models per record and 64 per run (the rest are `other`), 1000 `usage_recorded` events and 2000 attempts per
 run (past 2000 attempts the rest is counted in the run's `unattributed`; past 1000 events nothing more is counted and the report
-says `cap`). A model id that does not look like an id is counted as `other`; a session id that does not is refused, so its use is
+says `cap`). A model id that does not look like an id is counted as `other`; a session id that does not (it is at most 128 characters, like the run's own ids) is not looked at, so its use is
 not counted: the state is not redacted and holds numbers and safe ids only. The set that tells a response read from two logs apart holds 200 000 keys; beyond it a repeat may be counted twice and the
 record says so. Journal times are those of the machine that serves the run and log times those of the agent: a run served on
 another machine than the agent's (a devcontainer) may be windowed wrongly.
@@ -366,5 +371,8 @@ another machine than the agent's (a devcontainer) may be windowed wrongly.
 **Format.** Additive, so no release waits for it: the optional `cache_write_1h` on the `usage` event (only a read made for usage
 carries it, so the events the other readers get and the golden fixtures are unchanged), the events `usage_recorded` and
 `usage_failed`, `state.usage` and `run_started.history.usage`. An engine without this change reads the journal and the state as
-plain JSON and ignores what it does not know. The table's prices were taken from the vendors' price pages and carry `checkedAt: null`
-where nobody has checked them since; `scripts/check-prices.mjs` is the check that does (it is the next step of TASK-9JRS).
+plain JSON and ignores what it does not know. The shipped prices carry `checkedAt: null`: the 4.5 rows come from the vendor's price
+page and the 5.x rows from the model table of the `claude-api` skill (cached 2026-10-06), not from the live page, and nobody has
+compared them since. `scripts/check-prices.mjs` is the check that does, and `skills/kodel-prices/` is how a maintainer runs it. A request
+over a model's own `long_context_tokens` (200 000 unless the table says otherwise, 100 000 for `claude-haiku-5-5`) is flagged, and
+the higher price of such requests is not modelled.

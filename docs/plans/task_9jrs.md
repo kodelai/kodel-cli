@@ -136,8 +136,12 @@ Written after the review of the build. What was done differently or not done, pl
   env-gated `tests/agents/claude-code-usage.test.ts`, which was not run. The golden run `fixtures/usage-run/` was made by the pass of
   this build over a hand-made log, outside `fixtures/formats/v1/` so that `hashes.json` is untouched; it moves under the frozen
   formats at the first release.
-- **The price table is unverified.** Every entry has `checkedAt: null`, and the 5.x rows are assumed to cost what the same class of
-  4.5 costs. There are no rows for `claude-opus-4-1`, `claude-opus-4`, `claude-sonnet-4`, `claude-3-7-sonnet` or `claude-3-5-*`, so a
+- **The price table is unverified against the live page.** Every entry has `checkedAt: null`. The 4.5 rows are from the vendor's
+  price page; the 5.x rows (Opus 5.5 $4/$20, Sonnet 5.5 $2/$10, Haiku 5.5 $0.10/$0.50, Fable 5.1 $10/$50) are from the model table
+  of the `claude-api` skill, cached 2026-10-06, after the second review found that the first version of them (assumed to be the 4.5
+  prices) was wrong. The cache read price of Haiku 5.5 is not published there and is assumed to be 10% of its input price. Haiku
+  5.5 prices a request over 100K prompt tokens higher, which is not modelled; its `long_context_tokens` is 100 000, so such calls are
+  flagged (the others: 200 000). There are no rows for `claude-opus-4-1`, `claude-opus-4`, `claude-sonnet-4`, `claude-3-7-sonnet` or `claude-3-5-*`, so a
   run on those models reads `partial` (the accepted behaviour for an unknown model, never `$0`). `scripts/check-prices.mjs` lists the
   unchecked entries; the saved price page it is tested on is also hand-made, so the repository does not show that the shipped
   `sourceUrl` parses. The `cost-state` parser is written without a sample of the format.
@@ -157,5 +161,26 @@ Written after the review of the build. What was done differently or not done, pl
 - **Past 1000 `usage_recorded` events** a run says `cap` (a failure reason) and the log is not read again; past 2000 attempts the
   rest is counted in `unattributed`.
 - **`t9jrs_` is still a provisional prefix** (decision 7); the PR checklist greps that none is left at merge.
-- **Correction deltas** zero `api_calls`: a model whose totals come only from corrections has no priced call and reads `usd: null`;
-  that cannot happen in a normal pass (the step's own response is always a call).
+- **Correction deltas** zero `api_calls` (the response was counted as a call when it was open). A model line made only of a
+  correction (the agent changed model between steps) used to read `usd: null` beside a total that had the dollars; `summarizeCost`
+  now counts a line as known when it has any cost, so the two agree (`t9jrs_model_line_made_of_a_correction_has_its_cost`).
+
+### After the second review
+
+- **Prices and thresholds fixed** (see the table note above); `long_context_tokens` is a field of a table entry
+  (`t9jrs_long_context_threshold_is_the_models_own`). Every test and fixture with a dollar figure was changed with it.
+- **Open response and a whole one in another stream.** The pass kept the set of repeats under one key and looked up the open
+  response under another, so the check never matched; both now use `usageDedupeKey`
+  (`t9jrs_open_response_in_one_stream_whole_in_another_counted_once`).
+- **A record the run refuses** (an id its account does not accept, the run gone) ends the pass and now says `record_refused` once,
+  and `SAFE_SESSION` has the 128-character cap of the run's own ids, so a longer session is not looked at and reads `session_unknown`
+  (`t9jrs_a_record_the_run_refuses_is_said_once_not_a_silent_end`, `t9jrs_session_id_over_the_length_cap_is_not_looked_at_and_said`).
+- **A subagent log with no time on any entry** is said (`unreadable`), not skipped without a word. A log whose first entry only lacks
+  a time is dated by the first entry that has one, as before.
+- **Tests named in the plan that were renamed or split, and what they do not show.** `t9jrs_open_response_flushed_only_at_eof_never_on_budget_stop`
+  is two tests: the collector-level `t9jrs_a_stopped_read_does_not_release_the_open_response_when_usage_detail_is_on` and the writer-level
+  `t9jrs_budget_stop_credits_only_what_was_read` (the writer's own rule is `!stoppedEarly` in `usage.ts`; the collector rule is a guard
+  for a consumer that reads without `holdBack`, which the usage pass does not). `t9jrs_step_end_runs_both_passes_under_one_lock_usage_after_agent_log_before_judging`
+  is `t9jrs_usage_pass_runs_after_agent_log_before_judging` (order in the journal) plus the new `t9jrs_step_end_takes_the_pass_lock_once_for_both_passes`
+  (counts the acquisitions). `t9jrs_switch_off_writes_nothing_and_does_not_read` now has a collector spy
+  (`t9jrs_switch_off_does_not_even_build_a_collector_or_read`).

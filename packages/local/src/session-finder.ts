@@ -21,7 +21,8 @@ import { SESSIONS_INDEX } from "./hooks/session-registrar";
 /** The newest sessions of the hook index that are looked at. */
 const INDEX_SESSIONS = 20;
 const INDEX_BYTES = 1024 * 1024;
-export const SAFE_SESSION = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+/** Same shape and length as the run's own id check (`SAFE_ID`): a session the run's account would refuse is refused here. */
+export const SAFE_SESSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 /** A line of the hook index as far as it is used here. */
 const INDEX_LINE = z.object({
   session_id: z.string().max(200),
