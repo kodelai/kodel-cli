@@ -1,0 +1,844 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import {
+  buildDelta,
+  defaultAgentLog,
+  defaultHistory,
+  defaultUsage,
+  type HistoryConfig,
+  type JournalRecord,
+  type RedactRule,
+  type RunState,
+  runTotals,
+  summarizeCost,
+  tokensOf,
+  type UsageConfig,
+} from "@kodel-ai/pipeline-core";
+import { ClaudeLogBuilder } from "../../testkit/src";
+import {
+  type AgentLogRun,
+  AgentLogWriter,
+  FileStore,
+  LocalPipelineHost,
+  type LocalRun,
+  UsageWriter,
+} from "../src";
+
+const SESSION = "55555555-5555-4555-8555-555555555555";
+
+const PIPELINE = [
+  "name: two",
+  "nodes:",
+  "  - slug: a",
+  "    kind: agent",
+  "    prompt: do a",
+  "  - slug: b",
+  "    kind: agent",
+  "    prompt: do b",
+  "edges:",
+  "  - { from: a, to: b }",
+  "",
+].join("\n");
+
+let dir: string;
+let claude: string;
+beforeEach(async () => {
+  dir = await realpath(await mkdtemp(join(tmpdir(), "kodel-usage-run-")));
+  claude = join(dir, "..", `claude-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+  git("init", "-q");
+  git("config", "user.email", "t@example.com");
+  git("config", "user.name", "T");
+  git("commit", "-q", "--allow-empty", "-m", "initial");
+  await mkdir(join(dir, ".kodel", "pipelines"), { recursive: true });
+  await writeFile(join(dir, ".kodel", "pipelines", "two.yaml"), PIPELINE);
+  await writeFile(join(dir, ".kodel", "config.yaml"), "worktree:\n  mode: off\n");
+});
+afterEach(async () => {
+  await rm(dir, { recursive: true, force: true });
+  await rm(claude, { recursive: true, force: true });
+});
+
+interface RigOptions {
+  /** A task of its own, so that a second run in one test is not the first one picked up again. */
+  task?: string;
+  rules?: RedactRule[];
+  toolLog?: boolean;
+  usage?: Partial<UsageConfig> | null;
+  agentLog?: boolean;
+  session?: string | null;
+  budgetMs?: number;
+  now?: () => number;
+}
+
+interface Rig {
+  host: LocalPipelineHost;
+  run: LocalRun;
+  runId: string;
+  writer: UsageWriter;
+  agentLog: AgentLogWriter;
+  store: FileStore;
+}
+
+const historyOf = (options: RigOptions): HistoryConfig => ({
+  ...defaultHistory(),
+  ...(options.toolLog === false ? { tool_log: { enabled: false } } : {}),
+  agent_log: { ...defaultAgentLog(), enabled: options.agentLog !== false, interval_s: 0 },
+  ...(options.usage === null ? {} : { usage: { ...defaultUsage(), ...options.usage } }),
+});
+
+async function rig(options: RigOptions = {}): Promise<Rig> {
+  const env: NodeJS.ProcessEnv = { CLAUDE_CONFIG_DIR: claude };
+  if (options.session !== null) env["CLAUDE_CODE_SESSION_ID"] = options.session ?? SESSION;
+  const writer = new UsageWriter({
+    root: dir,
+    rules: options.rules ?? [],
+    env: () => env,
+    ...(options.budgetMs === undefined ? {} : { budgetMs: options.budgetMs }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+  });
+  const store = new FileStore({ root: join(dir, ".kodel") });
+  const agentLog = new AgentLogWriter({
+    store,
+    root: dir,
+    rules: options.rules ?? [],
+    env: () => env,
+  });
+  const host = new LocalPipelineHost({
+    root: dir,
+    heartbeatMs: 0,
+    environment: env,
+    history: historyOf(options),
+    usage: writer,
+    agentLog,
+    ...(options.rules === undefined ? {} : { rules: options.rules }),
+  });
+  const started = await host.start({ pipeline: "two", task: options.task ?? "t", restart: false });
+  const run = started.run as LocalRun;
+  return { host, run, runId: run.runId, writer, agentLog, store };
+}
+
+/** The start of the run as the agent's log has it, with a known use per response. */
+function sessionLog(runId: string, session = SESSION): ClaudeLogBuilder {
+  const log = new ClaudeLogBuilder({ sessionId: session, cwd: dir });
+  log
+    .user("please run the pipeline")
+    .say("msg_0", "starting it")
+    .call(
+      "msg_0",
+      { id: "toolu_start", name: "mcp__kodel__pipeline_start", input: { task: "t" } },
+      { input: 100, output: 10 },
+    )
+    .result("toolu_start", [{ type: "text", text: JSON.stringify({ ok: true, run_id: runId }) }])
+    .say("msg_1", "step a", {
+      input: 200,
+      output: 20,
+      cacheRead: 1000,
+      cacheWrite: 300,
+      cacheWrite1h: 100,
+    });
+  return log;
+}
+
+const install = (log: ClaudeLogBuilder) => log.install(claude);
+const stateOf = (r: Rig): Promise<RunState> => r.run.state();
+const journalOf = (r: Rig): Promise<JournalRecord[]> => r.store.readJournal(r.runId);
+
+describe("usage pass", () => {
+  test("t9jrs_pass_counts_an_attempt_and_marks_the_open_response", async () => {
+    const r = await rig();
+    await install(sessionLog(r.runId));
+    await r.run.completeStep("a", 1);
+    const state = await stateOf(r);
+    const a = state.usage?.attempts["a:1"];
+    expect(a).toBeDefined();
+    if (a === undefined) return;
+    // msg_0 closed, msg_1 still open at the end of the log: counted as it stands and marked
+    expect(a.last_open).toBe(true);
+    const tokens = tokensOf(a);
+    expect(tokens.input).toBe(300);
+    expect(tokens.output).toBe(30);
+    expect(tokens.cache_read).toBe(1000);
+    expect(tokens.cache_write).toBe(300);
+    expect(tokens.cache_write_1h).toBe(100);
+    expect(tokens.api_calls).toBe(2);
+    expect(summarizeCost(a).usd).not.toBeNull();
+    expect((await journalOf(r)).filter((rec) => rec.event === "usage_recorded")).toHaveLength(1);
+  });
+
+  test("t9jrs_usage_pass_runs_after_agent_log_before_judging", async () => {
+    const r = await rig();
+    await install(sessionLog(r.runId));
+    await r.run.completeStep("a", 1);
+    const events = (await journalOf(r)).map((rec) => rec.event);
+    expect(events.indexOf("agent_log_saved")).toBeGreaterThan(-1);
+    expect(events.indexOf("usage_recorded")).toBeGreaterThan(events.indexOf("agent_log_saved"));
+    expect(events.indexOf("usage_recorded")).toBeLessThan(events.indexOf("agent_completed"));
+  });
+
+  test("t9jrs_flushed_open_response_corrected_on_next_pass", async () => {
+    const r = await rig();
+    const log = sessionLog(r.runId);
+    const path = await install(log);
+    await r.run.completeStep("a", 1);
+    // the response that was open is now whole, with its real output, and a new one is being written
+    log.say("msg_1", "step a, more", {
+      input: 200,
+      output: 70,
+      cacheRead: 1000,
+      cacheWrite: 300,
+      cacheWrite1h: 100,
+    });
+    log.say("msg_2", "step b", { input: 10, output: 5 });
+    await writeFile(path, log.text());
+    await r.run.completeStep("b", 1);
+    const state = await stateOf(r);
+    const total = tokensOf(
+      runTotals(state.usage ?? { attempts: {}, unattributed: { models: {}, passes: 0 } }),
+    );
+    // msg_1 counted once with its final output; the call count is not raised by the correction
+    expect(total.output).toBe(10 + 70 + 5);
+    expect(total.input).toBe(100 + 200 + 10);
+    expect(total.api_calls).toBe(3);
+    expect(state.usage?.attempts["b:1"]?.last_open).toBe(true);
+  });
+
+  test("t9jrs_pass_after_restart_skips_credited_and_catches_up", async () => {
+    const r = await rig();
+    const log = sessionLog(r.runId);
+    const path = await install(log);
+    await r.run.completeStep("a", 1);
+    const before = tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage()));
+    // a new process: nothing is kept in memory
+    log.say("msg_2", "step b", { input: 10, output: 5 });
+    await writeFile(path, log.text());
+    r.writer.forget(r.runId);
+    await r.run.completeStep("b", 1);
+    const after = tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage()));
+    expect(after.api_calls).toBe(before.api_calls + 1);
+    expect(after.input).toBe(before.input + 10);
+  });
+
+  test("t9jrs_switch_off_writes_nothing_and_does_not_read", async () => {
+    const r = await rig({ usage: { enabled: false } });
+    await install(sessionLog(r.runId));
+    await r.run.completeStep("a", 1);
+    const state = await stateOf(r);
+    expect(state.usage).toBeUndefined();
+    const events = (await journalOf(r)).map((rec) => rec.event);
+    expect(events).not.toContain("usage_recorded");
+    expect(events).not.toContain("usage_failed");
+  });
+
+  test("t9jrs_agent_log_off_usage_on_records_written", async () => {
+    const r = await rig({ agentLog: false });
+    await install(sessionLog(r.runId));
+    await r.run.completeStep("a", 1);
+    const events = (await journalOf(r)).map((rec) => rec.event);
+    expect(events).not.toContain("agent_log_saved");
+    expect(events).toContain("usage_recorded");
+  });
+
+  test("t9jrs_old_run_without_usage_section_is_not_captured", async () => {
+    const r = await rig({ usage: null });
+    await install(sessionLog(r.runId));
+    await r.run.completeStep("a", 1);
+    expect((await stateOf(r)).usage).toBeUndefined();
+    expect((await r.run.report()).usage).toEqual({ not_collected: true, reason: "not_captured" });
+  });
+
+  test("t9jrs_session_unknown_is_said_once", async () => {
+    const r = await rig({ session: null });
+    await r.run.completeStep("a", 1);
+    await r.run.completeStep("b", 1);
+    const failed = (await journalOf(r)).filter((rec) => rec.event === "usage_failed");
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({ reason: "session_unknown" });
+  });
+
+  test("t9jrs_log_missing_is_not_collected", async () => {
+    const r = await rig();
+    // the environment names a session, and no log of it exists
+    await r.run.completeStep("a", 1);
+    const state = await stateOf(r);
+    expect(state.usage?.failed).toContain("log_missing");
+    expect(state.status).toBe("running");
+  });
+
+  test("t9jrs_only_sessions_that_called_pipeline_tools_count", async () => {
+    const r = await rig();
+    // a log that only mentions the run id in what the person said
+    const log = new ClaudeLogBuilder({ sessionId: SESSION, cwd: dir });
+    log
+      .user(`what happened to ${r.runId}?`)
+      .say("msg_0", "I do not know", { input: 500, output: 50 });
+    await install(log);
+    await r.run.completeStep("a", 1);
+    const state = await stateOf(r);
+    expect(Object.keys(state.usage?.attempts ?? {})).toEqual([]);
+    expect(state.usage?.failed).toContain("session_unknown");
+  });
+
+  test("t9jrs_budget_stop_credits_only_what_was_read", async () => {
+    let clock = 0;
+    // every look at the clock is a second later: the budget is up after the first entries
+    const r = await rig({ budgetMs: 2_500, now: () => (clock += 1_000) });
+    await install(sessionLog(r.runId));
+    await r.run.completeStep("a", 1);
+    const state = await stateOf(r);
+    expect(state.usage?.sessions[SESSION]?.behind).toBe(true);
+    expect(state.usage?.attempts["a:1"]?.incomplete).toBe(true);
+    // what was read is credited and not read twice: a pass with time left catches up with the rest
+    const credited = tokensOf(runTotals(state.usage ?? emptyUsage())).api_calls;
+    expect(credited).toBeLessThan(2);
+  });
+
+  test("t9jrs_budget_stop_then_next_pass_catches_up_and_counts_each_once", async () => {
+    const clock = { now: 0, tick: 1_000 };
+    const r = await rig({ budgetMs: 2_500, now: () => (clock.now += clock.tick) });
+    const log = sessionLog(r.runId);
+    const path = await install(log);
+    await r.run.completeStep("a", 1);
+    expect((await stateOf(r)).usage?.sessions[SESSION]?.behind).toBe(true);
+    clock.tick = 0;
+    log.say("msg_2", "step b", { input: 10, output: 5 });
+    await writeFile(path, log.text());
+    await r.run.completeStep("b", 1);
+    const state = await stateOf(r);
+    expect(state.usage?.sessions[SESSION]?.behind).toBeUndefined();
+    const total = tokensOf(runTotals(state.usage ?? emptyUsage()));
+    expect(total.api_calls).toBe(3);
+    expect(total.input).toBe(100 + 200 + 10);
+    expect(total.output).toBe(10 + 20 + 5);
+    expect((await r.run.report()).usage).toMatchObject({ complete: true });
+  });
+
+  test("t9jrs_gate_wait_and_pause_spans_go_to_unattributed", async () => {
+    const r = await rig();
+    const log = sessionLog(r.runId);
+    // the person was waited for from 10:00:01.000 to 10:00:02.000: what is said then is outside every step
+    log.wait(1_000).say("msg_g", "chatting at the gate", { input: 7, output: 3 });
+    log.wait(2_000).say("msg_h", "back at work", { input: 11, output: 4 });
+    await install(log);
+    const at = Date.parse("2026-10-21T10:00:01.000Z");
+    const journal = async (): Promise<JournalRecord[]> => [
+      { v: 1, seq: 1, ts: at, event: "gate_waiting", node: "g", attempt: 1 },
+      { v: 1, seq: 2, ts: at + 1_000, event: "gate_decided", node: "g" },
+    ];
+    const done = await r.writer.capture(runWith(r, journal), { node: "a", attempt: 1 }, held);
+    expect(done.recorded).toBeGreaterThan(0);
+    const usage = (await stateOf(r)).usage;
+    expect(tokensOf(usage?.unattributed ?? emptyUsage().unattributed).input).toBe(7);
+    expect(tokensOf(usage?.attempts["a:1"] ?? emptyUsage().unattributed).input).toBe(
+      100 + 200 + 11,
+    );
+  });
+
+  test("t9jrs_node_sums_plus_unattributed_equal_run_total", async () => {
+    const r = await rig();
+    await install(sessionLog(r.runId));
+    await r.run.completeStep("a", 1);
+    const usage = (await stateOf(r)).usage;
+    if (usage === undefined) throw new Error("no usage");
+    const parts = [...Object.values(usage.attempts), usage.unattributed].map(
+      (totals) => tokensOf(totals).input,
+    );
+    expect(parts.reduce((a, b) => a + b, 0)).toBe(tokensOf(runTotals(usage)).input);
+  });
+
+  test("t9jrs_every_response_counted_once_however_the_passes_fall", async () => {
+    // a small seeded generator: the same splits every time, and many different ones over the rounds of the test
+    let seed = 20_261_027;
+    const random = (n: number) => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+      return (seed >> 8) % n;
+    };
+    for (let round = 0; round < 6; round += 1) {
+      const r = await rig({ task: `round ${round}` });
+      const log = sessionLog(r.runId);
+      const path = await install(log);
+      let input = 100 + 200;
+      let output = 10 + 20;
+      let calls = 2;
+      const run = runWith(r, () => r.store.readJournal(r.runId));
+      for (let i = 0; i < 8; i += 1) {
+        const added = random(3);
+        for (let k = 0; k < added; k += 1) {
+          const a = 1 + random(50);
+          const b = 1 + random(50);
+          log.say(`msg_r${round}_${i}_${k}`, "more", { input: a, output: b });
+          input += a;
+          output += b;
+          calls += 1;
+        }
+        await writeFile(path, log.text());
+        if (random(2) === 0) await r.writer.capture(run, { node: "a", attempt: 1 }, held);
+        if (random(4) === 0) r.writer.forget(r.runId);
+      }
+      await r.writer.capture(run, { node: "a", attempt: 1 }, held);
+      // a pass with nothing new changes nothing
+      const once = (await stateOf(r)).usage;
+      await r.writer.capture(run, { node: "a", attempt: 1 }, held);
+      const twice = (await stateOf(r)).usage;
+      expect(twice?.events).toBe(once?.events);
+      const total = tokensOf(runTotals(twice ?? emptyUsage()));
+      expect(total.input).toBe(input);
+      expect(total.output).toBe(output);
+      expect(total.api_calls).toBe(calls);
+    }
+  });
+
+  test("t9jrs_refused_hand_in_then_retry_adds_delta", async () => {
+    const r = await rig();
+    const log = sessionLog(r.runId);
+    const path = await install(log);
+    const refused = await r.run.completeStep("a", 1, undefined, "no_such_outcome");
+    expect(refused.ok).toBe(false);
+    log.say("msg_2", "second try", { input: 10, output: 5 });
+    await writeFile(path, log.text());
+    await r.run.completeStep("a", 1);
+    const a = (await stateOf(r)).usage?.attempts["a:1"];
+    expect(a).toBeDefined();
+    if (a === undefined) return;
+    // each response once, in the one attempt
+    expect(tokensOf(a).api_calls).toBe(3);
+    expect(tokensOf(a).input).toBe(100 + 200 + 10);
+  });
+
+  test("t9jrs_recorded_only_for_active_agent_visit", async () => {
+    const r = await rig();
+    const delta = buildDelta([], { table: { format: 1, revision: "2026-10-01", models: {} } });
+    const cursor = { last_seq: 3, last_key: "a".repeat(64) };
+    const event = (node: string, attempt: number) => ({
+      type: "usage_recorded" as const,
+      session: SESSION,
+      node,
+      attempt,
+      delta,
+      cursor,
+    });
+    // another node, a future attempt: nothing is closed that does not exist
+    const took = async (node: string, attempt: number) => {
+      const decision = await r.run.apply(event(node, attempt));
+      return decision.ok && decision.noop !== true;
+    };
+    expect(await took("b", 1)).toBe(false);
+    expect(await took("a", 2)).toBe(false);
+    expect(await took("a", 1)).toBe(true);
+  });
+
+  test("t9jrs_subagent_counts_under_parent_and_is_marked", async () => {
+    const r = await rig();
+    const log = sessionLog(r.runId);
+    const path = await install(log);
+    await subagentLog(path, "agent-aaaa1111", (child) =>
+      child.say("sub_1", "looking", { input: 40, output: 4, model: "claude-haiku-5-5" }),
+    );
+    await r.run.completeStep("a", 1);
+    const a = (await stateOf(r)).usage?.attempts["a:1"];
+    expect(a?.subagent).toBe(true);
+    expect(a?.models["claude-haiku-5-5"]?.input).toBe(40);
+    // under the parent's attempt, in the run's totals
+    expect(tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage())).input).toBe(
+      100 + 200 + 40,
+    );
+  });
+
+  test("t9jrs_subagents_counted_when_tool_log_false", async () => {
+    const r = await rig({ toolLog: false });
+    const path = await install(sessionLog(r.runId));
+    await subagentLog(path, "agent-bbbb2222", (child) =>
+      child.say("sub_2", "looking", { input: 40, output: 4 }),
+    );
+    await r.run.completeStep("a", 1);
+    expect((await stateOf(r)).usage?.attempts["a:1"]?.subagent).toBe(true);
+  });
+
+  test("t9jrs_dedupe_across_sidechain_and_subagent_files", async () => {
+    const r = await rig();
+    const path = await install(sessionLog(r.runId));
+    // the same response is in the subagent's file too
+    await subagentLog(path, "agent-cccc3333", (child) =>
+      child.say("msg_1", "step a", {
+        input: 200,
+        output: 20,
+        cacheRead: 1000,
+        cacheWrite: 300,
+        cacheWrite1h: 100,
+      }),
+    );
+    await r.run.completeStep("a", 1);
+    expect(tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage())).api_calls).toBe(2);
+  });
+
+  test("t9jrs_state_holds_only_numbers_and_safe_ids", async () => {
+    const r = await rig();
+    const hostile = "sk-ant-0123456789abcdef0123456789abcdef weird model";
+    const log = sessionLog(r.runId);
+    log.say("msg_x", "odd", { input: 5, output: 1, model: hostile });
+    log.say("msg_y", "odd too", { input: 5, output: 1 });
+    await install(log);
+    await r.run.completeStep("a", 1);
+    const text = await readFile(join(r.store.runDir(r.runId), "state.json"), "utf8");
+    expect(text).not.toContain("sk-ant");
+    expect(text).not.toContain("weird");
+    expect((await stateOf(r)).usage?.attempts["a:1"]?.models["other"]).toBeDefined();
+  });
+
+  test("t9jrs_state_and_journal_agree_under_project_redaction_rule", async () => {
+    const rules: RedactRule[] = [{ name: "model", pattern: /sonnet/g }];
+    const r = await rig({ rules });
+    await install(sessionLog(r.runId));
+    await r.run.completeStep("a", 1);
+    const state = await stateOf(r);
+    const recorded = (await journalOf(r)).find((rec) => rec.event === "usage_recorded");
+    const stateModels = Object.keys(state.usage?.attempts["a:1"]?.models ?? {});
+    const journalModels = Object.keys(
+      (recorded?.["delta"] as { models?: Record<string, unknown> } | undefined)?.models ?? {},
+    );
+    expect(stateModels).toEqual(journalModels);
+    expect(stateModels.join()).not.toContain("sonnet");
+    const text = await readFile(join(r.store.runDir(r.runId), "state.json"), "utf8");
+    expect(text).not.toContain("sonnet");
+  });
+
+  test("t9jrs_agent_unsupported_reason", async () => {
+    const r = await rig();
+    // a client that is not Claude Code made the calls of this run
+    const caller = { name: "some-other-agent", version: "1" };
+    await r.run.nextStep({ serve: { caller } });
+    await r.run.completeStep("a", 1, undefined, undefined, caller);
+    expect((await stateOf(r)).usage?.failed).toContain("agent_unsupported");
+  });
+
+  test("t9jrs_nothing_written_to_a_finished_run", async () => {
+    const r = await rig();
+    const log = sessionLog(r.runId);
+    const path = await install(log);
+    await r.run.completeStep("a", 1);
+    await r.run.completeStep("b", 1);
+    expect((await stateOf(r)).status).toBe("completed");
+    const before = (await journalOf(r)).length;
+    log.say("msg_9", "after the end", { input: 999, output: 99 });
+    await writeFile(path, log.text());
+    const done = await r.writer.capture(
+      {
+        runId: r.runId,
+        state: () => r.run.state(),
+        apply: (event) => r.run.apply(event),
+        workdir: async () => undefined,
+        journal: () => r.store.readJournal(r.runId),
+      },
+      { node: "b", attempt: 1 },
+      { stillHeld: async () => true },
+    );
+    expect(done.skipped).toBe("not_running");
+    expect((await journalOf(r)).length).toBe(before);
+  });
+});
+
+describe("usage pass around the step end", () => {
+  test("t9jrs_lock_busy_journals_usage_failed_once_and_loses_nothing", async () => {
+    const r = await rig();
+    const log = sessionLog(r.runId);
+    const path = await install(log);
+    // somebody else holds the lock on copying for the whole of the step end
+    let release: () => void = () => undefined;
+    const gone = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const holding = r.store.withAgentLogLock(r.runId, 0, () => gone);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await r.run.completeStep("a", 1);
+    release();
+    await holding;
+    let events = (await journalOf(r)).filter((rec) => rec.event.startsWith("usage_"));
+    expect(events.map((rec) => rec["reason"])).toEqual(["busy"]);
+    // nothing moved: the next step end reads all of it
+    log.say("msg_2", "step b", { input: 10, output: 5 });
+    await writeFile(path, log.text());
+    await r.run.completeStep("b", 1);
+    events = (await journalOf(r)).filter((rec) => rec.event === "usage_failed");
+    expect(events).toHaveLength(1);
+    const total = tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage()));
+    expect(total.input).toBe(100 + 200 + 10);
+    expect(total.api_calls).toBe(3);
+  }, 20_000);
+
+  test("t9jrs_collector_throw_or_timeout_never_fails_step_and_routing_unchanged", async () => {
+    const boom = {
+      agent: "claude-code",
+      profiles: [],
+      locate: async () => [],
+      read: (): AsyncIterable<never> => ({
+        [Symbol.asyncIterator]: () => ({
+          next: async () => {
+            throw new Error("boom");
+          },
+        }),
+      }),
+    };
+    const env: NodeJS.ProcessEnv = { CLAUDE_CONFIG_DIR: claude, CLAUDE_CODE_SESSION_ID: SESSION };
+    const writer = new UsageWriter({ root: dir, rules: [], env: () => env, collector: () => boom });
+    const host = new LocalPipelineHost({
+      root: dir,
+      heartbeatMs: 0,
+      environment: env,
+      history: historyOf({}),
+      usage: writer,
+    });
+    const run = (await host.start({ pipeline: "two", task: "t", restart: false })).run as LocalRun;
+    await install(sessionLog(run.runId));
+    const first = await run.completeStep("a", 1);
+    expect(first.ok).toBe(true);
+    const second = await run.completeStep("b", 1);
+    expect(second.ok).toBe(true);
+    const state = await run.state();
+    expect(state.status).toBe("completed");
+    expect(state.usage?.failed).toContain("unreadable");
+  });
+
+  test("t9jrs_ticker_and_step_pass_interleaved", async () => {
+    const r = await rig();
+    await install(sessionLog(r.runId));
+    const ticks = Array.from({ length: 4 }, () =>
+      r.agentLog.capture(r.run.agentLogRun(), { why: "tick", waitMs: 0 }),
+    );
+    await Promise.all([...ticks, r.run.completeStep("a", 1)]);
+    const total = tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage()));
+    expect(total.api_calls).toBe(2);
+    expect(total.input).toBe(100 + 200);
+  });
+
+  test("t9jrs_attempt_credit_with_prompts_off_and_over_served_cap", async () => {
+    const env: NodeJS.ProcessEnv = { CLAUDE_CONFIG_DIR: claude, CLAUDE_CODE_SESSION_ID: SESSION };
+    const host = new LocalPipelineHost({
+      root: dir,
+      heartbeatMs: 0,
+      environment: env,
+      history: { ...historyOf({}), prompts: { enabled: false } },
+    });
+    const run = (await host.start({ pipeline: "two", task: "t", restart: false })).run as LocalRun;
+    await install(sessionLog(run.runId));
+    await run.completeStep("a", 1);
+    const state = await run.state();
+    // no step was ever served and the use is in its attempt all the same
+    expect(
+      (await new FileStore({ root: join(dir, ".kodel") }).readJournal(run.runId)).some(
+        (rec) => rec.event === "step_served",
+      ),
+    ).toBe(false);
+    expect(tokensOf(state.usage?.attempts["a:1"] ?? emptyUsage().unattributed).input).toBe(300);
+  });
+
+  test("t9jrs_one_session_over_two_runs", async () => {
+    const r = await rig({ task: "first" });
+    const log = sessionLog(r.runId);
+    const path = await install(log);
+    await r.run.completeStep("a", 1);
+    await r.run.completeStep("b", 1);
+    const first = tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage()));
+    // the same session goes on with another run
+    const second = (await r.host.start({ pipeline: "two", task: "second", restart: false }))
+      .run as LocalRun;
+    log
+      .wait(1_000)
+      .call(
+        "msg_s0",
+        { id: "toolu_start2", name: "mcp__kodel__pipeline_start", input: { task: "second" } },
+        { input: 1_000, output: 100 },
+      )
+      .result("toolu_start2", [
+        { type: "text", text: JSON.stringify({ ok: true, run_id: second.runId }) },
+      ])
+      .say("msg_s1", "second run, step a", { input: 2_000, output: 200 });
+    await writeFile(path, log.text());
+    await second.completeStep("a", 1);
+    const mine = tokensOf(runTotals((await second.state()).usage ?? emptyUsage()));
+    // each run got its own slice: the second does not hold the first's use, nor the first the second's
+    expect(mine.input).toBe(1_000 + 2_000);
+    expect(tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage())).input).toBe(first.input);
+  });
+
+  test("t9jrs_two_sessions_in_one_run_and_session_from_hook_index", async () => {
+    const r = await rig();
+    await install(sessionLog(r.runId));
+    // after a /clear the run goes on in a session the environment does not name
+    const OTHER = "77777777-7777-4777-8777-777777777777";
+    const second = new ClaudeLogBuilder({
+      sessionId: OTHER,
+      cwd: dir,
+      start: "2026-10-21T10:01:00.000Z",
+    });
+    second
+      .user("continue the run")
+      .call(
+        "msg_o0",
+        { id: "toolu_next", name: "mcp__kodel__pipeline_next_step", input: { run_id: r.runId } },
+        { input: 30, output: 3 },
+      )
+      .result("toolu_next", [{ type: "text", text: JSON.stringify({ ok: true, run_id: r.runId }) }])
+      .say("msg_o1", "after the clear", { input: 4, output: 1 });
+    const otherPath = await second.install(claude);
+    await writeFile(
+      join(dir, ".kodel", "sessions.jsonl"),
+      `${JSON.stringify({ session_id: OTHER, agent: "claude-code", transcript_path: otherPath, cwd: dir, ts: "2026-10-21T10:00:00.000Z" })}\n`,
+    );
+    await r.run.completeStep("a", 1);
+    const usage = (await stateOf(r)).usage;
+    expect(Object.keys(usage?.sessions ?? {}).sort()).toEqual([OTHER, SESSION].sort());
+  });
+
+  test("t9jrs_truncated_or_rotated_log", async () => {
+    const r = await rig();
+    const log = sessionLog(r.runId);
+    const path = await install(log);
+    await r.run.completeStep("a", 1);
+    const before = tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage()));
+    // the log is replaced by a shorter one: it is not the log we left
+    const short = new ClaudeLogBuilder({ sessionId: SESSION, cwd: dir });
+    short
+      .user("hello")
+      .call(
+        "msg_0",
+        { id: "toolu_start", name: "mcp__kodel__pipeline_start", input: { task: "t" } },
+        { input: 1, output: 1 },
+      )
+      .result("toolu_start", [
+        { type: "text", text: JSON.stringify({ ok: true, run_id: r.runId }) },
+      ]);
+    await writeFile(path, short.text());
+    r.writer.forget(r.runId);
+    await r.run.completeStep("b", 1);
+    const state = await stateOf(r);
+    expect(state.usage?.failed).toContain("unreadable");
+    expect(tokensOf(runTotals(state.usage ?? emptyUsage())).input).toBe(before.input);
+  });
+
+  test("t9jrs_changed_usage_shape_is_unreadable_not_zero", async () => {
+    // a new Claude Code that calls the usage of a response something else: no usage at all
+    const r = await rig({ task: "renamed" });
+    const log = sessionLog(r.runId);
+    log.lines.forEach((line, i) => {
+      log.lines[i] = line.replace('"usage":', '"token_usage":');
+    });
+    await install(log);
+    await r.run.completeStep("a", 1);
+    const state = await stateOf(r);
+    expect(state.usage?.failed).toContain("unreadable");
+    expect(Object.keys(state.usage?.attempts ?? {})).toEqual([]);
+    expect((await r.run.report()).usage).toEqual({ not_collected: true, reason: "unreadable" });
+  });
+
+  test("t9jrs_usage_with_every_count_renamed_is_unreadable_not_zero", async () => {
+    const r = await rig({ task: "zeros" });
+    const log = sessionLog(r.runId);
+    log.lines.forEach((line, i) => {
+      log.lines[i] = line
+        .replaceAll("input_tokens", "tokens_in")
+        .replaceAll("output_tokens", "tokens_out");
+    });
+    await install(log);
+    await r.run.completeStep("a", 1);
+    expect((await stateOf(r)).usage?.failed).toContain("unreadable");
+  });
+
+  test("t9jrs_streamed_lines_fold_to_the_agents_own_figure", async () => {
+    // a response is written as one line per content block, the usage growing: the agent's figure is the last one
+    const r = await rig({ task: "streamed" });
+    const log = new ClaudeLogBuilder({ sessionId: SESSION, cwd: dir });
+    log
+      .user("go")
+      .call(
+        "msg_0",
+        { id: "toolu_start", name: "mcp__kodel__pipeline_start", input: { task: "streamed" } },
+        { input: 100, output: 2 },
+      )
+      .result("toolu_start", [
+        { type: "text", text: JSON.stringify({ ok: true, run_id: r.runId }) },
+      ]);
+    let agents = 0;
+    for (let n = 1; n <= 4; n += 1) {
+      const id = `msg_s${n}`;
+      for (let line = 1; line <= 5; line += 1) {
+        log.say(id, `part ${line}`, { input: 50, output: line * 20, cacheRead: 400 });
+      }
+      agents += 100;
+    }
+    log.say("msg_end", "done", { input: 1, output: 1 });
+    await install(log);
+    await r.run.completeStep("a", 1);
+    const ours = tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage()));
+    // the sum of the last lines of each response, and not of all the lines (which is three times as much)
+    expect(ours.output).toBe(2 + agents + 1);
+    expect(ours.input).toBe(100 + 4 * 50 + 1);
+    expect(ours.cache_read).toBe(4 * 400);
+    expect(ours.api_calls).toBe(6);
+  });
+
+  test("t9jrs_worktree_removed_before_collection", async () => {
+    const r = await rig();
+    const gone = join(dir, "..", `gone-worktree-${Date.now()}`);
+    const log = new ClaudeLogBuilder({ sessionId: SESSION, cwd: gone });
+    log
+      .user("run it")
+      .call(
+        "msg_0",
+        { id: "toolu_start", name: "mcp__kodel__pipeline_start", input: { task: "t" } },
+        { input: 100, output: 10 },
+      )
+      .result("toolu_start", [
+        { type: "text", text: JSON.stringify({ ok: true, run_id: r.runId }) },
+      ])
+      .say("msg_1", "working", { input: 5, output: 1 });
+    const where = await log.install(claude, "-worktree-folder");
+    await writeFile(
+      join(dir, ".kodel", "sessions.jsonl"),
+      `${JSON.stringify({ session_id: SESSION, agent: "claude-code", transcript_path: where, cwd: gone, ts: "2026-10-21T10:00:00.000Z" })}\n`,
+    );
+    const withIt = await r.writer.capture(
+      { ...runWith(r, () => r.store.readJournal(r.runId)), workdir: async () => gone },
+      { node: "a", attempt: 1 },
+      held,
+    );
+    expect(withIt.sessions).toEqual([SESSION]);
+    expect(tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage())).input).toBe(105);
+  });
+});
+
+/** The run as the pass sees it, with a journal of our own: the times a person was waited for are told, not waited. */
+function runWith(r: Rig, journal: () => Promise<JournalRecord[]>): AgentLogRun {
+  return {
+    runId: r.runId,
+    state: () => r.run.state(),
+    apply: (event) => r.run.apply(event),
+    workdir: async () => undefined,
+    journal,
+  };
+}
+const held = { stillHeld: async () => true };
+
+/** A subagent of the session whose log is at `sessionPath`, begun after the run's first call. */
+async function subagentLog(
+  sessionPath: string,
+  id: string,
+  fill: (log: ClaudeLogBuilder) => void,
+): Promise<void> {
+  const child = new ClaudeLogBuilder({
+    sessionId: id,
+    cwd: dir,
+    start: "2026-10-21T10:00:30.000Z",
+  });
+  child.user("look into it");
+  fill(child);
+  const path = join(dirname(sessionPath), SESSION, "subagents", `${id}.jsonl`);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, child.text());
+}
+
+function emptyUsage() {
+  return { attempts: {}, unattributed: { models: {}, passes: 0 } };
+}

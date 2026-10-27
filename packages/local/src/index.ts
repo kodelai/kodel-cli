@@ -9,6 +9,8 @@ export * from "./host";
 export * from "./integrity";
 export * from "./pipeline-host";
 export * from "./project-root";
+export * from "./session-finder";
 export * from "./store";
 export * from "./tasks";
+export * from "./usage";
 export * from "./worktree";

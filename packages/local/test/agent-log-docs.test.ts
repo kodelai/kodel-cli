@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { AGENT_LOG_FAILURES, DEFAULT_AGENT_LOG, HISTORY_CATEGORIES } from "@kodel-ai/pipeline-core";
+import {
+  AGENT_LOG_FAILURES,
+  DEFAULT_AGENT_LOG,
+  DEFAULT_USAGE,
+  HISTORY_CATEGORIES,
+  USAGE_FAILURES,
+} from "@kodel-ai/pipeline-core";
 import { parse } from "yaml";
 import { HISTORY_SECTION_KEYS } from "../src";
 
@@ -86,5 +92,40 @@ describe("t3bk2 the page about the agent log", () => {
       "The agent's conversation log (`agent_log`) is the most sensitive one",
     );
     expect(CONFIG_SOURCE).toContain("config.ts");
+  });
+});
+
+/** The part of the page about usage and cost, up to the next section. */
+async function usageSection(): Promise<string> {
+  const text = await read();
+  const start = text.indexOf("## Usage and cost (`usage_recorded`)");
+  expect(start).toBeGreaterThan(-1);
+  const end = text.indexOf("\n## ", start + 10);
+  return text.slice(start, end === -1 ? undefined : end);
+}
+
+describe("t9jrs the page about usage and cost", () => {
+  test("t9jrs_docs_history_updated", async () => {
+    const text = (await read()).replace(/\s+/g, " ");
+    // what was planned is built: the page no longer says it is not, nor that a release waits for it
+    expect(text).not.toContain("Prices (planned)");
+    expect(text).not.toContain("not yet built");
+    expect(text).not.toContain("so the release waits for it");
+    const usage = (await usageSection()).replace(/\s+/g, " ");
+    expect(usage).toContain("`agent_log: false` does not stop the transcript being read");
+    expect(usage).toContain("only `usage: false` does");
+    expect(usage).toContain("Every cost is an estimate");
+    expect(usage).toContain(
+      "is not an event, is never in a run and is never shown as a run's cost",
+    );
+    expect(usage).toContain("a total over it is `partial`, never `$0`");
+    expect(usage).toContain("not a bill");
+    for (const reason of USAGE_FAILURES) expect(usage).toContain(`\`${reason}\``);
+  });
+
+  test("t9jrs_docs_usage_defaults_match", async () => {
+    const block = /```yaml\n([\s\S]*?)```/.exec(await usageSection())?.[1] ?? "";
+    const documented = parse(block) as { history: { usage: Record<string, unknown> } };
+    expect(documented.history.usage["enabled"]).toBe(DEFAULT_USAGE.enabled);
   });
 });
