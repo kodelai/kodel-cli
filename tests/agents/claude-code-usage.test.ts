@@ -1,8 +1,8 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { runTotals, tokensOf } from "../../packages/pipeline-core/src";
 import { claudeConfigDir, projectFolderName } from "../../packages/local/src/history";
+import { runTotals, tokensOf } from "../../packages/pipeline-core/src";
 import {
   type AgentTurn,
   describeCalls,
