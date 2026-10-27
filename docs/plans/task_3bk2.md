@@ -309,3 +309,22 @@ Round 4 (the ticker round), not taken:
 - Step 0 evidence: all seven running `kodel mcp` processes have `CLAUDE_CODE_SESSION_ID` in their environment; `docs/history.md:155` says
   it is exact "since the agent starts a server per session", which is wrong for `/clear`.
 - No `export` command in `packages/cli/src`; `tool_log` has no consumer yet.
+
+## Implementation notes (where the build differs from the plan)
+
+Written at the end of the build, so that a reader of the plan finds what changed.
+
+- **Three commits** as planned: A (collector options, whole responses, resumable reads, `findRunStart`), B (config, events, store, lock,
+  writer, report, docs, the sample run), C (the timer). B alone is the 52A8 behaviour; C is the timer you asked for.
+- **Resumable reading** keeps the collector's *live state* and the offset after the last whole line (`ReadOptions.resume`,
+  `checkpoint`, `shouldStop`), as the revised plan says; nothing is cloned.
+- **The real-agent test** (`tests/agents/claude-code-agent-log.test.ts`) is written and skipped without `KODEL_AGENT_TESTS=1`. It was
+  **not run** in this pipeline (a person runs those tests; they cost money). `/clear` was not tried either. Both are for the gate.
+- **Refused logs** are not stopped for good (`refused` is said once and tried again), because whether a log is the project's depends on
+  directories that come and go; `time_bound` is no longer a failure reason (a slow read stores what it has).
+- **`stopped` reasons** kept for good for a session: `log_changed`, `stored_copy_changed`.
+- **Tests named in the plan and not written as such:** `t3bk2_lock_order` (covered by `t3bk2_run_lock_not_held_at_apply`, which sees both
+  locks at the moment of the journal write), `t3bk2_hardening_reread_bound` (replaced by `t3bk2_resume_reads_only_new_lines`),
+  `t3bk2_subagent_nested` (only the direct subagents of a session are followed; nested ones are not), `t3bk2_hardening_stream_bound`
+  bounds what is *stored* from a 10 MB log, not the memory of the process (a heap assertion is flaky in CI).
+- **`kodel export`** does not exist; the follow-up task is not created (Decision 1 (a)).

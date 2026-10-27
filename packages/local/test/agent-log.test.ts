@@ -360,6 +360,37 @@ describe("t3bk2 which sessions belong to the run", () => {
     });
   });
 
+  test("t3bk2_proof_later_session_keeps_first_file", async () => {
+    // the environment names another session at a later step (the server was started again): the first file stays
+    const r = await rig({ session: SESSION });
+    const first = sessionLog(r.runId);
+    await installed(first);
+    expect((await capture(r, "step")).streams).toEqual([SESSION]);
+    const keptLength = (await stateOf(r)).agentLog?.sessions[SESSION]?.length ?? 0;
+    expect(keptLength).toBeGreaterThan(0);
+    r.env["CLAUDE_CODE_SESSION_ID"] = OLD;
+    const second = new ClaudeLogBuilder({
+      sessionId: OLD,
+      cwd: dir,
+      start: "2026-10-21T14:00:00.000Z",
+    });
+    second
+      .call("msg_o1", {
+        id: "toolu_o1",
+        name: "mcp__kodel__pipeline_next_step",
+        input: { run_id: r.runId },
+      })
+      .result("toolu_o1", "ok")
+      .say("msg_o2", "continuing")
+      .say("msg_o3", "still");
+    await installed(second);
+    const result = await capture(r, "step");
+    expect(result.streams).toContain(OLD);
+    const after = (await stateOf(r)).agentLog?.sessions;
+    expect(after?.[SESSION]?.length).toBe(keptLength);
+    expect(after?.[OLD]?.length).toBeGreaterThan(0);
+  });
+
   test("t3bk2_proof_index_session_without_run_id_refused", async () => {
     const r = await rig({ session: OLD });
     await installed(sessionLog(r.runId, OLD));

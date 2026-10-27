@@ -15,7 +15,7 @@
  */
 import { createHash } from "node:crypto";
 import { open, readFile, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
   type AgentHistoryCollector,
   type AgentLogConfig,
@@ -27,6 +27,7 @@ import {
   historyEventSchema,
   ID_FIELDS,
   KodelError,
+  MAX_AGENT_LOG_TICKS,
   type ReadCheckpoint,
   type RedactRule,
   type RunEvent,
@@ -94,8 +95,10 @@ export interface CaptureInput {
 }
 
 export interface CaptureResult {
-  /** The pass did not run, and why. */
-  skipped?: "disabled" | "not_running" | "no_step" | "in_flight" | "busy";
+  /** The pass did not run, and why. `tick_cap`: the timer has used the copies it may journal. */
+  skipped?: "disabled" | "not_running" | "no_step" | "in_flight" | "busy" | "tick_cap";
+  /** Something unexpected went wrong (the state could not be read, say): the timer gives up after a few in a row. */
+  errored?: true;
   /** Events journaled as saved, and the streams that got some. */
   saved: number;
   streams: string[];
@@ -165,7 +168,7 @@ export class AgentLogWriter {
   private readonly now: () => number;
   private readonly budgetMs: number;
   private readonly memos = new Map<string, StreamMemo>();
-  private readonly inFlight = new Set<string>();
+  private readonly inFlight = new Map<string, Promise<unknown>>();
   private readonly collectors = new Map<string, AgentHistoryCollector>();
 
   constructor(private readonly options: AgentLogWriterOptions) {
@@ -182,6 +185,24 @@ export class AgentLogWriter {
   /** Whether a pass of this run is going on in this process. */
   busy(runId: string): boolean {
     return this.inFlight.has(runId);
+  }
+
+  /** Whether the environment or the hook index names a session at all: with none, there is nothing to copy. */
+  async hasCandidates(): Promise<boolean> {
+    const own = cleanExecutorText(this.options.env()[SESSION_ENV]);
+    if (own !== undefined && SAFE_SESSION.test(own)) return true;
+    return (await this.indexSessions()).size > 0;
+  }
+
+  /** Waits until no pass of this run is going on in this process. */
+  async idle(runId: string): Promise<void> {
+    for (
+      let running = this.inFlight.get(runId);
+      running !== undefined;
+      running = this.inFlight.get(runId)
+    ) {
+      await running.catch(() => undefined);
+    }
   }
 
   private collector(configDir: string): AgentHistoryCollector {
@@ -215,8 +236,25 @@ export class AgentLogWriter {
    */
   async capture(run: AgentLogRun, input: CaptureInput): Promise<CaptureResult> {
     const result: CaptureResult = { saved: 0, streams: [], failures: [] };
-    if (this.inFlight.has(run.runId)) return { ...result, skipped: "in_flight" };
-    this.inFlight.add(run.runId);
+    // The timer gives way to a pass that is going on; the end of a step waits for it, since that copy must be made.
+    if (this.inFlight.has(run.runId)) {
+      if (input.why === "tick") return { ...result, skipped: "in_flight" };
+      await this.idle(run.runId);
+    }
+    const work = this.run(run, input, result);
+    this.inFlight.set(run.runId, work);
+    try {
+      return await work;
+    } finally {
+      if (this.inFlight.get(run.runId) === work) this.inFlight.delete(run.runId);
+    }
+  }
+
+  private async run(
+    run: AgentLogRun,
+    input: CaptureInput,
+    result: CaptureResult,
+  ): Promise<CaptureResult> {
     try {
       const state = await run.state();
       const skipped = this.shouldSkip(state, input);
@@ -229,12 +267,10 @@ export class AgentLogWriter {
         if (error instanceof KodelError && error.code === "STATE_LOCKED") {
           return { ...result, skipped: "busy" };
         }
-        return result;
+        return { ...result, errored: true };
       }
     } catch {
-      return result;
-    } finally {
-      this.inFlight.delete(run.runId);
+      return { ...result, errored: true };
     }
   }
 
@@ -242,6 +278,7 @@ export class AgentLogWriter {
     if (state.status !== "running") return "not_running";
     const config = state.history?.agent_log;
     if (state.agentLog === undefined || config?.enabled !== true) return "disabled";
+    if (input.why === "tick" && state.agentLog.ticks >= MAX_AGENT_LOG_TICKS) return "tick_cap";
     if (input.why === "step") {
       const visit = state.active.find(
         (v) => v.node === input.step?.node && v.attempt === input.step.attempt,
@@ -304,7 +341,7 @@ export class AgentLogWriter {
       if (main === "abort") return result;
       if (!ctx.toolLog) continue;
       for (const log of await subagentLogs(candidate.path, candidate.session)) {
-        const id = log.slice(log.lastIndexOf("/") + 1).replace(/\.jsonl$/, "");
+        const id = basename(log, ".jsonl");
         if (!SAFE_SESSION.test(id)) continue;
         const childMemo = this.memo(run.runId, id, log);
         if (childMemo.stopped !== undefined) continue;
@@ -455,6 +492,8 @@ export class AgentLogWriter {
         (await sourceTailHash(memo.path, resume.offset)) === memo.sourceTail;
       if (!same) resume = undefined;
     }
+    // Starting again from the beginning also forgets what the collector remembered about where the project is.
+    if (resume === undefined && journaled > 0) this.collectors.clear();
     const start = memo.start;
     if (resume === undefined && (start === undefined || start === null)) return "done";
 

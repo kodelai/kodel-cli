@@ -6,6 +6,7 @@ import {
   type CaptureOptions,
   type HistoryEvent,
   historyEventSchema,
+  newReadStats,
   type ReadCheckpoint,
   type ReadOptions,
   redactText,
@@ -541,6 +542,27 @@ describe("t3bk2 collector options: resuming a read", () => {
     expect(state.claude.seen.size).toBeLessThanOrEqual(1_000_000);
   });
 
+  test("t3bk2_resume_reads_only_new_lines", async () => {
+    // the bound of a long session: each pass reads the bytes that came since the last, not the log again
+    const { log, ref, path, collector } = await built((l) => {
+      l.user("start");
+      for (let i = 0; i < 30; i++) l.say(`msg_${i}`, `sentence ${i}`);
+    });
+    const firstStats = newReadStats();
+    const first = await checkpointOf(collector, ref, { stats: firstStats });
+    expect(firstStats.lines).toBe(log.lines.length);
+    const more = new ClaudeLogBuilder({
+      sessionId: SESSION,
+      cwd: base,
+      start: "2026-10-21T12:00:00.000Z",
+    });
+    more.say("msg_new1", "a").say("msg_new2", "b").say("msg_new3", "c");
+    await appendFile(path, more.text());
+    const secondStats = newReadStats();
+    await checkpointOf(collector, ref, { stats: secondStats, resume: first.checkpoint });
+    expect(secondStats.lines).toBe(3);
+  });
+
   test("t3bk2_should_stop_ends_the_read_between_entries", async () => {
     const { collector, ref } = await built(conversation);
     let asked = 0;
@@ -693,5 +715,35 @@ describe("t3bk2 collector options: where a run begins in a log", () => {
     const texts = events.flatMap((e) => (e.kind === "message" ? [e.text_preview] : []));
     expect(texts).toEqual(["AFTER the call"]);
     expect(events[0]?.seq).toBe(1);
+  });
+});
+
+describe("t3bk2 the canary of the log format", () => {
+  test("t3bk2_canary_names_missing_profile", async () => {
+    // a version no profile lists is still read, and the collector says so by the version, never silently: this is
+    // what the real-agent canary fails on, naming what to add
+    const root = await project();
+    const log = new ClaudeLogBuilder({ sessionId: SESSION, cwd: root, version: "9.9.9" });
+    log.user("hello").say("msg_1", "hi").say("msg_2", "again");
+    await log.install(configDir);
+    const collector = claudeCodeCollector({ configDir });
+    const ref = (await collector.locate(root))[0] as SessionRef;
+    const stats = (await import("@kodel-ai/pipeline-core")).newReadStats();
+    const events = await read(collector, ref, { stats });
+    expect(stats.drift).toEqual([
+      { agent_version: "9.9.9", profile: "cc-2", match: "above_known" },
+    ]);
+    const marker = events.find((e) => e.kind === "system" && e.subtype === "format_drift");
+    expect(marker).toMatchObject({
+      detail: "read with profile cc-2 (above_known)",
+      agent_version: "9.9.9",
+    });
+    // and a log of a known version has none
+    const known = await project("known");
+    await new ClaudeLogBuilder({ sessionId: SESSION, cwd: known }).user("x").install(configDir);
+    const [knownRef] = await collector.locate(known);
+    const quiet = (await import("@kodel-ai/pipeline-core")).newReadStats();
+    await read(collector, knownRef as SessionRef, { stats: quiet });
+    expect(quiet.drift).toEqual([]);
   });
 });

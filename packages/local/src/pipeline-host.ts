@@ -36,6 +36,7 @@ import {
   type StartOutcome,
 } from "@kodel-ai/pipeline-core";
 import { AgentLogWriter } from "./agent-log";
+import { AgentLogTickers, type Timers } from "./agent-log-ticker";
 import { loadConfig, type ProjectConfig, type WorktreeConfig } from "./config";
 import { GitSnapshotter, git } from "./git";
 import {
@@ -56,6 +57,11 @@ export interface LocalPipelineHostOptions extends HostOptions {
   worktree?: WorktreeConfig;
   /** Instead of the `history` section of the project config; mostly for tests. */
   history?: HistoryConfig;
+  /**
+   * Copy the agent's log of the runs on a timer (the interval each run started with), in this process. Only the
+   * process that serves the MCP tools asks for it. Timers can be given, for tests; the system's by default.
+   */
+  agentLogTimer?: boolean | Timers;
 }
 
 interface Loaded {
@@ -114,6 +120,8 @@ export class LocalPipelineHost implements PipelineHost {
   private readonly hosts = new Map<string, LocalHost>();
   /** What copies the agent's log into the runs: one for the process, since a run can live in more than one host. */
   private readonly agentLog: AgentLogWriter;
+  /** The timers that copy it while runs go; none unless this process serves the tools. */
+  private readonly agentLogTickers: AgentLogTickers | undefined;
   /** One handle per run, so that work running in this process is shared by every call. */
   private readonly runs = new Map<string, LocalRun>();
 
@@ -133,6 +141,12 @@ export class LocalPipelineHost implements PipelineHost {
         env: () => options.environment ?? process.env,
         now: options.clock ?? Date.now,
       });
+    this.agentLogTickers = options.agentLogTimer
+      ? new AgentLogTickers(
+          this.agentLog,
+          typeof options.agentLogTimer === "object" ? options.agentLogTimer : undefined,
+        )
+      : undefined;
   }
 
   private linkPromise: Promise<RunTaskLink | undefined> | undefined;
@@ -436,6 +450,7 @@ export class LocalPipelineHost implements PipelineHost {
       host = new LocalHost(spec, {
         ...this.options,
         agentLog: this.agentLog,
+        ...(this.agentLogTickers === undefined ? {} : { agentLogTickers: this.agentLogTickers }),
         runTaskLink: () => this.taskLink(),
         ...(source === undefined ? {} : { source }),
         ...(pipelineFile === undefined ? {} : { pipelineFile }),
@@ -567,6 +582,7 @@ export class LocalPipelineHost implements PipelineHost {
     const known = reused || terminal ? await this.open(run.runId) : run;
     if (!known) throw new KodelError("UNKNOWN_RUN", `there is no run "${run.runId}"`);
     this.runs.set(run.runId, known);
+    known.watchAgentLog();
     // Where the run works is what its record says, also for a run picked up again.
     const located = await known.location();
     const where = located && { ...located, path: await known.inProject(located.path) };
@@ -631,6 +647,7 @@ export class LocalPipelineHost implements PipelineHost {
   stop(): number {
     let stopped = 0;
     for (const run of this.runs.values()) stopped += run.stop();
+    this.agentLogTickers?.stopAll();
     return stopped;
   }
 
