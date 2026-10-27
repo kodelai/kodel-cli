@@ -204,11 +204,11 @@ describe("t3bk2 the line about the agent's log", () => {
       "agent log: 2 session(s), 1234 entries, 56 KB, mode full, copied 12 time(s) at the end of a step and 80 on the timer (unverified)",
     );
     expect(agentLogLine({ ...copied, cut: 3, final_pass: false, failed: ["tick_cap"] })).toBe(
-      "agent log: 2 session(s), 1234 entries, 56 KB, mode full, copied 12 time(s) at the end of a step and 80 on the timer, 3 event(s) left out for want of room, ended without a final copy, not copied: tick_cap (unverified)",
+      "agent log: 2 session(s), 1234 entries, 56 KB, mode full, copied 12 time(s) at the end of a step and 80 on the timer, 3 event(s) left out for want of room, ended in the middle of a step, not copied: tick_cap (unverified)",
     );
     // a run that is going has no word on its end yet
     const { final_pass: _gone, ...going } = copied;
-    expect(agentLogLine(going)).not.toContain("final copy");
+    expect(agentLogLine(going)).not.toContain("middle of a step");
   });
 
   test("t3bk2_report_reasons_exact", () => {

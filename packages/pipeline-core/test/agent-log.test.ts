@@ -5,6 +5,7 @@ import {
   defaultHistory,
   MAX_AGENT_LOG_STEPS,
   MAX_AGENT_LOG_TICKS,
+  MAX_AGENT_LOG_VISITS,
   parsePipeline,
   type RunEvent,
   type RunState,
@@ -264,22 +265,18 @@ describe("t3bk2 the report of the agent's log", () => {
 
   test("t3bk2_report_final_pass", () => {
     const base = started();
-    const copied = apply(base, saved({ why: "step", node: "write", attempt: 1 }));
-    const done = apply(copied.state, { type: "agent_completed", node: "write", attempt: 1 });
+    // a run that ends after a step of the agent, whether or not the copy at its end found anything new
+    const done = apply(base, { type: "agent_completed", node: "write", attempt: 1 });
     const finished = apply(done.state, { type: "cancel" });
-    const journal = [...copied.journal, ...done.journal, ...finished.journal];
-    expect(summarizeRun(finished.state, journal).agent_log).toMatchObject({ final_pass: true });
-    // the same run, ended some other way: the last step of the agent was not copied at its end
-    const missed = apply(base, { type: "agent_completed", node: "write", attempt: 1 });
-    const ended = apply(missed.state, { type: "cancel" });
     expect(
-      summarizeRun(ended.state, [...missed.journal, ...ended.journal]).agent_log,
-    ).toMatchObject({
-      final_pass: false,
-    });
-    // a run that ended before any agent step has nothing to be missing
+      summarizeRun(finished.state, [...done.journal, ...finished.journal]).agent_log,
+    ).toMatchObject({ final_pass: true });
+    // a run that ends in the middle of a step: cancelled while the agent was at work
     const early = apply(base, { type: "cancel" });
+    expect(early.state.agentLog?.endedInStep).toEqual(["write:1"]);
     expect(summarizeRun(early.state, early.journal).agent_log).toMatchObject({ final_pass: false });
+    // and one that is going has no word on it
+    expect("final_pass" in summarizeRun(base, []).agent_log).toBe(false);
   });
 
   test("t3bk2_report_reasons_are_listed", () => {
@@ -424,5 +421,48 @@ describe("t3bk2 the nodes of the share are those the run started with", () => {
     expect(Object.keys(accepted.state.nodes)).toContain("inserted");
     // what a step may use is still cut from the nodes the run began with: the new node is not among them
     expect(accepted.state.agentLog?.nodes).toEqual(["write", "approve"]);
+  });
+});
+
+describe("t3bk2 the account of bytes per visit", () => {
+  test("t3bk2_saved_event_counts_bytes_per_visit", () => {
+    const first = apply(started(), saved({ stream_to: 500 }));
+    const second = apply(
+      first.state,
+      saved({
+        why: "step",
+        attempt: 1,
+        first_seq: 11,
+        last_seq: 12,
+        stream_from: 500,
+        stream_to: 800,
+      }),
+    );
+    const again = apply(
+      second.state,
+      saved({
+        attempt: 2,
+        first_seq: 13,
+        last_seq: 14,
+        stream_from: 800,
+        stream_to: 900,
+      }),
+    );
+    // the same visit adds up, another attempt of the step is a visit of its own, and the total is the sum
+    expect(again.state.agentLog?.visits).toEqual({ "write:1": 800, "write:2": 100 });
+    expect(again.state.agentLog?.bytes).toBe(900);
+  });
+
+  test("t3bk2_visits_are_bounded", () => {
+    const state = started();
+    const log = state.agentLog;
+    if (log === undefined) throw new Error("no agent log state");
+    log.visits = Object.fromEntries(
+      Array.from({ length: MAX_AGENT_LOG_VISITS }, (_, i) => [`n${i}:1`, 1]),
+    );
+    const result = apply(state, saved({ node: "write" }));
+    // a visit beyond the bound counts in the total and not in the account of visits
+    expect(Object.keys(result.state.agentLog?.visits ?? {})).toHaveLength(MAX_AGENT_LOG_VISITS);
+    expect(result.state.agentLog?.bytes).toBe(500);
   });
 });

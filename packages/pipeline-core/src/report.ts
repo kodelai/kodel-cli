@@ -80,9 +80,10 @@ export type PromptsReport = { served: number } | { not_collected: true };
  * The agent's conversation log of the run (`agent_log/`). `not_collected`: the run did not ask for it (it was started
  * before it existed, `not_captured`) or had it switched off (`disabled`). Otherwise the counts come from the journal,
  * never from the files, which are display data outside the seal (`unverified` says so). `failed` are the reasons a
- * copy was not made; with no `sessions` that is the whole story. `final_pass` is for a run that has ended: whether the
- * last step of the agent was copied at its end (`false`: the run ended some other way, and the copy ends at the last
- * copy made while the run went); it is absent while the run goes.
+ * copy was not made; with no `sessions` that is the whole story. `final_pass` is for a run that has ended: `true` when
+ * it ended after a step of the agent (the copy of that step's end was asked for before the run ended), `false` when it
+ * ended in the middle of one (cancelled, a check failed) and the copy ends at the last copy made while the run went;
+ * it is absent while the run goes.
  */
 export type AgentLogReport =
   | { not_collected: true; reason: "not_captured" | "disabled" }
@@ -194,7 +195,6 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
   const refusals: RunReport["refusals"] = [];
   let served = 0;
   let lastAgentStep: string | undefined;
-  const copiedAtStepEnd = new Set<string>();
   const pipelineChanges: PipelineChangeReport[] = [];
   const agentDecisions: AgentDecisionReport[] = [];
   const attemptOf = (name: string, attempt: number) =>
@@ -276,11 +276,6 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
               };
             }
           }
-        }
-        break;
-      case "agent_log_saved":
-        if (record.why === "step" && name !== undefined && attempt !== undefined) {
-          copiedAtStepEnd.add(`${name}:${attempt}`);
         }
         break;
       case "agent_completed": {
@@ -422,15 +417,11 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
     checks: [...checks.values()],
     // The state key is there from the start of a run that keeps prompts, so a run of zero serves says so.
     prompts: state.served === undefined ? { not_collected: true } : { served },
-    agent_log: agentLogReport(state, lastAgentStep, copiedAtStepEnd),
+    agent_log: agentLogReport(state, lastAgentStep),
   };
 }
 
-function agentLogReport(
-  state: RunState,
-  lastAgentStep: string | undefined,
-  copiedAtStepEnd: ReadonlySet<string>,
-): AgentLogReport {
+function agentLogReport(state: RunState, lastAgentStep: string | undefined): AgentLogReport {
   const log = state.agentLog;
   if (log === undefined) {
     return {
@@ -447,14 +438,11 @@ function agentLogReport(
     mode: state.history?.agent_log?.mode ?? "unknown",
     passes: { tick: log.ticks, step: log.steps },
     cut: log.cut,
-    // The run ended in the middle of a step of the agent, or the last step it completed was not copied at its end.
+    // Whether the run ended in the middle of a step of the agent (cancelled, a check failed...) and not after one:
+    // in the middle, the copy ends at the last copy made while the run went, at most one interval and the response
+    // that was open behind what the agent had written.
     ...(ended
-      ? {
-          final_pass:
-            (log.endedInStep ?? []).length === 0 &&
-            lastAgentStep !== undefined &&
-            copiedAtStepEnd.has(lastAgentStep),
-        }
+      ? { final_pass: (log.endedInStep ?? []).length === 0 && lastAgentStep !== undefined }
       : {}),
     failed: [...log.failed],
     unverified: true,

@@ -214,7 +214,15 @@ export interface AgentLogState {
   failed: string[];
   /** Set when the run ends: the steps of the agent (`node:attempt`) that were still going. */
   endedInStep?: string[];
+  /**
+   * Bytes stored per visit of a step (`node:attempt`), so that a step that goes on over many copies is held to
+   * its share and a step that comes again is told from it. Runs from before this have none. Bounded.
+   */
+  visits?: Record<string, number>;
 }
+
+/** How many visits are told apart in the account of the bytes; beyond it a visit counts only in the total. */
+export const MAX_AGENT_LOG_VISITS = 2_000;
 
 /** How many refused calls a run journals: enough to see what was tried, too few to be a way to fill the disk. */
 export const MAX_LOGGED_REFUSALS = 100;
@@ -1200,6 +1208,12 @@ class Machine {
     };
     log.bytes += event.stream_to - event.stream_from;
     log.cut += event.cut ?? 0;
+    const visit = `${event.node}:${event.attempt}`;
+    const counted = log.visits ?? {};
+    if (visit in counted || Object.keys(counted).length < MAX_AGENT_LOG_VISITS) {
+      counted[visit] = (counted[visit] ?? 0) + (event.stream_to - event.stream_from);
+      log.visits = counted;
+    }
     this.log("agent_log_saved", {
       why: event.why,
       session: event.session,

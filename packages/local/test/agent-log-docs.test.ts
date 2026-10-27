@@ -19,8 +19,9 @@ async function section(): Promise<string> {
 
 describe("t3bk2 the page about the agent log", () => {
   test("t3bk2_docs_text", async () => {
-    const text = await read();
-    const agentLog = await section();
+    // the page wraps its lines where it likes: what is looked for is the words
+    const text = (await read()).replace(/\s+/g, " ");
+    const agentLog = (await section()).replace(/\s+/g, " ");
     // what was planned is built: the page no longer says it is not
     expect(text).not.toContain("are built in TASK-3BK2");
     expect(text).not.toContain("no `agent_log/` in a run");
@@ -28,11 +29,13 @@ describe("t3bk2 the page about the agent log", () => {
     // the changes of the decisions are told where a reader meets them
     expect(agentLog).toContain("Projects that upgrade start storing full sessions");
     expect(agentLog).toContain(
-      'the decision said "from the response\nthat issued `pipeline_start`"',
+      'the decision said "from the response that issued `pipeline_start`"',
     );
     expect(agentLog).toContain("after `/clear` the environment names the old session");
     expect(agentLog).toContain("`session_unknown`");
     expect(agentLog).toContain("loses at most one interval and the open response");
+    expect(agentLog).toContain("ended in the middle of a step");
+    expect(agentLog).toContain("the timer cannot spend the share of the next step");
     expect(agentLog).toContain("*what the agent has flushed*");
     expect(agentLog).toContain("drops only bytes nothing vouched for, so no history is rewritten");
     expect(agentLog).toContain("`.kodel/runs/*/agent_log`");

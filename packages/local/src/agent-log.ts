@@ -35,6 +35,7 @@ import {
   redactText,
   type SessionRef,
 } from "@kodel-ai/pipeline-core";
+import { z } from "zod";
 import { SESSION_ENV } from "./executor";
 import { claudeCodeCollector } from "./history/claude-code/collector";
 import {
@@ -59,6 +60,12 @@ const INDEX_SESSIONS = 20;
 const INDEX_BYTES = 1024 * 1024;
 const SAFE_SESSION = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const ID_OK = /^[A-Za-z0-9._:-]{1,200}$/;
+/** A line of the hook index as far as it is used here. */
+const INDEX_LINE = z.object({
+  session_id: z.string().max(200),
+  agent: z.string().max(100),
+  transcript_path: z.string().max(4096).optional(),
+});
 /** Streams kept in memory; the oldest go first. */
 const MEMO_CAP = 16;
 
@@ -146,12 +153,16 @@ async function sourceTailHash(path: string, offset: number): Promise<string | un
 }
 
 /** An id that is not plainly an identifier, or that redaction would change, becomes a stable stand-in. */
-export function pseudonymise<E extends HistoryEvent>(event: E, runId: string): E {
+export function pseudonymise<E extends HistoryEvent>(
+  event: E,
+  runId: string,
+  rules: readonly RedactRule[] = [],
+): E {
   const copy: Record<string, unknown> = { ...event };
   for (const field of ID_FIELDS) {
     const value = copy[field];
     if (typeof value !== "string") continue;
-    if (!ID_OK.test(value) || redactText(value) !== value) {
+    if (!ID_OK.test(value) || redactText(value, [...rules]) !== value) {
       copy[field] = `id-${sha256(`${value}|${runId}`).slice(0, 16)}`;
     }
   }
@@ -219,13 +230,13 @@ export class AgentLogWriter {
   private memo(runId: string, session: string, path: string): StreamMemo {
     const key = `${runId}|${session}`;
     let found = this.memos.get(key);
-    if (found === undefined || found.path !== path) {
-      found = { path, journaledSeq: 0 };
-      this.memos.set(key, found);
-      if (this.memos.size > MEMO_CAP) {
-        const oldest = this.memos.keys().next().value;
-        if (oldest !== undefined) this.memos.delete(oldest);
-      }
+    if (found === undefined || found.path !== path) found = { path, journaledSeq: 0 };
+    // The map keeps the order of use, so that what is dropped when it is full is what was used longest ago.
+    this.memos.delete(key);
+    this.memos.set(key, found);
+    if (this.memos.size > MEMO_CAP) {
+      const oldest = this.memos.keys().next().value;
+      if (oldest !== undefined) this.memos.delete(oldest);
     }
     return found;
   }
@@ -267,6 +278,8 @@ export class AgentLogWriter {
         if (error instanceof KodelError && error.code === "STATE_LOCKED") {
           return { ...result, skipped: "busy" };
         }
+        // A store that fails at the end of a step is told once; the timer tells it after three ticks that fail.
+        if (input.why === "step") await this.fail(run, result, "unreadable");
         return { ...result, errored: true };
       }
     } catch {
@@ -410,6 +423,11 @@ export class AgentLogWriter {
       if (transcript !== undefined && isInside(realStore, await realOrSelf(transcript)))
         path = transcript;
       path ??= await findSessionLog(store, dirs, session);
+      // Not even to look for the run in it: a link in the store to a file elsewhere is not a session log.
+      if (path !== undefined && !isInside(realStore, await realOrSelf(path))) {
+        found.push({ session, path: undefined, refused: true });
+        continue;
+      }
       found.push({ session, path });
     }
     return found;
@@ -427,22 +445,22 @@ export class AgentLogWriter {
       text.length > INDEX_BYTES ? text.slice(-INDEX_BYTES).split("\n").slice(1) : text.split("\n");
     for (const line of lines.reverse()) {
       if (out.size >= INDEX_SESSIONS) break;
-      let record: Record<string, unknown> | null;
+      let parsed: ReturnType<typeof INDEX_LINE.safeParse>;
       try {
-        record = JSON.parse(line) as Record<string, unknown> | null;
+        parsed = INDEX_LINE.safeParse(JSON.parse(line));
       } catch {
         continue;
       }
-      const session = record?.["session_id"];
+      // The index is written by hooks of an agent: only what is plainly a session of this agent is believed.
       if (
-        record?.["agent"] !== AGENT_ID ||
-        typeof session !== "string" ||
-        !SAFE_SESSION.test(session)
-      )
+        !parsed.success ||
+        parsed.data.agent !== AGENT_ID ||
+        !SAFE_SESSION.test(parsed.data.session_id)
+      ) {
         continue;
-      const transcript = record["transcript_path"];
-      if (!out.has(session))
-        out.set(session, typeof transcript === "string" ? transcript : undefined);
+      }
+      if (!out.has(parsed.data.session_id))
+        out.set(parsed.data.session_id, parsed.data.transcript_path);
     }
     return out;
   }
@@ -494,6 +512,11 @@ export class AgentLogWriter {
     }
     // Starting again from the beginning also forgets what the collector remembered about where the project is.
     if (resume === undefined && journaled > 0) this.collectors.clear();
+    // The checkpoint is the collector's live state, and a pass that reads moves it. It is taken here and given back
+    // only when the pass ends well: a pass that fails after reading leaves none, so the next one starts from the
+    // journal and takes what this one read but never stored.
+    memo.checkpoint = undefined;
+    let journaledNow = journaled;
     const start = memo.start;
     if (resume === undefined && (start === undefined || start === null)) return "done";
 
@@ -541,18 +564,23 @@ export class AgentLogWriter {
         shouldStop,
         extraWorkdirs: ctx.workdir === undefined ? [] : [ctx.workdir],
       })) {
-        const event = pseudonymise(raw, run.runId);
-        if (event.seq <= journaled) {
-          if (event.seq === journaled) {
+        // What is stored has its ids made safe by every rule the host has; what tells a changed log from a re-read one
+        // is made with the built-in ones only, so that a rule added or removed during the run does not look like one.
+        const event = pseudonymise(raw, run.runId, this.options.rules);
+        if (raw.seq <= journaled) {
+          if (raw.seq === journaled) {
             sawJournaled = true;
-            if (stored !== undefined && eventKey(event, run.runId) !== stored.last_key) {
+            if (
+              stored !== undefined &&
+              eventKey(pseudonymise(raw, run.runId), run.runId) !== stored.last_key
+            ) {
               changed = true;
               break;
             }
           }
           continue;
         }
-        lastSeen = event;
+        lastSeen = raw;
         if (
           !ctx.toolLog &&
           (event.kind === "tool_call" || event.kind === "tool_result" || event.kind === "subagent")
@@ -594,6 +622,8 @@ export class AgentLogWriter {
     }
 
     let marker = "";
+    // Events left out are counted also when there is no room even for the mark that says so.
+    if (dropped > 0 && lastDropped !== undefined) firstSeq ??= lastDropped.seq;
     if (dropped > 0 && lastDropped !== undefined && room >= MARKER_RESERVE) {
       marker = store.agentLogLines([
         {
@@ -611,7 +641,6 @@ export class AgentLogWriter {
           detail: `${dropped} event(s) left out`,
         } satisfies HistoryEvent,
       ]);
-      firstSeq ??= lastDropped.seq;
       entries += 1;
     }
 
@@ -642,7 +671,7 @@ export class AgentLogWriter {
         stream_from: expect.length,
         stream_to: appended.length,
         tail_hash: appended.tail_hash,
-        last_key: eventKey(lastSeen, run.runId),
+        last_key: eventKey(pseudonymise(lastSeen, run.runId), run.runId),
         entries,
         ...(dropped > 0 ? { cut: dropped } : {}),
       });
@@ -651,38 +680,46 @@ export class AgentLogWriter {
         memo.checkpoint = undefined;
         return "abort";
       }
-      memo.journaledSeq = lastSeen.seq;
+      journaledNow = lastSeen.seq;
       ctx.result.saved += 1;
       ctx.result.streams.push(session);
     }
     if (holder.value !== undefined) {
       memo.checkpoint = holder.value;
       memo.sourceTail = await sourceTailHash(memo.path, holder.value.offset);
+      // What the journal has for this stream as of this pass: the checkpoint is good for exactly that.
+      memo.journaledSeq = journaledNow;
     }
     return "done";
   }
 }
 
 /**
- * How many bytes a step may still store: its cumulative share of the run's bound (the position of its node among
- * the nodes the run started with), and never more than what is left. A step that comes again (a loop, a retry) may
- * always use the share of its own node, and a node the run did not start with (one a change of the pipeline added)
- * may use what is left. Nothing here looks at what kind of node it is.
+ * How many bytes a visit of a step may still store: the share of its node among the nodes the run started with (the
+ * part of the bound up to the node, less what the other visits used, so that nodes that never copy pass their share on),
+ * less what this visit has stored already, and never more than what is left of the bound. A step that comes again (a
+ * loop, a retry) is a visit of its own and may use the share of its node again; the passes of one visit share one
+ * allowance, so a timer cannot spend a step's share and then the next. A node the run did not start with (one a change
+ * of the pipeline added) may use what is left. Nothing here looks at what kind of node it is.
  */
 export function agentLogRoom(
   state: Pick<RunState, "agentLog">,
   config: Pick<AgentLogConfig, "max_kb">,
-  at: { node: string },
+  at: { node: string; attempt?: number },
 ): number {
   const log = state.agentLog;
   const total = config.max_kb * 1024;
   const used = log?.bytes ?? 0;
   const nodes = log?.nodes ?? [];
+  const mine = log?.visits?.[`${at.node}:${at.attempt ?? 0}`] ?? 0;
+  const others = Math.max(0, used - mine);
   const index = nodes.indexOf(at.node);
   const own = Math.floor(total / Math.max(1, nodes.length));
-  const cumulative = index < 0 ? total : Math.floor((total * (index + 1)) / nodes.length);
-  const allowed = index < 0 ? total - used : Math.max(cumulative - used, own);
-  return Math.max(0, Math.min(total - used, allowed));
+  const budget =
+    index < 0
+      ? total - others
+      : Math.max(Math.floor((total * (index + 1)) / nodes.length) - others, own);
+  return Math.max(0, Math.min(total - used, budget - mine));
 }
 
 /** What a stored stream holds, and what is wrong with it if something is. */

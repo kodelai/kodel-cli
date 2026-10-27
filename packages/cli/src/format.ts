@@ -137,7 +137,7 @@ export function agentLogLine(report: RunReport["agent_log"]): string {
     `copied ${report.passes.step} time(s) at the end of a step and ${report.passes.tick} on the timer`,
   ];
   if (report.cut > 0) parts.push(`${report.cut} event(s) left out for want of room`);
-  if (report.final_pass === false) parts.push("ended without a final copy");
+  if (report.final_pass === false) parts.push("ended in the middle of a step");
   if (report.failed.length > 0) parts.push(`not copied: ${report.failed.join(", ")}`);
   return `agent log: ${parts.join(", ")} (unverified)`;
 }

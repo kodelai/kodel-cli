@@ -328,3 +328,20 @@ Written at the end of the build, so that a reader of the plan finds what changed
   `t3bk2_subagent_nested` (only the direct subagents of a session are followed; nested ones are not), `t3bk2_hardening_stream_bound`
   bounds what is *stored* from a 10 MB log, not the memory of the process (a heap assertion is flaky in CI).
 - **`kodel export`** does not exist; the follow-up task is not created (Decision 1 (a)).
+
+### What the review of the build found, and what was done
+
+Four major findings were fixed, each with a test that fails without the fix: a pass that fails after reading no longer leaves a
+spent checkpoint (the checkpoint is taken at the start of a pass and given back only when it ends well); after a restart the
+checkpoint is good for what the journal has (`memo.journaledSeq`), so a big session catches up; `final_pass` now tells whether the
+run ended in the middle of a step, which is what a report can know (the step pass may find nothing new and journal nothing);
+the share of a step is counted per visit (`agentLog.visits`), so the timer cannot spend the next step's share. Also done: events
+dropped with no room even for the mark are counted; a store that fails at the end of a step is journaled as `unreadable`; ids are
+made safe with the host's rules as well, while the key that tells a changed log stays on the built-in ones; the memo table keeps the
+order of use; the hook index is read with zod; a link in the store that leads out of it is refused before it is read; the docs no
+longer promise a config for redaction rules or a named step in the report.
+
+Left as they are: an unproven log that grows is searched for the run in full on every pass (a cost, not a fault); a timer can be
+made for a run that has just finished and stops at its first tick; `MEMO_CAP` is 16 (the plan said 8) because subagents are
+streams too; `t3bk2_budget_inserted_before_index` is covered by `t3bk2_budget_added_node_uses_remainder` and
+`t3bk2_budget_frozen_after_accepted` (the nodes are fixed at the start).

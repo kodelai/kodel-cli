@@ -241,10 +241,12 @@ run continued in another session is copied from its first call there. Subagents 
 **When.** Every `interval_s` seconds while the run goes (by the process that serves it, only through the MCP server) and
 at the end of each step, before the step is judged, so the last step of a run is copied before the run ends. Only whole
 responses: the response still being written waits. Nothing is journaled or appended to a run that has ended. A run that
-ends some other way (cancelled, a gate rejected, a check failed) loses at most one interval and the open response, and the
-report says it ended without a final copy. The agent may buffer its writes, so a copy is at most one interval behind
-*what the agent has flushed*. A copy never fails or refuses a step. After a server restart the first copy reads the log
-from the start, for up to 30 seconds, and a very large session catches up over several copies.
+ends in the middle of a step (cancelled, a check failed) loses at most one interval and the open response, and the report
+says it ended in the middle of a step. The agent may buffer its writes, so a copy is at most one interval behind *what the
+agent has flushed*. A copy never fails or refuses a step; if one cannot be made the report says why, once. After a server
+restart the first copy reads the log from the start, for up to 30 seconds a pass, and a very large session catches up over
+several copies. A pass that fails after it has read leaves nothing to resume from: the next one starts from the journal, so
+what the failed pass read is stored by it.
 
 **What is written.** `agent_log/<session>.jsonl` holds the events, one JSON line each, in the event format above (`v: 1`).
 The journal has one `agent_log_saved` per copy: `why` (`tick` or `step`), `session`, `parent?`, `node`, `attempt`,
@@ -258,11 +260,12 @@ than before, or whose events are not the ones stored, stops the copy of that ses
 would change are replaced by a stable `id-` and a hash, in the call and its result alike, so they still pair.
 
 **Size.** `max_kb` (default 20480, bytes after redaction and cut) limits the events of one run. It is split by position: a
-step may use the part of the bound up to its node in the pipeline the run started with, less what the steps before it
-used, so nodes that never copy (gates, commands) pass their share on; a step that comes again may use the share of its own
-node, and a node a change added may use what is left. When a step's share is full, whole events are dropped and one
-`system` event with `subtype: "agent_log_cut"` counts them; the report names it. At most 4000 copies from the timer and
-1000 from the ends of steps are journaled per run.
+visit of a step may use the part of the bound up to its node in the pipeline the run started with, less what the other
+visits used, so nodes that never copy (gates, commands) pass their share on; all the copies of one visit share one
+allowance, so the timer cannot spend the share of the next step; a step that comes again is a visit of its own and may use
+the share of its node again, and a node a change added may use what is left. When a share is full, whole events are
+dropped, one `system` event with `subtype: "agent_log_cut"` counts them (when there is room for it), and the report counts
+the events left out. At most 4000 copies from the timer and 1000 from the ends of steps are journaled per run.
 
 **Switches.** `agent_log` is the privacy switch of this data. `usage` and `tool_calls` read the log themselves;
 `tool_log` stays the switch of the hooks, and with `tool_log: false` the agent log stores no `tool_call`, `tool_result` or
@@ -278,8 +281,8 @@ usage and cost never feed a check, a route or a gate.
 **Residual risk.** `redact` catches known patterns and 32+ character mixed high-entropy words. It does not catch hex-only
 or short secrets, a secret split across two events is redacted per event, and `history.changes.exclude` does not apply to
 the agent log. A tool that reads an `.env` puts up to 8 000 characters of it into the log; in a tracked history that is
-permanent. Redaction rules are read from the config as it is when the server starts, so a rule removed during a run keeps
-what earlier copies redacted. While a run waits at a gate, everything else the same session does is in `full` mode, and the
+permanent. The built-in rules are the ones that apply; a host that is given rules of its own reads them when it starts, so a
+rule removed during a run keeps what earlier copies redacted. While a run waits at a gate, everything else the same session does is in `full` mode, and the
 timer keeps copying it. An agent that starts its own `kodel mcp` with a chosen `CLAUDE_CODE_SESSION_ID` and the run's id can
 have another session of the project copied into the run. Lower the exposure with `preview_chars: 0` for a kind,
 `mode: metadata` or `enabled: false`.

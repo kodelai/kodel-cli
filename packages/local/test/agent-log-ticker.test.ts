@@ -618,6 +618,21 @@ describe("t3bk2 the timer: giving up", () => {
     expect(journal).toHaveLength(1);
   });
 
+  test("t3bk2_tick_busy_lock_skips", async () => {
+    // another process holds the lock: the tick does not wait, writes nothing, says nothing, and the timer stays
+    const journal: RunEvent[] = [];
+    const fake = manualTimers();
+    const t = new AgentLogTickers(
+      answering(Array.from({ length: 5 }, () => ({ skipped: "busy" }))),
+      fake.timers,
+    );
+    const run = fakeRun(journal);
+    await t.ensure(run);
+    for (let i = 0; i < 5; i++) await t.tick(run.runId);
+    expect(journal).toEqual([]);
+    expect(fake.live()).toHaveLength(1);
+  });
+
   test("t3bk2_tick_a_good_tick_resets_the_count", async () => {
     const fake = manualTimers();
     const t = new AgentLogTickers(

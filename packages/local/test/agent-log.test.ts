@@ -21,6 +21,7 @@ import {
   type HistoryConfig,
   type HistoryEvent,
   historyEventSchema,
+  type RedactRule,
   type RunState,
 } from "@kodel-ai/pipeline-core";
 import { ClaudeLogBuilder } from "../../testkit/src";
@@ -90,6 +91,8 @@ async function rig(
     history?: HistoryConfig;
     session?: string | null;
     writer?: (store: FileStore, env: () => NodeJS.ProcessEnv) => AgentLogWriter;
+    /** Project redaction rules, for the host (the journal) and for the writer alike. */
+    rules?: RedactRule[];
   } = {},
 ): Promise<Rig> {
   const env: NodeJS.ProcessEnv = { CLAUDE_CONFIG_DIR: claude };
@@ -97,13 +100,14 @@ async function rig(
   const store = new FileStore({ root: join(dir, ".kodel") });
   const writer =
     options.writer?.(store, () => env) ??
-    new AgentLogWriter({ store, root: dir, rules: [], env: () => env });
+    new AgentLogWriter({ store, root: dir, rules: options.rules ?? [], env: () => env });
   const host = new LocalPipelineHost({
     root: dir,
     heartbeatMs: 0,
     environment: env,
     history: options.history ?? logConfig(),
     agentLog: writer,
+    ...(options.rules === undefined ? {} : { rules: options.rules }),
   });
   const started = await host.start({ pipeline: "two", task: "t", restart: false });
   const run = started.run as LocalRun;
@@ -1456,5 +1460,229 @@ describe("t3bk2 what the run asked for", () => {
     const started = await host.start({ pipeline: "two", task: "t", restart: false });
     await (started.run as LocalRun).completeStep("a", 1);
     expect(spy.reads).toBe(0);
+  });
+});
+
+describe("t3bk2 what the review of the build found", () => {
+  const nodes2 = ["a", "b"];
+  const stateOf2 = (bytes: number, visits: Record<string, number>) =>
+    ({ agentLog: { nodes: nodes2, bytes, visits } }) as never;
+
+  test("t3bk2_budget_the_timer_cannot_spend_the_next_steps_share", () => {
+    const total = 64 * 1024;
+    const config = { max_kb: 64 };
+    // the first pass of step a is offered its share; having used it, the next pass of the same visit has none
+    expect(agentLogRoom(stateOf2(0, {}), config, { node: "a", attempt: 1 })).toBe(total / 2);
+    expect(
+      agentLogRoom(stateOf2(total / 2, { "a:1": total / 2 }), config, { node: "a", attempt: 1 }),
+    ).toBe(0);
+    // and step b is offered the rest
+    expect(
+      agentLogRoom(stateOf2(total / 2, { "a:1": total / 2 }), config, { node: "b", attempt: 1 }),
+    ).toBe(total / 2);
+  });
+
+  test("t3bk2_budget_a_step_that_comes_again_is_a_visit_of_its_own", () => {
+    const config = { max_kb: 64 };
+    const used = { "a:1": 32 * 1024 };
+    expect(agentLogRoom(stateOf2(32 * 1024, used), config, { node: "a", attempt: 2 })).toBe(
+      32 * 1024,
+    );
+    const both = { "a:1": 32 * 1024, "a:2": 32 * 1024 };
+    expect(agentLogRoom(stateOf2(64 * 1024, both), config, { node: "a", attempt: 2 })).toBe(0);
+  });
+
+  test("t3bk2_pass_failure_loses_nothing", async () => {
+    // a pass that reads and then fails to store must not leave the next one to start after what it read
+    const r = await rig();
+    const log = sessionLog(r.runId);
+    const path = await installed(log);
+    expect((await capture(r)).saved).toBe(1);
+    log.say("msg_3", "three").say("msg_4", "four");
+    await writeFile(path, log.text());
+    const real = r.store.appendAgentLog.bind(r.store);
+    let failing = true;
+    r.store.appendAgentLog = async (...args) => {
+      if (failing) {
+        failing = false;
+        throw new Error("the disk is full");
+      }
+      return real(...args);
+    };
+    expect(await capture(r)).toMatchObject({ saved: 0, errored: true });
+    log.say("msg_5", "five").say("msg_6", "six");
+    await writeFile(path, log.text());
+    expect((await capture(r)).saved).toBe(1);
+    const events = await stored(r);
+    const messages = events
+      .filter((e) => e.kind === "message")
+      .map((e) => e.kind === "message" && e.message_id);
+    // nothing between the pass that failed and the one that followed is missing
+    expect(messages).toEqual(expect.arrayContaining(["msg_1", "msg_2", "msg_3", "msg_4", "msg_5"]));
+    expect(events.map((e) => e.seq)).toEqual(events.map((_, i) => i + 1));
+  });
+
+  test("t3bk2_pass_failure_after_the_journal_refused_loses_nothing", async () => {
+    const r = await rig();
+    const log = sessionLog(r.runId);
+    const path = await installed(log);
+    await capture(r);
+    log.say("msg_3", "three").say("msg_4", "four");
+    await writeFile(path, log.text());
+    const real = r.run.agentLogRun();
+    let failing = true;
+    const flaky: AgentLogRun = {
+      ...real,
+      apply: async (event) => {
+        if (event.type === "agent_log_saved" && failing) {
+          failing = false;
+          throw new Error("the journal could not be written");
+        }
+        return real.apply(event);
+      },
+    };
+    await r.writer.capture(flaky, { why: "tick", waitMs: 0 });
+    log.say("msg_5", "five").say("msg_6", "six");
+    await writeFile(path, log.text());
+    expect((await capture(r)).saved).toBe(1);
+    const events = await stored(r);
+    expect(events.map((e) => e.seq)).toEqual(events.map((_, i) => i + 1));
+    expect(events.some((e) => e.kind === "message" && e.message_id === "msg_3")).toBe(true);
+  });
+
+  test("t3bk2_restart_catches_up_over_several_passes", async () => {
+    const r = await rig();
+    const log = sessionLog(r.runId);
+    for (let i = 0; i < 40; i++) log.say(`msg_h${i}`, `history ${i}`);
+    log.say("msg_h_end", "the end");
+    const path = await installed(log);
+    await capture(r);
+    const before = (await stateOf(r)).agentLog?.sessions[SESSION]?.last_seq ?? 0;
+    // the server restarts: nothing in memory, a small budget per pass, and the agent has written more
+    let ticks = 0;
+    const store = new FileStore({ root: join(dir, ".kodel") });
+    const fresh = new AgentLogWriter({
+      store,
+      root: dir,
+      rules: [],
+      env: () => r.env,
+      budgetMs: 1_000,
+      now: () => {
+        ticks += 300;
+        return ticks;
+      },
+    });
+    log.say("msg_new1", "after the restart").say("msg_new2", "and more").say("msg_new3", "last");
+    await writeFile(path, log.text());
+    let passes = 0;
+    let saved = 0;
+    while (saved === 0 && passes < 80) {
+      saved = (await fresh.capture(r.run.agentLogRun(), { why: "tick", waitMs: 0 })).saved;
+      passes += 1;
+    }
+    // it gets to the new part over several passes instead of starting from the beginning each time
+    expect(saved).toBe(1);
+    expect(passes).toBeGreaterThan(1);
+    expect(passes).toBeLessThan(40);
+    const after = (await stateOf(r)).agentLog?.sessions[SESSION]?.last_seq ?? 0;
+    expect(after).toBeGreaterThan(before);
+    const events = await stored(r);
+    expect(new Set(events.map((e) => e.seq)).size).toBe(events.length);
+  });
+
+  test("t3bk2_report_final_pass_when_the_timer_had_copied_everything", async () => {
+    const r = await rig();
+    const log = sessionLog(r.runId);
+    const path = await installed(log);
+    await capture(r);
+    await r.run.completeStep("a", 1);
+    log.say("msg_3", "b begins").say("msg_4", "b goes on");
+    await writeFile(path, log.text());
+    await capture(r); // the timer takes everything that is closed
+    await r.run.completeStep("b", 1); // and the pass at the end of the step finds nothing new
+    expect((await stateOf(r)).status).toBe("completed");
+    expect((await r.run.report()).agent_log).toMatchObject({ final_pass: true });
+  });
+
+  test("t3bk2_events_with_no_room_are_counted", async () => {
+    const r = await rig({ history: logConfig({ max_kb: 1 }) });
+    await installed(sessionLog(r.runId));
+    // the bound is nearly used by another stream: less room than the mark that says events were left out
+    const hex = "a".repeat(64);
+    await r.run.apply({
+      type: "agent_log_saved",
+      why: "tick",
+      session: "other",
+      node: "a",
+      attempt: 1,
+      first_seq: 1,
+      last_seq: 1,
+      stream_from: 0,
+      stream_to: 900,
+      tail_hash: hex,
+      last_key: hex,
+      entries: 1,
+    });
+    const before = (await stateOf(r)).agentLog;
+    const result = await capture(r);
+    expect(result.saved).toBe(1);
+    const after = (await stateOf(r)).agentLog;
+    // nothing was stored, and the events that could not be are in the count of what was left out
+    expect(after?.sessions[SESSION]?.length).toBe(0);
+    expect(after?.bytes).toBe(before?.bytes);
+    expect(after?.cut).toBeGreaterThan(before?.cut ?? 0);
+    expect((await r.run.report()).agent_log).toMatchObject({ cut: after?.cut });
+  });
+
+  test("t3bk2_step_failure_is_journaled", async () => {
+    const r = await rig();
+    await installed(sessionLog(r.runId));
+    r.store.appendAgentLog = async () => {
+      throw new Error("the disk is full");
+    };
+    const decision = await r.run.completeStep("a", 1);
+    expect(decision.ok).toBe(true);
+    // the step went on, and the report says why the copy did not
+    expect((await journalOf(r)).filter((rec) => rec.event === "agent_log_failed")).toMatchObject([
+      { reason: "unreadable" },
+    ]);
+    expect((await r.run.report()).agent_log).toMatchObject({ failed: ["unreadable"] });
+  });
+
+  test("t3bk2_journal_round_trip", async () => {
+    // a rule that matches the hashes the cursor is made of: the journal is redacted on the way in, the state is not
+    const hostile: RedactRule[] = [{ name: "hex", pattern: /[0-9a-f]{64}/g }];
+    const r = await rig({ rules: hostile });
+    const log = sessionLog(r.runId);
+    const path = await installed(log);
+    expect((await capture(r)).saved).toBe(1);
+    const text = await readFile(join(r.store.runDir(r.runId), "journal.jsonl"), "utf8");
+    expect(text).toContain("[REDACTED:hex]");
+    const cursor = (await stateOf(r)).agentLog?.sessions[SESSION];
+    expect(cursor?.tail_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(cursor?.last_key).toMatch(/^[0-9a-f]{64}$/);
+    // and the next pass goes on from the state, not from the journal
+    log.say("msg_3", "later").say("msg_4", "and later");
+    await writeFile(path, log.text());
+    const second = await capture(r);
+    expect(second).toMatchObject({ saved: 1, failures: [] });
+  });
+
+  test("t3bk2_a_link_out_of_the_store_is_not_read_to_find_the_run", async () => {
+    const r = await rig();
+    const outside = join(dir, "..", `secret-${Date.now()}.jsonl`);
+    // a file that would prove the run if it were read: it is not a session log of the agent's, only a link names it
+    await writeFile(outside, sessionLog(r.runId).text());
+    const folder = join(claude, "projects", dir.replace(/[^a-zA-Z0-9]/g, "-"));
+    await mkdir(folder, { recursive: true });
+    await symlink(outside, join(folder, `${SESSION}.jsonl`));
+    try {
+      const result = await capture(r, "step");
+      expect(result.failures).toEqual(["refused"]);
+      expect(result.streams).toEqual([]);
+      expect((await stateOf(r)).agentLog?.sessions).toEqual({});
+    } finally {
+      await rm(outside, { force: true });
+    }
   });
 });
