@@ -14,8 +14,7 @@
  *  - A copy never fails the step or the run. Whatever goes wrong is a reason, journaled once.
  */
 import { createHash } from "node:crypto";
-import { open, readFile, stat } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename } from "node:path";
 import {
   type AgentHistoryCollector,
   type AgentLogConfig,
@@ -26,6 +25,7 @@ import {
   type HistoryEvent,
   historyEventSchema,
   ID_FIELDS,
+  type JournalRecord,
   KodelError,
   MAX_AGENT_LOG_TICKS,
   type ReadCheckpoint,
@@ -35,37 +35,24 @@ import {
   redactText,
   type SessionRef,
 } from "@kodel-ai/pipeline-core";
-import { z } from "zod";
 import { SESSION_ENV } from "./executor";
 import { claudeCodeCollector } from "./history/claude-code/collector";
-import {
-  claudeConfigDir,
-  findSessionLog,
-  firstTimestamp,
-  subagentLogs,
-} from "./history/claude-code/locate";
+import { claudeConfigDir, firstTimestamp, subagentLogs } from "./history/claude-code/locate";
 import { AGENT_ID } from "./history/claude-code/normalize";
-import { findRunStart } from "./history/claude-code/window";
-import { isInside, realOrSelf } from "./history/scope";
-import { SESSIONS_INDEX } from "./hooks/session-registrar";
+import {
+  proveRunStart,
+  type RunStartMemo,
+  SAFE_SESSION,
+  SessionFinder,
+  sourceTailHash,
+} from "./session-finder";
 import type { FileStore } from "./store";
 
 /** A pass stops reading after this long and keeps what it has: a big log catches up over several passes. */
 export const PASS_BUDGET_MS = 30_000;
 /** Room kept free for the mark that says events were left out. */
 const MARKER_RESERVE = 320;
-const TAIL_BYTES = 64;
-/** The newest sessions of the hook index that are looked at. */
-const INDEX_SESSIONS = 20;
-const INDEX_BYTES = 1024 * 1024;
-const SAFE_SESSION = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const ID_OK = /^[A-Za-z0-9._:-]{1,200}$/;
-/** A line of the hook index as far as it is used here. */
-const INDEX_LINE = z.object({
-  session_id: z.string().max(200),
-  agent: z.string().max(100),
-  transcript_path: z.string().max(4096).optional(),
-});
 /** Streams kept in memory; the oldest go first. */
 const MEMO_CAP = 16;
 
@@ -77,6 +64,8 @@ export interface AgentLogRun {
   apply(event: RunEvent): Promise<{ ok: boolean; noop?: boolean }>;
   /** Where the run works when that is not the project root. */
   workdir(): Promise<string | undefined>;
+  /** The run's journal, read only: the count of usage looks in it for the times a person was waited for. */
+  journal(): Promise<JournalRecord[]>;
 }
 
 export interface AgentLogWriterOptions {
@@ -99,6 +88,12 @@ export interface CaptureInput {
   waitMs: number;
   /** For `step`: the step being completed, which must be the one the run is at. */
   step?: { node: string; attempt: number };
+  /**
+   * More work for the end of a step, done under the same lock right after the copy (also when the copy is switched
+   * off): the count of usage, so that one lock is taken for both and the timer cannot slip in between them. It is
+   * not run when the lock is not obtained, or when the run is not at that step.
+   */
+  also?: (lock: { stillHeld(): Promise<boolean> }) => Promise<void>;
 }
 
 export interface CaptureResult {
@@ -114,42 +109,13 @@ export interface CaptureResult {
 }
 
 /** What is kept in memory between passes for one stored stream (a session, or a subagent of it). */
-interface StreamMemo {
-  path: string;
-  /** Where the run begins in the log: `null` when the log has no call of this run (yet). */
-  start?: { offset: number; ts?: string } | null;
-  /** The size of the log when `start` was last looked for, so a log that did not grow is not searched again. */
-  searchedSize?: number;
+interface StreamMemo extends RunStartMemo {
   checkpoint?: ReadCheckpoint;
   /** The hash of the 64 bytes of the log before `checkpoint.offset`: what the checkpoint was made against. */
   sourceTail?: string;
   /** The `last_seq` the journal had for this stream when this process last wrote it. */
   journaledSeq: number;
   stopped?: AgentLogFailure;
-}
-
-interface Candidate {
-  session: string;
-  path: string | undefined;
-  /** The log is in the agent's store by name but leads out of it (a link): it is not opened. */
-  refused?: true;
-}
-
-/** The hash of the 64 bytes of a file that end at `offset`, or `undefined` if the file is shorter. */
-async function sourceTailHash(path: string, offset: number): Promise<string | undefined> {
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
-  try {
-    handle = await open(path, "r");
-    if ((await handle.stat()).size < offset) return undefined;
-    const size = Math.min(TAIL_BYTES, offset);
-    const buffer = Buffer.alloc(size);
-    await handle.read(buffer, 0, size, offset - size);
-    return createHash("sha256").update(buffer).digest("hex");
-  } catch {
-    return undefined;
-  } finally {
-    await handle?.close();
-  }
 }
 
 /** An id that is not plainly an identifier, or that redaction would change, becomes a stable stand-in. */
@@ -181,8 +147,10 @@ export class AgentLogWriter {
   private readonly memos = new Map<string, StreamMemo>();
   private readonly inFlight = new Map<string, Promise<unknown>>();
   private readonly collectors = new Map<string, AgentHistoryCollector>();
+  private readonly finder: SessionFinder;
 
   constructor(private readonly options: AgentLogWriterOptions) {
+    this.finder = new SessionFinder({ root: options.root, env: options.env });
     this.now = options.now ?? Date.now;
     this.budgetMs = options.budgetMs ?? PASS_BUDGET_MS;
   }
@@ -199,10 +167,8 @@ export class AgentLogWriter {
   }
 
   /** Whether the environment or the hook index names a session at all: with none, there is nothing to copy. */
-  async hasCandidates(): Promise<boolean> {
-    const own = cleanExecutorText(this.options.env()[SESSION_ENV]);
-    if (own !== undefined && SAFE_SESSION.test(own)) return true;
-    return (await this.indexSessions()).size > 0;
+  hasCandidates(): Promise<boolean> {
+    return this.finder.hasCandidates();
   }
 
   /** Waits until no pass of this run is going on in this process. */
@@ -269,11 +235,15 @@ export class AgentLogWriter {
     try {
       const state = await run.state();
       const skipped = this.shouldSkip(state, input);
-      if (skipped !== undefined) return { ...result, skipped };
+      // With the copy switched off the extra work is still done: it has a switch of its own.
+      const extra = input.also !== undefined && (skipped === undefined || skipped === "disabled");
+      if (skipped !== undefined && !extra) return { ...result, skipped };
       try {
-        return await this.options.store.withAgentLogLock(run.runId, input.waitMs, (lock) =>
-          this.pass(run, input, lock, result),
-        );
+        return await this.options.store.withAgentLogLock(run.runId, input.waitMs, async (lock) => {
+          const made = skipped === undefined ? await this.pass(run, input, lock, result) : result;
+          if (extra && input.also !== undefined && (await lock.stillHeld())) await input.also(lock);
+          return skipped === undefined ? made : { ...result, skipped };
+        });
       } catch (error) {
         if (error instanceof KodelError && error.code === "STATE_LOCKED") {
           return { ...result, skipped: "busy" };
@@ -318,7 +288,7 @@ export class AgentLogWriter {
     const workdir = await run.workdir();
     const node = this.nodeOf(state, input);
 
-    const candidates = await this.candidates(env, configDir, workdir);
+    const candidates = await this.finder.candidates(env, configDir, workdir);
     let proven = 0;
     let missing = false;
     for (const candidate of candidates) {
@@ -336,7 +306,7 @@ export class AgentLogWriter {
         proven += 1;
         continue;
       }
-      if (!(await this.prove(run.runId, memo))) continue;
+      if (!(await proveRunStart(run.runId, memo))) continue;
       proven += 1;
       const ctx: PassContext = {
         run,
@@ -383,86 +353,6 @@ export class AgentLogWriter {
     if (visit !== undefined) return { node: visit.node, attempt: visit.attempt };
     const last = state.trail[state.trail.length - 1] ?? "";
     return { node: last, attempt: state.nodes[last]?.attempt ?? 0 };
-  }
-
-  /** Whether the log has a call of this run, and where the run begins in it. */
-  private async prove(runId: string, memo: StreamMemo): Promise<boolean> {
-    if (memo.start) return true;
-    let size: number;
-    try {
-      size = (await stat(memo.path)).size;
-    } catch {
-      return false;
-    }
-    if (memo.start === null && memo.searchedSize === size) return false;
-    memo.searchedSize = size;
-    memo.start = (await findRunStart(memo.path, runId)) ?? null;
-    return memo.start !== null;
-  }
-
-  /** The sessions to look at: the environment's, and the newest of the hook index. */
-  private async candidates(
-    env: NodeJS.ProcessEnv,
-    configDir: string,
-    workdir: string | undefined,
-  ): Promise<Candidate[]> {
-    const store = join(configDir, "projects");
-    const realStore = await realOrSelf(store);
-    const dirs = [...(workdir === undefined ? [] : [workdir]), this.options.root];
-    const wanted = new Map<string, string | undefined>();
-    const own = cleanExecutorText(env[SESSION_ENV]);
-    if (own !== undefined && SAFE_SESSION.test(own)) wanted.set(own, undefined);
-    for (const [session, transcript] of await this.indexSessions()) {
-      if (!wanted.has(session) || wanted.get(session) === undefined)
-        wanted.set(session, transcript);
-    }
-    const found: Candidate[] = [];
-    for (const [session, transcript] of wanted) {
-      let path: string | undefined;
-      // A path from a hook is not trusted to point anywhere but at the agent's own store.
-      if (transcript !== undefined && isInside(realStore, await realOrSelf(transcript)))
-        path = transcript;
-      path ??= await findSessionLog(store, dirs, session);
-      // Not even to look for the run in it: a link in the store to a file elsewhere is not a session log.
-      if (path !== undefined && !isInside(realStore, await realOrSelf(path))) {
-        found.push({ session, path: undefined, refused: true });
-        continue;
-      }
-      found.push({ session, path });
-    }
-    return found;
-  }
-
-  private async indexSessions(): Promise<Map<string, string | undefined>> {
-    const out = new Map<string, string | undefined>();
-    let text: string;
-    try {
-      text = await readFile(join(this.options.root, SESSIONS_INDEX), "utf8");
-    } catch {
-      return out;
-    }
-    const lines =
-      text.length > INDEX_BYTES ? text.slice(-INDEX_BYTES).split("\n").slice(1) : text.split("\n");
-    for (const line of lines.reverse()) {
-      if (out.size >= INDEX_SESSIONS) break;
-      let parsed: ReturnType<typeof INDEX_LINE.safeParse>;
-      try {
-        parsed = INDEX_LINE.safeParse(JSON.parse(line));
-      } catch {
-        continue;
-      }
-      // The index is written by hooks of an agent: only what is plainly a session of this agent is believed.
-      if (
-        !parsed.success ||
-        parsed.data.agent !== AGENT_ID ||
-        !SAFE_SESSION.test(parsed.data.session_id)
-      ) {
-        continue;
-      }
-      if (!out.has(parsed.data.session_id))
-        out.set(parsed.data.session_id, parsed.data.transcript_path);
-    }
-    return out;
   }
 
   private async fail(
