@@ -40,6 +40,9 @@ The fields of each kind:
     the cached tokens inside `input`, so a total subtracts them first.
   - `reasoning` is the part of `output` spent on thinking, when the agent says so. It is inside `output`
     already, never added to it.
+  - `cache_write_1h?` is the part of `cache_write` written with the 1-hour lifetime (priced higher than the
+    5-minute one). It is inside `cache_write`, never added to it, and only a read made for usage
+    (`ReadOptions.usageDetail`) carries it; the events other readers get have no such field.
   - `cost` is `{ amount?, basis }`; `basis` is `reported` (the agent wrote it), `reported_zero`, `computed` or
     `unknown`. Collectors do not compute a cost: a log that does not carry one gives `unknown`.
 - `tool_call`: `id`, `name`, `mcp_server?` (from `mcp__<server>__<tool>`), `input_preview?`, `started`.

@@ -76,6 +76,8 @@ const usageEvent = z.object({
   output: count,
   cache_read: count,
   cache_write: count,
+  /** The part of `cache_write` written with the 1-hour lifetime, when the agent says so (priced higher). Inside `cache_write`, never added to it. */
+  cache_write_1h: count.optional(),
   reasoning: count,
   semantics: z.enum(USAGE_SEMANTICS),
   message_id: z.string(),
@@ -464,6 +466,12 @@ export interface ReadOptions {
    * written is stored by whole responses. The held events stay in the checkpoint.
    */
   holdBack?: boolean;
+  /**
+   * For a consumer that counts usage: `usage` events carry `cache_write_1h` when the log says it, and a read that was
+   * stopped (`shouldStop`) does not release the response it was in the middle of, so no response is counted with the
+   * usage of its first line. A read that reaches the end of the log still releases it.
+   */
+  usageDetail?: boolean;
   /** Start at this byte offset of the log with a fresh state (the start of a window). `seq` counts from there. */
   fromOffset?: number;
   /** Continue a read that stopped; `fromOffset` is ignored. The checkpoint belongs to the same log. */

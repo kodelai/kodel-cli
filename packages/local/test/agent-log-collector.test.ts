@@ -145,6 +145,7 @@ describe("t3bk2 collector options: metadata mode", () => {
     "output",
     "cache_read",
     "cache_write",
+    "cache_write_1h",
     "reasoning",
     "semantics",
     "request_id",
