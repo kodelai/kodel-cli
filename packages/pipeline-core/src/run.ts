@@ -8,6 +8,7 @@
  * attempt of the same visit (rework). Limits: `max_consecutive_failures` and `max_attempts`.
  */
 import { canonicalNode, checkIdOf, type NodeForms, stableJson } from "./canonical";
+import { type ChangesRef, changesField, isTreeId, MAX_CHANGES_ERROR } from "./changes";
 import { type ErrorCode, KodelError } from "./errors";
 import type { EngineRecord, ExecutorRecord } from "./executor";
 import type { HistoryConfig } from "./history-config";
@@ -252,6 +253,12 @@ export type RunEvent =
       outcome?: string;
       /** HEAD of the run's directory when the step was handed in, as the host read it. */
       head?: string;
+      /** The patch of the work since the previous hand-in, when the host kept one (`history.changes`). */
+      changes?: ChangesRef;
+      /** Why there is no patch, when the host tried and could not. */
+      changesError?: string;
+      /** The work tree at this hand-in; the next hand-in's patch starts there. */
+      tree?: string;
     }
   /** The engine work of a node (its own command) finished. The host judged the exit code. */
   | {
@@ -366,6 +373,11 @@ export type RunEvent =
   | { type: "tick"; deadOwners?: string[] }
   | { type: "resume" }
   | { type: "cancel" }
+  /**
+   * The patch of the whole run, or why there is none. Applied once the run has finished, like
+   * `task_note`; only journaled.
+   */
+  | { type: "changes_recorded"; changes?: ChangesRef; changesError?: string }
   /** What the tie between the run and its task did (or could not do); only goes to the journal. */
   | {
       type: "task_note";
@@ -757,6 +769,15 @@ class Machine {
       this.log("manual_edit", { note: event.note ?? null });
       return;
     }
+    if (event.type === "changes_recorded") {
+      this.log("changes_recorded", {
+        ...changesField(event.changes),
+        ...(typeof event.changesError === "string"
+          ? { changes_error: event.changesError.slice(0, MAX_CHANGES_ERROR) }
+          : {}),
+      });
+      return;
+    }
     if (event.type === "task_note") {
       this.log("task_link", {
         what: event.what,
@@ -881,6 +902,13 @@ class Machine {
             ? {}
             : { engine_version: event.engineVersion }),
           ...(event.head === undefined ? {} : { head: event.head }),
+          // The host made these and checked them; once more here, and a bad value is left out, never a
+          // reason to refuse the hand-in (a patch is a record, not a verdict).
+          ...changesField(event.changes),
+          ...(typeof event.changesError === "string"
+            ? { changes_error: event.changesError.slice(0, MAX_CHANGES_ERROR) }
+            : {}),
+          ...(isTreeId(event.tree) ? { tree: event.tree } : {}),
         });
         this.afterWork(visit);
         return;
