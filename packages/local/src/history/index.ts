@@ -5,6 +5,7 @@ import { type ClaudeCodeCollectorOptions, claudeCodeCollector } from "./claude-c
 export * from "./claude-code/collector";
 export * from "./claude-code/locate";
 export * from "./claude-code/normalize";
+export * from "./claude-code/window";
 export * from "./jsonl";
 export * from "./scope";
 
