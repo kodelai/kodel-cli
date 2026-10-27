@@ -18,8 +18,9 @@ import {
  * The tokens and the estimated cost of a run, on a real Claude Code: one headless turn in a throwaway Kodel project,
  * then the run's records set against what the agent says it used (`usage` and `modelUsage` of its result). They only
  * run with KODEL_AGENT_TESTS=1 (`bun run test:agents`); a person runs them before the change is merged, with the Claude
- * Code version noted in the pull request, and the figures below go in it. They are not in CI; the check CI enforces is
- * the offline twin in `packages/local/test/usage.test.ts` on a saved session.
+ * Code version noted in the pull request, and the figures below go in it. They are not in CI. What CI enforces is the
+ * offline twin in `packages/local/test/usage-collector.test.ts` (`t9jrs_saved_session_agrees_offline`), which runs on a
+ * hand-made session, not on a recording: it shows that nothing is lost or added, not that a real agent agrees.
  *
  * What they are the only evidence for:
  *  - a real run records usage for every agent node and a run total;

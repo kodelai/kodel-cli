@@ -1,9 +1,19 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { HistoryEvent, ReadOptions, SessionRef, UsageEvent } from "@kodel-ai/pipeline-core";
-import { claudeFolderName, installClaudeSession } from "../../testkit/src";
+import {
+  addDelta,
+  buildDelta,
+  defaultPricing,
+  type HistoryEvent,
+  newTotals,
+  type ReadOptions,
+  type SessionRef,
+  tokensOf,
+  type UsageEvent,
+} from "@kodel-ai/pipeline-core";
+import { ClaudeLogBuilder, claudeFolderName, installClaudeSession } from "../../testkit/src";
 import { claudeCodeCollector } from "../src/history";
 
 const MARKER = join(".kodel", "config.yaml");
@@ -132,4 +142,73 @@ describe("t9jrs the usage events of the collector", () => {
     // a read that reaches the end of the log still releases the last response
     expect(usageOf(await read(collector, ref, { usageDetail: true })).length).toBe(4);
   });
+
+  test("t9jrs_saved_session_agrees_offline", async () => {
+    // SYNTHETIC: the saved session is hand-made (see its README), so "the agent's own figure" is the sum of the last
+    // usage line of each response, taken from the raw file with none of the collector's code. What this shows in CI is
+    // that the collector and the sums lose and add nothing; agreement with a real agent is the env-gated test of
+    // tests/agents/claude-code-usage.test.ts.
+    const { collector, ref } = await tiers();
+    const raw = (await readFile(join(TIERS, "session.jsonl"), "utf8"))
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map(
+        (line) => JSON.parse(line) as { message?: { id?: string; usage?: Record<string, number> } },
+      );
+    const last = new Map<string, Record<string, number>>();
+    for (const entry of raw) {
+      if (entry.message?.id !== undefined && entry.message.usage !== undefined) {
+        last.set(entry.message.id, entry.message.usage);
+      }
+    }
+    const own = { input: 0, output: 0, cache_read: 0, cache_write: 0, calls: last.size };
+    for (const usage of last.values()) {
+      own.input += usage["input_tokens"] ?? 0;
+      own.output += usage["output_tokens"] ?? 0;
+      own.cache_read += usage["cache_read_input_tokens"] ?? 0;
+      own.cache_write += usage["cache_creation_input_tokens"] ?? 0;
+    }
+    const events = usageOf(await read(collector, ref, { usageDetail: true }));
+    const totals = newTotals();
+    addDelta(totals, buildDelta(events, defaultPricing()));
+    const ours = tokensOf(totals);
+    expect({
+      input: ours.input,
+      output: ours.output,
+      cache_read: ours.cache_read,
+      cache_write: ours.cache_write,
+      calls: ours.api_calls,
+    }).toEqual(own);
+  });
+
+  test("t9jrs_big_log_is_streamed", async () => {
+    // A synthetic log of some 15 MB is read as a stream: the heap does not grow with the size of the log.
+    const root = await project("big");
+    const session = "66666666-6666-4666-8666-666666666666";
+    const log = new ClaudeLogBuilder({ sessionId: session, cwd: root });
+    log.user("go");
+    const responses = 30_000;
+    for (let i = 0; i < responses; i += 1) {
+      log.say(`msg_${i}`, "x".repeat(300), { input: 10, output: 5 });
+    }
+    const where = await log.install(configDir);
+    const bytes = (await stat(where)).size;
+    log.lines.length = 0;
+    const collector = claudeCodeCollector({ configDir });
+    const ref = (await collector.locate(root)).find((r) => r.session_id === session);
+    expect(ref).toBeDefined();
+    Bun.gc(true);
+    const baseline = process.memoryUsage().heapUsed;
+    let peak = 0;
+    let seen = 0;
+    for await (const event of collector.read(ref as SessionRef, undefined, { usageDetail: true })) {
+      if (event.kind !== "usage") continue;
+      seen += 1;
+      if (seen % 2_000 === 0) peak = Math.max(peak, process.memoryUsage().heapUsed - baseline);
+    }
+    expect(seen).toBe(responses);
+    expect(bytes).toBeGreaterThan(10_000_000);
+    // the file was never held whole: far less than its size in extra heap
+    expect(peak).toBeLessThan(bytes);
+  }, 60_000);
 });

@@ -7,6 +7,7 @@ import {
   buildDelta,
   defaultAgentLog,
   defaultHistory,
+  defaultPricing,
   defaultUsage,
   type HistoryConfig,
   type JournalRecord,
@@ -842,3 +843,314 @@ async function subagentLog(
 function emptyUsage() {
   return { attempts: {}, unattributed: { models: {}, passes: 0 } };
 }
+
+// ── what the review of the build asked for ──────────────────────────────────
+
+const LOOP = [
+  "name: loop",
+  "nodes:",
+  "  - slug: write",
+  "    kind: agent",
+  "    prompt: write",
+  "  - slug: approve",
+  "    kind: human",
+  "    prompt: ok?",
+  "edges:",
+  "  - { from: write, to: approve }",
+  "  - { from: approve, to: write, when: rejected }",
+  "",
+].join("\n");
+
+describe("usage pass: edges of the log and of the run", () => {
+  test("t9jrs_invalid_lines_truncated_tail_unknown_fields", async () => {
+    const r = await rig({ task: "hostile-lines" });
+    const log = sessionLog(r.runId);
+    // a field no version knows on every line, lines that are not entries at all, an entry of a kind nobody knows
+    log.lines.forEach((line, i) => {
+      log.lines[i] = line.replace('{"sessionId"', '{"surprise":{"a":1},"sessionId"');
+    });
+    log.lines.splice(
+      3,
+      0,
+      "{ not json",
+      "",
+      "[]",
+      '{"type":"mystery","timestamp":"2026-10-21T10:00:00.500Z","payload":{"x":1}}',
+    );
+    const path = await install(log);
+    // the agent is writing right now: the last line is torn
+    await writeFile(
+      path,
+      `${log.text()}{"type":"assistant","message":{"id":"msg_torn","usage":{"input_tokens":9`,
+    );
+    await r.run.completeStep("a", 1);
+    const state = await stateOf(r);
+    expect(state.usage?.failed ?? []).toEqual([]);
+    expect(tokensOf(state.usage?.attempts["a:1"] ?? emptyUsage().unattributed).input).toBe(300);
+  });
+
+  test("t9jrs_entries_without_timestamp_and_clock_skew", async () => {
+    const r = await rig({ task: "no-clock" });
+    const log = sessionLog(r.runId);
+    // one tool result with no timestamp, and the last response stamped before the first
+    log.lines.forEach((line, i) => {
+      if (line.includes('"tool_result"')) log.lines[i] = line.replace(/"timestamp":"[^"]*",/, "");
+    });
+    const lastIndex = log.lines.length - 1;
+    log.lines[lastIndex] = (log.lines[lastIndex] ?? "").replace(
+      /"timestamp":"[^"]*"/,
+      '"timestamp":"2026-10-21T09:00:00.000Z"',
+    );
+    await install(log);
+    await r.run.completeStep("a", 1);
+    const state = await stateOf(r);
+    expect(state.usage?.failed ?? []).toEqual([]);
+    // every response counted once, in the attempt that was completed
+    const tokens = tokensOf(state.usage?.attempts["a:1"] ?? emptyUsage().unattributed);
+    expect(tokens.input).toBe(300);
+    expect(tokens.api_calls).toBe(2);
+  });
+
+  test("t9jrs_first_attempt_starts_at_runs_first_call", async () => {
+    const r = await rig({ task: "first-call" });
+    const log = new ClaudeLogBuilder({ sessionId: SESSION, cwd: dir });
+    log
+      .user("please run the pipeline")
+      .say("msg_pre", "work before the run", { input: 999, output: 99 })
+      .call(
+        "msg_0",
+        { id: "toolu_start", name: "mcp__kodel__pipeline_start", input: { task: "first-call" } },
+        { input: 100, output: 10 },
+      )
+      .result("toolu_start", [
+        { type: "text", text: JSON.stringify({ ok: true, run_id: r.runId }) },
+      ])
+      .say("msg_1", "step a", { input: 200, output: 20 });
+    await install(log);
+    await r.run.completeStep("a", 1);
+    const a = (await stateOf(r)).usage?.attempts["a:1"] ?? emptyUsage().unattributed;
+    // the call itself and what follows it; what came before it is not the run's
+    expect(tokensOf(a).input).toBe(300);
+  });
+
+  test("t9jrs_next_step_response_credited_to_its_step", async () => {
+    const r = await rig({ task: "next-step" });
+    const log = sessionLog(r.runId);
+    const path = await install(log);
+    await r.run.completeStep("a", 1);
+    // the response that asks what is next is written after step a is over and belongs to step b
+    log
+      .call(
+        "msg_n1",
+        { id: "toolu_n1", name: "mcp__kodel__pipeline_next_step", input: { run_id: r.runId } },
+        { input: 7, output: 1 },
+      )
+      .result("toolu_n1", [{ type: "text", text: "{}" }])
+      .say("msg_2", "step b", { input: 11, output: 4 });
+    await writeFile(path, log.text());
+    await r.run.completeStep("b", 1);
+    const usage = (await stateOf(r)).usage;
+    expect(tokensOf(usage?.attempts["b:1"] ?? emptyUsage().unattributed).input).toBe(7 + 11);
+    expect(tokensOf(usage?.attempts["a:1"] ?? emptyUsage().unattributed).input).toBe(300);
+  });
+
+  test("t9jrs_log_still_written_complete_false_then_filled_idempotent", async () => {
+    const clock = { now: 0, tick: 1_000 };
+    const r = await rig({ task: "fill", budgetMs: 2_500, now: () => (clock.now += clock.tick) });
+    await install(sessionLog(r.runId));
+    await r.run.completeStep("a", 1);
+    expect((await r.run.report()).usage).toMatchObject({ complete: false });
+    // a pass with time left fills the rest in, and a second one finds nothing to add
+    clock.tick = 0;
+    const journal = () => r.store.readJournal(r.runId);
+    const first = await r.writer.capture(runWith(r, journal), { node: "b", attempt: 1 }, held);
+    expect(first.recorded).toBeGreaterThan(0);
+    expect((await r.run.report()).usage).toMatchObject({ complete: true });
+    const filled = tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage()));
+    const events = (await journalOf(r)).filter((rec) => rec.event === "usage_recorded").length;
+    const again = await r.writer.capture(runWith(r, journal), { node: "b", attempt: 1 }, held);
+    expect(again.recorded).toBe(0);
+    expect(tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage()))).toEqual(filled);
+    expect((await journalOf(r)).filter((rec) => rec.event === "usage_recorded").length).toBe(
+      events,
+    );
+  });
+
+  test("t9jrs_budget_stop_while_skipping_credited_events_leaves_the_report_incomplete", async () => {
+    const clock = { now: 0, tick: 0 };
+    const r = await rig({
+      task: "restart-slow",
+      budgetMs: 2_500,
+      now: () => (clock.now += clock.tick),
+    });
+    await install(sessionLog(r.runId));
+    await r.run.completeStep("a", 1);
+    expect((await r.run.report()).usage).toMatchObject({ complete: true });
+    // the server restarts (nothing in memory), and the first read is slow: it ends while still skipping what is counted
+    r.writer.forget(r.runId);
+    clock.tick = 1_000;
+    const journal = () => r.store.readJournal(r.runId);
+    await r.writer.capture(runWith(r, journal), { node: "b", attempt: 1 }, held);
+    const stopped = await stateOf(r);
+    expect(stopped.usage?.sessions[SESSION]?.behind).toBe(true);
+    // the cursor did not go back, and the report says the log was not read to its end
+    expect(stopped.usage?.sessions[SESSION]?.last_seq).toBeGreaterThan(0);
+    expect((await r.run.report()).usage).toMatchObject({ complete: false });
+    // a later pass that reaches the end of a log with nothing new in it clears the mark
+    clock.tick = 0;
+    await r.writer.capture(runWith(r, journal), { node: "b", attempt: 1 }, held);
+    expect((await stateOf(r)).usage?.sessions[SESSION]?.behind).toBeUndefined();
+    expect((await r.run.report()).usage).toMatchObject({ complete: true });
+  });
+
+  test("t9jrs_agent_still_running_at_run_end", async () => {
+    const r = await rig({ task: "running-at-end" });
+    const log = sessionLog(r.runId);
+    const path = await install(log);
+    await r.run.completeStep("a", 1);
+    log.say("msg_2", "step b, the last words are still being written", { input: 10, output: 1 });
+    await writeFile(path, log.text());
+    await r.run.completeStep("b", 1);
+    const state = await stateOf(r);
+    expect(state.status).toBe("completed");
+    // the response open at the end is counted as it stands and said to be
+    expect(state.usage?.attempts["b:1"]?.last_open).toBe(true);
+    expect((await r.run.report()).usage).toMatchObject({ lower_bound: true });
+  });
+
+  test("t9jrs_usage_recorded_is_redacted_in_journal", async () => {
+    const rules: RedactRule[] = [{ name: "model", pattern: /sonnet/g }];
+    const r = await rig({ task: "redact", rules });
+    await install(sessionLog(r.runId));
+    await r.run.completeStep("a", 1);
+    const records = (await journalOf(r)).filter((rec) => rec.event === "usage_recorded");
+    expect(records.length).toBeGreaterThan(0);
+    expect(JSON.stringify(records)).not.toContain("sonnet");
+  });
+
+  test("t9jrs_frozen_prices_used_not_later_edit", async () => {
+    const dear = {
+      "claude-sonnet-5-5": { input: 900, output: 900, cache_read: 900, cache_write: 900 },
+    };
+    const r = await rig({ task: "frozen", usage: { prices: dear } });
+    // the agent edits the config of the project after the run began: the run keeps the prices it started with
+    await writeFile(
+      join(dir, ".kodel", "config.yaml"),
+      "worktree:\n  mode: off\nhistory:\n  usage:\n    prices: {}\n",
+    );
+    await install(sessionLog(r.runId));
+    await r.run.completeStep("a", 1);
+    const a = (await stateOf(r)).usage?.attempts["a:1"];
+    if (a === undefined) throw new Error("no attempt a:1");
+    const model = Object.values(a.models)[0];
+    expect(model?.config_priced_calls).toBeGreaterThan(0);
+    // 300 input tokens at 900 dollars per million tokens and more besides
+    expect(model?.computed_usd).toBeGreaterThan(0.2);
+    expect(summarizeCost(a).config).toBe(true);
+  });
+
+  test("t9jrs_hostile_model_id_on_the_open_response_is_folded", async () => {
+    const r = await rig({ task: "hostile-open" });
+    const log = sessionLog(r.runId);
+    // the last response, the one still open at the step end, names a model that is no id
+    log.say("msg_open", "still going", {
+      input: 5,
+      output: 1,
+      model: "sk-ant-0123456789abcdef0123456789abcdef weird model",
+    });
+    await install(log);
+    await r.run.completeStep("a", 1);
+    const state = await stateOf(r);
+    expect(state.usage?.failed ?? []).toEqual([]);
+    // the step's whole delta was kept: nothing was pushed to the next attempt
+    expect(tokensOf(state.usage?.attempts["a:1"] ?? emptyUsage().unattributed).input).toBe(305);
+    const text = await readFile(join(r.store.runDir(r.runId), "state.json"), "utf8");
+    expect(text).not.toContain("sk-ant");
+  });
+
+  test("t9jrs_the_pass_that_could_not_run_is_said_once", async () => {
+    const r = await rig({ task: "errored" });
+    await install(sessionLog(r.runId));
+    // the store fails at the step end in a way that is not a busy lock
+    r.store.withAgentLogLock = async () => {
+      throw new Error("disk is gone");
+    };
+    await r.run.completeStep("a", 1);
+    await r.run.completeStep("b", 1);
+    const failed = (await journalOf(r)).filter(
+      (rec) => rec.event === "usage_failed" && rec["reason"] === "unreadable",
+    );
+    expect(failed).toHaveLength(1);
+  });
+
+  test("t9jrs_events_cap_is_said_once_and_the_log_is_not_read_again", async () => {
+    const r = await rig({ task: "cap" });
+    await install(sessionLog(r.runId));
+    const delta = buildDelta([], defaultPricing());
+    for (let i = 1; i <= 1_000; i += 1) {
+      const done = await r.run.apply({
+        type: "usage_recorded",
+        session: SESSION,
+        delta,
+        cursor: { last_seq: i, last_key: "a".repeat(64) },
+      });
+      expect(done.ok).toBe(true);
+    }
+    const before = (await journalOf(r)).filter((rec) => rec.event === "usage_recorded").length;
+    expect(before).toBe(1_000);
+    await r.run.completeStep("a", 1);
+    await r.run.completeStep("b", 1);
+    const state = await stateOf(r);
+    expect(state.usage?.failed).toEqual(["cap"]);
+    const after = await journalOf(r);
+    expect(after.filter((rec) => rec.event === "usage_recorded").length).toBe(1_000);
+    expect(after.filter((rec) => rec.event === "usage_failed")).toHaveLength(1);
+  }, 60_000);
+
+  test("t9jrs_retried_node_gets_its_own_attempt", async () => {
+    await writeFile(join(dir, ".kodel", "pipelines", "loop.yaml"), LOOP);
+    const env: NodeJS.ProcessEnv = { CLAUDE_CONFIG_DIR: claude, CLAUDE_CODE_SESSION_ID: SESSION };
+    const host = new LocalPipelineHost({
+      root: dir,
+      heartbeatMs: 0,
+      environment: env,
+      history: historyOf({}),
+      usage: new UsageWriter({ root: dir, rules: [], env: () => env }),
+    });
+    const run = (await host.start({ pipeline: "loop", task: "t", restart: false })).run as LocalRun;
+    const log = sessionLog(run.runId);
+    const path = await install(log);
+    await run.completeStep("write", 1);
+    await run.decideHuman("approve", "rejected", "again");
+    log.say("msg_2", "second try", { input: 40, output: 4 });
+    await writeFile(path, log.text());
+    await run.completeStep("write", 2);
+    const usage = (await run.state()).usage;
+    expect(Object.keys(usage?.attempts ?? {}).sort()).toEqual(["write:1", "write:2"]);
+    expect(tokensOf(usage?.attempts["write:1"] ?? emptyUsage().unattributed).input).toBe(300);
+    expect(tokensOf(usage?.attempts["write:2"] ?? emptyUsage().unattributed).input).toBe(40);
+  });
+
+  test("t9jrs_superseded_or_canceled_attempt_usage_not_lost", async () => {
+    const r = await rig({ task: "canceled" });
+    const log = sessionLog(r.runId);
+    const path = await install(log);
+    await r.run.completeStep("a", 1);
+    const kept = tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage()));
+    await r.run.cancel();
+    expect((await stateOf(r)).status).toBe("canceled");
+    // what was counted stays counted, and a later pass writes nothing to a run that is over
+    log.say("msg_3", "after the cancel", { input: 500, output: 50 });
+    await writeFile(path, log.text());
+    const before = (await journalOf(r)).length;
+    const done = await r.writer.capture(
+      runWith(r, () => r.store.readJournal(r.runId)),
+      { node: "b", attempt: 1 },
+      held,
+    );
+    expect(done.skipped).toBe("not_running");
+    expect((await journalOf(r)).length).toBe(before);
+    expect(tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage()))).toEqual(kept);
+    expect((await stateOf(r)).usage?.attempts["a:1"]).toBeDefined();
+  });
+});

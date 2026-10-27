@@ -16,11 +16,14 @@ const script = join(root, "scripts", "check-prices.mjs");
 const pagesDir = join(root, "fixtures", "price-pages");
 const PAGE_FILE = "https%3A%2F%2Fdocs.claude.com%2Fen%2Fdocs%2Fabout-claude%2Fpricing.html";
 
+/** Plain Node when there is one (that is what the script is for); the runtime of this test otherwise. */
+const NODE = spawnSync("node", ["--version"]).status === 0 ? "node" : process.execPath;
+
 const scratch = mkdtempSync(join(tmpdir(), "check-prices-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 function run(args: string[], env: Record<string, string> = {}, cwd = root) {
-  const result = spawnSync("node", [script, ...args], {
+  const result = spawnSync(NODE, [script, ...args], {
     cwd,
     env: { ...process.env, ...env },
     encoding: "utf8",
@@ -32,7 +35,7 @@ function run(args: string[], env: Record<string, string> = {}, cwd = root) {
 /** The same, without blocking the event loop, for the tests whose server lives in this process. */
 function runAsync(args: string[]): Promise<{ code: number | null; out: string }> {
   return new Promise((done) => {
-    const child = spawn("node", [script, ...args], { cwd: root, env: process.env });
+    const child = spawn(NODE, [script, ...args], { cwd: root, env: process.env });
     let out = "";
     child.stdout.on("data", (chunk) => {
       out += String(chunk);

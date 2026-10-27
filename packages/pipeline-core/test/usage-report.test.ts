@@ -49,6 +49,24 @@ function stateWith(over: Partial<RunState>): RunState {
 }
 
 describe("usage report", () => {
+  test("t9jrs_current_reader_ignores_unknown_events", () => {
+    // what a later engine writes (events and fields this one does not know) must not stop the report of this one
+    const usage = newUsageState();
+    const totals = newTotals();
+    addDelta(totals, buildDelta([event()], context));
+    usage.attempts["write:1"] = totals;
+    usage.revisions.push("2026-10-01");
+    const state = stateWith({ usage, runId: "r_000000001_aaaa", task: "t", nodes: {}, trail: [] });
+    const journal: JournalRecord[] = [
+      { v: 1, seq: 1, ts: 1, event: "usage_from_the_future", something: { a: 1 } },
+      { v: 1, seq: 2, ts: 2, event: "cost_snapshot", amount: 3 },
+    ];
+    const known = usageReport(state, []);
+    expect(usageReport(state, journal)).toEqual(known);
+    expect(() => summarizeRun(state, journal)).not.toThrow();
+    expect(summarizeRun(state, journal).usage).toEqual(summarizeRun(state, []).usage);
+  });
+
   test("t9jrs_report_without_usage_section_is_not_captured", () => {
     expect(usageReport(stateWith({}), [])).toEqual({ not_collected: true, reason: "not_captured" });
   });
