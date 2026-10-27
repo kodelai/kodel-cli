@@ -5,9 +5,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LocalPipelineHost } from "@kodel-ai/local";
+import { defaultRegistry, docTopics } from "@kodel-ai/pipeline-core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { plain, runCli } from "../src/cli";
+import { SKILLS } from "../src/init/skills";
 
 let dir: string;
 
@@ -1376,5 +1378,55 @@ describe("a store made from the golden runs of the stored formats", () => {
     }
     const parsed = JSON.parse((await cli("report", "r_0mviewgvl_i1ig", "--json")).out);
     expect(parsed).toMatchObject({ status: "completed", extra_attempts: 9, feedback: 1 });
+  });
+});
+
+describe("the commands the design topic tells a person to type", () => {
+  const section = () => {
+    const text =
+      docTopics(defaultRegistry()).find((t) => t.topic === "pipeline-design")?.text ?? "";
+    const start = text.indexOf("### Once the person accepts it");
+    expect(start).toBeGreaterThanOrEqual(0);
+    return text.slice(start, text.indexOf("### After the proposal"));
+  };
+  /** The first word of every code span of the section, except the ones that are not commands. */
+  const named = (text: string) =>
+    [...text.matchAll(/`([^`]+)`/g)]
+      .map((m) => m[1] ?? "")
+      .filter((span) => span.startsWith("kodel "))
+      .map((span) => span.replace(/^kodel /, "").split(" ")[0] ?? "")
+      .filter((word) => /^[a-z]+$/.test(word));
+
+  test("tr5j7_design_topic_commands_exist_in_the_cli", async () => {
+    const commands = [...new Set(named(section()))];
+    // only the basic ones are listed; the decisions are named by the agent when they are needed
+    expect(commands).toEqual(["status"]);
+    for (const command of commands) {
+      const help = await cli(command, "--help");
+      expect(help.code, command).toBe(0);
+      expect(help.out, command).toMatch(new RegExp(`^Usage: kodel ${command}\\b`, "m"));
+    }
+    // `status` without an id lists the runs, with an id shows one
+    expect((await cli("status", "--help")).out).toContain("[run]");
+    expect(section()).toContain(
+      "`kodel status` lists the runs; `kodel status <run>` shows one run",
+    );
+    // the command of the hand-over that shows the whole pipeline is a real one, with its argument
+    const handOver =
+      docTopics(defaultRegistry()).find((t) => t.topic === "pipeline-design")?.text ?? "";
+    expect(handOver).toContain("`kodel pipeline proposals show <name>`");
+    const show = await cli("pipeline", "proposals", "show", "--help");
+    expect(show.out).toMatch(/^Usage: kodel pipeline proposals show\b/m);
+    expect(show.out).toContain("[name]");
+    expect(SKILLS.map((skill) => skill.name)).toContain("kodel-run");
+    expect(section()).toContain("`kodel-run` skill");
+  });
+
+  test("tr5j7_a_command_the_cli_lacks_is_found", async () => {
+    // refutation: the check of the test above fails for a name the CLI does not have
+    const [bad] = named("Type `kodel approvall <run>` to carry on");
+    expect(bad).toBe("approvall");
+    const help = await cli(bad ?? "", "--help");
+    expect(help.out).not.toMatch(/^Usage: kodel approvall\b/m);
   });
 });

@@ -52,6 +52,7 @@ for (const line of [
   "A pipeline is one YAML file",
   "Which check for which job",
   "Complete pipelines. Replace the commands",
+  "A checklist for a pipeline that exists",
 ]) {
   if (!built.includes(line)) fail(`the documentation line "${line}" is not in the artifact`);
 }
