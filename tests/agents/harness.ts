@@ -38,12 +38,25 @@ export interface ToolCall {
   isError: boolean;
 }
 
+/** What the agent says it used in a turn, per model, as the `result` event of `claude -p` has it. */
+export interface AgentUsage {
+  /** Tokens over all models. */
+  total: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  /** Tokens and dollars per model (`modelUsage`): the only per-model figures the agent gives. */
+  models: Record<
+    string,
+    { input: number; output: number; cacheRead: number; cacheWrite: number; usd: number }
+  >;
+}
+
 export interface AgentTurn {
   sessionId: string;
   calls: ToolCall[];
   /** The tools of the kodel server, as the agent saw them at the start. */
   kodelTools: string[];
   costUsd: number;
+  /** The agent's own count of its use in this turn; absent when the result event has none. */
+  agentUsage?: AgentUsage;
   finalText: string;
   isError: boolean;
   /** The raw stream, kept for the failure message. */
@@ -232,8 +245,43 @@ interface StreamEvent {
   tools?: string[];
   message?: { content?: StreamBlock[] | string };
   total_cost_usd?: number;
+  usage?: Record<string, unknown>;
+  modelUsage?: Record<string, Record<string, unknown>>;
   result?: string;
   is_error?: boolean;
+}
+
+const num = (value: unknown): number =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+
+/**
+ * The agent's own count of its use, from the `result` event of a turn: `usage` for the total and `modelUsage` for
+ * each model. `undefined` when the event has neither.
+ */
+export function agentUsageOf(
+  event: Pick<StreamEvent, "usage" | "modelUsage">,
+): AgentUsage | undefined {
+  const { usage, modelUsage } = event;
+  if (usage === undefined && modelUsage === undefined) return undefined;
+  const models: AgentUsage["models"] = {};
+  for (const [model, given] of Object.entries(modelUsage ?? {})) {
+    models[model] = {
+      input: num(given["inputTokens"]),
+      output: num(given["outputTokens"]),
+      cacheRead: num(given["cacheReadInputTokens"]),
+      cacheWrite: num(given["cacheCreationInputTokens"]),
+      usd: num(given["costUSD"]),
+    };
+  }
+  return {
+    total: {
+      input: num(usage?.["input_tokens"]),
+      output: num(usage?.["output_tokens"]),
+      cacheRead: num(usage?.["cache_read_input_tokens"]),
+      cacheWrite: num(usage?.["cache_creation_input_tokens"]),
+    },
+    models,
+  };
 }
 
 function textOf(content: unknown): string {
@@ -339,6 +387,7 @@ export async function runAgentTurn(options: TurnOptions): Promise<AgentTurn> {
   let sessionId = "";
   let kodelTools: string[] = [];
   let costUsd = 0;
+  let agentUsage: AgentUsage | undefined;
   let finalText = "";
   let isError = false;
   for (const line of stdout.split("\n")) {
@@ -381,6 +430,7 @@ export async function runAgentTurn(options: TurnOptions): Promise<AgentTurn> {
     if (event.type === "result") {
       sessionId = String(event.session_id ?? sessionId);
       costUsd = Number(event.total_cost_usd ?? 0);
+      agentUsage = agentUsageOf(event);
       finalText = String(event.result ?? "");
       isError = event.is_error === true;
     }
@@ -390,6 +440,7 @@ export async function runAgentTurn(options: TurnOptions): Promise<AgentTurn> {
     calls,
     kodelTools,
     costUsd,
+    ...(agentUsage === undefined ? {} : { agentUsage }),
     finalText,
     isError,
     transcript: `${stdout}\n--- stderr ---\n${stderr}`,
