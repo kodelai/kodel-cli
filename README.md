@@ -2,9 +2,12 @@
 
 Spec-driven pipelines that run inside the coding agent you already use, and are checked outside of it.
 
-> **Status: early development.** Nothing is released yet and the package is not on npm. The
-> English documentation will be written once the first working version exists; until then this
-> README and [AGENTS.md](AGENTS.md) are the entry points.
+[![npm](https://img.shields.io/npm/v/@kodel-ai/kodel?include_prereleases)](https://www.npmjs.com/package/@kodel-ai/kodel)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
+> **Status: beta.** `@kodel-ai/kodel` is on npm as `0.1.0-beta.0`; formats and commands may still
+> change before 1.0. The full English documentation is not written yet; until then this README and
+> [AGENTS.md](AGENTS.md) are the entry points.
 
 Coding agents are good at doing a step and bad at knowing when it is really done. Kodel is a local
 [MCP](https://modelcontextprotocol.io) server that holds the process: you describe how you work as a
@@ -68,16 +71,14 @@ repeats. When a run needs you, the agent tells you what to look at and the comma
 
 ## Quick start
 
-Requirements: Node >= 22.19 to run, [Bun](https://bun.sh) to build from source.
+Requirement: Node >= 22.19.
 
 ```bash
-git clone <this repository> && cd etude
-bun install --frozen-lockfile
-bun run build
+npm install -g @kodel-ai/kodel
 ```
 
-Make `kodel` and `kodel-hook` (both in `packages/cli/dist/`) available on your `PATH`, for example with
-`npm link` inside `packages/cli`. Then, in the repository you want to work on:
+This puts `kodel` and `kodel-hook` on your `PATH`; the agents' hooks call `kodel-hook`, so install it
+globally rather than running `kodel` through `npx`. Then, in the repository you want to work on:
 
 ```bash
 kodel init          # MCP server, the /kodel-run skill, config and hooks for the agents found here
@@ -148,6 +149,9 @@ behind this (untrusted agent input, fail-closed, redaction on every write, human
 [docs/history.md](docs/history.md).
 
 ## Contributing
+
+To work on Kodel itself you need [Bun](https://bun.sh) as well as Node. `bun run build` produces
+`packages/cli/dist/kodel.js`, the same file that is published.
 
 ```bash
 bun install --frozen-lockfile
