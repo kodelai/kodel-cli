@@ -20,6 +20,8 @@ export interface Price {
   cache_read: number;
   cache_write: number;
   cache_write_1h?: number;
+  /** A prompt over this many tokens is flagged as long context (`LONG_CONTEXT_TOKENS` when the table does not say). */
+  long_context_tokens?: number;
 }
 
 /** The override of one model: all four prices (a partial entry is refused), the 1-hour write optional. */
@@ -49,6 +51,7 @@ const entrySchema = z
     cache_read: rate,
     cache_write: rate,
     cache_write_1h: rate.optional(),
+    long_context_tokens: z.number().int().positive().optional(),
     sourceUrl: z.string().url(),
     checkedAt: day.nullable(),
   })

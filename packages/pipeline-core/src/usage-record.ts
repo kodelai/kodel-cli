@@ -29,6 +29,8 @@ export const USAGE_FAILURES = [
   "agent_unsupported",
   /** The run has journaled as many `usage_recorded` as it may: nothing more is counted. */
   "cap",
+  /** The run's own account refused a record (an id it does not accept, the run went away): the pass stopped. */
+  "record_refused",
 ] as const;
 export type UsageFailure = (typeof USAGE_FAILURES)[number];
 
@@ -275,7 +277,8 @@ export function summarizeCost(totals: UsageTotals): CostSummary {
     longContext += usage.long_context_calls;
     calls += usage.api_calls;
   }
-  const known = calls - unpriced > 0;
+  // A correction adds dollars and no call (`correctionDelta`), so a model line made of one has cost and no priced call.
+  const known = calls - unpriced > 0 || reported + computed > 0;
   const basis =
     reported > 0 && computed > 0
       ? "mixed"

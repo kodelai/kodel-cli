@@ -66,7 +66,7 @@ describe("t9jrs check-prices network mode (saved pages)", () => {
 
   test("t9jrs_check_prices_exit_codes: a changed price is exit 1 and names the model", () => {
     const dir = pagesWith((html) =>
-      html.replace(/(<td>Claude Sonnet 5\.5<\/td><td>)\$3 /, "$1$$4 "),
+      html.replace(/(<td>Claude Sonnet 5\.5<\/td><td>)\$2 /, "$1$$4 "),
     );
     const { code, out } = run(["--pages", dir]);
     expect(code).toBe(1);
@@ -158,7 +158,7 @@ describe("t9jrs check-prices network mode (loopback server)", () => {
 });
 
 describe("t9jrs check-prices --local", () => {
-  // sonnet-5-5 is $3 per million input tokens, so one response with 1 000 000 input tokens costs $3.00.
+  // sonnet-5-5 is $2 per million input tokens, so one response with 1 000 000 input tokens costs $2.00.
   function project(costStates: object[] | null, withMarker = true) {
     const proj = mkdtempSync(join(scratch, "proj-"));
     if (withMarker) {
@@ -210,14 +210,14 @@ describe("t9jrs check-prices --local", () => {
   });
 
   test("t9jrs_check_prices_local_drift_over_10pct: 9.9% is not flagged", () => {
-    const { proj, configDir } = project([state(3 / 1.099)]);
+    const { proj, configDir } = project([state(2 / 1.099)]);
     const { code, out } = run(["--local", "--root", proj, "--config-dir", configDir]);
     expect(code).toBe(0);
     expect(out).toContain("compared 1 session(s)");
   });
 
   test("t9jrs_check_prices_local_drift_over_10pct: 10.1% is flagged, exit 1", () => {
-    const { proj, configDir } = project([state(3 / 1.101)]);
+    const { proj, configDir } = project([state(2 / 1.101)]);
     const { code, out } = run(["--local", "--root", proj, "--config-dir", configDir]);
     expect(code).toBe(1);
     expect(out).toContain("s1.jsonl");
@@ -231,7 +231,7 @@ describe("t9jrs check-prices --local", () => {
   });
 
   test("t9jrs_check_prices_local_drift_over_10pct: models the table lacks are listed", () => {
-    const { proj, configDir } = project([state(3)]);
+    const { proj, configDir } = project([state(2)]);
     const file = join(configDir, "projects", projectFolderName(proj), "s2.jsonl");
     writeFileSync(
       file,

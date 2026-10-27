@@ -4,6 +4,7 @@ import ts from "typescript";
 import {
   addDelta,
   buildDelta,
+  correctionDelta,
   costOf,
   DEDUPE_CAP,
   decide,
@@ -79,7 +80,7 @@ describe("t9jrs the price table and the cost of an event", () => {
   });
 
   test("t9jrs_price_maths", () => {
-    // sonnet: 3 / 15 / 0.3 / 3.75 / 6 dollars per million tokens
+    // sonnet 5.5: 2 / 10 / 0.2 / 2.5 / 4 dollars per million tokens
     const e = event({
       input: 1_000,
       output: 500,
@@ -89,8 +90,8 @@ describe("t9jrs the price table and the cost of an event", () => {
     });
     const price = resolvePrice(defaultPricing(), e.model, e.ts)?.price;
     expect(price).toBeDefined();
-    // 1000*3 + 500*15 + 2000*0.3 + 3000*3.75 + 1000*6 = 28350 -> 0.02835
-    expect(priceEvent(e, price as NonNullable<typeof price>)).toBe(0.02835);
+    // 1000*2 + 500*10 + 2000*0.2 + 3000*2.5 + 1000*4 = 18900 -> 0.0189
+    expect(priceEvent(e, price as NonNullable<typeof price>)).toBe(0.0189);
   });
 
   test("t9jrs_1h_write_priced_at_its_own_rate", () => {
@@ -140,6 +141,42 @@ describe("t9jrs the price table and the cost of an event", () => {
     expect(summarizeCost(totals).long_context).toBe(true);
     // the price is the same flat one: the flag only says the cost may be low
     expect(costOf(big, defaultPricing()).computed_usd).toBeGreaterThan(0);
+  });
+
+  test("t9jrs_long_context_threshold_is_the_models_own", () => {
+    const over100k = { input: 100, cache_read: 100_001 };
+    const over200k = { input: 100, cache_read: 200_001 };
+    // haiku 5.5 steps at 100K prompt tokens, the others at 200K
+    const haiku = (over: Partial<UsageEvent>) => event({ model: "claude-haiku-5-5", ...over });
+    const sonnet = (over: Partial<UsageEvent>) => event({ model: "claude-sonnet-5-5", ...over });
+    const calls = (events: UsageEvent[], model: string) =>
+      buildDelta(events, defaultPricing()).models[model]?.long_context_calls;
+    expect(SHIPPED_PRICES.models["claude-haiku-5-5"]?.[0]?.long_context_tokens).toBe(100_000);
+    expect(calls([haiku({ input: 100, cache_read: 99_899 })], "claude-haiku-5-5")).toBe(0);
+    expect(calls([haiku(over100k)], "claude-haiku-5-5")).toBe(1);
+    expect(calls([sonnet(over100k)], "claude-sonnet-5-5")).toBe(0);
+    expect(calls([sonnet({ input: 100, cache_read: 199_900 })], "claude-sonnet-5-5")).toBe(0);
+    expect(calls([sonnet(over200k)], "claude-sonnet-5-5")).toBe(1);
+    // a model with no price has no threshold of its own: the default one
+    expect(calls([event({ model: "claude-future-9", ...over100k })], "claude-future-9")).toBe(0);
+    expect(calls([event({ model: "claude-future-9", ...over200k })], "claude-future-9")).toBe(1);
+  });
+
+  test("t9jrs_model_line_made_of_a_correction_has_its_cost", () => {
+    // the correction of a response counted while it was open adds dollars and no call (`correctionDelta`):
+    // a model line made of one only must not read as an unknown cost, and must agree with the total
+    const rest = correctionDelta(
+      event({ input: 1_000_000, output: 0 }),
+      { input: 0, output: 0, cache_read: 0, cache_write: 0, cache_write_1h: 0 },
+      defaultPricing(),
+    );
+    expect(rest).toBeDefined();
+    const line = newTotals();
+    addDelta(line, rest as UsageDelta);
+    const model = line.models["claude-sonnet-5-5"];
+    expect(model?.api_calls).toBe(0);
+    expect(model?.computed_usd).toBe(2);
+    expect(summarizeCost(line)).toMatchObject({ usd: 2, basis: "computed", partial: false });
   });
 
   test("t9jrs_rounding_pinned", () => {
@@ -226,7 +263,7 @@ describe("t9jrs the price table and the cost of an event", () => {
     expect(summarizeCost(totals)).toMatchObject({ usd: null, partial: true, basis: "unknown" });
     // a known model beside it: the cost is a part, and says so
     addDelta(totals, buildDelta([event({ input: 1_000_000 })], defaultPricing()));
-    expect(summarizeCost(totals)).toMatchObject({ usd: 3, partial: true, basis: "computed" });
+    expect(summarizeCost(totals)).toMatchObject({ usd: 2, partial: true, basis: "computed" });
   });
 
   test("t9jrs_reported_zero_is_not_unknown", () => {

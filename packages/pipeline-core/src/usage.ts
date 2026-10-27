@@ -45,8 +45,9 @@ function billableInput(event: UsageEvent): number {
 const oneHourOf = (event: UsageEvent): number =>
   Math.min(event.cache_write_1h ?? 0, event.cache_write);
 
-export function isLongContext(event: UsageEvent): boolean {
-  return billableInput(event) + event.cache_read + event.cache_write > LONG_CONTEXT_TOKENS;
+/** `threshold` is the model's own (`long_context_tokens` of its price); the default holds for a model with no price. */
+export function isLongContext(event: UsageEvent, threshold = LONG_CONTEXT_TOKENS): boolean {
+  return billableInput(event) + event.cache_read + event.cache_write > threshold;
 }
 
 /** Dollars for the tokens of `event` at `price`. `reasoning` is inside `output` and is not added. */
@@ -121,7 +122,8 @@ export function buildDelta(
     entry.cache_write += event.cache_write;
     entry.cache_write_1h += oneHourOf(event);
     entry.api_calls += 1;
-    if (isLongContext(event)) entry.long_context_calls += 1;
+    const threshold = resolvePrice(context, event.model, event.ts)?.price.long_context_tokens;
+    if (isLongContext(event, threshold)) entry.long_context_calls += 1;
     entry.reported_usd = roundUsd(entry.reported_usd + cost.reported_usd);
     entry.computed_usd = roundUsd(entry.computed_usd + cost.computed_usd);
     if (cost.unpriced) entry.unpriced_calls += 1;
@@ -235,6 +237,10 @@ export function splitBySpans(
   return { credited, outside };
 }
 
+/** The key of the set of repeats (`dedupeUsage`): the same for a response whole and for the same one still open. */
+export const usageDedupeKey = (event: Pick<UsageEvent, "message_id" | "request_id">): string =>
+  `${event.message_id}\u0000${event.request_id ?? ""}`;
+
 /**
  * Leave out an event already counted: the same response read from the main log and from a subagent's, by `message_id`
  * and `request_id`. `seen` is the caller's, kept across streams; once it holds `cap` keys it stops growing and the
@@ -248,7 +254,7 @@ export function dedupeUsage(
   const fresh: UsageEvent[] = [];
   let overflow = false;
   for (const event of events) {
-    const key = `${event.message_id}\u0000${event.request_id ?? ""}`;
+    const key = usageDedupeKey(event);
     if (seen.has(key)) continue;
     if (seen.size >= cap) overflow = true;
     else seen.add(key);
