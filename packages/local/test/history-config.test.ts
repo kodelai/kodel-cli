@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   DEFAULT_AGENT_LOG,
   DEFAULT_HISTORY,
+  DEFAULT_USAGE,
   KodelError,
   PipelineService,
   parsePipeline,
@@ -106,6 +107,7 @@ describe("starting a run needs git when history.changes is on", () => {
     expect((await startedRecord(host, run.runId))?.history).toEqual({
       ...DEFAULT_HISTORY,
       agent_log: DEFAULT_AGENT_LOG,
+      usage: DEFAULT_USAGE,
     });
   });
 
@@ -216,6 +218,7 @@ describe("run_started.history", () => {
       executor: { enabled: true },
       tool_log: { enabled: false },
       agent_log: DEFAULT_AGENT_LOG,
+      usage: DEFAULT_USAGE,
     });
   });
 

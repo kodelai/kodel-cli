@@ -74,7 +74,9 @@ describe("t3bk2 the page about the agent log", () => {
 
   test("t3bk2_history_keys_exact", async () => {
     // the sections of `history` the config reads: the categories with a switch, and the one with more keys
-    expect([...HISTORY_SECTION_KEYS].sort()).toEqual([...HISTORY_CATEGORIES, "agent_log"].sort());
+    expect([...HISTORY_SECTION_KEYS].sort()).toEqual(
+      [...HISTORY_CATEGORIES, "agent_log", "usage"].sort(),
+    );
     // and the comment that tells which are which says so
     const source = await readFile(
       new URL("../../pipeline-core/src/history-config.ts", import.meta.url).pathname,

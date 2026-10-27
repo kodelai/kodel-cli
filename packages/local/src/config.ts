@@ -11,11 +11,13 @@ import {
   DEFAULT_TASK_ON_RUN,
   defaultAgentLog,
   defaultHistory,
+  defaultUsage,
   type HistoryConfig,
   isValidGlob,
   KodelError,
   MAX_SUPPORTED_MAJOR,
   parseVersion,
+  pricesOverrideSchema,
   TASK_ON_RUN_MODES,
   type TaskOnRunMode,
 } from "@kodel-ai/pipeline-core";
@@ -140,6 +142,15 @@ const agentLogSchema = z
   })
   .strict();
 
+// `prices` is the shipped table's override: per model, all four prices, a safe id and a bound on how many, so what is
+// frozen into the run's state is never free text.
+const usageSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    prices: pricesOverrideSchema.optional(),
+  })
+  .strict();
+
 // Strict at every level like the rest: a misspelled category must not leave a switch on without the
 // person noticing, and a switch is the point of this section.
 const historySchema = z
@@ -164,6 +175,7 @@ const historySchema = z
     executor: z.object({ enabled: z.boolean().optional() }).strict().optional(),
     tool_log: z.object({ enabled: z.boolean().optional() }).strict().optional(),
     agent_log: agentLogSchema.optional(),
+    usage: usageSchema.optional(),
   })
   .strict();
 
@@ -242,7 +254,7 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
         agent_hints: { ...DEFAULT_AGENT_HINTS },
         decisions: { dialog: false, agent: { ...DEFAULT_DECISIONS.agent } },
         tasks: { ...DEFAULT_TASKS, on_run: { ...DEFAULT_TASKS.on_run }, adapters: {} },
-        history: { ...defaultHistory(), agent_log: defaultAgentLog() },
+        history: { ...defaultHistory(), agent_log: defaultAgentLog(), usage: defaultUsage() },
       };
     }
     throw error;
@@ -327,6 +339,10 @@ function mergeHistory(given: z.infer<typeof historySchema> | undefined): History
     executor: { enabled: given?.executor?.enabled ?? d.executor.enabled },
     tool_log: { enabled: given?.tool_log?.enabled ?? d.tool_log.enabled },
     agent_log: mergeAgentLog(given?.agent_log),
+    usage: {
+      enabled: given?.usage?.enabled ?? defaultUsage().enabled,
+      prices: given?.usage?.prices ?? {},
+    },
   };
 }
 
