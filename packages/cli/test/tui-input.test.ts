@@ -7,6 +7,8 @@ describe("tui input", () => {
   test("keys: letters, arrows, enter, tab, escape and ctrl-c are named", () => {
     expect(parseInput("q")).toEqual([key("q")]);
     expect(parseInput("\u001b[A")).toEqual([key("up")]);
+    expect(parseInput("\u001b[5~")).toEqual([key("pageup")]);
+    expect(parseInput("\u001b[6~")).toEqual([key("pagedown")]);
     expect(parseInput("\u001bOB")).toEqual([key("down")]);
     expect(parseInput("\r")).toEqual([key("enter")]);
     expect(parseInput("\t")).toEqual([key("tab")]);

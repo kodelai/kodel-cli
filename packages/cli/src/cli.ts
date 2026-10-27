@@ -478,16 +478,21 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       requireHuman();
       const { runTui } = await import("./tui/run");
       if (opts.demo) {
-        const { demoSessions } = await import("./tui/demo");
-        await runTui(process.stdin, process.stdout, async () => demoSessions(Date.now()), "demo", {
+        const { demoGateDetail, demoSessions } = await import("./tui/demo");
+        // One start time for the whole run, so the sample waits keep their identity and only age.
+        const base = Date.now();
+        await runTui(process.stdin, process.stdout, async () => demoSessions(base), "demo", {
           mouse: opts.mouse === true,
+          loadDetail: async (runId) => demoGateDetail(runId, base),
         });
         return;
       }
       const { loadSessions } = await import("./tui/load");
+      const { loadGateDetail } = await import("./tui/gate");
       const h = await host();
       await runTui(process.stdin, process.stdout, () => loadSessions(h, Date.now()), "project", {
         mouse: opts.mouse === true,
+        loadDetail: (runId) => loadGateDetail(h, runId),
       });
     });
 

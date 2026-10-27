@@ -45,6 +45,7 @@ import {
   parsePipeline,
   parseSnapshot,
   type RedactRule,
+  type ResultReport,
   type RunEvent,
   type RunFacts,
   type RunReport,
@@ -1834,6 +1835,11 @@ export class LocalRun {
     } catch {
       // nothing more to do about it
     }
+  }
+
+  /** What an attempt reported as results (a review's findings, a person's comments); read-only. */
+  resultsOf(node: string, attempt: number): Promise<ResultReport | undefined> {
+    return this.host.store.readReport(this.runId, node, attempt);
   }
 
   /**

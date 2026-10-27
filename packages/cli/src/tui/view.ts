@@ -16,8 +16,10 @@ import type { InputEvent } from "./input";
 import type { Loaded } from "./load";
 import {
   formatAge,
+  type GateDetail,
   NEED_KEYS,
   NEED_TAG,
+  type PathStep,
   type Session,
   type StepState,
   sortSessions,
@@ -44,6 +46,15 @@ export interface Model {
   now: number;
   /** Whether the terminal is told to send mouse events; off lets the person select text as usual. */
   mouse: boolean;
+  /** What the card of a run at a human step shows, by `detailKey`; filled in as it is read. */
+  details: Record<string, GateDetail>;
+  /** How many lines of the card are scrolled off the top. */
+  cardScroll: number;
+}
+
+/** A run's gate detail is good for the wait it was read for: a new wait is a new key. */
+export function detailKey(s: Session): string {
+  return `${s.id}:${s.since}`;
 }
 
 export interface Size {
@@ -93,7 +104,13 @@ export function initialModel(
     frame: 0,
     now,
     mouse,
+    details: {},
+    cardScroll: 0,
   };
+}
+
+export function withDetail(m: Model, key: string, detail: GateDetail): Model {
+  return { ...m, details: { ...m.details, [key]: detail } };
 }
 
 /** New data from disk: the selection stays on the same session when it is still there. */
@@ -124,7 +141,7 @@ function selectedSession(m: Model): Session | undefined {
   return m.sessions.find((s) => s.id === m.selected) ?? m.sessions[0];
 }
 
-export function update(m: Model, key: string): Model {
+export function update(m: Model, key: string, size: Size = DEFAULT_SIZE): Model {
   if (key === "ctrl-c") return { ...m, quit: true };
   const current = selectedSession(m);
   if (m.confirm !== null && current) {
@@ -147,6 +164,12 @@ export function update(m: Model, key: string): Model {
     case "down":
     case "j":
       return moveSelection(m, 1);
+    case "pagedown":
+    case " ":
+      return scrollCard(m, size, PAGE);
+    case "pageup":
+    case "b":
+      return scrollCard(m, size, -PAGE);
     case "m":
       return {
         ...m,
@@ -181,7 +204,22 @@ function moveSelection(m: Model, by: -1 | 1): Model {
     m.sessions.findIndex((s) => s.id === selectedSession(m)?.id),
   );
   const next = m.sessions[Math.min(m.sessions.length - 1, Math.max(0, at + by))];
-  return { ...m, selected: next?.id ?? m.selected, notice: "" };
+  return { ...m, selected: next?.id ?? m.selected, notice: "", cardScroll: 0 };
+}
+
+const DEFAULT_SIZE: Size = { cols: 120, rows: 30 };
+const PAGE = 10;
+
+function cardWidthFor({ cols }: Size): number {
+  return cols >= WIDE_COLS ? cols - listWidthFor(cols) - 3 : cols - 2;
+}
+
+/** Scroll the card, never past its last line. */
+function scrollCard(m: Model, size: Size, by: number): Model {
+  const height = size.rows - 3;
+  const length = cardLines(selectedSession(m), m, cardWidthFor(size)).length;
+  const max = Math.max(0, length - height);
+  return { ...m, cardScroll: Math.min(max, Math.max(0, m.cardScroll + by)) };
 }
 
 function decide(m: Model, s: Session, key: "a" | "r"): Model {
@@ -228,7 +266,7 @@ const STEP_GLYPH: Record<StepState, string> = {
   failed: red("✗"),
 };
 
-const TIME_WIDTH = 7;
+const TIME_WIDTH = 8;
 
 function tagOf(s: Session): string {
   return s.status === "waiting" && s.need ? NEED_TAG[s.need] : s.step;
@@ -251,7 +289,7 @@ function listLines(m: Model, width: number): ListLines {
   const ids: (string | undefined)[] = [];
   let selectedAt = 0;
   const tagWidth = Math.min(13, Math.max(7, ...m.sessions.map((s) => tagOf(s).length)));
-  const titleWidth = Math.max(8, width - tagWidth - 12);
+  const titleWidth = Math.max(8, width - tagWidth - 13);
   for (const g of GROUPS) {
     const members = m.sessions.filter(g.of);
     if (members.length === 0) continue;
@@ -305,8 +343,176 @@ function actionLine(s: Session, project: boolean): string {
   return `${parts.join("   ")}${project ? dim("   (shows the command for now)") : ""}`;
 }
 
-function cardLines(s: Session | undefined, m: Model, width: number, height: number): string[] {
+const SEVERITY_RANK: Record<string, number> = {
+  blocker: 0,
+  critical: 1,
+  major: 2,
+  minor: 3,
+  info: 4,
+};
+
+function severityStyle(severity: string, text: string): string {
+  const rank = SEVERITY_RANK[severity] ?? 4;
+  return rank <= 2 ? red(text) : rank === 3 ? yellow(text) : dim(text);
+}
+
+/** The end of a path is the part that tells files apart. */
+function tailFit(text: string, width: number): string {
+  if (text.length <= width) return text;
+  return `…${text.slice(text.length - width + 1)}`;
+}
+
+function formatMs(ms: number): string {
+  if (ms < 1000) return "";
+  if (ms < 60_000) return ` ${(ms / 1000).toFixed(1)}s`;
+  return ` ${Math.floor(ms / 60_000)}m${String(Math.round((ms % 60_000) / 1000)).padStart(2, "0")}`;
+}
+
+/** Tokens laid out in lines no wider than `width`, joined by `glue`. */
+function flow(tokens: { text: string; plain: number }[], glue: string, width: number): string[] {
+  const lines: string[] = [];
+  let line = "";
+  let used = 0;
+  for (const t of tokens) {
+    if (used > 0 && used + glue.length + t.plain > width) {
+      lines.push(line);
+      line = t.text;
+      used = t.plain;
+    } else {
+      line += used === 0 ? t.text : dim(glue) + t.text;
+      used += used === 0 ? t.plain : glue.length + t.plain;
+    }
+  }
+  if (line !== "") lines.push(line);
+  return lines;
+}
+
+function pathToken(step: PathStep, current: string): { text: string; plain: number } {
+  const note = step.note ? ` ${step.note}` : "";
+  if (step.slug === current) {
+    const t = `◐ ${step.slug}${note}`;
+    return { text: bold(yellow(t)), plain: t.length };
+  }
+  const plain = `${step.slug}${note} ✓`.length;
+  if (step.state === "done") return { text: `${step.slug}${note} ${green("✓")}`, plain };
+  if (step.state === "failed") return { text: red(`${step.slug}${note} ✗`), plain };
+  return { text: dim(`${step.slug}${note}`), plain: step.slug.length + note.length };
+}
+
+const FINDINGS_SHOWN = 3;
+
+function approveCard(s: Session, d: GateDetail, m: Model, width: number): string[] {
+  const out: string[] = [];
+  const inner = Math.max(10, width - 4);
+  const bar = yellow("│");
+  out.push(`${glyph(s, m.frame)} ${bold(s.title)}`);
+  out.push(dim(`${s.id} · ${s.pipeline}`));
+  if (s.workdir) out.push(dim(tailFit(s.workdir, width)));
+  out.push("");
+  out.push(bold(yellow(`${d.position} · ${d.node} · waiting ${formatAge(m.now - s.since)}`)));
+  out.push(
+    ...flow(
+      d.path.map((p) => pathToken(p, d.node)),
+      " → ",
+      width,
+    ),
+  );
+  out.push("");
+  out.push(yellow("┌ You are asked"));
+  for (const line of wrapText(d.prompt, inner)) out.push(`${bar} ${line}`);
+  for (const line of wrapText(d.instructions ?? "", inner)) out.push(`${bar} ${dim(line)}`);
+  if (d.comments > 0) {
+    out.push(
+      `${bar} ${dim(`${d.comments} comment${d.comments === 1 ? "" : "s"} recorded at this step`)}`,
+    );
+  }
+  out.push(`${yellow("└")} ${actionLine(s, m.source === "project")}`);
+  out.push("");
+
+  const failed = d.checks.filter((c) => !c.passed);
+  const passed = d.checks.length - failed.length;
+  out.push(
+    dim(
+      `CHECKED BY THE ENGINE · ${passed} passed${failed.length ? `, ${failed.length} failed` : ""}`,
+    ),
+  );
+  for (const c of failed) out.push(red(`✗ ${c.label}${formatMs(c.ms ?? 0)}`));
+  const ok = d.checks
+    .filter((c) => c.passed)
+    .map((c) => {
+      const t = `${c.label}${formatMs(c.ms ?? 0)}`;
+      return { text: `${green("✓")} ${t}`, plain: t.length + 2 };
+    });
+  out.push(...flow(ok, "  ", width));
+  if (d.changedAfterChecks.length > 0) {
+    const n = d.changedAfterChecks.length;
+    const names = d.changedAfterChecks.slice(0, 3).join(", ");
+    const more = n > 3 ? ` +${n - 3}` : "";
+    const text = `⚠ ${n} file${n === 1 ? "" : "s"} changed after the checks passed: ${names}${more}`;
+    out.push(...wrapText(text, width).map(yellow));
+  }
+  out.push("");
+
+  const c = d.changes;
+  if (c.kind === "files") {
+    const files = `${c.totalFiles} file${c.totalFiles === 1 ? "" : "s"}`;
+    out.push(dim(`CHANGES · ${files} · ${c.totalLines} lines`));
+    for (const [file, lines] of c.files.slice(0, 8)) {
+      out.push(`${fit(tailFit(file, width - 7), width - 6)}${String(lines).padStart(5)}`);
+    }
+    if (c.files.length > 8) out.push(dim(`… ${c.files.length - 8} more`));
+  } else if (c.kind === "none") {
+    out.push(dim("CHANGES"), "No files changed.");
+  } else if (c.kind === "unavailable") {
+    out.push(
+      dim("CHANGES"),
+      ...wrapText(`Cannot tell what changed: ${c.reason}`, width).map(yellow),
+    );
+  } else {
+    out.push(dim("CHANGES"), dim("This is not a git repository."));
+  }
+  out.push("");
+
+  if (d.review) {
+    const rows = [...d.review.findings].sort(
+      (a, b) => (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9),
+    );
+    const counts = new Map<string, number>();
+    for (const f of rows) counts.set(f.severity, (counts.get(f.severity) ?? 0) + 1);
+    const summary = [...counts.entries()]
+      .map(([sev, n]) => severityStyle(sev, `${n} ${sev}`))
+      .join(dim(" · "));
+    out.push(
+      dim(`${d.review.node.toUpperCase()} FINDINGS · the agent's, ${d.review.completeness}`),
+    );
+    out.push(rows.length === 0 ? green("No findings.") : summary);
+    for (const f of rows.slice(0, FINDINGS_SHOWN)) {
+      out.push(`${severityStyle(f.severity, fit(f.severity, 8))}${tailFit(f.location, width - 9)}`);
+      for (const line of wrapText(f.description, width - 2).slice(0, 2)) out.push(`  ${dim(line)}`);
+    }
+    if (rows.length > FINDINGS_SHOWN) out.push(dim(`… ${rows.length - FINDINGS_SHOWN} more`));
+    out.push("");
+  }
+
+  if (d.decisions.length > 0) {
+    out.push(dim("EARLIER DECISIONS"));
+    for (const x of d.decisions) {
+      const mark = x.decision === "approved" ? green("✓") : red("✗");
+      const why = x.reason ? ` ${dim(`“${x.reason}”`)}` : "";
+      out.push(`${mark} ${x.node} ${x.decision} ${dim(`${formatAge(m.now - x.ts)} ago`)}${why}`);
+    }
+    out.push("");
+  }
+  out.push(dim("JOURNAL"));
+  for (const l of s.log) out.push(dim(l));
+  return out.map((l) => fit(l, width));
+}
+
+/** Every line of the card; the screen shows the part from `cardScroll` on. */
+function cardLines(s: Session | undefined, m: Model, width: number): string[] {
   if (!s) return [dim("No session selected.")];
+  const detail = s.need === "approve" ? m.details[detailKey(s)] : undefined;
+  if (detail) return approveCard(s, detail, m, width);
   const out: string[] = [];
   out.push(`${glyph(s, m.frame)} ${bold(s.title)}`);
   out.push(dim(`${s.id} · ${s.pipeline}`));
@@ -320,8 +526,8 @@ function cardLines(s: Session | undefined, m: Model, width: number, height: numb
     out.push(`${yellow("│")} ${green("Ready to decide")}`);
     if (s.after) out.push(`${yellow("│")} ${dim(`After that: ${s.after}`)}`);
     if (s.command) out.push(`${yellow("│")} ${dim(`$ ${s.command}`)}`);
-    const actions = actionLine(s, m.source === "project");
-    out.push(`${yellow("└")} ${actions}`);
+    out.push(`${yellow("└")} ${actionLine(s, m.source === "project")}`);
+    if (s.need === "approve") out.push(dim("Reading the details…"));
     out.push("");
   } else if (s.status === "failed") {
     out.push(red("┌ failed"));
@@ -354,11 +560,20 @@ function cardLines(s: Session | undefined, m: Model, width: number, height: numb
     }
     out.push("");
   }
-  // The journal is the tail: when the card is short, the newest records stay.
-  const room = Math.max(1, height - out.length - 1);
   out.push(dim("JOURNAL"));
-  for (const l of s.log.slice(-room)) out.push(dim(l));
+  for (const l of s.log) out.push(dim(l));
   return out.map((l) => fit(l, width));
+}
+
+/** The lines of the card that fit, with a mark where more is above or below. */
+function cardWindow(lines: string[], scroll: number, height: number, width: number): string[] {
+  const start = Math.min(Math.max(0, scroll), Math.max(0, lines.length - height));
+  const shown = lines.slice(start, start + height);
+  if (start > 0 && shown.length > 0) shown[0] = dim(fit("▲ PgUp for earlier", width));
+  if (start + height < lines.length && shown.length > 0) {
+    shown[shown.length - 1] = dim(fit("▼ PgDn for more", width));
+  }
+  return shown;
 }
 
 const MENU_BRAND = " kodel ";
@@ -435,14 +650,21 @@ export function render(m: Model, { cols, rows }: Size): string[] {
       const listWidth = listWidthFor(cols);
       const cardWidth = cols - listWidth - 3;
       const left = listView(m, listWidth, bodyHeight).lines;
-      const right = cardLines(current, m, cardWidth, bodyHeight).slice(0, bodyHeight);
+      const right = cardWindow(
+        cardLines(current, m, cardWidth),
+        m.cardScroll,
+        bodyHeight,
+        cardWidth,
+      );
       body = Array.from({ length: bodyHeight }, (_, i) => {
         const l = fit(left[i] ?? "", listWidth);
         const r = fit(right[i] ?? "", cardWidth);
         return `${l} ${dim("│")} ${r}`;
       });
     } else if (m.focus === "card") {
-      body = cardLines(current, m, cols - 2, bodyHeight).map((l) => ` ${l}`);
+      body = cardWindow(cardLines(current, m, cols - 2), m.cardScroll, bodyHeight, cols - 2).map(
+        (l) => ` ${l}`,
+      );
     } else {
       body = listView(m, cols - 1, bodyHeight).lines.map((l) => ` ${l}`);
     }
@@ -495,12 +717,14 @@ export function mouseUpdate(
   if (!m.mouse || m.confirm !== null) return m;
   const wide = size.cols >= WIDE_COLS;
   if (event.action !== "press") {
-    if (m.section !== 0 || (!wide && m.focus === "card")) return m;
-    return moveSelection(m, event.action === "wheel_up" ? -1 : 1);
+    if (m.section !== 0) return m;
+    const direction = event.action === "wheel_up" ? -1 : 1;
+    const overCard = wide ? event.x > listWidthFor(size.cols) : m.focus === "card";
+    return overCard ? scrollCard(m, size, direction * 3) : moveSelection(m, direction);
   }
   const hit = hitTest(m, size, event.x, event.y);
   if (!hit) return m;
   if (hit.kind === "menu") return { ...m, section: hit.section, notice: "" };
   if (!wide && hit.id === m.selected) return { ...m, focus: "card", notice: "" };
-  return { ...m, selected: hit.id, notice: "" };
+  return { ...m, selected: hit.id, notice: "", cardScroll: 0 };
 }

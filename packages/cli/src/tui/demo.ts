@@ -1,6 +1,6 @@
 /** Sample sessions for `kodel tui --demo`. Nothing here is read from a project. */
 import type { Loaded } from "./load";
-import type { Session, StepLine } from "./session";
+import type { GateDetail, PathStep, Session, StepLine } from "./session";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -188,4 +188,77 @@ export function demoSessions(now: number): Loaded {
     },
   ];
   return { sessions, proposals: 1 };
+}
+
+const step = (slug: string, state: PathStep["state"], human = false, note?: string): PathStep => ({
+  slug,
+  state,
+  human,
+  ...(note ? { note } : {}),
+});
+
+/** What the card of the sample run waiting for approval shows, shaped like a real run's. */
+export function demoGateDetail(runId: string, now: number): GateDetail | undefined {
+  if (runId !== "r_0mvo6g4mi") return undefined;
+  return {
+    node: "final-approval",
+    position: "gate 2 of 2",
+    prompt: "Look at the diff and try the change. Approve to finish, or reject with what is wrong.",
+    path: [
+      step("plan", "done"),
+      step("plan-approval", "done", true),
+      step("impl", "done", false, "×2"),
+      step("verify", "done"),
+      step("test", "done"),
+      step("build", "done"),
+      step("review", "done"),
+      step("final-approval", "waiting", true),
+    ],
+    checks: [
+      { node: "plan", label: "plan diff", passed: true, ms: 153 },
+      { node: "impl", label: "impl diff", passed: true, ms: 158 },
+      { node: "verify", label: "verify", passed: true, ms: 1631 },
+      { node: "test", label: "test", passed: true, ms: 85_684 },
+      { node: "build", label: "build", passed: true, ms: 282 },
+      { node: "review", label: "review result", passed: true, ms: 61 },
+    ],
+    review: {
+      node: "review",
+      completeness: "complete",
+      findings: [
+        {
+          severity: "minor",
+          location: "packages/cli/test/cli.test.ts:296",
+          description:
+            "The plan lists a test for a run whose state cannot be read, and none was added. The code handles it, so this is a coverage gap only.",
+        },
+        {
+          severity: "minor",
+          location: "packages/cli/src/format.ts:9",
+          description:
+            "line.slice(0, max) counts UTF-16 units and can split a surrogate pair at the cut.",
+        },
+        {
+          severity: "info",
+          location: "packages/cli/src/cli.ts:168",
+          description: "The --full description differs slightly from the plan's wording. Harmless.",
+        },
+      ],
+    },
+    changes: {
+      kind: "files",
+      files: [
+        ["packages/cli/test/cli.test.ts", 142],
+        ["packages/cli/src/cli.ts", 96],
+        ["packages/cli/src/format.ts", 61],
+        ["docs/plans/make-status-readable.md", 58],
+        ["packages/cli/src/table.ts", 22],
+      ],
+      totalFiles: 5,
+      totalLines: 379,
+    },
+    changedAfterChecks: [],
+    decisions: [{ node: "plan-approval", decision: "approved", ts: now - 6 * 3_600_000 }],
+    comments: 0,
+  };
 }

@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { stripAnsi, visibleLength } from "../src/tui/ansi";
-import { demoSessions } from "../src/tui/demo";
-import type { Session } from "../src/tui/session";
+import { demoGateDetail, demoSessions } from "../src/tui/demo";
+import type { GateDetail, Session } from "../src/tui/session";
 import { formatAge } from "../src/tui/session";
 import {
+  detailKey,
   hitTest,
   initialModel,
   isAnimated,
@@ -14,6 +15,7 @@ import {
   update,
   WIDE_COLS,
   withData,
+  withDetail,
 } from "../src/tui/view";
 
 const NOW = Date.UTC(2026, 9, 27, 15, 0, 0);
@@ -288,11 +290,22 @@ describe("tui mouse", () => {
     expect(m.selected).toBe(last);
   });
 
-  test("the wheel leaves a card and other sections alone", () => {
-    const m = on();
-    const card = { ...m, focus: "card" as const };
-    expect(mouseUpdate(card, NARROW, wheel("wheel_down"))).toBe(card);
-    const other = { ...m, section: 1 };
+  test("the wheel over a card scrolls the card, not the selection; other sections are left alone", () => {
+    const gate = demoSessions(NOW).sessions.find((s) => s.need === "approve");
+    const key = detailKey(gate as Session);
+    const detail = demoGateDetail(gate?.id ?? "", NOW) as GateDetail;
+    const base = withDetail({ ...on(), selected: gate?.id ?? "" }, key, detail);
+    const small = { cols: 70, rows: 16 };
+    const card = { ...base, focus: "card" as const };
+    const scrolled = mouseUpdate(card, small, wheel("wheel_down"));
+    expect(scrolled.cardScroll).toBeGreaterThan(0);
+    expect(scrolled.selected).toBe(card.selected);
+    const wide = { cols: 120, rows: 16 };
+    expect(mouseUpdate(base, wide, { ...wheel("wheel_down"), x: 100 }).cardScroll).toBeGreaterThan(
+      0,
+    );
+    expect(mouseUpdate(base, wide, { ...wheel("wheel_down"), x: 5 }).cardScroll).toBe(0);
+    const other = { ...on(), section: 1 };
     expect(mouseUpdate(other, WIDE, wheel("wheel_down"))).toBe(other);
   });
 
@@ -331,5 +344,151 @@ describe("tui mouse", () => {
     expect(y).toBeGreaterThan(0);
     const clicked = mouseUpdate(m, WIDE, press(3, y));
     expect(clicked.selected).toBe(sessions.find((s) => s.title === "finished-run-40")?.id ?? "");
+  });
+});
+
+describe("tui card of a run waiting for approval", () => {
+  const SIZE = { cols: 120, rows: 36 };
+  const gate = () => demoSessions(NOW).sessions.find((s) => s.need === "approve") as Session;
+  const withCard = () => {
+    const g = gate();
+    const m = { ...demo(), selected: g.id };
+    return withDetail(m, detailKey(g), demoGateDetail(g.id, NOW) as GateDetail);
+  };
+  const text = (m: ReturnType<typeof demo>, size = SIZE) => plain(render(m, size)).join("\n");
+
+  test("it says which gate this is, and the way the run took to get there", () => {
+    const out = text(withCard());
+    expect(out).toContain("gate 2 of 2 · final-approval");
+    expect(out).toMatch(/plan ✓ → plan-approval ✓ → impl ×2 ✓/);
+    expect(out).toContain("◐ final-approval");
+  });
+
+  test("it puts the question first, then what the engine checked, then what changed", () => {
+    const out = text(withCard());
+    const at = (needle: string) => out.indexOf(needle);
+    expect(at("You are asked")).toBeGreaterThan(-1);
+    expect(at("CHECKED BY THE ENGINE")).toBeGreaterThan(at("You are asked"));
+    expect(at("CHANGES")).toBeGreaterThan(at("CHECKED BY THE ENGINE"));
+    expect(at("FINDINGS")).toBeGreaterThan(at("CHANGES"));
+    expect(out).toContain("Look at the diff and try the change.");
+  });
+
+  test("checks the engine ran are told apart from what the agent says", () => {
+    const out = text(withCard());
+    expect(out).toContain("CHECKED BY THE ENGINE · 6 passed");
+    expect(out).toContain("test 1m26");
+    expect(out).toContain("REVIEW FINDINGS · the agent's");
+    expect(out).not.toContain("agent says");
+  });
+
+  test("findings come most severe first, a few of them, and the rest are counted", () => {
+    const g = gate();
+    const detail = demoGateDetail(g.id, NOW) as GateDetail;
+    const many: GateDetail = {
+      ...detail,
+      review: {
+        node: "review",
+        completeness: "complete",
+        findings: [
+          { severity: "info", location: "a.ts:1", description: "i1" },
+          { severity: "info", location: "b.ts:2", description: "i2" },
+          { severity: "major", location: "c.ts:3", description: "m1" },
+          { severity: "minor", location: "d.ts:4", description: "n1" },
+          { severity: "info", location: "e.ts:5", description: "i3" },
+        ],
+      },
+    };
+    const out = text(withDetail({ ...demo(), selected: g.id }, detailKey(g), many), {
+      cols: 120,
+      rows: 60,
+    });
+    expect(out.indexOf("c.ts:3")).toBeGreaterThan(-1);
+    expect(out.indexOf("c.ts:3")).toBeLessThan(out.indexOf("d.ts:4"));
+    expect(out).toContain("… 2 more");
+    expect(out).toContain("1 major");
+  });
+
+  test("changes after the checks, and changes that cannot be told, are warnings, not silence", () => {
+    const g = gate();
+    const detail = demoGateDetail(g.id, NOW) as GateDetail;
+    const m = { ...demo(), selected: g.id };
+    const after = text(
+      withDetail(m, detailKey(g), { ...detail, changedAfterChecks: ["src/a.ts", "src/b.ts"] }),
+    );
+    expect(after).toContain("⚠ 2 files changed after the checks passed");
+    const unavailable = text(
+      withDetail(m, detailKey(g), {
+        ...detail,
+        changes: { kind: "unavailable", reason: "git failed" },
+      }),
+    );
+    expect(unavailable).toContain("Cannot tell what changed: git failed");
+    expect(unavailable).not.toContain("No files changed");
+    const failed = text(
+      withDetail(m, detailKey(g), {
+        ...detail,
+        checks: [{ node: "test", label: "test", passed: false }],
+      }),
+    );
+    expect(failed).toContain("✗ test");
+    expect(failed).toContain("1 failed");
+  });
+
+  test("until the details are read the card shows what it has, and says it is reading", () => {
+    const m = { ...demo(), selected: gate().id };
+    const out = text(m);
+    expect(out).toContain("Reading the details…");
+    expect(out).toContain("Step «review» waits for your decision");
+  });
+
+  test("a long card scrolls by page and by the keys, and stops at both ends", () => {
+    const small = { cols: 120, rows: 16 };
+    let m = withCard();
+    expect(text(m, small)).toContain("▼ PgDn for more");
+    m = update(m, "pagedown", small);
+    expect(m.cardScroll).toBe(10);
+    expect(text(m, small)).toContain("▲ PgUp for earlier");
+    for (let i = 0; i < 20; i++) m = update(m, " ", small);
+    const end = m.cardScroll;
+    expect(update(m, "pagedown", small).cardScroll).toBe(end);
+    expect(text(m, small)).not.toContain("▼ PgDn for more");
+    for (let i = 0; i < 20; i++) m = update(m, "b", small);
+    expect(m.cardScroll).toBe(0);
+  });
+
+  test("moving to another run starts its card at the top", () => {
+    const small = { cols: 120, rows: 16 };
+    let m = update(withCard(), "pagedown", small);
+    expect(m.cardScroll).toBeGreaterThan(0);
+    m = update(m, "down", small);
+    expect(m.cardScroll).toBe(0);
+  });
+
+  test("every line of the card fits the width, even a long path and a long file name", () => {
+    const g = gate();
+    const detail = demoGateDetail(g.id, NOW) as GateDetail;
+    const long: GateDetail = {
+      ...detail,
+      changes: {
+        kind: "files",
+        files: [
+          ["packages/pipeline-core/src/some/very/deep/folder/with/a/long-file-name-indeed.ts", 9],
+        ],
+        totalFiles: 1,
+        totalLines: 9,
+      },
+    };
+    for (const size of [
+      { cols: 120, rows: 36 },
+      { cols: 70, rows: 36 },
+    ]) {
+      const m = withDetail(
+        { ...demo(), selected: g.id, focus: "card" as const },
+        detailKey(g),
+        long,
+      );
+      for (const line of render(m, size)) expect(visibleLength(line)).toBe(size.cols);
+    }
   });
 });

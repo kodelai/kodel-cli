@@ -96,3 +96,58 @@ export function sortSessions(sessions: Session[]): Session[] {
     return a.status === "waiting" ? a.since - b.since : b.since - a.since;
   });
 }
+
+/** One step on the way a run goes, in the order it goes. */
+export interface PathStep {
+  slug: string;
+  state: StepState;
+  /** A person decides it. */
+  human: boolean;
+  /** `×2` for a step that ran twice. */
+  note?: string;
+}
+
+/** What the engine itself found out, as opposed to what the agent says. */
+export interface CheckLine {
+  node: string;
+  label: string;
+  passed: boolean;
+  ms?: number;
+}
+
+export interface Finding {
+  severity: string;
+  location: string;
+  description: string;
+}
+
+export type ChangeSummary =
+  | { kind: "files"; files: [string, number][]; totalFiles: number; totalLines: number }
+  | { kind: "none" }
+  | { kind: "unavailable"; reason: string }
+  | { kind: "no_repo" };
+
+export interface DecisionLine {
+  node: string;
+  decision: string;
+  reason?: string;
+  ts: number;
+}
+
+/** Everything the card of a run waiting at a human step shows beyond the list row. */
+export interface GateDetail {
+  node: string;
+  /** `gate 2 of 2` on the way this run takes. */
+  position: string;
+  prompt: string;
+  instructions?: string;
+  path: PathStep[];
+  checks: CheckLine[];
+  review?: { node: string; completeness: string; findings: Finding[] };
+  changes: ChangeSummary;
+  /** Files that changed after the checks passed: the agent kept working. */
+  changedAfterChecks: string[];
+  decisions: DecisionLine[];
+  /** Comments already recorded at this step. */
+  comments: number;
+}
