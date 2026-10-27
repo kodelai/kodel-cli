@@ -124,3 +124,38 @@ Adopted in the plan: every finding of both rounds not listed here. Not adopted, 
 - `store.ts`: `readStateRaw` (`495-520`) and `readJournal` (`613-633`) parse plain JSON, no `v` check on journal records; `redactDeep` on journal events (`975`); `summarizeRun` (`report.ts:207-362`) ignores unknown events.
 - `history-config.ts` (`agent_log` optional, not in `DEFAULT_HISTORY`), `config.ts:145-171` `HISTORY_SECTION_KEYS`, `config.test.ts:279-283` and `agent-log-docs.test.ts:75-77` list the keys; `docs/history.md:294` "Prices (planned)" and `:313-315` the Constraint paragraph.
 - `scripts/build-cli.mjs:24-27` builds `dist/kodel.js` from `main.ts`, which runs the CLI at top level; core uses extensionless imports; CI runs `bun test` before `bun run build`. `tests/agents/harness.ts:226-235` exposes only `total_cost_usd`. `fixtures/formats/README.md`: an optional field needs no new directory. `skills/` has `analyze`, `design`, `kodel-run`.
+
+## Implementation notes (where the build differs from the plan)
+
+Written after the review of the build. What was done differently or not done, plainly:
+
+- **Fixtures are hand-made, not recordings.** `fixtures/history/claude-code/v2.1.310/` (the 1-hour cache tier) and
+  `fixtures/price-pages/` (the saved price page) were written by hand with invented numbers; their READMEs say so. A real,
+  scrubbed recording of a session with 1-hour writes was not committed. `t9jrs_saved_session_agrees_offline` therefore sums the raw
+  file by an independent route and shows that nothing is lost or added; it does not show that a real agent agrees. That is the
+  env-gated `tests/agents/claude-code-usage.test.ts`, which was not run. The golden run `fixtures/usage-run/` was made by the pass of
+  this build over a hand-made log, outside `fixtures/formats/v1/` so that `hashes.json` is untouched; it moves under the frozen
+  formats at the first release.
+- **The price table is unverified.** Every entry has `checkedAt: null`, and the 5.x rows are assumed to cost what the same class of
+  4.5 costs. There are no rows for `claude-opus-4-1`, `claude-opus-4`, `claude-sonnet-4`, `claude-3-7-sonnet` or `claude-3-5-*`, so a
+  run on those models reads `partial` (the accepted behaviour for an unknown model, never `$0`). `scripts/check-prices.mjs` lists the
+  unchecked entries; the saved price page it is tested on is also hand-made, so the repository does not show that the shipped
+  `sourceUrl` parses. The `cost-state` parser is written without a sample of the format.
+- **"A session shared with other work goes to unattributed" is not built.** Only the spans a person was waited for (gates, pauses)
+  go to `unattributed`; whatever else the session says between two steps is credited to the next agent step, as decision 3 says for
+  polling through command nodes. The test named for it is not written.
+- **Dedupe across logs holds within one pass.** The set that tells a repeated response apart is per pass (capped at 200 000 keys),
+  not kept for the run; a read repeated in a later pass (a budget stop, a subagent log that appears later) could count a response
+  twice. Subagent logs do not repeat the main log's responses in the logs seen, so this is rare.
+- **Windows come from passes, not from `step_served`** (decision 3); the plan's test names `t9jrs_window_*` are covered by the
+  boundary tests of `splitBySpans` and the pass tests. `t9jrs_run_over_several_sessions` and `t9jrs_two_sessions_in_one_run` are one
+  test, `t9jrs_two_sessions_in_one_run_and_session_from_hook_index`.
+- **`node_superseded` (a node dropped by a pipeline change) is not exercised.** A cancelled run is (`t9jrs_superseded_or_canceled_attempt_usage_not_lost`).
+- **The JSON import has no import attribute.** `price-table.ts` reads `price-table.json` with a plain `import`; that works for Bun
+  and for the bundled `dist/kodel.js`. An unbundled Node ESM consumer of `@kodel-ai/pipeline-core` (its exports point at `src/`) would
+  need `with { type: "json" }` or a bundler; Kodel Server must be told.
+- **Past 1000 `usage_recorded` events** a run says `cap` (a failure reason) and the log is not read again; past 2000 attempts the
+  rest is counted in `unattributed`.
+- **`t9jrs_` is still a provisional prefix** (decision 7); the PR checklist greps that none is left at merge.
+- **Correction deltas** zero `api_calls`: a model whose totals come only from corrections has no priced call and reads `usd: null`;
+  that cannot happen in a normal pass (the step's own response is always a call).
