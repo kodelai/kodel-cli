@@ -684,7 +684,12 @@ describe("t9jrs the account of usage in the run machine", () => {
         ),
       },
     };
-    expect(apply(crowded, recorded())).toMatchObject({ noop: true, journal: [] });
+    // past the limit the record is not refused: it counts in the run's unattributed use, so the sum stays whole
+    const spilled = apply(crowded, recorded());
+    expect(spilled.journal).toHaveLength(1);
+    expect(spilled.journal[0]).not.toHaveProperty("node");
+    expect(Object.keys(spilled.state.usage?.attempts ?? {})).toHaveLength(MAX_USAGE_ATTEMPTS);
+    expect(Object.keys(spilled.state.usage?.unattributed.models ?? {})).not.toEqual([]);
     // but one already told apart still takes records
     const known = {
       ...crowded,

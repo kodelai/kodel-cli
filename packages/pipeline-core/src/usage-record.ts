@@ -27,6 +27,8 @@ export const USAGE_FAILURES = [
   "unreadable",
   "busy",
   "agent_unsupported",
+  /** The run has journaled as many `usage_recorded` as it may: nothing more is counted. */
+  "cap",
 ] as const;
 export type UsageFailure = (typeof USAGE_FAILURES)[number];
 

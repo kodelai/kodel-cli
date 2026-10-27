@@ -1335,8 +1335,9 @@ class Machine {
       );
       if (visit === undefined) throw new Repeat();
       key = `${visit.node}:${visit.attempt}`;
+      // Past the limit a record counts in the run's `unattributed`: the state stays bounded and the sum stays whole.
       if (!(key in usage.attempts) && Object.keys(usage.attempts).length >= MAX_USAGE_ATTEMPTS) {
-        throw new Repeat();
+        key = undefined;
       }
     }
     const totals = key === undefined ? usage.unattributed : (usage.attempts[key] ?? newTotals());

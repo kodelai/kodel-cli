@@ -352,12 +352,14 @@ and is never shown as a run's cost.
 calls and the estimated cost with the table revisions, and the flags `complete`, `partial`, `unattributed`, `last_open`,
 `long_context`, `incomplete`, `includes subagents`; or `not_collected` with a reason: `not_captured` (the run did not ask for it),
 `disabled`, `session_unknown`, `log_missing`, `refused`, `unreadable`, `busy` (the lock was taken by another pass; said once, and
-nothing is lost because the cursor did not move), `agent_unsupported` (the run's agent has no collector). A record written in a
+nothing is lost because the cursor did not move; also said when the pass could not run or lost the lock), `agent_unsupported` (the
+run's agent has no collector), and, next to a report that has numbers, `cap` (the run journaled as many records as it may). A record written in a
 format this engine does not know reads `cannot read (format X)`, never "modified".
 
 **Limits.** At most 16 models per record and 64 per run (the rest are `other`), 1000 `usage_recorded` events and 2000 attempts per
-run. Model and session ids that do not look like ids are counted as `other`: the state is not redacted and holds numbers and safe
-ids only. The set that tells a response read from two logs apart holds 200 000 keys; beyond it a repeat may be counted twice and the
+run (past 2000 attempts the rest is counted in the run's `unattributed`; past 1000 events nothing more is counted and the report
+says `cap`). A model id that does not look like an id is counted as `other`; a session id that does not is refused, so its use is
+not counted: the state is not redacted and holds numbers and safe ids only. The set that tells a response read from two logs apart holds 200 000 keys; beyond it a repeat may be counted twice and the
 record says so. Journal times are those of the machine that serves the run and log times those of the agent: a run served on
 another machine than the agent's (a devcontainer) may be windowed wrongly.
 

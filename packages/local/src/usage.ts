@@ -27,10 +27,12 @@ import {
   dedupeUsage,
   defaultPricing,
   type FlushedResponse,
+  foldModelId,
   type HistoryEvent,
   isEmptyDelta,
   type JournalRecord,
   KodelError,
+  MAX_USAGE_EVENTS,
   mergeDeltas,
   type PricingContext,
   type ReadCheckpoint,
@@ -235,6 +237,11 @@ export class UsageWriter {
     const state = await run.state();
     const skipped = this.skipReason(state, step);
     if (skipped !== undefined) return { ...result, skipped };
+    // The journal holds as many records as it may: said once, and the log is no longer read for nothing.
+    if ((state.usage?.events ?? 0) >= MAX_USAGE_EVENTS) {
+      await this.fail(run, result, "cap");
+      return result;
+    }
     const env = this.options.env();
     const configDir = claudeConfigDir(env);
     const workdir = await run.workdir();
@@ -496,7 +503,7 @@ export class UsageWriter {
         : {
             offset: holder.value.offset,
             key: responseKey(provisional),
-            model: provisional.model,
+            model: foldModelId(provisional.model),
             input: provisional.input,
             output: provisional.output,
             cache_read: provisional.cache_read,
@@ -506,16 +513,23 @@ export class UsageWriter {
     // A flushed response stays to be corrected until it is found whole.
     const keepFlushed = cursorFlushed ?? (correcting === undefined ? stored?.flushed : undefined);
     const worth = !isEmptyDelta(stepDelta) || !isEmptyDelta(outsideDelta);
-    if (worth && (last !== undefined || stored !== undefined)) {
+    // `behind` says the log was not read to its end. It has to change when the pass changes its mind about that, also
+    // when there is nothing to credit (a read that ran out of time while it skipped what was credited already, or a
+    // log that ends in events that carry no usage).
+    const needsMark = stoppedEarly ? stored?.behind !== true : stored?.behind === true;
+    let written = credited;
+    if ((worth || needsMark) && (last !== undefined || stored !== undefined)) {
+      // The cursor never goes back, however far a read that ran out of time got in skipping.
       const cursor: UsageCursor = {
-        last_seq: endSeq,
+        last_seq: Math.max(endSeq, credited),
         last_key: last === undefined ? (stored?.last_key ?? "") : usageEventKey(last),
         ...(keepFlushed === undefined ? {} : { flushed: keepFlushed }),
         ...(stoppedEarly ? { behind: true as const } : {}),
       };
       if (/^[0-9a-f]{64}$/.test(cursor.last_key)) {
         if (!(await lock.stillHeld())) return "abort";
-        if (!isEmptyDelta(stepDelta)) {
+        // The cursor goes with the step's delta, empty or not, unless the other one carries it.
+        if (!isEmptyDelta(stepDelta) || isEmptyDelta(outsideDelta)) {
           const decision = await run.apply({
             type: "usage_recorded",
             session,
@@ -540,12 +554,13 @@ export class UsageWriter {
           ctx.result.recorded += 1;
           if (!ctx.result.sessions.includes(session)) ctx.result.sessions.push(session);
         }
+        written = cursor.last_seq;
       }
     }
     if (holder.value !== undefined) {
       memo.checkpoint = holder.value;
       memo.sourceTail = await sourceTailHash(memo.path, holder.value.offset);
-      memo.creditedSeq = worth ? endSeq : credited;
+      memo.creditedSeq = written;
     }
     return "done";
   }

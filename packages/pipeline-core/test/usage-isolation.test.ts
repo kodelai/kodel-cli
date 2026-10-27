@@ -82,7 +82,12 @@ describe("t9jrs usage never feeds a check, a route or a gate", () => {
     const found = (await importsOf(path)).filter((m) => USAGE_MODULES.test(m));
     expect(found).toEqual(["./usage-record"]);
     // ...and it reads `.usage` of the state only in the methods that keep the account.
-    const source = ts.createSourceFile(path, await readFile(path, "utf8"), ts.ScriptTarget.ES2023, true);
+    const source = ts.createSourceFile(
+      path,
+      await readFile(path, "utf8"),
+      ts.ScriptTarget.ES2023,
+      true,
+    );
     const readers = new Set<string>();
     const visit = (node: ts.Node, method: string): void => {
       let here = method;
@@ -212,6 +217,6 @@ describe("t9jrs the same run, different tables", () => {
     expect(trace("dear")).toEqual(base);
     expect(trace("hostile")).toEqual(base);
     // the run went through the gate twice and ended
-    expect(JSON.stringify(base)).toContain("\"status\":\"completed\"");
+    expect(JSON.stringify(base)).toContain('"status":"completed"');
   });
 });

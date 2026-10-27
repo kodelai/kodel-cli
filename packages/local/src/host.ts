@@ -2138,9 +2138,20 @@ export class LocalRun {
         },
       })
       .catch(() => undefined);
-    if (!counted && copied?.skipped === "busy") {
-      // Said once: what the pass would have read is read by the next one, the cursor did not move.
-      await this.apply({ type: "usage_failed", reason: "busy" }).catch(() => undefined);
+    if (!counted) {
+      // Said once: what the pass would have read is read by the next one, the cursor did not move. A step the copy
+      // had nothing to do with (the run is over, or it is not at an agent step) has nothing to say either.
+      const reason =
+        copied?.skipped === "busy"
+          ? "busy"
+          : copied === undefined || copied.errored === true
+            ? "unreadable"
+            : copied.skipped === undefined
+              ? "busy" // the lock was lost before the count could run
+              : undefined;
+      if (reason !== undefined) {
+        await this.apply({ type: "usage_failed", reason }).catch(() => undefined);
+      }
     }
     const executor = await this.executorNow(caller);
     // HEAD of the run's own directory: the root may be somewhere else entirely.
