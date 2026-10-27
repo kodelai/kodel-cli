@@ -71,6 +71,10 @@ export const usageDeltaSchema = z
     last_open: z.literal(true).optional(),
     /** The set that tells repeats apart overflowed; a repeat may have been counted twice. */
     dedupe_overflow: z.literal(true).optional(),
+    /** The pass stopped before the end of the log (its time was up): part of what the agent used is not here yet. */
+    incomplete: z.literal(true).optional(),
+    /** Some of it was used by a subagent of the session, counted under its parent. */
+    subagent: z.literal(true).optional(),
   })
   .strict();
 export type UsageDelta = z.infer<typeof usageDeltaSchema>;
@@ -100,6 +104,8 @@ export const usageCursorSchema = z
     last_seq: whole,
     last_key: hex64,
     flushed: flushedSchema.optional(),
+    /** The last pass stopped before the end of the log: more is to come. */
+    behind: z.literal(true).optional(),
   })
   .strict();
 export type UsageCursor = z.infer<typeof usageCursorSchema>;
@@ -110,6 +116,8 @@ export interface UsageTotals {
   passes: number;
   last_open?: true;
   dedupe_overflow?: true;
+  incomplete?: true;
+  subagent?: true;
 }
 
 export interface UsageState {
@@ -203,6 +211,8 @@ export function addDelta(totals: UsageTotals, delta: UsageDelta): void {
   totals.passes += 1;
   if (delta.last_open === true) totals.last_open = true;
   if (delta.dedupe_overflow === true) totals.dedupe_overflow = true;
+  if (delta.incomplete === true) totals.incomplete = true;
+  if (delta.subagent === true) totals.subagent = true;
 }
 
 export interface CostSummary {
@@ -294,6 +304,8 @@ export function runTotals(state: {
     total.passes += part.passes;
     if (part.last_open === true) total.last_open = true;
     if (part.dedupe_overflow === true) total.dedupe_overflow = true;
+    if (part.incomplete === true) total.incomplete = true;
+    if (part.subagent === true) total.subagent = true;
   }
   return total;
 }

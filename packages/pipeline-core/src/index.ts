@@ -32,4 +32,5 @@ export * from "./task-size";
 export * from "./tasks";
 export * from "./usage";
 export * from "./usage-record";
+export * from "./usage-report";
 export * from "./version";

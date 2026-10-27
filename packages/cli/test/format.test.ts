@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { RunReport } from "@kodel-ai/pipeline-core";
-import { agentLogLine, formatDuration, formatReport } from "../src/format";
+import type { RunReport, UsageLine } from "@kodel-ai/pipeline-core";
+import { agentLogLine, formatDuration, formatReport, usageLines } from "../src/format";
 
 describe("formatDuration", () => {
   test("is short enough for a table", () => {
@@ -31,6 +31,7 @@ const report: RunReport = {
   checks: [],
   prompts: { served: 3 },
   agent_log: { not_collected: true, reason: "not_captured" },
+  usage: { not_collected: true, reason: "not_captured" },
   nodes: [
     {
       node: "impl",
@@ -251,5 +252,121 @@ describe("t3bk2 the line about the agent's log", () => {
       (t) => t,
     );
     expect(text).toContain("agent log: not_collected (disabled)");
+  });
+});
+
+describe("usage in the report", () => {
+  const line = (over: Partial<UsageLine> = {}): UsageLine => ({
+    tokens: {
+      input: 300,
+      output: 30,
+      cache_read: 1000,
+      cache_write: 300,
+      cache_write_1h: 100,
+      api_calls: 2,
+    },
+    cost: { usd: 0.0123, basis: "computed", partial: false, config: false, long_context: false },
+    models: {
+      "claude-sonnet-5-5": {
+        input: 300,
+        output: 30,
+        cache_read: 1000,
+        cache_write: 300,
+        cache_write_1h: 100,
+        api_calls: 2,
+        usd: 0.0123,
+        partial: false,
+      },
+    },
+    last_open: false,
+    incomplete: false,
+    subagent: false,
+    dedupe_overflow: false,
+    ...over,
+  });
+  const full = (over: Partial<UsageLine> = {}): RunReport["usage"] => ({
+    estimate: true,
+    revisions: ["2026-10-01"],
+    total: line(over),
+    lower_bound: true,
+    complete: true,
+    attempts: [{ node: "impl", attempt: 1, ...line(over) }],
+    failed: [],
+  });
+
+  test("t9jrs_report_labels_estimate_and_revisions", () => {
+    const lines = usageLines(full(), (t) => t);
+    expect(lines[0]).toContain("estimate");
+    expect(lines[0]).toContain("2026-10-01");
+    expect(lines.join("\n")).toContain("at least this much");
+    expect(lines.join("\n")).toContain("impl #1");
+  });
+
+  test("t9jrs_report_text_has_a_line_per_flag", () => {
+    const flagged = line({
+      last_open: true,
+      incomplete: true,
+      subagent: true,
+      dedupe_overflow: true,
+      cost: { usd: 0.5, basis: "computed", partial: true, config: true, long_context: true },
+    });
+    const text = usageLines(full(flagged), (t) => t).join("\n");
+    for (const part of [
+      "partial",
+      "priced from the config",
+      "long context",
+      "last response counted as it stood",
+      "incomplete",
+      "includes subagents",
+      "repeats may be counted twice",
+    ]) {
+      expect(text).toContain(part);
+    }
+  });
+
+  test("t9jrs_report_partial_total_never_shows_zero_dollars", () => {
+    const unknown = line({
+      cost: { usd: null, basis: "unknown", partial: true, config: false, long_context: false },
+    });
+    const lines = usageLines(full(unknown), (t) => t);
+    expect(lines[0]).toContain("cost unknown");
+    // the total and the attempt say unknown, and show no dollar amount at all
+    expect(lines[0]).not.toContain("$");
+    expect(lines.find((l) => l.includes("impl #1"))).not.toContain("$");
+  });
+
+  test("t9jrs_report_each_not_collected_reason_is_named", () => {
+    for (const reason of [
+      "not_captured",
+      "disabled",
+      "session_unknown",
+      "log_missing",
+      "refused",
+      "unreadable",
+      "busy",
+      "agent_unsupported",
+    ] as const) {
+      expect(usageLines({ not_collected: true, reason }, (t) => t)).toEqual([
+        `usage: not_collected (${reason})`,
+      ]);
+    }
+  });
+
+  test("t9jrs_unknown_usage_format_is_cannot_read_not_modified", () => {
+    const [text] = usageLines({ cannot_read: true, format: "2" }, (t) => t);
+    expect(text).toContain("cannot read");
+    expect(text).toContain("format 2");
+    expect(text).not.toMatch(/modified/i);
+  });
+
+  test("t9jrs_report_never_shows_cost_state", () => {
+    const text = formatReport({ ...report, usage: full() }, (t) => t);
+    expect(text).not.toContain("cost-state");
+    expect(text).toContain("usage (estimate");
+  });
+
+  test("t9jrs_report_json_has_usage", () => {
+    const json = JSON.parse(JSON.stringify({ ...report, usage: full() })) as RunReport;
+    expect("estimate" in json.usage).toBe(true);
   });
 });

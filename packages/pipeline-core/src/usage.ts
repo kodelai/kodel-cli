@@ -7,6 +7,7 @@
 import type { HistoryEvent } from "./agent-history";
 import { type Price, type PricingContext, resolvePrice } from "./price-table";
 import {
+  addModelUsage,
   MAX_MODELS_PER_RECORD,
   type ModelUsage,
   roundUsd,
@@ -97,6 +98,10 @@ export interface BuildOptions {
   lastOpen?: boolean;
   /** The set of repeats overflowed while reading. */
   dedupeOverflow?: boolean;
+  /** The pass stopped before the end of the log. */
+  incomplete?: boolean;
+  /** Some events are a subagent's. */
+  subagent?: boolean;
 }
 
 /** The delta of a group of events. The caller has already left out repeats (`dedupeUsage`). */
@@ -128,6 +133,82 @@ export function buildDelta(
     models,
     ...(options.lastOpen === true ? { last_open: true as const } : {}),
     ...(options.dedupeOverflow === true ? { dedupe_overflow: true as const } : {}),
+    ...(options.incomplete === true ? { incomplete: true as const } : {}),
+    ...(options.subagent === true ? { subagent: true as const } : {}),
+  };
+}
+
+/** Whether a delta counts nothing: no calls and no flag worth a record. */
+export function isEmptyDelta(delta: UsageDelta): boolean {
+  return (
+    Object.keys(delta.models).length === 0 &&
+    delta.last_open !== true &&
+    delta.dedupe_overflow !== true &&
+    delta.incomplete !== true
+  );
+}
+
+/** The part of a response's tokens that was counted while it was still open (`FlushedResponse`, without the ids). */
+export interface CountedTokens {
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_write: number;
+  cache_write_1h: number;
+}
+
+/**
+ * What a response used beyond what was counted when it was still open: `final` with the counted tokens taken off
+ * (never below zero). It is one call that was counted already, so the correction adds tokens and cost and no call.
+ * `undefined` when nothing is left to add.
+ */
+export function correctionDelta(
+  final: UsageEvent,
+  counted: CountedTokens,
+  context: PricingContext,
+): UsageDelta | undefined {
+  const rest: UsageEvent = {
+    ...final,
+    input: Math.max(0, final.input - counted.input),
+    output: Math.max(0, final.output - counted.output),
+    cache_read: Math.max(0, final.cache_read - counted.cache_read),
+    cache_write: Math.max(0, final.cache_write - counted.cache_write),
+    cache_write_1h: Math.max(0, (final.cache_write_1h ?? 0) - counted.cache_write_1h),
+    reasoning: 0,
+    // A response that was open reported a cost of its own only once it closed.
+    ...(final.cost?.basis === "reported" ? { cost: undefined } : {}),
+  };
+  if (
+    rest.input + rest.output + rest.cache_read + rest.cache_write === 0 &&
+    final.cost?.basis !== "reported"
+  ) {
+    return undefined;
+  }
+  const delta = buildDelta([rest], context);
+  for (const entry of Object.values(delta.models)) {
+    entry.api_calls = 0;
+    entry.long_context_calls = 0;
+    entry.unpriced_calls = 0;
+    entry.config_priced_calls = 0;
+  }
+  return delta;
+}
+
+/** Add `more` to `delta` (the same revision): used to give a correction and the new events one record. */
+export function mergeDeltas(delta: UsageDelta, more: UsageDelta): UsageDelta {
+  const models: Record<string, ModelUsage> = {};
+  for (const part of [delta, more]) {
+    for (const [model, usage] of Object.entries(part.models)) {
+      addModelUsage(slot(models, model, MAX_MODELS_PER_RECORD - 1), usage);
+    }
+  }
+  return {
+    ...delta,
+    models,
+    ...(more.last_open === true ? { last_open: true as const } : {}),
+    ...(more.dedupe_overflow === true ? { dedupe_overflow: true as const } : {}),
+    ...(more.incomplete === true ? { incomplete: true as const } : {}),
+    ...(more.subagent === true ? { subagent: true as const } : {}),
   };
 }
 
