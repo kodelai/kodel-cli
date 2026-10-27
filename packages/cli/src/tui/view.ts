@@ -12,6 +12,7 @@ import {
   wrapText,
   yellow,
 } from "./ansi";
+import type { InputEvent } from "./input";
 import type { Loaded } from "./load";
 import {
   formatAge,
@@ -41,6 +42,8 @@ export interface Model {
   /** Counts the animation steps; the spinner and the blink read it. */
   frame: number;
   now: number;
+  /** Whether the terminal is told to send mouse events; off lets the person select text as usual. */
+  mouse: boolean;
 }
 
 export interface Size {
@@ -75,6 +78,7 @@ export function initialModel(
   loaded: Loaded,
   source: Model["source"] = "demo",
   now: number = Date.now(),
+  mouse = false,
 ): Model {
   return {
     section: 0,
@@ -88,6 +92,7 @@ export function initialModel(
     source,
     frame: 0,
     now,
+    mouse,
   };
 }
 
@@ -126,11 +131,6 @@ export function update(m: Model, key: string): Model {
     if (key === "y") return decide(m, current, m.confirm);
     return { ...m, confirm: null, notice: "Cancelled." };
   }
-  const list = m.sessions;
-  const at = Math.max(
-    0,
-    list.findIndex((s) => s.id === current?.id),
-  );
   switch (key) {
     case "q":
       return { ...m, quit: true };
@@ -143,13 +143,15 @@ export function update(m: Model, key: string): Model {
       return { ...m, section: Number(key) - 1, notice: "" };
     case "up":
     case "k":
-      return { ...m, selected: list[Math.max(0, at - 1)]?.id ?? m.selected, notice: "" };
+      return moveSelection(m, -1);
     case "down":
     case "j":
+      return moveSelection(m, 1);
+    case "m":
       return {
         ...m,
-        selected: list[Math.min(list.length - 1, at + 1)]?.id ?? m.selected,
-        notice: "",
+        mouse: !m.mouse,
+        notice: m.mouse ? "Mouse off." : "Mouse on. Hold Shift (Option in iTerm2) to select text.",
       };
     case "enter":
     case "right":
@@ -171,6 +173,15 @@ export function update(m: Model, key: string): Model {
     default:
       return m;
   }
+}
+
+function moveSelection(m: Model, by: -1 | 1): Model {
+  const at = Math.max(
+    0,
+    m.sessions.findIndex((s) => s.id === selectedSession(m)?.id),
+  );
+  const next = m.sessions[Math.min(m.sessions.length - 1, Math.max(0, at + by))];
+  return { ...m, selected: next?.id ?? m.selected, notice: "" };
 }
 
 function decide(m: Model, s: Session, key: "a" | "r"): Model {
@@ -228,8 +239,16 @@ function timeOf(s: Session, now: number, ago: boolean): string {
   return ago ? `${age} ago` : age;
 }
 
-function listLines(m: Model, width: number): { lines: string[]; selectedAt: number } {
+interface ListLines {
+  lines: string[];
+  /** The session each line shows, or nothing for a group heading or a gap. */
+  ids: (string | undefined)[];
+  selectedAt: number;
+}
+
+function listLines(m: Model, width: number): ListLines {
   const lines: string[] = [];
+  const ids: (string | undefined)[] = [];
   let selectedAt = 0;
   const tagWidth = Math.min(13, Math.max(7, ...m.sessions.map((s) => tagOf(s).length)));
   const titleWidth = Math.max(8, width - tagWidth - 12);
@@ -240,6 +259,7 @@ function listLines(m: Model, width: number): { lines: string[]; selectedAt: numb
     const gap = Math.max(1, width - head.length - g.label.length);
     const text = `${head}${" ".repeat(gap)}${g.label}`;
     lines.push(g.title === "WAITING FOR YOU" ? bold(yellow(text)) : dim(text));
+    ids.push(undefined);
     for (const s of members) {
       const bar = s.status === "waiting" ? yellow("▌") : " ";
       const tag = fit(tagOf(s), tagWidth);
@@ -253,10 +273,26 @@ function listLines(m: Model, width: number): { lines: string[]; selectedAt: numb
       } else {
         lines.push(fit(row, width));
       }
+      ids.push(s.id);
     }
     lines.push("");
+    ids.push(undefined);
   }
-  return { lines, selectedAt };
+  return { lines, ids, selectedAt };
+}
+
+/** The part of the list that fits `height` lines, kept around the selected one. */
+function listView(m: Model, width: number, height: number) {
+  const { lines, ids, selectedAt } = listLines(m, width);
+  const start =
+    lines.length <= height
+      ? 0
+      : Math.min(Math.max(0, selectedAt - Math.floor(height / 2)), lines.length - height);
+  return { lines: lines.slice(start, start + height), ids: ids.slice(start, start + height) };
+}
+
+function listWidthFor(cols: number): number {
+  return Math.min(58, Math.max(44, Math.floor(cols * 0.42)));
 }
 
 function actionLine(s: Session, project: boolean): string {
@@ -325,16 +361,22 @@ function cardLines(s: Session | undefined, m: Model, width: number, height: numb
   return out.map((l) => fit(l, width));
 }
 
+const MENU_BRAND = " kodel ";
+
+function menuCount(m: Model, i: number): number {
+  if (i === 0) return m.sessions.filter((s) => s.status === "waiting").length;
+  return i === 1 ? m.proposals : 0;
+}
+
 function menuLine(m: Model, cols: number): string {
-  const waiting = m.sessions.filter((s) => s.status === "waiting").length;
   const items = SECTIONS.map((name, i) => {
-    const count = i === 0 ? waiting : i === 1 ? m.proposals : 0;
+    const count = menuCount(m, i);
     const badge = count > 0 ? ` ${yellow(String(count))}` : "";
     const text = ` ${i + 1} ${name}${badge} `;
     return i === m.section ? inverse(stripAnsi(text)) : text;
   });
   const right = dim(m.source === "demo" ? "sample data " : "live ");
-  const left = `${bold(" kodel ")}${items.join("")}`;
+  const left = `${bold(MENU_BRAND)}${items.join("")}`;
   const gap = cols - visibleLength(left) - visibleLength(right);
   return fit(gap >= 1 ? `${left}${" ".repeat(gap)}${right}` : left, cols);
 }
@@ -354,13 +396,8 @@ function hints(m: Model, wide: boolean): string {
     m.proposals > 0
       ? dim(`   ${m.proposals} pipeline proposal${m.proposals === 1 ? "" : "s"} wait on 2`)
       : "";
-  return `${move}${open}${back}${decide}   ${bold("Tab")} menu   ${bold("q")} quit${proposals}`;
-}
-
-function scrollWindow(lines: string[], height: number, anchor: number): string[] {
-  if (lines.length <= height) return lines;
-  const start = Math.min(Math.max(0, anchor - Math.floor(height / 2)), lines.length - height);
-  return lines.slice(start, start + height);
+  const mouse = `   ${bold("m")} mouse ${m.mouse ? green("on") : dim("off")}`;
+  return `${move}${open}${back}${decide}   ${bold("Tab")} menu${mouse}   ${bold("q")} quit${proposals}`;
 }
 
 function emptyState(): string[] {
@@ -395,10 +432,9 @@ export function render(m: Model, { cols, rows }: Size): string[] {
   } else {
     const current = selectedSession(m);
     if (wide) {
-      const listWidth = Math.min(58, Math.max(44, Math.floor(cols * 0.42)));
+      const listWidth = listWidthFor(cols);
       const cardWidth = cols - listWidth - 3;
-      const { lines, selectedAt } = listLines(m, listWidth);
-      const left = scrollWindow(lines, bodyHeight, selectedAt);
+      const left = listView(m, listWidth, bodyHeight).lines;
       const right = cardLines(current, m, cardWidth, bodyHeight).slice(0, bodyHeight);
       body = Array.from({ length: bodyHeight }, (_, i) => {
         const l = fit(left[i] ?? "", listWidth);
@@ -408,8 +444,7 @@ export function render(m: Model, { cols, rows }: Size): string[] {
     } else if (m.focus === "card") {
       body = cardLines(current, m, cols - 2, bodyHeight).map((l) => ` ${l}`);
     } else {
-      const { lines, selectedAt } = listLines(m, cols - 1);
-      body = scrollWindow(lines, bodyHeight, selectedAt).map((l) => ` ${l}`);
+      body = listView(m, cols - 1, bodyHeight).lines.map((l) => ` ${l}`);
     }
   }
   for (let i = 0; i < bodyHeight; i++) out.push(fit(body[i] ?? "", cols));
@@ -417,4 +452,55 @@ export function render(m: Model, { cols, rows }: Size): string[] {
   const status = m.notice !== "" ? green(m.notice) : hints(m, wide);
   out.push(fit(` ${status}`, cols));
   return out;
+}
+
+export type Hit = { kind: "menu"; section: number } | { kind: "session"; id: string };
+
+/** What is under a point of the screen (1-based column and row, as the terminal reports them). */
+export function hitTest(m: Model, { cols, rows }: Size, x: number, y: number): Hit | undefined {
+  if (cols < 40 || rows < 12) return undefined;
+  if (y === 1) {
+    let start = MENU_BRAND.length + 1;
+    for (const [i, name] of SECTIONS.entries()) {
+      const count = menuCount(m, i);
+      const width = ` ${i + 1} ${name} `.length + (count > 0 ? ` ${count}`.length : 0);
+      if (x >= start && x < start + width) return { kind: "menu", section: i };
+      start += width;
+    }
+    return undefined;
+  }
+  const bodyHeight = rows - 3;
+  const row = y - 3;
+  if (m.section !== 0 || m.sessions.length === 0 || row < 0 || row >= bodyHeight) return undefined;
+  const wide = cols >= WIDE_COLS;
+  if (wide) {
+    if (x > listWidthFor(cols)) return undefined;
+    const id = listView(m, listWidthFor(cols), bodyHeight).ids[row];
+    return id === undefined ? undefined : { kind: "session", id };
+  }
+  if (m.focus === "card") return undefined;
+  const id = listView(m, cols - 1, bodyHeight).ids[row];
+  return id === undefined ? undefined : { kind: "session", id };
+}
+
+/**
+ * A click selects a session or a menu item and the wheel moves the selection; nothing else. A
+ * decision is never made with the mouse: it takes a key and a confirmation.
+ */
+export function mouseUpdate(
+  m: Model,
+  size: Size,
+  event: Extract<InputEvent, { type: "mouse" }>,
+): Model {
+  if (!m.mouse || m.confirm !== null) return m;
+  const wide = size.cols >= WIDE_COLS;
+  if (event.action !== "press") {
+    if (m.section !== 0 || (!wide && m.focus === "card")) return m;
+    return moveSelection(m, event.action === "wheel_up" ? -1 : 1);
+  }
+  const hit = hitTest(m, size, event.x, event.y);
+  if (!hit) return m;
+  if (hit.kind === "menu") return { ...m, section: hit.section, notice: "" };
+  if (!wide && hit.id === m.selected) return { ...m, focus: "card", notice: "" };
+  return { ...m, selected: hit.id, notice: "" };
 }

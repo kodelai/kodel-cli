@@ -1,43 +1,49 @@
 /** The terminal loop: alternate screen, raw keys, redraw on a key, a resize, a frame or new data. */
+import { MOUSE_OFF, MOUSE_ON, parseInput } from "./input";
 import type { Loaded } from "./load";
-import { initialModel, isAnimated, type Model, render, tick, update, withData } from "./view";
-
-const KEYS: Record<string, string> = {
-  "\u001b[A": "up",
-  "\u001b[B": "down",
-  "\u001b[C": "right",
-  "\u001b[D": "left",
-  "\u001bOA": "up",
-  "\u001bOB": "down",
-  "\r": "enter",
-  "\n": "enter",
-  "\t": "tab",
-  "\u001b": "escape",
-  "\u0003": "ctrl-c",
-};
-
-export function keyName(chunk: string): string {
-  return KEYS[chunk] ?? chunk;
-}
+import {
+  initialModel,
+  isAnimated,
+  type Model,
+  mouseUpdate,
+  render,
+  tick,
+  update,
+  withData,
+} from "./view";
 
 const FRAME_MS = 100;
 const REFRESH_MS = 2000;
+
+export interface TuiOptions {
+  /** Start with mouse events on; `m` turns them on and off while the screen is open. */
+  mouse?: boolean;
+}
 
 export async function runTui(
   stdin: NodeJS.ReadStream,
   stdout: NodeJS.WriteStream,
   load: () => Promise<Loaded>,
   source: Model["source"],
+  options: TuiOptions = {},
 ): Promise<number> {
   // Read before the screen is taken over, so a project that cannot be read ends with a plain error.
-  let model: Model = initialModel(await load(), source, Date.now());
+  let model: Model = initialModel(await load(), source, Date.now(), options.mouse === true);
+  let mouseSent = false;
 
+  const size = () => ({ cols: stdout.columns ?? 80, rows: stdout.rows ?? 24 });
   const draw = () => {
-    const lines = render(model, { cols: stdout.columns ?? 80, rows: stdout.rows ?? 24 });
+    if (model.mouse !== mouseSent) {
+      stdout.write(model.mouse ? MOUSE_ON : MOUSE_OFF);
+      mouseSent = model.mouse;
+    }
+    const lines = render(model, size());
     stdout.write(lines.map((line, i) => `\u001b[${i + 1};1H${line}`).join(""));
   };
+  // Always turned off on the way out, whatever was sent: a terminal left reporting the mouse
+  // fills the person's shell with escape codes.
   const restore = () => {
-    stdout.write("\u001b[?25h\u001b[?1049l");
+    stdout.write(`${MOUSE_OFF}\u001b[?25h\u001b[?1049l`);
     if (stdin.isTTY) stdin.setRawMode(false);
   };
 
@@ -82,7 +88,11 @@ export async function runTui(
       resolve(0);
     };
     const onData = (chunk: string) => {
-      model = update(model, keyName(chunk));
+      for (const event of parseInput(chunk)) {
+        model =
+          event.type === "key" ? update(model, event.name) : mouseUpdate(model, size(), event);
+        if (model.quit) break;
+      }
       if (model.quit) finish();
       else draw();
     };

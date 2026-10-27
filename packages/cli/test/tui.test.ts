@@ -1,10 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { stripAnsi, visibleLength } from "../src/tui/ansi";
 import { demoSessions } from "../src/tui/demo";
+import type { Session } from "../src/tui/session";
 import { formatAge } from "../src/tui/session";
 import {
+  hitTest,
   initialModel,
   isAnimated,
+  mouseUpdate,
   ordered,
   render,
   tick,
@@ -191,5 +194,142 @@ describe("tui sessions list", () => {
     const text = screen(m);
     expect(text).toContain("No runs yet.");
     expect(text).toContain("/kodel-run");
+  });
+});
+
+describe("tui mouse", () => {
+  const WIDE = { cols: 120, rows: 30 };
+  const NARROW = { cols: 70, rows: 30 };
+  const on = () => ({ ...demo(), mouse: true });
+  const press = (x: number, y: number) => ({
+    type: "mouse" as const,
+    action: "press" as const,
+    x,
+    y,
+  });
+  const wheel = (action: "wheel_up" | "wheel_down") => ({
+    type: "mouse" as const,
+    action,
+    x: 5,
+    y: 5,
+  });
+  /** The 1-based row of the screen where `text` is shown. */
+  const rowOf = (m: ReturnType<typeof demo>, size: { cols: number; rows: number }, text: string) =>
+    plain(render(m, size)).findIndex((l) => l.includes(text)) + 1;
+
+  test("`m` turns the mouse on and off, says how to select text, and shows the state", () => {
+    let m = demo();
+    expect(m.mouse).toBe(false);
+    expect(screen(m)).toContain("m mouse off");
+    m = update(m, "m");
+    expect(m.mouse).toBe(true);
+    expect(m.notice).toContain("Shift");
+    expect(screen({ ...m, notice: "" })).toContain("m mouse on");
+    expect(update(m, "m").mouse).toBe(false);
+  });
+
+  test("with the mouse off, clicks and the wheel do nothing", () => {
+    const m = demo();
+    const y = rowOf(m, WIDE, "fix-wait-timeout");
+    expect(mouseUpdate(m, WIDE, press(3, y))).toBe(m);
+    expect(mouseUpdate(m, WIDE, wheel("wheel_down"))).toBe(m);
+  });
+
+  test("a click on a row selects that session", () => {
+    const m = on();
+    const y = rowOf(m, WIDE, "fix-wait-timeout");
+    const hit = hitTest(m, WIDE, 3, y);
+    expect(hit).toEqual({ kind: "session", id: "r_1kd9q22vb" });
+    expect(mouseUpdate(m, WIDE, press(3, y)).selected).toBe("r_1kd9q22vb");
+  });
+
+  test("a click on a heading, a gap, the card or below the list selects nothing", () => {
+    const m = on();
+    const heading = rowOf(m, WIDE, "WAITING FOR YOU");
+    expect(hitTest(m, WIDE, 3, heading)).toBeUndefined();
+    expect(hitTest(m, WIDE, 3, heading + 5)).toBeUndefined();
+    const y = rowOf(m, WIDE, "fix-wait-timeout");
+    expect(hitTest(m, WIDE, 100, y)).toBeUndefined();
+    expect(hitTest(m, WIDE, 3, 2)).toBeUndefined();
+    expect(hitTest(m, WIDE, 3, WIDE.rows)).toBeUndefined();
+  });
+
+  test("on a narrow screen the second click on a row opens its card, and the card is not clickable", () => {
+    let m = on();
+    const y = rowOf(m, NARROW, "fix-wait-timeout");
+    m = mouseUpdate(m, NARROW, press(5, y));
+    expect(m.selected).toBe("r_1kd9q22vb");
+    expect(m.focus).toBe("list");
+    m = mouseUpdate(m, NARROW, press(5, y));
+    expect(m.focus).toBe("card");
+    expect(mouseUpdate(m, NARROW, press(5, y))).toBe(m);
+  });
+
+  test("a click on the menu switches the section, with the counts in the badge taken into account", () => {
+    const m = on();
+    const line = plain(render(m, WIDE))[0] ?? "";
+    const pipeline = line.indexOf("2 Pipeline") + 1;
+    expect(mouseUpdate(m, WIDE, press(pipeline + 2, 1)).section).toBe(1);
+    const tasks = line.indexOf("3 Tasks") + 1;
+    expect(mouseUpdate(m, WIDE, press(tasks, 1)).section).toBe(2);
+    expect(hitTest(m, WIDE, 2, 1)).toBeUndefined(); // the name on the left is not a button
+  });
+
+  test("the wheel moves the selection down and up, and stops at the ends", () => {
+    let m = on();
+    const first = ordered(m.sessions)[0]?.id;
+    expect(m.selected).toBe(first ?? "");
+    m = mouseUpdate(m, WIDE, wheel("wheel_up"));
+    expect(m.selected).toBe(first ?? "");
+    m = mouseUpdate(m, WIDE, wheel("wheel_down"));
+    expect(m.selected).toBe(ordered(m.sessions)[1]?.id ?? "");
+    const last = ordered(m.sessions).at(-1)?.id ?? "";
+    for (let i = 0; i < 40; i++) m = mouseUpdate(m, WIDE, wheel("wheel_down"));
+    expect(m.selected).toBe(last);
+  });
+
+  test("the wheel leaves a card and other sections alone", () => {
+    const m = on();
+    const card = { ...m, focus: "card" as const };
+    expect(mouseUpdate(card, NARROW, wheel("wheel_down"))).toBe(card);
+    const other = { ...m, section: 1 };
+    expect(mouseUpdate(other, WIDE, wheel("wheel_down"))).toBe(other);
+  });
+
+  test("while a decision waits for y or n, the mouse does nothing", () => {
+    const gate = demoSessions(NOW).sessions.find((s) => s.need === "approve");
+    const asked = update({ ...on(), selected: gate?.id ?? "" }, "a");
+    expect(asked.confirm).toBe("a");
+    const y = rowOf(asked, WIDE, "fix-wait-timeout");
+    expect(mouseUpdate(asked, WIDE, press(3, y))).toBe(asked);
+    expect(mouseUpdate(asked, WIDE, wheel("wheel_down"))).toBe(asked);
+  });
+
+  test("a click never decides: the action line of the card is text, not a button", () => {
+    const gate = demoSessions(NOW).sessions.find((s) => s.need === "approve");
+    const m = { ...on(), selected: gate?.id ?? "" };
+    const y = rowOf(m, WIDE, "a approve");
+    const x = (plain(render(m, WIDE))[y - 1] ?? "").indexOf("a approve") + 1;
+    expect(mouseUpdate(m, WIDE, press(x, y)).confirm).toBeNull();
+    expect(mouseUpdate(m, WIDE, press(x, y)).sessions).toEqual(m.sessions);
+  });
+
+  test("a list that scrolls: a click lands on the row that is shown, not on the one at that index", () => {
+    const sessions: Session[] = Array.from({ length: 60 }, (_, i) => ({
+      id: `r_${String(i).padStart(3, "0")}`,
+      title: `finished-run-${String(i).padStart(2, "0")}`,
+      pipeline: "dev",
+      status: "done",
+      step: "done",
+      since: NOW - (i + 1) * 3_600_000,
+      steps: [],
+      log: [],
+    }));
+    let m = { ...initialModel({ sessions, proposals: 0 }, "project", NOW), mouse: true };
+    for (let i = 0; i < 45; i++) m = mouseUpdate(m, WIDE, wheel("wheel_down"));
+    const y = rowOf(m, WIDE, "finished-run-40");
+    expect(y).toBeGreaterThan(0);
+    const clicked = mouseUpdate(m, WIDE, press(3, y));
+    expect(clicked.selected).toBe(sessions.find((s) => s.title === "finished-run-40")?.id ?? "");
   });
 });

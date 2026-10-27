@@ -473,17 +473,22 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .command("tui")
     .description("Open the terminal UI: the runs of this project, and what waits for you")
     .option("--demo", "show sample runs instead of this project's")
-    .action(async (opts: { demo?: boolean }) => {
+    .option("--mouse", "start with the mouse on (the m key turns it on and off)")
+    .action(async (opts: { demo?: boolean; mouse?: boolean }) => {
       requireHuman();
       const { runTui } = await import("./tui/run");
       if (opts.demo) {
         const { demoSessions } = await import("./tui/demo");
-        await runTui(process.stdin, process.stdout, async () => demoSessions(Date.now()), "demo");
+        await runTui(process.stdin, process.stdout, async () => demoSessions(Date.now()), "demo", {
+          mouse: opts.mouse === true,
+        });
         return;
       }
       const { loadSessions } = await import("./tui/load");
       const h = await host();
-      await runTui(process.stdin, process.stdout, () => loadSessions(h, Date.now()), "project");
+      await runTui(process.stdin, process.stdout, () => loadSessions(h, Date.now()), "project", {
+        mouse: opts.mouse === true,
+      });
     });
 
   program
