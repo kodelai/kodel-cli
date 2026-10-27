@@ -3,6 +3,7 @@
  * `.kodel/runs`. A run keeps a copy of the pipeline it started with, so editing a file never
  * changes a run in flight.
  */
+
 import { mkdir, readdir, readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import {
@@ -34,6 +35,7 @@ import {
   type ServedSurface,
   type StartOutcome,
 } from "@kodel-ai/pipeline-core";
+import { AgentLogWriter } from "./agent-log";
 import { loadConfig, type ProjectConfig, type WorktreeConfig } from "./config";
 import { GitSnapshotter, git } from "./git";
 import {
@@ -110,6 +112,8 @@ export class LocalPipelineHost implements PipelineHost {
   private readonly store: FileStore;
   private readonly storeRoot: string;
   private readonly hosts = new Map<string, LocalHost>();
+  /** What copies the agent's log into the runs: one for the process, since a run can live in more than one host. */
+  private readonly agentLog: AgentLogWriter;
   /** One handle per run, so that work running in this process is shared by every call. */
   private readonly runs = new Map<string, LocalRun>();
 
@@ -120,6 +124,15 @@ export class LocalPipelineHost implements PipelineHost {
       root: this.storeRoot,
       ...(options.rules ? { rules: options.rules } : {}),
     });
+    this.agentLog =
+      options.agentLog ??
+      new AgentLogWriter({
+        store: this.store,
+        root: options.root,
+        rules: options.rules ?? [],
+        env: () => options.environment ?? process.env,
+        now: options.clock ?? Date.now,
+      });
   }
 
   private linkPromise: Promise<RunTaskLink | undefined> | undefined;
@@ -422,6 +435,7 @@ export class LocalPipelineHost implements PipelineHost {
     if (!host) {
       host = new LocalHost(spec, {
         ...this.options,
+        agentLog: this.agentLog,
         runTaskLink: () => this.taskLink(),
         ...(source === undefined ? {} : { source }),
         ...(pipelineFile === undefined ? {} : { pipelineFile }),

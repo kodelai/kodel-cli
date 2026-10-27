@@ -5,6 +5,7 @@
  * what the person and the agent said before it, and what an earlier run did in the same session, stay out.
  * The search looks at lines, not at events, so it works whatever the capture mode and stores nothing.
  */
+import { toTs } from "@kodel-ai/pipeline-core";
 import { streamRawLines } from "../jsonl";
 
 /** A tool of the pipeline server, whatever the server is called in `.mcp.json`. */
@@ -27,9 +28,16 @@ function resultText(content: unknown): string {
     .join("\n");
 }
 
+function at(start: number, entry: Json): RunStart {
+  const ts = toTs(entry["timestamp"]);
+  return { offset: start, ...(ts === undefined ? {} : { ts }) };
+}
+
 export interface RunStart {
   /** The byte the line of the first call starts at. */
   offset: number;
+  /** The time of that call, when the line has one. */
+  ts?: string;
 }
 
 /** The start of the run in the log, or `undefined` when the session never called the run's tools with its id. */
@@ -38,7 +46,7 @@ export async function findRunStart(
   runId: string,
   signal?: AbortSignal,
 ): Promise<RunStart | undefined> {
-  const calls = new Map<string, number>();
+  const calls = new Map<string, { start: number; ts: string | undefined }>();
   for await (const { text, start } of streamRawLines(path, signal ? { signal } : {})) {
     const mentionsRun = text.includes(runId);
     const mayCall = text.includes("tool_use") && text.includes("pipeline_");
@@ -59,17 +67,17 @@ export async function findRunStart(
         const name = block["name"];
         if (typeof id !== "string" || typeof name !== "string" || !PIPELINE_TOOL.test(name))
           continue;
-        if ((JSON.stringify(block["input"]) ?? "").includes(runId)) return { offset: start };
+        if ((JSON.stringify(block["input"]) ?? "").includes(runId)) return at(start, entry);
         if (calls.size >= CALLS_CAP) {
           const oldest = calls.keys().next().value;
           if (oldest !== undefined) calls.delete(oldest);
         }
-        calls.set(id, start);
+        calls.set(id, { start, ts: toTs(entry["timestamp"]) });
       } else if (block["type"] === "tool_result") {
         const id = block["tool_use_id"];
-        const callStart = typeof id === "string" ? calls.get(id) : undefined;
-        if (callStart !== undefined && resultText(block["content"]).includes(runId)) {
-          return { offset: callStart };
+        const call = typeof id === "string" ? calls.get(id) : undefined;
+        if (call !== undefined && resultText(block["content"]).includes(runId)) {
+          return { offset: call.start, ...(call.ts === undefined ? {} : { ts: call.ts }) };
         }
       }
     }

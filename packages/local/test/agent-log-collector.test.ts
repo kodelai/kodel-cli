@@ -577,7 +577,7 @@ describe("t3bk2 collector options: where a run begins in a log", () => {
       });
     });
     // the start has no run id in its input; its result names the run, and the window starts at the call
-    expect(await findRunStart(path, RID)).toEqual({ offset: log.offsetOf(2) });
+    expect(await findRunStart(path, RID)).toMatchObject({ offset: log.offsetOf(2) });
   });
 
   test("t3bk2_proof_resumed_session_captured", async () => {
@@ -589,7 +589,7 @@ describe("t3bk2 collector options: where a run begins in a log", () => {
         input: { run_id: RID },
       });
     });
-    expect(await findRunStart(path, RID)).toEqual({ offset: log.offsetOf(1) });
+    expect(await findRunStart(path, RID)).toMatchObject({ offset: log.offsetOf(1) });
   });
 
   test("t3bk2_proof_other_run_id_is_unknown", async () => {
@@ -625,8 +625,8 @@ describe("t3bk2 collector options: where a run begins in a log", () => {
       });
       start(l, "msg_C", "toolu_3", OTHER);
     });
-    expect(await findRunStart(path, RID)).toEqual({ offset: log.offsetOf(0) });
-    expect(await findRunStart(path, OTHER)).toEqual({ offset: log.offsetOf(3) });
+    expect(await findRunStart(path, RID)).toMatchObject({ offset: log.offsetOf(0) });
+    expect(await findRunStart(path, OTHER)).toMatchObject({ offset: log.offsetOf(3) });
   });
 
   test("t3bk2_proof_same_response_ends_and_starts", async () => {
@@ -640,7 +640,7 @@ describe("t3bk2 collector options: where a run begins in a log", () => {
       l.say("msg_A", "and now the next one");
       start(l, "msg_A", "toolu_2", RID);
     });
-    expect(await findRunStart(path, RID)).toEqual({ offset: log.offsetOf(2) });
+    expect(await findRunStart(path, RID)).toMatchObject({ offset: log.offsetOf(2) });
   });
 
   test("t3bk2_proof_failed_start_call", async () => {
@@ -652,14 +652,14 @@ describe("t3bk2 collector options: where a run begins in a log", () => {
       }).result("toolu_1", "error: the project has no pipeline", true);
       start(l, "msg_B", "toolu_2", RID);
     });
-    expect(await findRunStart(path, RID)).toEqual({ offset: log.offsetOf(2) });
+    expect(await findRunStart(path, RID)).toMatchObject({ offset: log.offsetOf(2) });
   });
 
   test("t3bk2_proof_any_server_name", async () => {
     const { log, path } = await built((l) =>
       start(l, "msg_A", "toolu_1", RID, "mcp__pipelines__pipeline_start"),
     );
-    expect(await findRunStart(path, RID)).toEqual({ offset: log.offsetOf(0) });
+    expect(await findRunStart(path, RID)).toMatchObject({ offset: log.offsetOf(0) });
   });
 
   test("t3bk2_proof_metadata_mode_still_matches", async () => {
@@ -669,7 +669,7 @@ describe("t3bk2 collector options: where a run begins in a log", () => {
       l.say("msg_C", "CANARY_AFTER");
     });
     const found = await findRunStart(path, RID);
-    expect(found).toEqual({ offset: log.offsetOf(2) });
+    expect(found).toMatchObject({ offset: log.offsetOf(2) });
     const events = await read(collector, ref, {
       fromOffset: (found as { offset: number }).offset,
       capture: { metadata: true },

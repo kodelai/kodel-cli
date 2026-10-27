@@ -4,7 +4,7 @@ import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { FileStore, LocalPipelineHost } from "../src";
+import { FileStore, LocalPipelineHost, readStoredAgentLog } from "../src";
 
 /** The golden runs: one directory per stored format, `fixtures/formats/v<N>/<run id>/`. */
 const FORMATS = resolve(
@@ -188,6 +188,61 @@ describe("every stored format is opened by the current engine", () => {
         expect(await run?.integrityStatus()).toBe("unknown");
       }
       expect(await hashTree(runsDir())).toEqual(before);
+    }
+  });
+
+  test("t3bk2_old_run_still_opens", async () => {
+    await copyRuns("v1");
+    const host = hostFor();
+    for (const id of Object.keys(V1_RUNS)) {
+      const run = await host.open(id);
+      // `status` and `report` read a run from before the agent's log: nothing was captured, and nothing is made up
+      expect((await run?.state())?.agentLog).toBeUndefined();
+      expect((await run?.report())?.agent_log).toEqual({
+        not_collected: true,
+        reason: "not_captured",
+      });
+      expect(await readdir(join(runsDir(), id))).not.toContain("agent_log");
+    }
+    expect((await host.runSummaries()).map((r) => r.meta.runId).sort()).toEqual(
+      Object.keys(V1_RUNS).sort(),
+    );
+  });
+
+  test("t3bk2_agent_log_run_opens", async () => {
+    // a real run of this engine with the agent's log kept, taken once; it lives outside the hashed formats
+    // directory (the format of `agent_log/` is frozen with the others at the first release)
+    const fixtures = resolve(FORMATS, "..", "agent-log");
+    const [id] = (await readdir(fixtures)).filter((name) => name.startsWith("r_"));
+    expect(id).toBeDefined();
+    await cp(join(fixtures, id as string), join(runsDir(), id as string), { recursive: true });
+    const host = hostFor();
+    const run = await host.open(id as string);
+    const report = await run?.report();
+    expect(report?.status).toBe("completed");
+    expect(report?.agent_log).toMatchObject({
+      sessions: 2,
+      mode: "full",
+      final_pass: true,
+      unverified: true,
+      passes: { step: 3, tick: 0 },
+    });
+    const state = await run?.state();
+    const store = new FileStore({ root: join(root, ".kodel") });
+    const streams = Object.entries(state?.agentLog?.sessions ?? {});
+    expect(streams).toHaveLength(2);
+    for (const [session, kept] of streams) {
+      const read = await readStoredAgentLog(store, id as string, session, kept.length);
+      expect(read.ok).toBe(true);
+      expect(read.events.length).toBe(kept.entries);
+    }
+    // no path of the machine that took it
+    for (const file of await readdir(join(fixtures, id as string), { recursive: true })) {
+      const path = join(fixtures, id as string, file);
+      if (!/\.(json|jsonl|yaml)$/.test(path)) continue;
+      expect(await readFile(path, "utf8")).not.toMatch(
+        /\/Users\/|\/home\/|\/var\/folders|[A-Za-z]:\\{1,2}Users/,
+      );
     }
   });
 

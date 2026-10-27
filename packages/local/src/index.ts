@@ -1,4 +1,5 @@
 /** Local adapters: file-based state store, process executor, git snapshots, system clock. */
+export * from "./agent-log";
 export * from "./command";
 export * from "./config";
 export * from "./executor";

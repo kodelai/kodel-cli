@@ -10,9 +10,9 @@ What reads a log is a **collector**, one per agent. Adding an agent means adding
 - The collectors, which read files, are in `@kodel-ai/local` (`@kodel-ai/local/history`). The first is Claude Code.
 - The conformance suite every collector must pass is `agentHistoryContract` in `@kodel-ai/testkit`.
 
-Only the normalized events are meant to be kept, never the raw log. Every text in an event is a preview of at
-most 500 characters, and every string goes through `redact` before it leaves the collector. (The 500 is the
-current behaviour: the per-kind caps decided in "Capture decisions" at the end of this page are not built yet.)
+Only the normalized events are meant to be kept, never the raw log. Every text in an event is a preview, cut
+to 500 characters unless the consumer asks for other caps (the agent log does: see "The agent log"), and every
+string goes through `redact` before it leaves the collector.
 
 ## The event
 
@@ -32,7 +32,8 @@ An event is one JSON object, one per line when stored (JSON Lines). Every event 
 The fields of each kind:
 
 - `session`: `cwd?`, `git_branch?`. The first event of a session.
-- `message`: `role` (`user` or `assistant`), `text_preview`, `message_id?`.
+- `message`: `role` (`user` or `assistant`), `text_preview?` (absent in `metadata` mode and when the cap of its kind is
+  `0`), `message_id?`.
 - `usage`: one per model response. `model`, `input`, `output`, `cache_read`, `cache_write`, `reasoning`,
   `semantics`, `message_id`, `request_id?`, `cost?`.
   - `semantics: additive`: the four counts do not overlap and are summed as they are. `overlap`: the agent counts
@@ -66,8 +67,9 @@ These are the rules a collector follows, learned from real logs. Each is covered
   takes the earlier one's time, because `from`/`to` windows rely on the order. Times outside years 0001-9999 are
   treated as missing. A time without a zone is read as UTC, never in the zone of the machine, so the same log gives
   the same events everywhere. `started`, `ended` and `duration_ms` follow the same rule as `ts`.
-- **Text is redacted, then cut.** A preview is redacted before it is cut to 500 characters (the current cap; see
-  "Capture decisions" for the planned per-kind caps), so a secret that straddles the cut cannot survive as a prefix.
+- **Text is redacted, then cut.** A preview is redacted before it is cut (to 500 characters, or to the cap of its kind
+  when the consumer sets caps), and a cut never splits a surrogate pair, so a secret that straddles the cut cannot
+  survive as a prefix.
 - **A response can be split by other lines.** A `user` or `system` line (a tool result, a hook summary) can come
   between the lines of one response; in real logs about 6% of responses are written like that. The fold keeps the
   response open until another response starts, and the events of the lines in between wait behind its `usage`,
@@ -152,7 +154,7 @@ is `{ value, source }`, and a part that cannot be observed is left out, never gu
 | source | meaning |
 | --- | --- |
 | `observed` | the transport says it (the MCP handshake: the client's name and version) |
-| `observed-env` | the environment of the server (`CLAUDE_CODE_SESSION_ID`); exact, since the agent starts a server per session |
+| `observed-env` | the environment of the server (`CLAUDE_CODE_SESSION_ID`): the session that was current when the server started. A server lives as long as its agent process, so after `/clear` it still names the old session |
 | `observed-hook` | the newest session the hooks registered in `.kodel/sessions.jsonl` for the run's directories; used when the environment has none |
 | `derived` | read out of the session's own log (the model of its last answer) |
 
@@ -194,17 +196,24 @@ answers are not.
   that records this. The report says `prompts: <n> served` for such a run and `prompts: not_collected` for any other
   (an older run, a switch off at its start, or a run started before this record existed and continued after).
 
-## Capture decisions
+## The agent log (`agent_log/`)
 
-**Planned defaults, not yet built.** They were decided in TASK-52A8 and are built in TASK-3BK2 (the agent log) and
-TASK-9JRS (cost and prices). Until those land, the behaviour described above stays: previews of at most 500
-characters, and no `agent_log/` in a run. The plan is `docs/plans/task_52a8.md`.
+Each run keeps the sessions of its agent in `agent_log/` of the run folder, as normalized events with redacted text
+previews. It is **on by default and `full`**, with no opt-in (like the other history categories that are on by default).
+The raw log is never copied. The run folder is committed when the project tracks `.kodel/runs` (this repository ignores
+it, and `kodel init` does not write `.gitignore`); a project that tracks it should ignore `.kodel/runs/*/agent_log`.
+**Projects that upgrade start storing full sessions.** The decisions behind it were taken in TASK-52A8 and built in
+TASK-3BK2.
 
-**The agent log is on, and it is `full`.** Each run keeps the session of its agent in `agent_log/` of the run folder,
-as normalized events with redacted text previews, with no opt-in (like the other history categories that are on by
-default). The raw log is never copied. The run folder is committed when the project tracks `.kodel/runs` (this
-repository ignores it, and `kodel init` does not write `.gitignore`). **Projects that upgrade start storing full
-sessions.**
+```yaml
+history:
+  agent_log:
+    enabled: true        # false stores nothing
+    mode: full           # metadata: types, times, models, usage, tool names and sizes, and no text at all
+    preview_chars: 4000  # one number for every kind, or per kind: { user, agent, tool_input, tool_result }; 0 leaves a kind out
+    max_kb: 20480        # the events of one run, split per step
+    interval_s: 10       # seconds between copies while the run goes; 0: only at the end of a step
+```
 
 | kind | key in `preview_chars` | default cap (characters) | measured p90 / p95 / p99 |
 | --- | --- | --- | --- |
@@ -213,26 +222,76 @@ sessions.**
 | tool input | `tool_input` | 4 000 | 2 011 / 4 108 / 10 822 |
 | tool result | `tool_result` | 8 000 | 4 864 / 7 789 / 19 430 |
 
-The caps are `history.agent_log.preview_chars` in `config.yaml`, per kind (the keys above) or as one number; `0` empties
-a kind. The subagent description and `system.detail` keep 500. The percentiles come from 647 session files; with these
-caps a median session is about 163 KB of events (38 KB gzipped), a p90 session 2.4 MB, the largest 12.9 MB.
-`max_kb` (default 20480, bytes after redaction and cut) limits the events of one run. It is split per step so that a
-long run does not lose its end: each step may use `max_kb` divided by the number of nodes of the pipeline, and what a
-step does not use carries over to the next ones. When a step's share is full, whole events are dropped, one marker event
-counts them, and the report names the step. `mode: metadata` keeps the envelope, usage, tool names, times and sizes and
-no text; `enabled: false` stores nothing.
+The subagent description and `system.detail` keep 500, and line breaks are kept. The percentiles come from 647 session
+files; with these caps a median session is about 163 KB of events (38 KB gzipped), a p90 session 2.4 MB, the largest
+12.9 MB. In `metadata` mode the session event keeps no `cwd` or branch either.
 
-- **Which session.** Only a session proven to have called `pipeline_*` with the run's id; a session known only from
-  the hook index is not stored ("session unknown"). Only events from the response that issued `pipeline_start` to the end of the run.
-- **When.** At the end of each step and of the run, up to the last closed response; nothing is written to a finished
-  run, so the tail of the last response may be missing, and the report says so.
-- **Switches.** `agent_log` is the privacy switch of this data. `usage` and `tool_calls` read the log themselves;
-  `tool_log` stays the switch of the hooks, and `agent_log` stores no tool events when `tool_log` is off. A kind is
-  silenced with `preview_chars: 0`, not with `prompts` or `output`.
-- **Frozen at the start.** The keys, and the price override, are journaled in `run_started.history`; an edit of the
-  config during a run changes nothing for that run. A run without them reads as "not captured".
-- **Display data.** `agent_log/` is outside the seal and shown as unverified. It is information only: usage and cost never
-  feed a check, a route or a gate.
+**Which session.** A session belongs to the run when its own log has a call of `pipeline_start`, `pipeline_next_step` or
+`pipeline_complete_step` (matched by the end of the tool name, whatever the server is called) whose input or result
+holds the run's id. The candidates are the session in the environment of the server (`CLAUDE_CODE_SESSION_ID`) and the
+newest sessions of the hook index (`.kodel/sessions.jsonl`); neither is believed without the run id in its log, which is
+found whatever the mode. The window starts at the first such call: the person's request, anything an earlier run did in
+the same session, and the text of the same response before the call are outside it (the decision said "from the response
+that issued `pipeline_start`"; the call is the first thing a log shows that is surely the run's). A server keeps the
+session it had when it started, so after `/clear` the environment names the old session and the new one is found through
+the hook index: without the hooks of `kodel init` the new session is not found and the report says `session_unknown`. A
+run continued in another session is copied from its first call there. Subagents of a stored session are included, as
+`agent-<id>.jsonl` with `parent_session_id`, when they began after the run's first call.
+
+**When.** Every `interval_s` seconds while the run goes (by the process that serves it, only through the MCP server) and
+at the end of each step, before the step is judged, so the last step of a run is copied before the run ends. Only whole
+responses: the response still being written waits. Nothing is journaled or appended to a run that has ended. A run that
+ends some other way (cancelled, a gate rejected, a check failed) loses at most one interval and the open response, and the
+report says it ended without a final copy. The agent may buffer its writes, so a copy is at most one interval behind
+*what the agent has flushed*. A copy never fails or refuses a step. After a server restart the first copy reads the log
+from the start, for up to 30 seconds, and a very large session catches up over several copies.
+
+**What is written.** `agent_log/<session>.jsonl` holds the events, one JSON line each, in the event format above (`v: 1`).
+The journal has one `agent_log_saved` per copy: `why` (`tick` or `step`), `session`, `parent?`, `node`, `attempt`,
+`first_seq`, `last_seq`, `stream_from`, `stream_to`, `tail_hash`, `last_key`, `entries` and `cut?`; and `agent_log_failed`
+with a reason, once per reason: `session_unknown`, `log_missing`, `refused`, `log_changed`, `stored_copy_changed`,
+`tick_cap`, `unreadable`. The journal is what the files are measured against: a stream is vouched for up to `stream_to`
+bytes. Bytes after it are a copy that never reached the journal; they are not read and the next copy cuts them off (this
+drops only bytes nothing vouched for, so no history is rewritten). A stream that is shorter than the journal says, or whose
+end is not the end the journal vouches for, is not extended: the report says `stored_copy_changed`. A log that is shorter
+than before, or whose events are not the ones stored, stops the copy of that session (`log_changed`). Ids that redaction
+would change are replaced by a stable `id-` and a hash, in the call and its result alike, so they still pair.
+
+**Size.** `max_kb` (default 20480, bytes after redaction and cut) limits the events of one run. It is split by position: a
+step may use the part of the bound up to its node in the pipeline the run started with, less what the steps before it
+used, so nodes that never copy (gates, commands) pass their share on; a step that comes again may use the share of its own
+node, and a node a change added may use what is left. When a step's share is full, whole events are dropped and one
+`system` event with `subtype: "agent_log_cut"` counts them; the report names it. At most 4000 copies from the timer and
+1000 from the ends of steps are journaled per run.
+
+**Switches.** `agent_log` is the privacy switch of this data. `usage` and `tool_calls` read the log themselves;
+`tool_log` stays the switch of the hooks, and with `tool_log: false` the agent log stores no `tool_call`, `tool_result` or
+`subagent` event and no subagent file. A kind is silenced with `preview_chars: 0`, not with `prompts` or `output`. The keys
+are frozen at the start: they are journaled in `run_started.history`, and an edit of the config during a run changes
+nothing for that run. A run without them reads as "not captured"; the report says `not_captured` or `disabled`.
+
+**Display data.** `agent_log/` is outside the seal and shown as `unverified`: a changed file does not break the seal, and
+`kodel report` counts from the journal and never opens the files. A stream that cannot be read says what is wrong with it
+(`format`: written in a format this engine does not know, upgrade; `damaged`), never "modified". It is information only:
+usage and cost never feed a check, a route or a gate.
+
+**Residual risk.** `redact` catches known patterns and 32+ character mixed high-entropy words. It does not catch hex-only
+or short secrets, a secret split across two events is redacted per event, and `history.changes.exclude` does not apply to
+the agent log. A tool that reads an `.env` puts up to 8 000 characters of it into the log; in a tracked history that is
+permanent. Redaction rules are read from the config as it is when the server starts, so a rule removed during a run keeps
+what earlier copies redacted. While a run waits at a gate, everything else the same session does is in `full` mode, and the
+timer keeps copying it. An agent that starts its own `kodel mcp` with a chosen `CLAUDE_CODE_SESSION_ID` and the run's id can
+have another session of the project copied into the run. Lower the exposure with `preview_chars: 0` for a kind,
+`mode: metadata` or `enabled: false`.
+
+**Format.** Under `v: 1` before the first release: `text_preview` is optional (it was always there), and `agent_log_cut` is a
+`system` event. At the first release the sample run in `fixtures/agent-log/` is moved under the frozen formats (or its hash
+is pinned), and from then on a change of the event shape needs a reader of the previous format.
+
+## Prices (planned)
+
+**Planned defaults, not yet built.** They were decided in TASK-52A8 and are built in TASK-9JRS (cost and prices). Until
+that lands, `usage.cost` has no `revision` or `source` and no cost is computed. The plan is `docs/plans/task_52a8.md`.
 
 **Prices.** A table in code (`pipeline-core`, plain data): `format`, `revision` (a date), per model the prices of input,
 output, cache read and cache write, and `effectiveFrom`, `sourceUrl`, `checkedAt`. The entry is chosen by the time of
@@ -245,11 +304,6 @@ when it ends, is missing from about half of the session files and is always abov
 is never in a run and is never shown as a run's cost; only the `--local` check reads it, with the same project scoping
 as the collectors (Kodel projects only).
 
-**Residual risk.** `redact` catches known patterns and 32+ character mixed high-entropy words. It does not catch hex-only or
-short secrets, a secret split across two events is redacted per event, and `history.changes.exclude` does not apply to
-the agent log. A tool that reads an `.env` puts up to 8 000 characters of it into the log; in a tracked history that is
-permanent. Lower it with `preview_chars: 0` for a kind, `mode: metadata` or `enabled: false`.
-
-**Constraint.** The format changes this needs (optional `revision`/`source` on `usage.cost`, `text_preview` optional in
-`metadata`, a new cut marker, new `run_started.history` keys) are allowed under `v: 1` only before the first release, so
-the release waits for them, or the version is bumped with a reader of the previous format.
+**Constraint.** The format change the prices need (optional `revision`/`source` on `usage.cost`, a `computed` basis, new
+keys in `run_started.history`) is allowed under `v: 1` only before the first release, so the release waits for it, or the
+version is bumped with a reader of the previous format.

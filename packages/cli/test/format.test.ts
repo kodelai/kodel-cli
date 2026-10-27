@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { RunReport } from "@kodel-ai/pipeline-core";
-import { formatDuration, formatReport } from "../src/format";
+import { agentLogLine, formatDuration, formatReport } from "../src/format";
 
 describe("formatDuration", () => {
   test("is short enough for a table", () => {
@@ -30,6 +30,7 @@ const report: RunReport = {
   agent_decisions: [],
   checks: [],
   prompts: { served: 3 },
+  agent_log: { not_collected: true, reason: "not_captured" },
   nodes: [
     {
       node: "impl",
@@ -183,5 +184,72 @@ describe("jspb_format_report_checks_and_size", () => {
     expect(text).toContain("task size: 2 file(s), +10 -3 lines");
     expect(text).toContain("directories: src 2");
     expect(text).toContain("languages: ts 2");
+  });
+});
+
+describe("t3bk2 the line about the agent's log", () => {
+  test("t3bk2_report_line", () => {
+    const copied: Exclude<RunReport["agent_log"], { not_collected: true }> = {
+      sessions: 2,
+      entries: 1234,
+      bytes: 56 * 1024,
+      mode: "full",
+      passes: { tick: 80, step: 12 },
+      cut: 0,
+      final_pass: true,
+      failed: [],
+      unverified: true,
+    };
+    expect(agentLogLine(copied)).toBe(
+      "agent log: 2 session(s), 1234 entries, 56 KB, mode full, copied 12 time(s) at the end of a step and 80 on the timer (unverified)",
+    );
+    expect(agentLogLine({ ...copied, cut: 3, final_pass: false, failed: ["tick_cap"] })).toBe(
+      "agent log: 2 session(s), 1234 entries, 56 KB, mode full, copied 12 time(s) at the end of a step and 80 on the timer, 3 event(s) left out for want of room, ended without a final copy, not copied: tick_cap (unverified)",
+    );
+    // a run that is going has no word on its end yet
+    const { final_pass: _gone, ...going } = copied;
+    expect(agentLogLine(going)).not.toContain("final copy");
+  });
+
+  test("t3bk2_report_reasons_exact", () => {
+    expect(agentLogLine({ not_collected: true, reason: "not_captured" })).toBe(
+      "agent log: not_collected (not_captured)",
+    );
+    expect(agentLogLine({ not_collected: true, reason: "disabled" })).toBe(
+      "agent log: not_collected (disabled)",
+    );
+    const none = {
+      sessions: 0,
+      entries: 0,
+      bytes: 0,
+      mode: "full",
+      passes: { tick: 0, step: 0 },
+      cut: 0,
+      unverified: true as const,
+    };
+    expect(agentLogLine({ ...none, failed: ["session_unknown", "log_missing"] })).toBe(
+      "agent log: not_collected (session_unknown, log_missing)",
+    );
+    expect(agentLogLine({ ...none, failed: [] })).toBe("agent log: nothing copied yet");
+    // a stored stream that changed or a log that did: said by what happened, never as "modified"
+    for (const reason of [
+      "log_changed",
+      "stored_copy_changed",
+      "refused",
+      "unreadable",
+      "tick_cap",
+    ] as const) {
+      const line = agentLogLine({ ...none, failed: [reason] });
+      expect(line).toContain(reason);
+      expect(line).not.toMatch(/modified/i);
+    }
+  });
+
+  test("t3bk2_report_line_is_in_the_report", () => {
+    const text = formatReport(
+      { ...report, agent_log: { not_collected: true, reason: "disabled" } },
+      (t) => t,
+    );
+    expect(text).toContain("agent log: not_collected (disabled)");
   });
 });

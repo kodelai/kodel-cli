@@ -1,0 +1,2 @@
+{"agent":"claude-code","agent_version":"2.1.306","ts":"2026-10-21T10:00:06.100Z","kind":"session","cwd":"[REDACTED:high-entropy]","v":1,"seq":1,"session_id":"agent-abc123","parent_session_id":"55555555-5555-4555-8555-555555555555"}
+{"agent":"claude-code","agent_version":"2.1.306","ts":"2026-10-21T10:00:06.100Z","kind":"message","role":"user","text_preview":"Review it","v":1,"seq":2,"session_id":"agent-abc123","parent_session_id":"55555555-5555-4555-8555-555555555555"}
