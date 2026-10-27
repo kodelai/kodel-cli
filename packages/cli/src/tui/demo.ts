@@ -1,195 +1,191 @@
-/** Sample data for the layout prototype. Nothing here is read from a project. */
+/** Sample sessions for `kodel tui --demo`. Nothing here is read from a project. */
+import type { Loaded } from "./load";
+import type { Session, StepLine } from "./session";
 
-export type SessionStatus = "waiting" | "running" | "failed" | "done";
-export type WaitKind = "GATE" | "CHANGE" | "PROPOSAL" | "ACK";
-export type StepState = "done" | "running" | "waiting" | "pending" | "failed";
+const MIN = 60_000;
+const HOUR = 60 * MIN;
 
-export interface DemoStep {
-  name: string;
-  state: StepState;
-  took?: string;
-}
-
-export interface DemoSession {
-  id: string;
-  title: string;
-  pipeline: string;
-  agent: string;
-  status: SessionStatus;
-  wait?: WaitKind;
-  step: string;
-  age: string;
-  cost: string;
-  workdir: string;
-  summary?: string;
-  files?: string[];
-  steps: DemoStep[];
-  log: string[];
-}
-
-const CODE_STEPS: DemoStep[] = [
-  { name: "plan", state: "done", took: "4m" },
-  { name: "implement", state: "done", took: "1h 21m" },
-  { name: "checks", state: "done", took: "6m" },
-  { name: "review", state: "waiting", took: "21m" },
+const CODE_STEPS: StepLine[] = [
+  { name: "plan", state: "done" },
+  { name: "implement", state: "done" },
+  { name: "checks", state: "done" },
+  { name: "review", state: "waiting" },
   { name: "commit", state: "pending" },
 ];
 
-export const DEMO_SESSIONS: DemoSession[] = [
-  {
-    id: "r_0mvo6g4mi",
-    title: "capture-usage-cost",
-    pipeline: "dev",
-    agent: "claude-code",
-    status: "waiting",
-    wait: "GATE",
-    step: "review",
-    age: "21m",
-    cost: "$3.41",
-    workdir: "worktrees/capture-usage-cost",
-    summary:
-      "Added usage and cost to the step record. Old runs are read as cost unknown, never as zero. Tests t52_* pass.",
-    files: [
-      "packages/pipeline-core/src/run-state.ts  +88 -12",
-      "packages/pipeline-core/src/usage.ts  +141 new",
-      "fixtures/formats/v1/run-with-usage/  +57 new",
-      "… 11 more files",
-    ],
-    steps: CODE_STEPS,
-    log: [
-      "14:02 step.start    implement",
-      "14:41 check         typecheck ok 8s",
-      "14:41 check         lint ok 2s",
-      "14:42 check         bun test ok 412 passed",
-      "14:42 step.done     implement",
-      "14:43 step.start    review (human)",
-      "14:43 waiting       GATE review",
-    ],
-  },
-  {
-    id: "r_1kd93xa07",
-    title: "pipeline-format-version",
-    pipeline: "dev",
-    agent: "claude-code",
-    status: "waiting",
-    wait: "CHANGE",
-    step: "change #2",
-    age: "40m",
-    cost: "$1.12",
-    workdir: "worktrees/pipeline-format-version",
-    summary:
-      "The lint check failed on generated fixtures. Proposed: lint only packages/ and tests/.",
-    files: [".kodel/pipelines/dev.yaml  paths: [packages/**, tests/**]"],
-    steps: [
-      { name: "plan", state: "done", took: "3m" },
-      { name: "implement", state: "waiting", took: "35m" },
-      { name: "review", state: "pending" },
-      { name: "commit", state: "pending" },
-    ],
-    log: [
-      "13:52 step.start    implement",
-      "14:20 check         lint failed 41 problems in fixtures/",
-      "14:22 propose       pipeline change #2",
-      "14:22 waiting       CHANGE accept or discard",
-    ],
-  },
-  {
-    id: "—",
-    title: "release.yaml (new pipeline)",
-    pipeline: "release",
-    agent: "claude-code",
-    status: "waiting",
-    wait: "PROPOSAL",
-    step: "proposal",
-    age: "1h",
-    cost: "—",
-    workdir: "—",
-    summary: "A new pipeline for releases: build, check artifact, tag, publish notes.",
-    files: [".kodel/proposals/release.yaml"],
-    steps: [],
-    log: ["13:30 propose       release.yaml", "13:30 waiting       PROPOSAL accept or discard"],
-  },
-  {
-    id: "r_0vb88k4fn",
-    title: "decisions-docs",
-    pipeline: "docs",
-    agent: "codex",
-    status: "waiting",
-    wait: "ACK",
-    step: "state changed",
-    age: "3d",
-    cost: "$0.90",
-    workdir: "worktrees/decisions-docs",
-    summary: "The run state was changed outside kodel. Accept the state to continue.",
-    steps: [
-      { name: "draft", state: "done", took: "9m" },
-      { name: "review", state: "waiting" },
-    ],
-    log: ["11:04 notice        state changed outside kodel", "11:04 waiting       ACK"],
-  },
-  {
-    id: "r_1kd9q22vb",
-    title: "fix-wait-timeout",
-    pipeline: "dev",
-    agent: "claude-code",
-    status: "running",
-    step: "implement",
-    age: "9m",
-    cost: "$0.47",
-    workdir: "worktrees/fix-wait-timeout",
-    steps: [
-      { name: "plan", state: "done", took: "3m" },
-      { name: "implement", state: "running", took: "9m" },
-      { name: "review", state: "pending" },
-      { name: "commit", state: "pending" },
-    ],
-    log: [
-      "14:02 step.start    implement (attempt 1)",
-      "14:06 check         test failed t40_wait_timeout_reports",
-      "14:06 step.retry    implement, the agent got the reason",
-      "14:08 agent         ran bun test wait",
-    ],
-  },
-  {
-    id: "r_0zz41pe8c",
-    title: "report-pdf-export",
-    pipeline: "dev",
-    agent: "claude-code",
-    status: "failed",
-    step: "checks 3/3",
-    age: "1d",
-    cost: "$5.80",
-    workdir: "worktrees/report-pdf-export",
-    steps: [
-      { name: "plan", state: "done", took: "5m" },
-      { name: "implement", state: "failed", took: "2h 10m" },
-    ],
-    log: ["10:15 check         test failed (3rd attempt)", "10:15 run.stop      checks exhausted"],
-  },
-  {
-    id: "r_0xq77h2ta",
-    title: "task-key-format",
-    pipeline: "dev",
-    agent: "claude-code",
-    status: "done",
-    step: "done",
-    age: "1d",
-    cost: "$2.05",
-    workdir: "worktrees/task-key-format",
-    steps: CODE_STEPS.map((s) => ({ ...s, state: "done" as const })),
-    log: ["16:20 step.done     commit", "16:20 run.done"],
-  },
-  {
-    id: "r_0wm10c9ds",
-    title: "mcp-instructions",
-    pipeline: "dev",
-    agent: "claude-code",
-    status: "done",
-    step: "done",
-    age: "2d",
-    cost: "$1.73",
-    workdir: "worktrees/mcp-instructions",
-    steps: CODE_STEPS.map((s) => ({ ...s, state: "done" as const })),
-    log: ["09:12 step.done     commit", "09:12 run.done"],
-  },
-];
+const allDone = CODE_STEPS.map((s) => ({ ...s, state: "done" as const }));
+
+export function demoSessions(now: number): Loaded {
+  const sessions: Session[] = [
+    {
+      id: "r_0mvo6g4mi",
+      title: "capture-usage-cost",
+      pipeline: "dev",
+      status: "waiting",
+      need: "approve",
+      step: "approve",
+      since: now - 21 * MIN,
+      workdir: "worktrees/capture-usage-cost",
+      headline: "Step «review» waits for your decision",
+      prompt:
+        "Review the change. Old runs must read as cost unknown, never as zero. Check the fixtures under fixtures/formats/v1.",
+      command: "kodel gate approve|reject r_0mvo6g4mi",
+      steps: CODE_STEPS,
+      log: [
+        "14:42:10 node_finished      implement",
+        "14:42:11 node_entered       review",
+        "14:42:11 gate_waiting       review",
+      ],
+    },
+    {
+      id: "r_1kd93xa07",
+      title: "pipeline-format-version",
+      pipeline: "dev",
+      status: "waiting",
+      need: "pipeline_edit",
+      step: "pipeline edit",
+      since: now - 40 * MIN,
+      workdir: "worktrees/pipeline-format-version",
+      headline: "The agent proposes to change this run's pipeline",
+      prompt:
+        "The pipeline of this run was changed: lint now covers packages/ and tests/ only. Nothing runs again.",
+      after: "approve «review»",
+      command: "kodel pipeline changes apply r_1kd93xa07",
+      steps: [
+        { name: "plan", state: "done" },
+        { name: "implement", state: "done" },
+        { name: "review", state: "waiting" },
+      ],
+      log: [
+        "14:20:03 check_finished     lint failed",
+        "14:22:40 pipeline_change_proposed",
+        "14:22:41 gate_waiting       review",
+      ],
+    },
+    {
+      id: "r_0vb88k4fn",
+      title: "decisions-docs",
+      pipeline: "docs",
+      status: "waiting",
+      need: "paused",
+      step: "paused",
+      since: now - 2 * HOUR - 5 * MIN,
+      workdir: "worktrees/decisions-docs",
+      headline: "Paused at «draft»: a step used up all its attempts",
+      prompt: "The step failed 3 times. Resume gives it more attempts.",
+      command: "kodel resume r_0vb88k4fn",
+      steps: [
+        { name: "draft", state: "failed", note: "attempt 3" },
+        { name: "review", state: "pending" },
+      ],
+      log: ["12:30:00 check_finished     test failed", "12:31:12 run_paused         draft"],
+    },
+    {
+      id: "r_0t55c8k21",
+      title: "task-link-fix",
+      pipeline: "dev",
+      status: "waiting",
+      need: "hand_edit",
+      step: "hand edit",
+      since: now - 3 * 24 * HOUR,
+      headline: "Files of this run were changed outside kodel",
+      prompt: "Look at what changed, then accept the run as it is now.",
+      command: "kodel ack r_0t55c8k21",
+      steps: allDone,
+      log: ["09:12:00 manual_edit"],
+    },
+    {
+      id: "r_1kd9q22vb",
+      title: "fix-wait-timeout",
+      pipeline: "dev",
+      status: "running",
+      activity: "working",
+      step: "checks",
+      since: now - 9 * MIN,
+      workdir: "worktrees/fix-wait-timeout",
+      steps: [
+        { name: "plan", state: "done" },
+        { name: "implement", state: "done" },
+        { name: "checks", state: "running" },
+      ],
+      log: ["14:06:03 agent_completed     implement", "14:06:09 check_finished     typecheck"],
+    },
+    {
+      id: "r_1kd9w31xc",
+      title: "mcp-server-names",
+      pipeline: "dev",
+      status: "running",
+      activity: "agent",
+      step: "implement",
+      since: now - 4 * MIN,
+      steps: [
+        { name: "plan", state: "done" },
+        { name: "implement", state: "running" },
+      ],
+      log: ["14:11:20 node_entered       implement"],
+    },
+    {
+      id: "r_1kd8aa019",
+      title: "report-html-export",
+      pipeline: "dev",
+      status: "running",
+      activity: "quiet",
+      quietMs: 12 * MIN,
+      step: "quiet 12m",
+      since: now - 50 * MIN,
+      steps: [
+        { name: "plan", state: "done" },
+        { name: "implement", state: "running" },
+      ],
+      log: ["13:20:00 node_entered       implement"],
+    },
+    {
+      id: "r_0zz41pe8c",
+      title: "report-pdf-export",
+      pipeline: "dev",
+      status: "failed",
+      step: "implement",
+      since: now - 26 * HOUR,
+      reason: 'node "implement" failed with "no-fix" and nothing handles that',
+      steps: [
+        { name: "plan", state: "done" },
+        { name: "implement", state: "failed", note: "attempt 2" },
+      ],
+      log: ["10:15:00 node_finished      implement no-fix", "10:15:00 run_finished"],
+    },
+    {
+      id: "r_0xq77h2ta",
+      title: "task-key-format",
+      pipeline: "dev",
+      status: "done",
+      step: "done",
+      since: now - 27 * HOUR,
+      steps: allDone,
+      log: ["16:20:00 run_finished"],
+    },
+    {
+      id: "r_0wm10c9ds",
+      title: "old-experiment",
+      pipeline: "dev",
+      status: "canceled",
+      step: "canceled",
+      since: now - 5 * 24 * HOUR,
+      steps: [{ name: "plan", state: "done" }],
+      log: ["11:00:00 run_finished"],
+    },
+    {
+      id: "r_0mvh62i9e",
+      title: "run-title-from-the-agent",
+      pipeline: "dev",
+      status: "unreadable",
+      step: "unreadable",
+      since: now - 6 * 24 * HOUR,
+      headline: "This run cannot be opened",
+      prompt:
+        "It was written before pipelines were kept in versions (format 1, this kodel reads 2); finish it with the kodel that started it, or remove it.",
+      steps: [],
+      log: [],
+    },
+  ];
+  return { sessions, proposals: 1 };
+}

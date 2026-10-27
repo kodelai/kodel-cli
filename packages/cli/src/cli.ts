@@ -471,11 +471,19 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
 
   program
     .command("tui")
-    .description("Open the terminal UI (a layout prototype with sample data)")
-    .action(async () => {
+    .description("Open the terminal UI: the runs of this project, and what waits for you")
+    .option("--demo", "show sample runs instead of this project's")
+    .action(async (opts: { demo?: boolean }) => {
       requireHuman();
       const { runTui } = await import("./tui/run");
-      await runTui(process.stdin, process.stdout);
+      if (opts.demo) {
+        const { demoSessions } = await import("./tui/demo");
+        await runTui(process.stdin, process.stdout, async () => demoSessions(Date.now()), "demo");
+        return;
+      }
+      const { loadSessions } = await import("./tui/load");
+      const h = await host();
+      await runTui(process.stdin, process.stdout, () => loadSessions(h, Date.now()), "project");
     });
 
   program

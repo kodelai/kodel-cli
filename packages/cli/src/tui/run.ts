@@ -1,6 +1,6 @@
-/** The terminal loop: alternate screen, raw keys, redraw on a key or a resize. */
-import { DEMO_SESSIONS } from "./demo";
-import { initialModel, type Model, render, update } from "./view";
+/** The terminal loop: alternate screen, raw keys, redraw on a key, a resize, a frame or new data. */
+import type { Loaded } from "./load";
+import { initialModel, isAnimated, type Model, render, tick, update, withData } from "./view";
 
 const KEYS: Record<string, string> = {
   "\u001b[A": "up",
@@ -20,11 +20,17 @@ export function keyName(chunk: string): string {
   return KEYS[chunk] ?? chunk;
 }
 
+const FRAME_MS = 100;
+const REFRESH_MS = 2000;
+
 export async function runTui(
   stdin: NodeJS.ReadStream,
   stdout: NodeJS.WriteStream,
+  load: () => Promise<Loaded>,
+  source: Model["source"],
 ): Promise<number> {
-  let model: Model = initialModel(DEMO_SESSIONS);
+  // Read before the screen is taken over, so a project that cannot be read ends with a plain error.
+  let model: Model = initialModel(await load(), source, Date.now());
 
   const draw = () => {
     const lines = render(model, { cols: stdout.columns ?? 80, rows: stdout.rows ?? 24 });
@@ -42,7 +48,33 @@ export async function runTui(
   process.once("exit", restore);
 
   return await new Promise<number>((resolve) => {
+    let refreshing = false;
+    const frames = setInterval(() => {
+      model = tick(model, Date.now());
+      if (isAnimated(model)) draw();
+    }, FRAME_MS);
+    const refresh = setInterval(() => {
+      if (refreshing) return;
+      refreshing = true;
+      load()
+        .then((loaded) => {
+          model = withData(model, loaded, Date.now());
+        })
+        .catch((error: unknown) => {
+          model = {
+            ...model,
+            notice: `Cannot read the runs: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        })
+        .finally(() => {
+          refreshing = false;
+          draw();
+        });
+    }, REFRESH_MS);
+
     const finish = () => {
+      clearInterval(frames);
+      clearInterval(refresh);
       stdin.off("data", onData);
       stdout.off("resize", onResize);
       stdin.pause();
