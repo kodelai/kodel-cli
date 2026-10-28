@@ -378,7 +378,8 @@ another machine than the agent's (a devcontainer) may be windowed wrongly.
 carries it, so the events the other readers get and the golden fixtures are unchanged), the events `usage_recorded` and
 `usage_failed`, `state.usage` and `run_started.history.usage`. An engine without this change reads the journal and the state as
 plain JSON and ignores what it does not know. The shipped prices carry `checkedAt: null`: the 4.5 rows come from the vendor's price
-page and the 5.x rows from the model table of the `claude-api` skill (cached 2026-10-06), not from the live page, and nobody has
-compared them since. `scripts/check-prices.mjs` is the check that does, and `skills/kodel-prices/` is how a maintainer runs it. A request
+page and every other row (4.6, 4.7, 4.8 and the 5.x ones) from the model table of the `claude-api` skill (cached 2026-10-06), not
+from the live page, and nobody has compared them since, except the Sonnet 5.5 cache read, which was corrected from Claude Code's own
+`/usage`. `scripts/check-prices.mjs` is the check that does, and `skills/kodel-prices/` is how a maintainer runs it. A request
 over a model's own `long_context_tokens` (200 000 unless the table says otherwise, 100 000 for `claude-haiku-5-5`) is flagged, and
 the higher price of such requests is not modelled.

@@ -64,8 +64,14 @@ import {
 
 /** A pass stops reading after this long and keeps what it has: a big log catches up over several passes. */
 export const USAGE_BUDGET_MS = 10_000;
-/** Streams kept in memory; the oldest go first. */
-const MEMO_CAP = 16;
+/**
+ * What is kept in memory, bounded three ways so that one busy run cannot make another (or its own main session) forget:
+ * the main sessions of all runs, the subagent logs of one run, and the runs that have subagent logs at all. The oldest go
+ * first inside each.
+ */
+const MAIN_MEMO_CAP = 32;
+const CHILD_MEMO_CAP = 48;
+const CHILD_RUN_CAP = 8;
 
 const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
 
@@ -159,6 +165,8 @@ interface PassContext {
   workdir: string | undefined;
   /** Repeats across the main log and the subagents' logs of this pass. */
   seen: Set<string>;
+  /** How many `usage_recorded` the journal held when the pass began: the pass may add records up to the cap. */
+  events: number;
   result: UsageResult;
 }
 
@@ -166,7 +174,10 @@ interface PassContext {
 export class UsageWriter {
   private readonly now: () => number;
   private readonly budgetMs: number;
-  private readonly memos = new Map<string, StreamMemo>();
+  /** The main session of each run, by `runId|session`. */
+  private readonly mains = new Map<string, StreamMemo>();
+  /** The subagent logs of each run, by run and then by session. */
+  private readonly children = new Map<string, Map<string, StreamMemo>>();
   private readonly collectors = new Map<string, AgentHistoryCollector>();
   private readonly finder: SessionFinder;
 
@@ -178,8 +189,9 @@ export class UsageWriter {
 
   /** Let go of what is kept for a run that has ended. */
   forget(runId: string): void {
-    for (const key of [...this.memos.keys()])
-      if (key.startsWith(`${runId}|`)) this.memos.delete(key);
+    for (const key of [...this.mains.keys()])
+      if (key.startsWith(`${runId}|`)) this.mains.delete(key);
+    this.children.delete(runId);
   }
 
   private collector(configDir: string): AgentHistoryCollector {
@@ -193,15 +205,43 @@ export class UsageWriter {
     return found;
   }
 
-  private memo(runId: string, session: string, path: string): StreamMemo {
+  /** The memo of a main session; it is never pushed out by the subagent logs of any run. */
+  private mainMemo(runId: string, session: string, path: string): StreamMemo {
     const key = `${runId}|${session}`;
-    let found = this.memos.get(key);
+    let found = this.mains.get(key);
     if (found === undefined || found.path !== path) found = { path, creditedSeq: 0 };
-    this.memos.delete(key);
-    this.memos.set(key, found);
-    if (this.memos.size > MEMO_CAP) {
-      const oldest = this.memos.keys().next().value;
-      if (oldest !== undefined) this.memos.delete(oldest);
+    this.mains.delete(key);
+    this.mains.set(key, found);
+    if (this.mains.size > MAIN_MEMO_CAP) {
+      const oldest = this.mains.keys().next().value;
+      if (oldest !== undefined) this.mains.delete(oldest);
+    }
+    return found;
+  }
+
+  /** The memo of a subagent log if there is one; it takes no slot. */
+  private peekChild(runId: string, session: string, path: string): StreamMemo | undefined {
+    const found = this.children.get(runId)?.get(session);
+    return found !== undefined && found.path === path ? found : undefined;
+  }
+
+  /** A memo for a subagent log of a run, kept among the newest `CHILD_MEMO_CAP` of that run. */
+  private childMemo(runId: string, session: string, path: string): StreamMemo {
+    const own = this.children.get(runId) ?? new Map<string, StreamMemo>();
+    // Touched runs go last, and the oldest run's logs are forgotten when too many runs have any.
+    this.children.delete(runId);
+    this.children.set(runId, own);
+    if (this.children.size > CHILD_RUN_CAP) {
+      const oldest = this.children.keys().next().value;
+      if (oldest !== undefined) this.children.delete(oldest);
+    }
+    let found = own.get(session);
+    if (found === undefined || found.path !== path) found = { path, creditedSeq: 0 };
+    own.delete(session);
+    own.set(session, found);
+    if (own.size > CHILD_MEMO_CAP) {
+      const oldest = own.keys().next().value;
+      if (oldest !== undefined) own.delete(oldest);
     }
     return found;
   }
@@ -265,6 +305,7 @@ export class UsageWriter {
       started,
       workdir,
       seen: new Set(),
+      events: state.usage?.events ?? 0,
       result,
     };
 
@@ -281,7 +322,7 @@ export class UsageWriter {
         missing = missing || candidate.session === cleanExecutorText(env[SESSION_ENV]);
         continue;
       }
-      const memo = this.memo(run.runId, candidate.session, candidate.path);
+      const memo = this.mainMemo(run.runId, candidate.session, candidate.path);
       if (memo.stopped !== undefined) {
         proven += 1;
         continue;
@@ -293,18 +334,19 @@ export class UsageWriter {
       for (const log of await subagentLogs(candidate.path, candidate.session)) {
         const id = basename(log, ".jsonl");
         if (!SAFE_SESSION.test(id)) continue;
-        const child = this.memo(run.runId, id, log);
-        if (child.stopped !== undefined) continue;
-        if (child.start === undefined) {
+        let child = this.peekChild(run.runId, id, log);
+        if (child?.stopped !== undefined) continue;
+        if (child?.start === undefined) {
           const born = await firstTimestamp(log);
           const from = memo.start?.ts;
-          // A subagent that began before the run's first call belongs to what came before.
+          // A subagent that began before the run's first call belongs to what came before; it takes no slot.
           if (born === undefined) {
             // Without a time on its first entry it cannot be told from one that began before the run: not guessed.
             await this.fail(run, result, "unreadable", id);
             continue;
           }
           if (from !== undefined && born < from) continue;
+          child = this.childMemo(run.runId, id, log);
           child.start = { offset: 0 };
         }
         if ((await this.credit(ctx, id, candidate.session, child)) === "abort") return result;
@@ -314,6 +356,13 @@ export class UsageWriter {
       await this.fail(run, result, await this.noSession(run, missing));
     }
     return result;
+  }
+
+  /** Whether the journal cannot take another record: said once as `cap`, not as a record the machine refused. */
+  private async capReached(ctx: PassContext): Promise<boolean> {
+    if (ctx.events + ctx.result.recorded < MAX_USAGE_EVENTS) return false;
+    await this.fail(ctx.run, ctx.result, "cap");
+    return true;
   }
 
   /** Why no log was found: an agent with no collector, a log that is gone, or a session that is not known. */
@@ -557,6 +606,7 @@ export class UsageWriter {
         if (!(await lock.stillHeld())) return "abort";
         // The cursor goes with the step's delta, empty or not, unless the other one carries it.
         if (!isEmptyDelta(stepDelta) || isEmptyDelta(outsideDelta)) {
+          if (await this.capReached(ctx)) return "abort";
           const decision = await run.apply({
             type: "usage_recorded",
             session,
@@ -575,6 +625,7 @@ export class UsageWriter {
         }
         if (!isEmptyDelta(outsideDelta)) {
           if (!(await lock.stillHeld())) return "abort";
+          if (await this.capReached(ctx)) return "abort";
           const decision = await run.apply({
             type: "usage_recorded",
             session,

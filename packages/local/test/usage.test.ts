@@ -1332,3 +1332,153 @@ describe("usage pass: the second review", () => {
     expect(built).toBe(1);
   });
 });
+
+// ── the fifth review ────────────────────────────────────────────────────────
+
+/** A collector that tells which reads begin at the start of a log and which continue one. */
+function spyingCollector(reads: { sub: boolean; resumed: boolean }[]) {
+  return (configDir: string): AgentHistoryCollector => {
+    const real = claudeCodeCollector({ configDir, cacheScope: true });
+    return {
+      agent: real.agent,
+      profiles: real.profiles,
+      locate: (root, options) => real.locate(root, options),
+      read: (ref, window, options) => {
+        reads.push({
+          sub: ref.parent_session_id !== undefined,
+          resumed: options?.resume !== undefined,
+        });
+        return real.read(ref, window, options);
+      },
+    };
+  };
+}
+
+const freshMainReads = (reads: { sub: boolean; resumed: boolean }[]) =>
+  reads.filter((read) => !read.sub && !read.resumed).length;
+
+describe("usage pass: the fifth review", () => {
+  test("t9jrs_many_subagent_logs_do_not_make_the_pass_forget_the_main_log", async () => {
+    const reads: { sub: boolean; resumed: boolean }[] = [];
+    const r = await rig({ task: "many-subagents", collector: spyingCollector(reads) });
+    const log = sessionLog(r.runId);
+    const path = await install(log);
+    // more subagent logs than the old shared cap of 16 streams
+    for (let i = 0; i < 20; i += 1) {
+      await subagentLog(path, `agent-many${String(i).padStart(4, "0")}`, (child) =>
+        child.say(`sub_${i}`, "looking", { input: 1, output: 1 }),
+      );
+    }
+    await r.run.completeStep("a", 1);
+    log.say("msg_2", "step b", { input: 10, output: 5 });
+    await writeFile(path, log.text());
+    await r.run.completeStep("b", 1);
+    // the main log was read from the run's start once; the second pass went on from where the first stopped
+    expect(freshMainReads(reads)).toBe(1);
+    const total = tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage()));
+    expect(total.input).toBe(100 + 200 + 10 + 20);
+  }, 60_000);
+
+  test("t9jrs_a_run_with_many_subagent_logs_does_not_push_out_another_runs_memory", async () => {
+    const reads: { sub: boolean; resumed: boolean }[] = [];
+    const first = await rig({ task: "busy-run", collector: spyingCollector(reads) });
+    const log = sessionLog(first.runId);
+    const path = await install(log);
+    for (let i = 0; i < 20; i += 1) {
+      await subagentLog(path, `agent-busy${String(i).padStart(4, "0")}`, (child) =>
+        child.say(`sub_${i}`, "looking", { input: 1, output: 1 }),
+      );
+    }
+    const second = (await first.host.start({ pipeline: "two", task: "quiet-run", restart: false }))
+      .run as LocalRun;
+    log
+      .wait(1_000)
+      .call(
+        "msg_q0",
+        { id: "toolu_start_q", name: "mcp__kodel__pipeline_start", input: { task: "quiet-run" } },
+        { input: 1_000, output: 100 },
+      )
+      .result("toolu_start_q", [
+        { type: "text", text: JSON.stringify({ ok: true, run_id: second.runId }) },
+      ])
+      .say("msg_q1", "second run, step a", { input: 2_000, output: 200 });
+    await writeFile(path, log.text());
+    await first.run.completeStep("a", 1);
+    await second.completeStep("a", 1);
+    log.say("msg_q2", "more", { input: 3, output: 1 });
+    await writeFile(path, log.text());
+    await first.run.completeStep("b", 1);
+    await second.completeStep("b", 1);
+    // one read from the start for each of the two runs, then they go on: neither made the other forget
+    expect(freshMainReads(reads)).toBe(2);
+  }, 60_000);
+
+  test("t9jrs_a_subagent_that_began_before_the_run_takes_no_slot_and_is_not_counted", async () => {
+    const reads: { sub: boolean; resumed: boolean }[] = [];
+    const r = await rig({ task: "early-subagents", collector: spyingCollector(reads) });
+    const path = await install(sessionLog(r.runId));
+    for (let i = 0; i < 20; i += 1) {
+      const id = `agent-early${String(i).padStart(3, "0")}`;
+      const child = new ClaudeLogBuilder({
+        sessionId: id,
+        cwd: dir,
+        start: "2026-10-21T09:00:00.000Z",
+      });
+      child.user("before the run").say(`early_${i}`, "old news", { input: 500, output: 5 });
+      const file = join(dirname(path), SESSION, "subagents", `${id}.jsonl`);
+      await mkdir(dirname(file), { recursive: true });
+      await writeFile(file, child.text());
+    }
+    await r.run.completeStep("a", 1);
+    await r.run.completeStep("b", 1);
+    // not counted, and not read at all
+    expect(reads.filter((read) => read.sub)).toHaveLength(0);
+    expect(tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage())).input).toBe(100 + 200);
+    expect(freshMainReads(reads)).toBe(1);
+  }, 60_000);
+
+  test("t9jrs_lost_lock_with_the_copy_switched_off_is_said_as_busy", async () => {
+    const r = await rig({ task: "lost-lock", agentLog: false });
+    await install(sessionLog(r.runId));
+    // the lock is taken and then lost before the count could run: the copy says it is switched off
+    r.agentLog.capture = (async () => ({
+      skipped: "disabled",
+      saved: 0,
+      streams: [],
+      failures: [],
+    })) as typeof r.agentLog.capture;
+    await r.run.completeStep("a", 1);
+    const events = (await journalOf(r)).filter((rec) => rec.event.startsWith("usage_"));
+    expect(events.map((rec) => [rec.event, rec["reason"]])).toEqual([["usage_failed", "busy"]]);
+  });
+
+  test("t9jrs_cap_reached_in_the_middle_of_a_pass_is_said_as_cap_not_as_a_refused_record", async () => {
+    const r = await rig({ task: "cap-mid-pass" });
+    const log = sessionLog(r.runId);
+    log.wait(1_000).say("msg_g", "chatting at the gate", { input: 7, output: 3 });
+    log.wait(2_000).say("msg_h", "back at work", { input: 11, output: 4 });
+    await install(log);
+    const delta = buildDelta([], defaultPricing());
+    // one record short of the cap: the step's record fits, the one for what was said at the gate does not
+    for (let i = 1; i <= 999; i += 1) {
+      const done = await r.run.apply({
+        type: "usage_recorded",
+        session: "99999999-9999-4999-8999-999999999999",
+        delta,
+        cursor: { last_seq: i, last_key: "a".repeat(64) },
+      });
+      expect(done.ok).toBe(true);
+    }
+    const at = Date.parse("2026-10-21T10:00:01.000Z");
+    const journal = async (): Promise<JournalRecord[]> => [
+      { v: 1, seq: 1, ts: at, event: "gate_waiting", node: "g", attempt: 1 },
+      { v: 1, seq: 2, ts: at + 1_000, event: "gate_decided", node: "g" },
+    ];
+    const done = await r.writer.capture(runWith(r, journal), { node: "a", attempt: 1 }, held);
+    expect(done.recorded).toBe(1);
+    const failed = (await stateOf(r)).usage?.failed ?? [];
+    expect(failed).toContain("cap");
+    expect(failed).not.toContain("record_refused");
+    expect((await journalOf(r)).filter((rec) => rec.event === "usage_recorded").length).toBe(1_000);
+  }, 120_000);
+});

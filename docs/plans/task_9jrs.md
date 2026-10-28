@@ -231,6 +231,12 @@ The main stream had 126 requests in `/usage` and 125 in the transcript.
 - **What agrees.** Output agrees within 1%, cache writes within 4-13%. Re-pricing `/usage`'s own token counts with the table
   reproduces its per-model cost within about 1% for Opus 5.5, Fable 5.1 and Haiku 5.5, and, after the fix, for Sonnet 5.5
   (`t9jrs_sonnet_5_5_cache_read_matches_usage_comparison`, within 3%, and it fails with the old 0.20).
+- **The assumption behind "within about 1%".** The Opus 5.5 and Fable 5.1 figures hold if all of their cache writes were 5-minute
+  writes (at 1.25x the input price): Opus gives $1.609 against $1.61, Fable $41.55 against $41.12, and every 10% of 1-hour writes
+  adds $1.20 (+2.9%) to Fable. The Sonnet 5.5 figure needs the 47% share of 1-hour writes seen in its own transcript (1.21m of 2.59m):
+  with all writes at 5 minutes the session costs $29.95, with all at 1 hour $34.00, so $31.75 is inside that bracket, and with the
+  transcript's share it is $31.84 (+0.3%). Solving for the cache read price gives $0.088 (all 1-hour) to $0.110 (all 5-minute), so
+  $0.10 is consistent and $0.20 is excluded under any mix ($48.3 to $52.3).
 - **What does not.** Uncached input and cache reads are undercounted by 23-51% in the transcripts: a fork does not log the prompt it
   inherited, a cache that sat idle past its time to live is written again, and some requests are never written to the transcript. So
   the 10% token tolerance of decision 5 holds for a clean one-turn session, not for a session with forks and subagents. The totals of
@@ -240,7 +246,25 @@ The main stream had 126 requests in `/usage` and 125 in the transcript.
   carries it outside the tests. A change of a price after a release needs a new revision.
 - **`claude-sonnet-5`** keeps its 10%-of-input cache read; it may be 0.10 too, and is not changed without evidence.
 - **The golden run** `fixtures/usage-run/` keeps the figures it stored (they carry the revision they were made with, 2026-10-27, and are
-  never recomputed): this is by design, and it is the exception to "every test and fixture with a dollar figure was changed".
+  never recomputed): this is by design, and it is the exception to "every test and fixture with a dollar figure was changed". It also
+  carries the Sonnet 4.5 prices (3/15/0.3/3.75) under revision 2026-10-27, whereas the table of that revision priced Sonnet 5.5 at
+  2/10/0.2/2.5: two price tables under one revision. That is allowed only because the formats are free until the first release; after
+  it, a stored cost and its revision must belong together.
 - **Real-agent tests** (`KODEL_AGENT_TESTS=1`) were run once by the builder and all four failed with a 401 (`OAuth access token is
   invalid`) from the sandboxed test environment, before any request reached the model. They are still not run; the person runs them
   in a logged-in terminal and puts the figures in the pull request.
+
+### After the fifth review
+
+- **`scripts/check-prices.mjs`** took the first row of the page that held a model's name, so `claude-opus-5` could take the row of
+  "Claude Opus 5.5" when the page listed the newest first. The name now has to end where the version ends (no `.5` or `-5` after it),
+  and a dated id resolves to the longest key with a date tail only, as the core's `keyFor` does; a test pins the script's matching to
+  `resolvePrice` on a corpus and the page is tested in both orders.
+- **The memory of the usage pass** was one shared LRU of 16 streams, so a run with more than 15 subagent logs made the pass forget its
+  main session (and read it from the run's start again at every pass). The main sessions now have their own map, the subagent logs
+  of a run their own bounded map, and a subagent that began before the run takes no slot.
+- **A lost lock with the copy switched off** is now journaled as `busy`, and a cap reached in the middle of a pass as `cap`, not as a
+  refused record.
+- **Still known:** the dedupe by `message.id` is per pass (a response whole in a subagent file read later in the same pass after being
+  counted as a correction can be counted twice, which needs a log that repeats the main log's responses); `check-prices.mjs` compares
+  `cache_write_1h` with the page, and a live page with no such column would read as changed.

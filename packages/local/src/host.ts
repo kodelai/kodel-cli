@@ -2142,12 +2142,10 @@ export class LocalRun {
       // Said once: what the pass would have read is read by the next one, the cursor did not move. A step the copy
       // had nothing to do with (the run is over, or it is not at an agent step) has nothing to say either.
       // The copy threw, or the lock was busy or lost, before the count could run: nothing was read, so it is `busy`.
+      // With the copy switched off (`disabled`) the count still runs under the lock, so not running it means the lock
+      // was lost: that is `busy` too. Only a run that is over or not at an agent step has nothing to say.
       const reason =
-        copied === undefined || copied.errored === true || copied.skipped === "busy"
-          ? "busy"
-          : copied.skipped === undefined
-            ? "busy"
-            : undefined;
+        copied?.skipped === "not_running" || copied?.skipped === "no_step" ? undefined : "busy";
       if (reason !== undefined) {
         await this.apply({ type: "usage_failed", reason }).catch(() => undefined);
       }
