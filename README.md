@@ -96,6 +96,18 @@ behind this (untrusted agent input, fail-closed, redaction on every write, human
 [AGENTS.md](AGENTS.md). How Kodel reads the logs of your agent sessions is in
 [docs/history.md](docs/history.md).
 
+## Something went wrong?
+
+Open an [issue](https://github.com/kodelai/kodel-cli/issues/new/choose), or send a note straight from
+the terminal:
+
+```bash
+kodel feedback "gate refuses to run in tmux" --type bug   # or: feature, feedback
+```
+
+It sends only your text and a short description of your system, shows both, and asks before it sends.
+For a security problem, see [SECURITY.md](SECURITY.md) instead.
+
 ## Contributing
 
 To work on Kodel itself you need [Bun](https://bun.sh) as well as Node. `bun run build` produces
