@@ -9,6 +9,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { resolvePrice, SHIPPED_PRICES } from "@kodel-ai/pipeline-core";
 import { projectFolderName } from "../src/history/claude-code/locate";
 
 const root = resolve(import.meta.dir, "..", "..", "..");
@@ -78,6 +79,32 @@ describe("t9jrs check-prices network mode (saved pages)", () => {
     const { code, out } = run(["--pages", dir]);
     expect(code).toBe(2);
     expect(out).toContain("claude-haiku-5-5: not found");
+  });
+
+  test("t9jrs_check_prices_row_order_does_not_change_the_result: newest first and oldest first agree, exit 0", () => {
+    // A name that is the start of a longer one ("Claude Opus 5" and "Claude Opus 5.5") must not take the longer row.
+    const reverseRows = (html: string) => {
+      const rows = html.match(/<tr><td>.*<\/tr>\n/g) ?? [];
+      expect(rows.length).toBeGreaterThan(10);
+      return rows
+        .reduce((page, row) => page.replace(row, ""), html)
+        .replace("</table>", `${[...rows].reverse().join("")}</table>`);
+    };
+    const newestFirst = run(["--pages", pagesWith(reverseRows)]);
+    const oldestFirst = run(["--pages", pagesDir]);
+    expect(newestFirst.code).toBe(0);
+    expect(oldestFirst.code).toBe(0);
+    for (const model of ["claude-opus-5", "claude-sonnet-5", "claude-fable-5"]) {
+      expect(newestFirst.out).toContain(`${model}: ok`);
+    }
+  });
+
+  test("t9jrs_check_prices_row_order_does_not_change_the_result: a changed price of the longer name is not hidden by the shorter", () => {
+    const dir = pagesWith((html) => html.replace(/(<td>Claude Opus 5\.5<\/td><td>)\$4 /, "$1$$9 "));
+    const { code, out } = run(["--pages", dir]);
+    expect(code).toBe(1);
+    expect(out).toContain("claude-opus-5-5: differs");
+    expect(out).toContain("claude-opus-5: ok");
   });
 
   test("t9jrs_check_prices_exit_codes: a page that is not there is exit 2", () => {
@@ -278,6 +305,35 @@ describe("t9jrs check-prices keeps its copies in step with the engine", () => {
       "",
     ];
     for (const cwd of corpus) expect(mod.projectFolderName(cwd)).toBe(projectFolderName(cwd));
+  });
+
+  test("t9jrs_check_prices_matching_equals_the_cores: the script resolves a model id as resolvePrice does", async () => {
+    const mod = (await import(script)) as {
+      priceOf: (table: unknown, model: string, ts: string) => unknown;
+    };
+    const ts = "2026-10-28T10:00:00.000Z";
+    const corpus = [
+      "claude-opus-5",
+      "claude-opus-5-5",
+      "claude-opus-5-20261001",
+      "claude-opus-5-5-20261001",
+      "claude-opus-5-5-latest",
+      "claude-opus-5-5-fast",
+      "claude-opus-5-fast",
+      "claude-opus-5-1",
+      "claude-sonnet-5-5-20261001",
+      "claude-sonnet-5-20261001",
+      "claude-fable-5-1-20261001",
+      "claude-fable-5-20261001",
+      "claude-opus-4-1",
+      "claude-haiku-5-5",
+      "something-else",
+    ];
+    for (const model of corpus) {
+      const ours = mod.priceOf(SHIPPED_PRICES, model, ts);
+      const core = resolvePrice({ table: SHIPPED_PRICES }, model, ts)?.price;
+      expect(ours, model).toEqual(core);
+    }
   });
 
   test("t9jrs_check_prices_script_reads_the_json_table_only", () => {

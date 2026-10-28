@@ -74,7 +74,8 @@ function modelNamePattern(model) {
       i++;
     } else if (part !== undefined) words.push(part);
   }
-  return new RegExp(words.join("[\\s\\-]+"), "i");
+  // No more version after the name: "Claude Opus 5" is not a prefix of "Claude Opus 5.5".
+  return new RegExp(`${words.join("[\\s\\-]+")}(?![.\\-]?\\d)`, "i");
 }
 
 function pageText(html) {
@@ -186,11 +187,24 @@ function* jsonLines(path) {
   }
 }
 
+const DATE_TAIL = /^-(\d{8}|latest)$/;
+
+/** The table key that names `model`: the exact one, else the longest one `model` is a dated form of (as the core does). */
+export function keyFor(table, model) {
+  if (Object.hasOwn(table.models, model)) return model;
+  let best;
+  for (const id of Object.keys(table.models)) {
+    if (model.startsWith(id) && DATE_TAIL.test(model.slice(id.length))) {
+      if (best === undefined || id.length > best.length) best = id;
+    }
+  }
+  return best;
+}
+
 /** The price of one response by the entry in force at `ts` (the last entry whose effectiveFrom is not after it). */
-function priceOf(table, model, ts) {
-  const list =
-    table.models[model] ??
-    Object.entries(table.models).find(([id]) => model.startsWith(`${id}-`))?.[1];
+export function priceOf(table, model, ts) {
+  const key = keyFor(table, model);
+  const list = key === undefined ? undefined : table.models[key];
   if (list === undefined) return undefined;
   const entries = (Array.isArray(list) ? list : [list])
     .filter((e) => e.effectiveFrom === undefined || e.effectiveFrom <= ts.slice(0, 10))
