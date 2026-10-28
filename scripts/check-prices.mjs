@@ -74,8 +74,9 @@ function modelNamePattern(model) {
       i++;
     } else if (part !== undefined) words.push(part);
   }
-  // No more version after the name: "Claude Opus 5" is not a prefix of "Claude Opus 5.5".
-  return new RegExp(`${words.join("[\\s\\-]+")}(?![.\\-]?\\d)`, "i");
+  // No more version after the name: "Claude Opus 5" is not a prefix of "Claude Opus 5.5" or "Claude Opus 5-5", but it
+  // is still the model of a dated id such as "claude-opus-5-20261001" (an eight-digit tail is a date, not a version).
+  return new RegExp(`${words.join("[\\s\\-]+")}(?!\\d|[.]\\d|-\\d{1,2}(?!\\d))`, "i");
 }
 
 function pageText(html) {

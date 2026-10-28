@@ -107,6 +107,29 @@ describe("t9jrs check-prices network mode (saved pages)", () => {
     expect(out).toContain("claude-opus-5: ok");
   });
 
+  test("t9jrs_check_prices_row_order_does_not_change_the_result: a dated id on a page is the model, a longer version is not", async () => {
+    const mod = (await import(script)) as {
+      checkEntryAgainstPage: (
+        model: string,
+        entry: Record<string, number>,
+        text: string,
+      ) => { status: string };
+    };
+    const entry = { input: 5, output: 25 };
+    const check = (text: string) => mod.checkEntryAgainstPage("claude-opus-5", entry, text).status;
+    // A dated API id names the model itself (eight digits are a date, not a version)...
+    expect(check("claude-opus-5-20261001 $5 $25")).toBe("ok");
+    expect(check("claude-opus-5-latest $5 $25")).toBe("ok");
+    expect(check("Claude Opus 5 (legacy) $5 $25")).toBe("ok");
+    // ...a longer version or a longer number does not.
+    expect(check("Claude Opus 5.5 $4 $20")).toBe("missing");
+    expect(check("Claude Opus 5-5 $4 $20")).toBe("missing");
+    expect(check("Claude Opus 50 $5 $25")).toBe("missing");
+    expect(check("claude-opus-5-5-20261001 $4 $20")).toBe("missing");
+    // The row of the longer name first does not hide the shorter one that follows it.
+    expect(check("Claude Opus 5.5 $4 $20 Claude Opus 5 $5 $25")).toBe("ok");
+  });
+
   test("t9jrs_check_prices_exit_codes: a page that is not there is exit 2", () => {
     const dir = mkdtempSync(join(scratch, "empty-"));
     expect(run(["--pages", dir]).code).toBe(2);
