@@ -8,6 +8,7 @@
  * attempt of the same visit (rework). Limits: `max_consecutive_failures` and `max_attempts`.
  */
 import { canonicalNode, checkIdOf, type NodeForms, stableJson } from "./canonical";
+import { type ChangesRef, changesField, isTreeId, MAX_CHANGES_ERROR } from "./changes";
 import { type ErrorCode, KodelError } from "./errors";
 import type { EngineRecord, ExecutorRecord } from "./executor";
 import type { HistoryConfig } from "./history-config";
@@ -180,7 +181,49 @@ export interface RunState {
   served?: Record<string, string[]>;
   /** How many `step_served` and `served_write_failed` events were journaled; there is a limit. */
   servedEvents?: number;
+  /**
+   * The agent's conversation log of the run (`agent_log/`): where each stored stream ends and how much was
+   * stored. Present only for a run started with `history.agent_log` on, so its absence says "not captured". Holds
+   * numbers, ids and hex hashes, never text: the state is not redacted.
+   */
+  agentLog?: AgentLogState;
 }
+
+/** Where the stored stream of one session ends, and what the journal vouches for. */
+export interface AgentLogSessionState {
+  last_seq: number;
+  /** The length of the stored stream in bytes: where the next append goes. Bytes past it are not stored. */
+  length: number;
+  /** sha256 (lowercase hex) of the last 64 bytes of the stored stream at `length`. */
+  tail_hash: string;
+  /** sha256 of what identifies the event at `last_seq`; a different one means the log itself changed. */
+  last_key: string;
+  entries: number;
+}
+
+export interface AgentLogState {
+  /** The nodes of the pipeline the run started with, in order: the share of each step is cut from them. */
+  nodes: string[];
+  sessions: Record<string, AgentLogSessionState>;
+  /** Events journaled by the ticker and by the end of a step; each has a limit. */
+  ticks: number;
+  steps: number;
+  /** Bytes stored by all sessions, and the events left out for want of room. */
+  bytes: number;
+  cut: number;
+  /** The reasons already journaled as a failure: a reason is journaled once. */
+  failed: string[];
+  /** Set when the run ends: the steps of the agent (`node:attempt`) that were still going. */
+  endedInStep?: string[];
+  /**
+   * Bytes stored per visit of a step (`node:attempt`), so that a step that goes on over many copies is held to
+   * its share and a step that comes again is told from it. Runs from before this have none. Bounded.
+   */
+  visits?: Record<string, number>;
+}
+
+/** How many visits are told apart in the account of the bytes; beyond it a visit counts only in the total. */
+export const MAX_AGENT_LOG_VISITS = 2_000;
 
 /** How many refused calls a run journals: enough to see what was tried, too few to be a way to fill the disk. */
 export const MAX_LOGGED_REFUSALS = 100;
@@ -193,6 +236,25 @@ export const MAX_SERVED_PER_ATTEMPT = 20;
 
 /** How many `step_served` and `served_write_failed` events a run journals. */
 export const MAX_SERVED_EVENTS = 500;
+
+/** How many copies of the agent's log a run journals from the ticker, and from the ends of steps. */
+export const MAX_AGENT_LOG_TICKS = 4_000;
+export const MAX_AGENT_LOG_STEPS = 1_000;
+
+/** Why a copy of the agent's log was not made; each is journaled once per run. */
+export const AGENT_LOG_FAILURES = [
+  "session_unknown",
+  "log_missing",
+  "refused",
+  "log_changed",
+  "stored_copy_changed",
+  "tick_cap",
+  "unreadable",
+] as const;
+export type AgentLogFailure = (typeof AGENT_LOG_FAILURES)[number];
+
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const HEX64 = /^[0-9a-f]{64}$/;
 
 // ── events in, effects out ──────────────────────────────────────────────────
 
@@ -252,6 +314,12 @@ export type RunEvent =
       outcome?: string;
       /** HEAD of the run's directory when the step was handed in, as the host read it. */
       head?: string;
+      /** The patch of the work since the previous hand-in, when the host kept one (`history.changes`). */
+      changes?: ChangesRef;
+      /** Why there is no patch, when the host tried and could not. */
+      changesError?: string;
+      /** The work tree at this hand-in; the next hand-in's patch starts there. */
+      tree?: string;
     }
   /** The engine work of a node (its own command) finished. The host judged the exit code. */
   | {
@@ -357,6 +425,30 @@ export type RunEvent =
     }
   /** The file of a `step_served` event could not be written. */
   | { type: "served_write_failed"; node: string; attempt: number; n: number; message: string }
+  /**
+   * Events of the agent's log were appended to the run's `agent_log/<session>.jsonl`. The stream was
+   * `stream_from` bytes long before and is `stream_to` now; `first_seq`..`last_seq` are the events appended.
+   * `why` is who asked: the ticker or the end of a step.
+   */
+  | {
+      type: "agent_log_saved";
+      why: "tick" | "step";
+      session: string;
+      parent?: string;
+      node: string;
+      attempt: number;
+      first_seq: number;
+      last_seq: number;
+      stream_from: number;
+      stream_to: number;
+      tail_hash: string;
+      last_key: string;
+      entries: number;
+      /** Events left out for want of room. */
+      cut?: number;
+    }
+  /** The agent's log could not be copied, for this reason; journaled once per reason. */
+  | { type: "agent_log_failed"; reason: AgentLogFailure; session?: string }
   /** A human accepted a change made to the run's files outside kodel. Journaled; changes nothing else. */
   | { type: "acknowledge"; note?: string }
   /**
@@ -366,6 +458,11 @@ export type RunEvent =
   | { type: "tick"; deadOwners?: string[] }
   | { type: "resume" }
   | { type: "cancel" }
+  /**
+   * The patch of the whole run, or why there is none. Applied once the run has finished, like
+   * `task_note`; only journaled.
+   */
+  | { type: "changes_recorded"; changes?: ChangesRef; changesError?: string }
   /** What the tie between the run and its task did (or could not do); only goes to the journal. */
   | {
       type: "task_note";
@@ -739,6 +836,11 @@ class Machine {
   private end(status: "completed" | "failed" | "canceled", reason?: string) {
     this.s.status = status;
     this.s.finishedAt = this.now;
+    if (this.s.agentLog !== undefined) {
+      this.s.agentLog.endedInStep = this.s.active
+        .filter((visit) => visit.phase === "agent")
+        .map((visit) => `${visit.node}:${visit.attempt}`);
+    }
     this.s.active = [];
     this.log("run_finished", {
       status,
@@ -755,6 +857,15 @@ class Machine {
     if (event.type === "start") return this.start(event);
     if (event.type === "acknowledge") {
       this.log("manual_edit", { note: event.note ?? null });
+      return;
+    }
+    if (event.type === "changes_recorded") {
+      this.log("changes_recorded", {
+        ...changesField(event.changes),
+        ...(typeof event.changesError === "string"
+          ? { changes_error: event.changesError.slice(0, MAX_CHANGES_ERROR) }
+          : {}),
+      });
       return;
     }
     if (event.type === "task_note") {
@@ -825,6 +936,8 @@ class Machine {
     }
     if (event.type === "step_served") return this.stepServed(event);
     if (event.type === "served_write_failed") return this.servedWriteFailed(event);
+    if (event.type === "agent_log_saved") return this.agentLogSaved(event);
+    if (event.type === "agent_log_failed") return this.agentLogFailed(event);
     if (event.type === "cancel") {
       if (this.s.status === "running" || this.s.status === "paused") this.end("canceled");
       else throw new Repeat();
@@ -881,6 +994,13 @@ class Machine {
             ? {}
             : { engine_version: event.engineVersion }),
           ...(event.head === undefined ? {} : { head: event.head }),
+          // The host made these and checked them; once more here, and a bad value is left out, never a
+          // reason to refuse the hand-in (a patch is a record, not a verdict).
+          ...changesField(event.changes),
+          ...(typeof event.changesError === "string"
+            ? { changes_error: event.changesError.slice(0, MAX_CHANGES_ERROR) }
+            : {}),
+          ...(isTreeId(event.tree) ? { tree: event.tree } : {}),
         });
         this.afterWork(visit);
         return;
@@ -998,6 +1118,17 @@ class Machine {
       };
     }
     if (event.history?.prompts.enabled === true) this.s.served = {};
+    if (event.history?.agent_log?.enabled === true) {
+      this.s.agentLog = {
+        nodes: this.spec.nodes.map((node) => node.slug),
+        sessions: {},
+        ticks: 0,
+        steps: 0,
+        bytes: 0,
+        cut: 0,
+        failed: [],
+      };
+    }
     this.log("run_started", {
       run: event.runId,
       task: event.task,
@@ -1058,6 +1189,88 @@ class Machine {
       attempt: event.attempt,
       n: event.n,
       message: event.message.slice(0, 200),
+    });
+  }
+
+  /**
+   * Keep the account of a copy of the agent's log. Like `stepServed`, anything that does not hold (the run is not
+   * running, a run that does not copy, a limit, a copy that does not continue the stored stream) is a quiet no-op: the
+   * copy is display data and must never refuse or fail a step. The stream must continue where the journal says it
+   * ends, and the events must be newer than the last ones stored: that is what keeps two writers from storing an
+   * event twice or over each other.
+   */
+  private agentLogSaved(event: Extract<RunEvent, { type: "agent_log_saved" }>) {
+    const log = this.s.agentLog;
+    if (log === undefined || this.s.status !== "running") throw new Repeat();
+    const whole = (n: number) => Number.isSafeInteger(n) && n >= 0;
+    if (
+      !SAFE_ID.test(event.session) ||
+      !(event.parent === undefined || SAFE_ID.test(event.parent)) ||
+      !HEX64.test(event.tail_hash) ||
+      !HEX64.test(event.last_key) ||
+      ![event.first_seq, event.last_seq, event.stream_from, event.stream_to, event.entries].every(
+        whole,
+      ) ||
+      event.first_seq < 1 ||
+      event.last_seq < event.first_seq ||
+      event.stream_to < event.stream_from
+    ) {
+      throw new Repeat();
+    }
+    if (event.why === "tick") {
+      if (log.ticks >= MAX_AGENT_LOG_TICKS) throw new Repeat();
+    } else if (log.steps >= MAX_AGENT_LOG_STEPS) {
+      throw new Repeat();
+    }
+    const stored = log.sessions[event.session];
+    if (event.stream_from !== (stored?.length ?? 0)) throw new Repeat();
+    if (event.first_seq <= (stored?.last_seq ?? 0)) throw new Repeat();
+    if (event.why === "tick") log.ticks += 1;
+    else log.steps += 1;
+    log.sessions[event.session] = {
+      last_seq: event.last_seq,
+      length: event.stream_to,
+      tail_hash: event.tail_hash,
+      last_key: event.last_key,
+      entries: (stored?.entries ?? 0) + event.entries,
+    };
+    log.bytes += event.stream_to - event.stream_from;
+    log.cut += event.cut ?? 0;
+    const visit = `${event.node}:${event.attempt}`;
+    const counted = log.visits ?? {};
+    if (visit in counted || Object.keys(counted).length < MAX_AGENT_LOG_VISITS) {
+      counted[visit] = (counted[visit] ?? 0) + (event.stream_to - event.stream_from);
+      log.visits = counted;
+    }
+    this.log("agent_log_saved", {
+      why: event.why,
+      session: event.session,
+      ...(event.parent === undefined ? {} : { parent: event.parent }),
+      node: event.node.slice(0, 100),
+      attempt: event.attempt,
+      first_seq: event.first_seq,
+      last_seq: event.last_seq,
+      stream_from: event.stream_from,
+      stream_to: event.stream_to,
+      tail_hash: event.tail_hash,
+      last_key: event.last_key,
+      entries: event.entries,
+      ...(event.cut === undefined || event.cut === 0 ? {} : { cut: event.cut }),
+    });
+  }
+
+  private agentLogFailed(event: Extract<RunEvent, { type: "agent_log_failed" }>) {
+    const log = this.s.agentLog;
+    if (log === undefined || this.s.status !== "running") throw new Repeat();
+    if (!AGENT_LOG_FAILURES.includes(event.reason) || log.failed.includes(event.reason)) {
+      throw new Repeat();
+    }
+    log.failed.push(event.reason);
+    this.log("agent_log_failed", {
+      reason: event.reason,
+      ...(event.session !== undefined && SAFE_ID.test(event.session)
+        ? { session: event.session }
+        : {}),
     });
   }
 

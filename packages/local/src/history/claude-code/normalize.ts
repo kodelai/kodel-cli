@@ -10,7 +10,14 @@
  *  - a tool result comes in a later `user` entry, paired by `tool_use_id`;
  *  - an agent call is answered by a `toolUseResult.agentId` that names the subagent log file.
  */
-import { type DraftEvent, type FormatProfile, previewOf, toTs } from "@kodel-ai/pipeline-core";
+import {
+  type CaptureOptions,
+  type DraftEvent,
+  type FormatProfile,
+  PREVIEW_CAP,
+  previewOf,
+  toTs,
+} from "@kodel-ai/pipeline-core";
 
 export const AGENT_ID = "claude-code";
 
@@ -32,9 +39,19 @@ export interface ClaudeState {
   held: DraftEvent[];
   seen: Set<string>;
   skipped: number;
+  /** How texts are shaped; without it a text is a 500 character preview with whitespace collapsed. */
+  capture: CaptureOptions | undefined;
+  /** Events at the start of the last entry's output that ended a response (the rest belong to the open one). */
+  flushedCount: number;
+  /** How many leading events of the last entry's output are settled: not part of a response still being written. */
+  closedCount: number;
 }
 
-export function newClaudeState(sessionId: string, parentSessionId?: string): ClaudeState {
+export function newClaudeState(
+  sessionId: string,
+  parentSessionId?: string,
+  capture?: CaptureOptions,
+): ClaudeState {
   return {
     sessionId,
     parentSessionId,
@@ -45,7 +62,28 @@ export function newClaudeState(sessionId: string, parentSessionId?: string): Cla
     held: [],
     seen: new Set(),
     skipped: 0,
+    capture,
+    flushedCount: 0,
+    closedCount: 0,
   };
+}
+
+type PreviewKind = "user" | "agent" | "tool_input" | "tool_result" | "detail";
+
+/** A text as the capture options want it, or `undefined` when it is left out (metadata, or a cap of `0`). */
+function preview(state: ClaudeState, kind: PreviewKind, text: string): string | undefined {
+  const capture = state.capture;
+  if (capture === undefined) return previewOf(text);
+  if (capture.metadata === true) return undefined;
+  const asked = capture.caps?.[kind];
+  // A cap that is not a whole number of at least 0 is a mistake of whoever set it; the default is safer than none.
+  const cap =
+    typeof asked === "number" && Number.isInteger(asked) && asked >= 0 ? asked : PREVIEW_CAP;
+  if (cap === 0) return undefined;
+  return previewOf(text, cap, {
+    ...(capture.keepLineBreaks === true ? { keepLineBreaks: true } : {}),
+    ...(capture.rules === undefined ? {} : { rules: capture.rules }),
+  });
 }
 
 type Json = Record<string, unknown>;
@@ -95,7 +133,20 @@ function textOf(content: unknown): string {
     .join("\n");
 }
 
+/**
+ * One entry to events, and how many leading ones are settled. A response is open from its first line until the
+ * next response starts, and what the entry gives after the end of the previous response belongs to the new one;
+ * a consumer that stores whole responses holds the rest back (`closedCount`).
+ */
 function normalizeV2(entry: unknown, state: ClaudeState): DraftEvent[] {
+  state.flushedCount = 0;
+  const out = normalizeEntry(entry, state);
+  state.closedCount =
+    state.pending === undefined ? out.length : Math.min(state.flushedCount, out.length);
+  return out;
+}
+
+function normalizeEntry(entry: unknown, state: ClaudeState): DraftEvent[] {
   if (!isObject(entry)) return [];
   const type = str(entry["type"]);
   if (type !== "user" && type !== "assistant" && type !== "system") {
@@ -125,6 +176,7 @@ function normalizeV2(entry: unknown, state: ClaudeState): DraftEvent[] {
   // come between them; only the start of another response ends it.
   if (state.pending !== undefined && key !== undefined && state.pending.key !== key) {
     out.push(...flushPending(state));
+    state.flushedCount = out.length;
   }
 
   const base = {
@@ -137,8 +189,8 @@ function normalizeV2(entry: unknown, state: ClaudeState): DraftEvent[] {
 
   if (!state.sessionAnnounced) {
     state.sessionAnnounced = true;
-    const cwd = str(entry["cwd"]);
-    const branch = str(entry["gitBranch"]);
+    const cwd = state.capture?.metadata === true ? undefined : str(entry["cwd"]);
+    const branch = state.capture?.metadata === true ? undefined : str(entry["gitBranch"]);
     out.push({
       ...base,
       kind: "session",
@@ -156,11 +208,13 @@ function normalizeV2(entry: unknown, state: ClaudeState): DraftEvent[] {
     const duration = entry["durationMs"];
     const content = str(entry["content"]);
     const detail =
-      typeof duration === "number"
-        ? `${Math.round(duration)}ms`
-        : content === undefined
-          ? undefined
-          : previewOf(content);
+      state.capture?.metadata === true
+        ? undefined
+        : typeof duration === "number"
+          ? `${Math.round(duration)}ms`
+          : content === undefined
+            ? undefined
+            : preview(state, "detail", content);
     out.push({ ...base, kind: "system", subtype, ...(detail === undefined ? {} : { detail }) });
     return settle(state, out);
   }
@@ -204,11 +258,12 @@ function normalizeV2(entry: unknown, state: ClaudeState): DraftEvent[] {
       if (block["type"] === "text") {
         const text = str(block["text"]);
         if (text !== undefined && text.trim() !== "") {
+          const shown = preview(state, "agent", text);
           out.push({
             ...base,
             kind: "message",
             role: "assistant",
-            text_preview: previewOf(text),
+            ...(shown === undefined ? {} : { text_preview: shown }),
             ...(messageId === undefined ? {} : { message_id: messageId }),
           });
         }
@@ -224,13 +279,17 @@ function normalizeV2(entry: unknown, state: ClaudeState): DraftEvent[] {
         }
         state.calls.set(id, { started: ts, description });
         const server = name.startsWith("mcp__") ? name.split("__")[1] : undefined;
+        const shownInput =
+          input === undefined
+            ? undefined
+            : preview(state, "tool_input", JSON.stringify(input) ?? "");
         out.push({
           ...base,
           kind: "tool_call",
           id,
           name,
           ...(server === undefined || server === "" ? {} : { mcp_server: server }),
-          ...(input === undefined ? {} : { input_preview: previewOf(JSON.stringify(input) ?? "") }),
+          ...(shownInput === undefined ? {} : { input_preview: shownInput }),
           started: ts,
         });
       }
@@ -241,8 +300,15 @@ function normalizeV2(entry: unknown, state: ClaudeState): DraftEvent[] {
   // user
   if (entry["isMeta"] !== true) {
     const text = textOf(message["content"]);
-    if (text.trim() !== "")
-      out.push({ ...base, kind: "message", role: "user", text_preview: previewOf(text) });
+    if (text.trim() !== "") {
+      const shown = preview(state, "user", text);
+      out.push({
+        ...base,
+        kind: "message",
+        role: "user",
+        ...(shown === undefined ? {} : { text_preview: shown }),
+      });
+    }
   }
   for (const block of blocks) {
     if (!isObject(block) || block["type"] !== "tool_result") continue;
@@ -252,6 +318,7 @@ function normalizeV2(entry: unknown, state: ClaudeState): DraftEvent[] {
     const call = state.calls.get(id);
     state.calls.delete(id);
     const duration = call === undefined ? undefined : Date.parse(ts) - Date.parse(call.started);
+    const shownOutput = output === "" ? undefined : preview(state, "tool_result", output);
     out.push({
       ...base,
       kind: "tool_result",
@@ -260,19 +327,21 @@ function normalizeV2(entry: unknown, state: ClaudeState): DraftEvent[] {
       ended: ts,
       ...(duration === undefined || duration < 0 ? {} : { duration_ms: duration }),
       size: Buffer.byteLength(output),
-      ...(output === "" ? {} : { output_preview: previewOf(output) }),
+      ...(shownOutput === undefined ? {} : { output_preview: shownOutput }),
     });
     const result = entry["toolUseResult"];
     const agentId = isObject(result) ? str(result["agentId"]) : undefined;
     if (agentId !== undefined && once(state, `s:${agentId}`)) {
       const described =
         call?.description ?? (isObject(result) ? str(result["description"]) : undefined);
+      const shownDescription =
+        described === undefined ? undefined : preview(state, "detail", described);
       out.push({
         ...base,
         kind: "subagent",
         agent_id: agentId,
         child_session_id: `agent-${agentId}`,
-        ...(described === undefined ? {} : { description_preview: previewOf(described) }),
+        ...(shownDescription === undefined ? {} : { description_preview: shownDescription }),
       });
     }
   }

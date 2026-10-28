@@ -8,7 +8,7 @@
  * preview that has gone through `redact`.
  */
 import { z } from "zod";
-import { redactDeep, redactText } from "./redact";
+import { type RedactRule, redactDeep, redactText } from "./redact";
 
 /** The version `v` of every `HistoryEvent`. */
 export const HISTORY_FORMAT = 1;
@@ -58,7 +58,8 @@ const messageEvent = z.object({
   ...envelope,
   kind: z.literal("message"),
   role: z.enum(["user", "assistant"]),
-  text_preview: z.string(),
+  /** Absent in `metadata` mode, and for a kind whose cap is `0`. */
+  text_preview: z.string().optional(),
   message_id: z.string().optional(),
 });
 
@@ -139,15 +140,88 @@ export type DraftEvent = HistoryEvent extends infer E
     : never
   : never;
 
+/**
+ * The caps of a stored text, per kind, in characters (UTF-16 units, never splitting a surrogate pair). `detail` is the
+ * subagent description and `system.detail`. A cap of `0` leaves the text out.
+ */
+export interface CaptureCaps {
+  user: number;
+  agent: number;
+  tool_input: number;
+  tool_result: number;
+  detail: number;
+}
+
+/**
+ * How a collector shapes what it reads, for a consumer that stores events. Without it a collector behaves as
+ * before: 500 characters, whitespace collapsed, built-in redaction rules only, every id as the log has it.
+ */
+export interface CaptureOptions {
+  caps?: Partial<CaptureCaps>;
+  /** Keep line breaks (spaces and tabs are still collapsed, blank runs are cut to one empty line). */
+  keepLineBreaks?: boolean;
+  /** Keep types, times, models, usage, tool names and sizes, and no text at all (not even `cwd` or the branch). */
+  metadata?: boolean;
+  /** Project redaction rules, applied on top of the built-in ones. */
+  rules?: RedactRule[];
+  /** Leave the id fields as they are in the log (the consumer pseudonymises them); everything else is redacted. */
+  skipIds?: boolean;
+}
+
+/** The fields that carry an identifier and not text. */
+export const ID_FIELDS = [
+  "id",
+  "message_id",
+  "request_id",
+  "session_id",
+  "parent_session_id",
+  "agent_id",
+  "child_session_id",
+] as const;
+
+export interface PreviewOptions {
+  keepLineBreaks?: boolean;
+  rules?: RedactRule[];
+}
+
+/** Cut to `cap` characters with a mark, without leaving half of a surrogate pair. */
+function cutText(text: string, cap: number): string {
+  if (text.length <= cap) return text;
+  let end = Math.max(0, cap - 1);
+  const last = text.charCodeAt(end - 1);
+  if (end > 0 && last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return `${text.slice(0, end)}…`;
+}
+
 /** Redacted first and cut after: a secret that straddles the cut must not survive as a prefix no rule matches. */
-export function previewOf(text: string, cap = PREVIEW_CAP): string {
-  const flat = redactText(text.replace(/\s+/g, " ").trim());
-  return flat.length <= cap ? flat : `${flat.slice(0, cap - 1)}…`;
+export function previewOf(text: string, cap = PREVIEW_CAP, options: PreviewOptions = {}): string {
+  const flat = options.keepLineBreaks
+    ? text
+        .replace(/\r\n?/g, "\n")
+        .replace(/[ \t]+/g, " ")
+        .replace(/ ?\n ?/g, "\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim()
+    : text.replace(/\s+/g, " ").trim();
+  return cutText(redactText(flat, options.rules), cap);
 }
 
 /** Every string of an event goes through `redact` before it can be stored. */
-export function redactEvent<E extends HistoryEvent>(event: E): E {
-  return redactDeep(event);
+export function redactEvent<E extends HistoryEvent>(
+  event: E,
+  rules: RedactRule[] = [],
+  options: { skipIds?: boolean } = {},
+): E {
+  if (!options.skipIds) return redactDeep(event, rules);
+  const kept: Record<string, unknown> = {};
+  const rest: Record<string, unknown> = { ...event };
+  for (const field of ID_FIELDS) {
+    if (field in rest) {
+      kept[field] = rest[field];
+      delete rest[field];
+    }
+  }
+  return { ...redactDeep(rest, rules), ...kept } as E;
 }
 
 /** Epoch milliseconds or an ISO string in, the canonical `ts` out; `undefined` for anything else. */
@@ -370,9 +444,40 @@ export interface LocateOptions {
   signal?: AbortSignal;
 }
 
+/**
+ * Where a read can continue: opaque to the consumer except for the two numbers. `offset` is the byte after the last
+ * whole line consumed and `seq` the last sequence number given; the rest is the collector's own live state.
+ */
+export interface ReadCheckpoint {
+  offset: number;
+  seq: number;
+  readonly state: unknown;
+}
+
 export interface ReadOptions {
   signal?: AbortSignal;
   stats?: ReadStats;
+  /** How texts are shaped; see `CaptureOptions`. */
+  capture?: CaptureOptions;
+  /**
+   * Hold back the events of a response that has not closed: they are given when it closes, so a log still being
+   * written is stored by whole responses. The held events stay in the checkpoint.
+   */
+  holdBack?: boolean;
+  /** Start at this byte offset of the log with a fresh state (the start of a window). `seq` counts from there. */
+  fromOffset?: number;
+  /** Continue a read that stopped; `fromOffset` is ignored. The checkpoint belongs to the same log. */
+  resume?: ReadCheckpoint;
+  /** Filled while reading with the point a later read can continue from. */
+  checkpoint?: { value?: ReadCheckpoint };
+  /**
+   * Asked before each entry of the log; `true` ends the read there, with the checkpoint after the last entry that
+   * was read. This is how a consumer stops a read it can continue: stopping by leaving the loop can leave the
+   * events of an entry unseen while the checkpoint is past it.
+   */
+  shouldStop?: () => boolean;
+  /** Directories that count as the project's for this read, besides its root and worktrees (a run's own, now gone). */
+  extraWorkdirs?: string[];
 }
 
 export interface AgentHistoryCollector {

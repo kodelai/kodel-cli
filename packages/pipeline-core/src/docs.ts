@@ -7,6 +7,7 @@ import { z } from "zod";
 import checks from "../agent-docs/checks.md" with { type: "text" };
 import examples from "../agent-docs/examples.md" with { type: "text" };
 import design from "../agent-docs/pipeline-design.md" with { type: "text" };
+import quality from "../agent-docs/pipeline-quality.md" with { type: "text" };
 import spec from "../agent-docs/pipeline-spec.md" with { type: "text" };
 import { commonNodeShape, edgeSchema, topSchema } from "./pipeline";
 import type { Registry } from "./registry";
@@ -125,6 +126,12 @@ export function docTopics(registry: Registry): DocTopic[] {
       topic: "examples",
       summary: "Complete pipelines that the parser accepts, small to strict",
       text: examples,
+    },
+    {
+      topic: "pipeline-quality",
+      summary:
+        "What makes a pipeline good: the balance of background work and the person's control, the report, a checklist",
+      text: quality,
     },
   ];
 }

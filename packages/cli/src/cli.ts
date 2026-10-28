@@ -398,6 +398,8 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         ...(storageError === undefined ? {} : { storageError }),
         agentDecisions: settings.agentDecisions,
         build: BUILD,
+        // This process serves the agent: it copies the agent's log into the runs while they go.
+        agentLogTimer: true,
         // The same tie the tools were built for; without one the host asks the config itself.
         ...(runLink === undefined ? {} : { runTaskLink: runLink }),
       });
@@ -588,7 +590,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         );
       }
       env.out(`integrity: ${await run.integrityStatus()}\n`);
-      env.out(`seal:      ${await run.sealStatus()}\n`);
+      env.out(`seal:      ${await run.sealStatusSettled()}\n`);
       env.out(`trail:     ${state.trail.map(plain).join(" > ")}\n`);
       const pending = await pendingLine(run);
       if (pending) env.out(`pipeline:  ${pending}\n`);
@@ -1030,7 +1032,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const report = await run.report();
       // The report is read from the run's own files, so it is only as good as they are: whether they
       // are as kodel last wrote them goes with it.
-      const trust = { integrity: await run.integrityStatus(), seal: await run.sealStatus() };
+      const trust = { integrity: await run.integrityStatus(), seal: await run.sealStatusSettled() };
       env.out(
         opts.json
           ? `${JSON.stringify({ ...report, ...trust }, null, 2)}\n`

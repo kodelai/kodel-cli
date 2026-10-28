@@ -3,6 +3,7 @@
  * `.kodel/runs` (or under `~/.kodel/projects/<project_id>` with `storage: home`). A run keeps a copy
  * of the pipeline it started with, so editing a file never changes a run in flight.
  */
+
 import { mkdir, readdir, readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import {
@@ -34,6 +35,8 @@ import {
   type ServedSurface,
   type StartOutcome,
 } from "@kodel-ai/pipeline-core";
+import { AgentLogWriter } from "./agent-log";
+import { AgentLogTickers, type Timers } from "./agent-log-ticker";
 import { loadConfig, type ProjectConfig, type WorktreeConfig } from "./config";
 import { GitSnapshotter, git } from "./git";
 import {
@@ -74,6 +77,11 @@ export interface LocalPipelineHostOptions extends HostOptions {
    * every call that opens, starts or lists runs, or keeps a proposal, answers with this.
    */
   storageError?: KodelError;
+  /**
+   * Copy the agent's log of the runs on a timer (the interval each run started with), in this process. Only the
+   * process that serves the MCP tools asks for it. Timers can be given, for tests; the system's by default.
+   */
+  agentLogTimer?: boolean | Timers;
 }
 
 /** The methods of the host that read or write the history; see `guardEntryPoints`. */
@@ -156,6 +164,10 @@ export class LocalPipelineHost implements PipelineHost {
   private readonly store: FileStore;
   private readonly storeRoot: string;
   private readonly hosts = new Map<string, LocalHost>();
+  /** What copies the agent's log into the runs: one for the process, since a run can live in more than one host. */
+  private readonly agentLog: AgentLogWriter;
+  /** The timers that copy it while runs go; none unless this process serves the tools. */
+  private readonly agentLogTickers: AgentLogTickers | undefined;
   /** One handle per run, so that work running in this process is shared by every call. */
   private readonly runs = new Map<string, LocalRun>();
 
@@ -168,6 +180,21 @@ export class LocalPipelineHost implements PipelineHost {
       ...(options.rules ? { rules: options.rules } : {}),
     });
     this.guardEntryPoints();
+    this.agentLog =
+      options.agentLog ??
+      new AgentLogWriter({
+        store: this.store,
+        root: options.root,
+        rules: options.rules ?? [],
+        env: () => options.environment ?? process.env,
+        now: options.clock ?? Date.now,
+      });
+    this.agentLogTickers = options.agentLogTimer
+      ? new AgentLogTickers(
+          this.agentLog,
+          typeof options.agentLogTimer === "object" ? options.agentLogTimer : undefined,
+        )
+      : undefined;
   }
 
   /**
@@ -524,6 +551,8 @@ export class LocalPipelineHost implements PipelineHost {
     if (!host) {
       host = new LocalHost(spec, {
         ...this.options,
+        agentLog: this.agentLog,
+        ...(this.agentLogTickers === undefined ? {} : { agentLogTickers: this.agentLogTickers }),
         runTaskLink: () => this.taskLink(),
         ...(source === undefined ? {} : { source }),
         ...(pipelineFile === undefined ? {} : { pipelineFile }),
@@ -651,6 +680,7 @@ export class LocalPipelineHost implements PipelineHost {
     const known = reused || terminal ? await this.open(run.runId) : this.guard(run);
     if (!known) throw this.unknownRun(run.runId);
     this.runs.set(run.runId, known);
+    known.watchAgentLog();
     // Where the run works is what its record says, also for a run picked up again.
     const located = await known.location();
     const where = located && { ...located, path: await known.inProject(located.path) };
@@ -715,7 +745,17 @@ export class LocalPipelineHost implements PipelineHost {
   stop(): number {
     let stopped = 0;
     for (const run of this.runs.values()) stopped += run.stop();
+    this.agentLogTickers?.stopAll();
     return stopped;
+  }
+
+  /**
+   * Wait for what this process still writes about its runs (the patch of a run that has just ended),
+   * but no longer than `ms`. Called when the server goes away, so the record is not cut off by the exit.
+   */
+  async settle(ms: number): Promise<void> {
+    const deadline = Date.now() + ms;
+    await Promise.all([...this.runs.values()].map((run) => run.settleEndJobs(deadline)));
   }
 
   /** Whether a start for this task would pick up a run that exists, instead of making one. */
