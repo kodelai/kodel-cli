@@ -13,7 +13,7 @@ Spec-driven pipelines that run inside the coding agent you already use, and are 
 Requirement: Node >= 22.19. Kodel works with Claude Code, Codex and OpenCode (see
 [adapters](adapters/README.md) for what is checked on a real agent).
 
-**1. Install.** The agents' hooks call `kodel-hook`, so install globally rather than using `npx`.
+**1. Install.**
 
 ```bash
 npm install -g @kodel-ai/kodel
@@ -25,9 +25,7 @@ npm install -g @kodel-ai/kodel
 kodel init
 ```
 
-It adds the MCP server, the `/kodel-design` and `/kodel-run` skills, the config and the hooks for the
-agents it finds. It asks before it writes; `--dry-run` shows what would change. Other options:
-`--agent claude-code,codex,opencode`, `--tasks` for the optional task tracker, `--no-hooks`.
+It adds the MCP server, the skills, the config and the hooks for the agents it finds.
 
 **3. Create a pipeline.** Restart your agent so it picks up the MCP server, then ask it to design one:
 
@@ -35,8 +33,7 @@ agents it finds. It asks before it writes; `--dry-run` shows what would change. 
 /kodel-design
 ```
 
-The agent looks at your project and proposes a pipeline: the steps, what is checked after each one,
-and where you decide. The proposal waits for you. Read it and accept it in a terminal:
+Follow the agent's instructions. When it proposes a pipeline, accept it in a terminal:
 
 ```bash
 kodel pipeline proposals show
@@ -78,16 +75,9 @@ only a person decides.
 | `kodel report [run]` | Where the time went and what was redone in a run. |
 | `kodel pipeline changes ...` | Review a change to the pipeline of a run that is going. |
 | `kodel pipeline proposals ...` | Review a pipeline the agent proposed outside a run. |
-| `kodel task ...` | The tasks of this repository (off until `tasks.enabled` is set). |
 | `kodel feedback [text]` | Send a bug report, an idea or a note to the Kodel developers. |
 
 Run `kodel <command> --help` for the options.
-
-## Tasks
-
-Optional, and off by default. When on, the agent can write down what it finds on the way ("create a
-task for that bug"), you can ask what is left, and a tracker such as Jira can sit behind the same
-interface. See [docs/tasks.md](docs/tasks.md).
 
 ## How it is built
 
