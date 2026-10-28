@@ -80,7 +80,7 @@ describe("t9jrs the price table and the cost of an event", () => {
   });
 
   test("t9jrs_price_maths", () => {
-    // sonnet 5.5: 2 / 10 / 0.2 / 2.5 / 4 dollars per million tokens
+    // sonnet 5.5: 2 / 10 / 0.1 / 2.5 / 4 dollars per million tokens
     const e = event({
       input: 1_000,
       output: 500,
@@ -90,8 +90,30 @@ describe("t9jrs the price table and the cost of an event", () => {
     });
     const price = resolvePrice(defaultPricing(), e.model, e.ts)?.price;
     expect(price).toBeDefined();
-    // 1000*2 + 500*10 + 2000*0.2 + 3000*2.5 + 1000*4 = 18900 -> 0.0189
-    expect(priceEvent(e, price as NonNullable<typeof price>)).toBe(0.0189);
+    // 1000*2 + 500*10 + 2000*0.1 + 3000*2.5 + 1000*4 = 18700 -> 0.0187
+    expect(priceEvent(e, price as NonNullable<typeof price>)).toBe(0.0187);
+  });
+
+  test("t9jrs_sonnet_5_5_cache_read_matches_usage_comparison", () => {
+    // Claude Code's own /usage of the session of 2026-10-28, row claude-sonnet-5-5: 130.7k input, 459.8k output,
+    // 183.4m cache read, 2.7m cache write, $31.75. The split of the writes between 5 minutes and 1 hour is not in
+    // /usage; the transcripts of the same session had 1.21m of 2.59m written for an hour, and that share is used.
+    const writes = 2_700_000;
+    const oneHour = Math.round((writes * 1_211_053) / 2_592_263);
+    const e = event({
+      input: 130_700,
+      output: 459_800,
+      cache_read: 183_400_000,
+      cache_write: writes,
+      cache_write_1h: oneHour,
+    });
+    const price = resolvePrice(defaultPricing(), e.model, e.ts)?.price;
+    expect(price).toBeDefined();
+    const usd = priceEvent(e, price as NonNullable<typeof price>);
+    expect(Math.abs(usd - 31.75) / 31.75).toBeLessThan(0.03);
+    // the 0.20 of the skill's cached table would have been far off: the reason the row says 0.10
+    const wrong = priceEvent(e, { ...(price as NonNullable<typeof price>), cache_read: 0.2 });
+    expect(Math.abs(wrong - 31.75) / 31.75).toBeGreaterThan(0.3);
   });
 
   test("t9jrs_1h_write_priced_at_its_own_rate", () => {

@@ -209,3 +209,38 @@ Written after the review of the build. What was done differently or not done, pl
   entry would read `changed`; this cannot be tried offline. `packages/cli/src/cli.ts` and `agent-log-ticker.ts` needed no change
   (`report --json` serialises the whole report; the ticker never runs usage), although the list of affected files named them. Some test
   names are used in more than one package; that is fine for `bun test` but "the test named in the plan" is then ambiguous.
+
+### After the final gate
+
+The person rejected the final gate because the Sonnet 5.5 cache read price was about twice too high against Claude Code's own `/usage`
+(0.20 shipped, about 0.10 implied). The row now says 0.10 and the table note says where the number comes from. What `/usage` showed
+for the session b81ebe2e of this build, against the collector over its main log and 18 subagent files (628 responses, repeats cut by
+`message.id`), priced with the table **before** the fix:
+
+| model | | input | output | cache read | cache write | cost |
+| --- | --- | --- | --- | --- | --- | --- |
+| claude-sonnet-5-5 | `/usage` | 130.7k | 459.8k | 183.4m | 2.7m | $31.75 |
+| | collector | 1.0k | 460.7k | 141.0m | 2.59m | $41.10 |
+| claude-fable-5-1 | `/usage` | 678.6k | 201.7k | 18.7m | 1.6m | $41.12 |
+| | collector | 2.3k | 200.6k | 9.17m | 1.39m | $29.70 |
+| claude-opus-5-5 | `/usage` | 7.1k | 22.6k | 1.9m | 149.8k | $1.61 |
+| | collector | 0.05k | 22.4k | 1.43m | 143.6k | $1.45 |
+
+The main stream had 126 requests in `/usage` and 125 in the transcript.
+
+- **What agrees.** Output agrees within 1%, cache writes within 4-13%. Re-pricing `/usage`'s own token counts with the table
+  reproduces its per-model cost within about 1% for Opus 5.5, Fable 5.1 and Haiku 5.5, and, after the fix, for Sonnet 5.5
+  (`t9jrs_sonnet_5_5_cache_read_matches_usage_comparison`, within 3%, and it fails with the old 0.20).
+- **What does not.** Uncached input and cache reads are undercounted by 23-51% in the transcripts: a fork does not log the prompt it
+  inherited, a cache that sat idle past its time to live is written again, and some requests are never written to the transcript. So
+  the 10% token tolerance of decision 5 holds for a clean one-turn session, not for a session with forks and subagents. The totals of
+  this session came within 3% only because the errors of two models went the other way (Sonnet too high by the price, Fable too low by
+  the undercount).
+- **Revision.** The table's `revision` stays 2026-10-28: the table of that date with the old 0.20 was never pushed and no stored cost
+  carries it outside the tests. A change of a price after a release needs a new revision.
+- **`claude-sonnet-5`** keeps its 10%-of-input cache read; it may be 0.10 too, and is not changed without evidence.
+- **The golden run** `fixtures/usage-run/` keeps the figures it stored (they carry the revision they were made with, 2026-10-27, and are
+  never recomputed): this is by design, and it is the exception to "every test and fixture with a dollar figure was changed".
+- **Real-agent tests** (`KODEL_AGENT_TESTS=1`) were run once by the builder and all four failed with a 401 (`OAuth access token is
+  invalid`) from the sandboxed test environment, before any request reached the model. They are still not run; the person runs them
+  in a logged-in terminal and puts the figures in the pull request.

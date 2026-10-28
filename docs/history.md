@@ -131,6 +131,10 @@ is cut and followed by a hash, which is not reproduced: such a folder is found b
 
 The transcript does not contain every request the agent makes (titles, summaries and the like), so the totals of
 the events are a little below the agent's own. On a clean one-turn session the test accepts a difference of 10%.
+The transcript also undercounts uncached input and cache reads for a session with forks and subagents (a fork does not log the
+prompt it inherited, and a cache written again after it went idle is not in it): in a measured session they were 23-51% below
+Claude Code's own `/usage`, while output agreed within 1%. The 10% holds for a clean one-turn session only, and the cost of a model
+is only as good as its row of the price table.
 
 ## Writing a collector for another agent
 

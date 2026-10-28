@@ -1,7 +1,7 @@
 {
   "format": 1,
   "revision": "2026-10-28",
-  "note": "Prices are US dollars per million tokens. Entries marked checkedAt null have not been compared with the live price page yet: run scripts/check-prices.mjs. The rows of claude-opus-4-6 to claude-opus-5-5, claude-sonnet-4-6 to claude-sonnet-5-5, claude-haiku-5-5 and claude-fable-5 to claude-fable-5-1 come from the model table of the claude-api skill (cached 2026-10-06), not from the live page. That table gives the cache read price only for claude-opus-5-5, claude-sonnet-5-5 and claude-fable-5-1; for the others it is assumed to be 10% of the input price (claude-haiku-5-5 and claude-fable-5 included). Cache writes are priced at 1.25x input (5 minutes) and 2x input (1 hour). long_context_tokens is the prompt size above which a request is flagged as long context (default 200000); the higher price of such requests is not modelled.",
+  "note": "Prices are US dollars per million tokens. Entries marked checkedAt null have not been compared with the live price page yet: run scripts/check-prices.mjs. The rows of claude-opus-4-6 to claude-opus-5-5, claude-sonnet-4-6 to claude-sonnet-5-5, claude-haiku-5-5 and claude-fable-5 to claude-fable-5-1 come from the model table of the claude-api skill (cached 2026-10-06), not from the live page. That table gives the cache read price only for claude-opus-5-5, claude-sonnet-5-5 and claude-fable-5-1; for the others it is assumed to be 10% of the input price (claude-haiku-5-5 and claude-fable-5 included). The cache read price of claude-sonnet-5-5 is 0.10, not the 0.20 the skill cache gives: it was corrected on 2026-10-28 from a comparison with Claude Code's own /usage, whose Sonnet 5.5 session cost is only reproduced with 0.10. With /usage's own token counts, claude-opus-5-5, claude-fable-5-1 and claude-haiku-5-5 reproduce its per-model session costs within about 1%. The cache read price of claude-sonnet-5 follows the same unverified 10%-of-input rule and may be 0.10 too: it is not changed without evidence. Cache writes are priced at 1.25x input (5 minutes) and 2x input (1 hour). long_context_tokens is the prompt size above which a request is flagged as long context (default 200000); the higher price of such requests is not modelled.",
   "models": {
     "claude-opus-4-5": [
       {
@@ -51,7 +51,7 @@
       {
         "input": 2,
         "output": 10,
-        "cache_read": 0.2,
+        "cache_read": 0.1,
         "cache_write": 2.5,
         "cache_write_1h": 4,
         "sourceUrl": "https://docs.claude.com/en/docs/about-claude/pricing",
