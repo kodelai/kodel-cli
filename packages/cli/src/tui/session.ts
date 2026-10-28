@@ -97,16 +97,6 @@ export function sortSessions(sessions: Session[]): Session[] {
   });
 }
 
-/** One step on the way a run goes, in the order it goes. */
-export interface PathStep {
-  slug: string;
-  state: StepState;
-  /** A person decides it. */
-  human: boolean;
-  /** `×2` for a step that ran twice. */
-  note?: string;
-}
-
 /** What the engine itself found out, as opposed to what the agent says. */
 export interface CheckLine {
   node: string;
@@ -127,11 +117,31 @@ export type ChangeSummary =
   | { kind: "unavailable"; reason: string }
   | { kind: "no_repo" };
 
-export interface DecisionLine {
-  node: string;
-  decision: string;
+/** One try at a step: what it ended with and everything that was found out about it. */
+export interface Attempt {
+  n: number;
+  /** The label the step ended with, or nothing while it is still going. */
+  outcome?: string;
+  ok?: boolean;
+  ms?: number;
+  exit?: number;
+  /** Why a command or a check failed, or why a person rejected. */
   reason?: string;
-  ts: number;
+  /** What the agent said it did; it is the agent's word, not checked. */
+  summary?: string;
+  checks: CheckLine[];
+  decision?: { decision: string; reason?: string };
+  review?: { completeness: string; findings: Finding[] };
+}
+
+/** One step on the way a run goes, in the order it goes. */
+export interface StepDetail {
+  slug: string;
+  kind: string;
+  state: StepState;
+  /** A person decides it. */
+  human: boolean;
+  attempts: Attempt[];
 }
 
 /** Everything the card of a run waiting at a human step shows beyond the list row. */
@@ -141,13 +151,14 @@ export interface GateDetail {
   position: string;
   prompt: string;
   instructions?: string;
-  path: PathStep[];
+  steps: StepDetail[];
+  /** The latest attempt of each step, as the engine judged it. */
   checks: CheckLine[];
-  review?: { node: string; completeness: string; findings: Finding[] };
   changes: ChangeSummary;
   /** Files that changed after the checks passed: the agent kept working. */
   changedAfterChecks: string[];
-  decisions: DecisionLine[];
   /** Comments already recorded at this step. */
   comments: number;
+  /** The journal of the run, oldest first. */
+  journal: string[];
 }

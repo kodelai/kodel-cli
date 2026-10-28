@@ -13,6 +13,7 @@ const KEYS: Record<string, string> = {
   "\u001b[D": "left",
   "\u001bOA": "up",
   "\u001bOB": "down",
+  "\u001b[Z": "shift-tab",
   "\u001b[5~": "pageup",
   "\u001b[6~": "pagedown",
   "\r": "enter",

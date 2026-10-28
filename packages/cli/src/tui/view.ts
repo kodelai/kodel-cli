@@ -19,11 +19,11 @@ import {
   type GateDetail,
   NEED_KEYS,
   NEED_TAG,
-  type PathStep,
   type Session,
   type StepState,
   sortSessions,
 } from "./session";
+import { isListTab, itemCount, JOURNAL, TABS, type TabState, tabContent, tabStrip } from "./tabs";
 
 export const SECTIONS = ["Sessions", "Pipeline", "Tasks", "Report"] as const;
 
@@ -50,6 +50,12 @@ export interface Model {
   details: Record<string, GateDetail>;
   /** How many lines of the card are scrolled off the top. */
   cardScroll: number;
+  /** Which tab of the card is shown, which line of its list is on, and whether that line is open. */
+  tab: number;
+  cursor: number;
+  open: boolean;
+  /** The list is put away and the card has the whole width. */
+  zoom: boolean;
 }
 
 /** A run's gate detail is good for the wait it was read for: a new wait is a new key. */
@@ -106,6 +112,10 @@ export function initialModel(
     mouse,
     details: {},
     cardScroll: 0,
+    tab: 0,
+    cursor: 0,
+    open: false,
+    zoom: false,
   };
 }
 
@@ -148,6 +158,10 @@ export function update(m: Model, key: string, size: Size = DEFAULT_SIZE): Model 
     if (key === "y") return decide(m, current, m.confirm);
     return { ...m, confirm: null, notice: "Cancelled." };
   }
+  if (m.focus === "card" && m.section === 0) {
+    const moved = cardKey(m, key, size);
+    if (moved) return moved;
+  }
   switch (key) {
     case "q":
       return { ...m, quit: true };
@@ -170,6 +184,9 @@ export function update(m: Model, key: string, size: Size = DEFAULT_SIZE): Model 
     case "pageup":
     case "b":
       return scrollCard(m, size, -PAGE);
+    case "z":
+      if (m.section !== 0 || m.sessions.length === 0) return m;
+      return { ...m, zoom: !m.zoom, focus: m.zoom ? m.focus : "card" };
     case "m":
       return {
         ...m,
@@ -178,10 +195,10 @@ export function update(m: Model, key: string, size: Size = DEFAULT_SIZE): Model 
       };
     case "enter":
     case "right":
-      return m.section === 0 ? { ...m, focus: "card" } : m;
+      return m.section === 0 && m.sessions.length > 0 ? { ...m, focus: "card" } : m;
     case "escape":
     case "left":
-      return { ...m, focus: "list" };
+      return { ...m, focus: "list", zoom: false };
     case "a":
     case "r": {
       if (current?.need === undefined || NEED_KEYS[current.need][key] === undefined) return m;
@@ -198,27 +215,165 @@ export function update(m: Model, key: string, size: Size = DEFAULT_SIZE): Model 
   }
 }
 
+/** The keys of a card that has the focus; anything it does not use goes on to the general ones. */
+function cardKey(m: Model, key: string, size: Size): Model | undefined {
+  const found = detailOf(m);
+  const up = key === "up" || key === "k";
+  const down = key === "down" || key === "j";
+  if (!found) return up || down ? scrollCard(m, size, up ? -1 : 1) : undefined;
+  const onList = isListTab(m.tab) && !m.open;
+  switch (key) {
+    case "tab":
+      return toTab(m, (m.tab + 1) % TABS.length);
+    case "shift-tab":
+      return toTab(m, (m.tab + TABS.length - 1) % TABS.length);
+    case "right":
+      return toTab(m, Math.min(TABS.length - 1, m.tab + 1));
+    case "left":
+      return m.tab > 0 ? toTab(m, m.tab - 1) : m;
+    case "up":
+    case "k":
+    case "down":
+    case "j": {
+      const by = up ? -1 : 1;
+      return onList ? moveCursor(m, found.d, by) : scrollCard(m, size, by);
+    }
+    case "pageup":
+    case "b":
+      return onList ? moveCursor(m, found.d, -PAGE) : scrollCard(m, size, -PAGE);
+    case "pagedown":
+    case " ":
+      return onList ? moveCursor(m, found.d, PAGE) : scrollCard(m, size, PAGE);
+    case "enter":
+      return onList && itemCount(found.d, m.tab) > 0 ? { ...m, open: true, cardScroll: 0 } : m;
+    case "n":
+    case "p":
+      return m.open ? moveCursor(m, found.d, key === "n" ? 1 : -1) : m;
+    case "escape":
+      return m.open ? { ...m, open: false, cardScroll: 0 } : { ...m, focus: "list", zoom: false };
+    default:
+      return undefined;
+  }
+}
+
+function toTab(m: Model, tab: number): Model {
+  // The journal is read from its end: the newest records are the ones people look for.
+  const scroll = tab === JOURNAL ? Number.MAX_SAFE_INTEGER : 0;
+  return { ...m, tab, cursor: 0, open: false, cardScroll: scroll, notice: "" };
+}
+
+function moveCursor(m: Model, d: GateDetail, by: number): Model {
+  const count = itemCount(d, m.tab);
+  return {
+    ...m,
+    cursor: Math.min(Math.max(0, count - 1), Math.max(0, m.cursor + by)),
+    cardScroll: 0,
+  };
+}
+
+/** The selected run's gate detail, once it has been read. */
+function detailOf(m: Model): { s: Session; d: GateDetail } | undefined {
+  const s = selectedSession(m);
+  const d = s?.need === "approve" ? m.details[detailKey(s)] : undefined;
+  return s && d ? { s, d } : undefined;
+}
+
 function moveSelection(m: Model, by: -1 | 1): Model {
   const at = Math.max(
     0,
     m.sessions.findIndex((s) => s.id === selectedSession(m)?.id),
   );
   const next = m.sessions[Math.min(m.sessions.length - 1, Math.max(0, at + by))];
-  return { ...m, selected: next?.id ?? m.selected, notice: "", cardScroll: 0 };
+  return {
+    ...m,
+    selected: next?.id ?? m.selected,
+    notice: "",
+    cardScroll: 0,
+    tab: 0,
+    cursor: 0,
+    open: false,
+  };
 }
 
 const DEFAULT_SIZE: Size = { cols: 120, rows: 30 };
 const PAGE = 10;
 
-function cardWidthFor({ cols }: Size): number {
-  return cols >= WIDE_COLS ? cols - listWidthFor(cols) - 3 : cols - 2;
+interface Layout {
+  showList: boolean;
+  showCard: boolean;
+  listWidth: number;
+  /** The column (from 1) where the card starts. */
+  cardX: number;
+  cardWidth: number;
+}
+
+function layoutOf(m: Model, cols: number): Layout {
+  if (cols >= WIDE_COLS) {
+    const listWidth = listWidthFor(cols);
+    return m.zoom
+      ? { showList: false, showCard: true, listWidth, cardX: 2, cardWidth: cols - 2 }
+      : {
+          showList: true,
+          showCard: true,
+          listWidth,
+          cardX: listWidth + 4,
+          cardWidth: cols - listWidth - 3,
+        };
+  }
+  const card = m.focus === "card";
+  return { showList: !card, showCard: card, listWidth: cols - 1, cardX: 2, cardWidth: cols - 2 };
+}
+
+interface Panel {
+  /** Lines that stay at the top: the name of the run and the tabs. */
+  head: string[];
+  body: string[];
+  /** The line to keep in sight, in `body`. */
+  anchor?: number;
+  spans?: [number, number][];
+}
+
+function tabState(m: Model, d: GateDetail): TabState {
+  const count = itemCount(d, m.tab);
+  return { tab: m.tab, cursor: Math.min(m.cursor, Math.max(0, count - 1)), open: m.open };
+}
+
+/** What the right side shows for the selected run. */
+function panel(m: Model, width: number): Panel {
+  const s = selectedSession(m);
+  if (!s) return { head: [], body: [dim("No session selected.")] };
+  const found = detailOf(m);
+  if (!found) return { head: [], body: cardLines(s, m, width) };
+  const focused = m.focus === "card";
+  const strip = tabStrip(found.d, m.tab, width, focused);
+  const content = tabContent(s, found.d, tabState(m, found.d), {
+    now: m.now,
+    width,
+    actions: actionLine(s, m.source === "project"),
+    focused,
+  });
+  const name = `${glyph(s, m.frame)} ${bold(s.title)}  ${dim(`${s.id} · ${s.pipeline}`)}`;
+  return {
+    head: [fit(name, width), strip.line],
+    body: content.lines,
+    ...(content.anchor === undefined ? {} : { anchor: content.anchor }),
+    spans: strip.spans,
+  };
+}
+
+/** The panel as `height` lines: the head, then the part of the body that fits. */
+function panelLines(m: Model, p: Panel, width: number, height: number): string[] {
+  const room = Math.max(1, height - p.head.length);
+  const follow = p.anchor !== undefined && isListTab(m.tab) && !m.open;
+  const scroll = follow ? (p.anchor ?? 0) - Math.floor(room / 2) : m.cardScroll;
+  return [...p.head, ...cardWindow(p.body, scroll, room, width)];
 }
 
 /** Scroll the card, never past its last line. */
 function scrollCard(m: Model, size: Size, by: number): Model {
-  const height = size.rows - 3;
-  const length = cardLines(selectedSession(m), m, cardWidthFor(size)).length;
-  const max = Math.max(0, length - height);
+  const p = panel(m, layoutOf(m, size.cols).cardWidth);
+  const room = Math.max(1, size.rows - 3 - p.head.length);
+  const max = Math.max(0, p.body.length - room);
   return { ...m, cardScroll: Math.min(max, Math.max(0, m.cardScroll + by)) };
 }
 
@@ -307,7 +462,9 @@ function listLines(m: Model, width: number): ListLines {
       const row = `${bar}${glyph(s, m.frame)} ${fit(s.title, titleWidth)} ${tagStyled} ${time}`;
       if (s.id === m.selected) {
         selectedAt = lines.length;
-        lines.push(inverse(fit(stripAnsi(row), width)));
+        const plain = fit(stripAnsi(row), width);
+        // With the card in focus the list keeps its place but stops shouting.
+        lines.push(m.focus === "list" ? inverse(plain) : bold(`›${plain.slice(1)}`));
       } else {
         lines.push(fit(row, width));
       }
@@ -343,176 +500,9 @@ function actionLine(s: Session, project: boolean): string {
   return `${parts.join("   ")}${project ? dim("   (shows the command for now)") : ""}`;
 }
 
-const SEVERITY_RANK: Record<string, number> = {
-  blocker: 0,
-  critical: 1,
-  major: 2,
-  minor: 3,
-  info: 4,
-};
-
-function severityStyle(severity: string, text: string): string {
-  const rank = SEVERITY_RANK[severity] ?? 4;
-  return rank <= 2 ? red(text) : rank === 3 ? yellow(text) : dim(text);
-}
-
-/** The end of a path is the part that tells files apart. */
-function tailFit(text: string, width: number): string {
-  if (text.length <= width) return text;
-  return `…${text.slice(text.length - width + 1)}`;
-}
-
-function formatMs(ms: number): string {
-  if (ms < 1000) return "";
-  if (ms < 60_000) return ` ${(ms / 1000).toFixed(1)}s`;
-  return ` ${Math.floor(ms / 60_000)}m${String(Math.round((ms % 60_000) / 1000)).padStart(2, "0")}`;
-}
-
-/** Tokens laid out in lines no wider than `width`, joined by `glue`. */
-function flow(tokens: { text: string; plain: number }[], glue: string, width: number): string[] {
-  const lines: string[] = [];
-  let line = "";
-  let used = 0;
-  for (const t of tokens) {
-    if (used > 0 && used + glue.length + t.plain > width) {
-      lines.push(line);
-      line = t.text;
-      used = t.plain;
-    } else {
-      line += used === 0 ? t.text : dim(glue) + t.text;
-      used += used === 0 ? t.plain : glue.length + t.plain;
-    }
-  }
-  if (line !== "") lines.push(line);
-  return lines;
-}
-
-function pathToken(step: PathStep, current: string): { text: string; plain: number } {
-  const note = step.note ? ` ${step.note}` : "";
-  if (step.slug === current) {
-    const t = `◐ ${step.slug}${note}`;
-    return { text: bold(yellow(t)), plain: t.length };
-  }
-  const plain = `${step.slug}${note} ✓`.length;
-  if (step.state === "done") return { text: `${step.slug}${note} ${green("✓")}`, plain };
-  if (step.state === "failed") return { text: red(`${step.slug}${note} ✗`), plain };
-  return { text: dim(`${step.slug}${note}`), plain: step.slug.length + note.length };
-}
-
-const FINDINGS_SHOWN = 3;
-
-function approveCard(s: Session, d: GateDetail, m: Model, width: number): string[] {
-  const out: string[] = [];
-  const inner = Math.max(10, width - 4);
-  const bar = yellow("│");
-  out.push(`${glyph(s, m.frame)} ${bold(s.title)}`);
-  out.push(dim(`${s.id} · ${s.pipeline}`));
-  if (s.workdir) out.push(dim(tailFit(s.workdir, width)));
-  out.push("");
-  out.push(bold(yellow(`${d.position} · ${d.node} · waiting ${formatAge(m.now - s.since)}`)));
-  out.push(
-    ...flow(
-      d.path.map((p) => pathToken(p, d.node)),
-      " → ",
-      width,
-    ),
-  );
-  out.push("");
-  out.push(yellow("┌ You are asked"));
-  for (const line of wrapText(d.prompt, inner)) out.push(`${bar} ${line}`);
-  for (const line of wrapText(d.instructions ?? "", inner)) out.push(`${bar} ${dim(line)}`);
-  if (d.comments > 0) {
-    out.push(
-      `${bar} ${dim(`${d.comments} comment${d.comments === 1 ? "" : "s"} recorded at this step`)}`,
-    );
-  }
-  out.push(`${yellow("└")} ${actionLine(s, m.source === "project")}`);
-  out.push("");
-
-  const failed = d.checks.filter((c) => !c.passed);
-  const passed = d.checks.length - failed.length;
-  out.push(
-    dim(
-      `CHECKED BY THE ENGINE · ${passed} passed${failed.length ? `, ${failed.length} failed` : ""}`,
-    ),
-  );
-  for (const c of failed) out.push(red(`✗ ${c.label}${formatMs(c.ms ?? 0)}`));
-  const ok = d.checks
-    .filter((c) => c.passed)
-    .map((c) => {
-      const t = `${c.label}${formatMs(c.ms ?? 0)}`;
-      return { text: `${green("✓")} ${t}`, plain: t.length + 2 };
-    });
-  out.push(...flow(ok, "  ", width));
-  if (d.changedAfterChecks.length > 0) {
-    const n = d.changedAfterChecks.length;
-    const names = d.changedAfterChecks.slice(0, 3).join(", ");
-    const more = n > 3 ? ` +${n - 3}` : "";
-    const text = `⚠ ${n} file${n === 1 ? "" : "s"} changed after the checks passed: ${names}${more}`;
-    out.push(...wrapText(text, width).map(yellow));
-  }
-  out.push("");
-
-  const c = d.changes;
-  if (c.kind === "files") {
-    const files = `${c.totalFiles} file${c.totalFiles === 1 ? "" : "s"}`;
-    out.push(dim(`CHANGES · ${files} · ${c.totalLines} lines`));
-    for (const [file, lines] of c.files.slice(0, 8)) {
-      out.push(`${fit(tailFit(file, width - 7), width - 6)}${String(lines).padStart(5)}`);
-    }
-    if (c.files.length > 8) out.push(dim(`… ${c.files.length - 8} more`));
-  } else if (c.kind === "none") {
-    out.push(dim("CHANGES"), "No files changed.");
-  } else if (c.kind === "unavailable") {
-    out.push(
-      dim("CHANGES"),
-      ...wrapText(`Cannot tell what changed: ${c.reason}`, width).map(yellow),
-    );
-  } else {
-    out.push(dim("CHANGES"), dim("This is not a git repository."));
-  }
-  out.push("");
-
-  if (d.review) {
-    const rows = [...d.review.findings].sort(
-      (a, b) => (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9),
-    );
-    const counts = new Map<string, number>();
-    for (const f of rows) counts.set(f.severity, (counts.get(f.severity) ?? 0) + 1);
-    const summary = [...counts.entries()]
-      .map(([sev, n]) => severityStyle(sev, `${n} ${sev}`))
-      .join(dim(" · "));
-    out.push(
-      dim(`${d.review.node.toUpperCase()} FINDINGS · the agent's, ${d.review.completeness}`),
-    );
-    out.push(rows.length === 0 ? green("No findings.") : summary);
-    for (const f of rows.slice(0, FINDINGS_SHOWN)) {
-      out.push(`${severityStyle(f.severity, fit(f.severity, 8))}${tailFit(f.location, width - 9)}`);
-      for (const line of wrapText(f.description, width - 2).slice(0, 2)) out.push(`  ${dim(line)}`);
-    }
-    if (rows.length > FINDINGS_SHOWN) out.push(dim(`… ${rows.length - FINDINGS_SHOWN} more`));
-    out.push("");
-  }
-
-  if (d.decisions.length > 0) {
-    out.push(dim("EARLIER DECISIONS"));
-    for (const x of d.decisions) {
-      const mark = x.decision === "approved" ? green("✓") : red("✗");
-      const why = x.reason ? ` ${dim(`“${x.reason}”`)}` : "";
-      out.push(`${mark} ${x.node} ${x.decision} ${dim(`${formatAge(m.now - x.ts)} ago`)}${why}`);
-    }
-    out.push("");
-  }
-  out.push(dim("JOURNAL"));
-  for (const l of s.log) out.push(dim(l));
-  return out.map((l) => fit(l, width));
-}
-
 /** Every line of the card; the screen shows the part from `cardScroll` on. */
 function cardLines(s: Session | undefined, m: Model, width: number): string[] {
   if (!s) return [dim("No session selected.")];
-  const detail = s.need === "approve" ? m.details[detailKey(s)] : undefined;
-  if (detail) return approveCard(s, detail, m, width);
   const out: string[] = [];
   out.push(`${glyph(s, m.frame)} ${bold(s.title)}`);
   out.push(dim(`${s.id} · ${s.pipeline}`));
@@ -596,23 +586,31 @@ function menuLine(m: Model, cols: number): string {
   return fit(gap >= 1 ? `${left}${" ".repeat(gap)}${right}` : left, cols);
 }
 
-function hints(m: Model, wide: boolean): string {
+function hints(m: Model): string {
   const current = selectedSession(m);
   if (m.confirm !== null) {
     const label = current?.need ? (NEED_KEYS[current.need][m.confirm] ?? "") : "";
     return `${bold(label)} «${current?.title ?? ""}»?  ${bold("y")} yes   ${bold("n")} no`;
   }
-  const move = `${bold("↑↓")} select`;
-  const open = wide || m.focus === "card" ? "" : `   ${bold("Enter")} open`;
-  const back = !wide && m.focus === "card" ? `   ${bold("Esc")} back` : "";
   const keys = current?.need ? NEED_KEYS[current.need] : {};
   const decide = `${keys.a ? `   ${bold("a")} ${keys.a}` : ""}${keys.r ? `   ${bold("r")} ${keys.r}` : ""}`;
+  const zoom = `   ${bold("z")} ${m.zoom ? "show list" : "zoom"}`;
+  if (m.focus === "card" && m.section === 0) {
+    let nav: string;
+    if (!detailOf(m)) nav = `${bold("↑↓")} scroll   ${bold("Esc")} list`;
+    else if (m.open) nav = `${bold("↑↓")} scroll   ${bold("n/p")} next/prev   ${bold("Esc")} back`;
+    else if (isListTab(m.tab)) {
+      nav = `${bold("←→")} tabs   ${bold("↑↓")} select   ${bold("Enter")} open   ${bold("Esc")} list`;
+    } else nav = `${bold("←→")} tabs   ${bold("↑↓")} scroll   ${bold("Esc")} list`;
+    return `${nav}${decide}${zoom}   ${bold("q")} quit`;
+  }
+  const open = `   ${bold("Enter")} details`;
   const proposals =
     m.proposals > 0
       ? dim(`   ${m.proposals} pipeline proposal${m.proposals === 1 ? "" : "s"} wait on 2`)
       : "";
   const mouse = `   ${bold("m")} mouse ${m.mouse ? green("on") : dim("off")}`;
-  return `${move}${open}${back}${decide}   ${bold("Tab")} menu${mouse}   ${bold("q")} quit${proposals}`;
+  return `${bold("↑↓")} select${open}${decide}   ${bold("Tab")} menu${mouse}   ${bold("q")} quit${proposals}`;
 }
 
 function emptyState(): string[] {
@@ -630,7 +628,6 @@ export function render(m: Model, { cols, rows }: Size): string[] {
   if (cols < 40 || rows < 12) {
     return [fit(`Terminal too small: ${cols}x${rows}, need 40x12.`, cols)];
   }
-  const wide = cols >= WIDE_COLS;
   const bodyHeight = rows - 3;
   const rule = dim("─".repeat(cols));
   const out: string[] = [menuLine(m, cols), rule];
@@ -645,38 +642,36 @@ export function render(m: Model, { cols, rows }: Size): string[] {
   } else if (m.sessions.length === 0) {
     body = emptyState();
   } else {
-    const current = selectedSession(m);
-    if (wide) {
-      const listWidth = listWidthFor(cols);
-      const cardWidth = cols - listWidth - 3;
-      const left = listView(m, listWidth, bodyHeight).lines;
-      const right = cardWindow(
-        cardLines(current, m, cardWidth),
-        m.cardScroll,
-        bodyHeight,
-        cardWidth,
-      );
+    const layout = layoutOf(m, cols);
+    const right = layout.showCard
+      ? panelLines(m, panel(m, layout.cardWidth), layout.cardWidth, bodyHeight)
+      : [];
+    const left = layout.showList ? listView(m, layout.listWidth, bodyHeight).lines : [];
+    if (layout.showList && layout.showCard) {
+      const divider = m.focus === "card" ? cyan("┃") : dim("│");
       body = Array.from({ length: bodyHeight }, (_, i) => {
-        const l = fit(left[i] ?? "", listWidth);
-        const r = fit(right[i] ?? "", cardWidth);
-        return `${l} ${dim("│")} ${r}`;
+        const l = fit(left[i] ?? "", layout.listWidth);
+        const r = fit(right[i] ?? "", layout.cardWidth);
+        return `${l} ${divider} ${r}`;
       });
-    } else if (m.focus === "card") {
-      body = cardWindow(cardLines(current, m, cols - 2), m.cardScroll, bodyHeight, cols - 2).map(
-        (l) => ` ${l}`,
-      );
+    } else if (layout.showCard) {
+      body = right.map((l) => ` ${l}`);
     } else {
-      body = listView(m, cols - 1, bodyHeight).lines.map((l) => ` ${l}`);
+      body = left.map((l) => ` ${l}`);
     }
   }
   for (let i = 0; i < bodyHeight; i++) out.push(fit(body[i] ?? "", cols));
 
-  const status = m.notice !== "" ? green(m.notice) : hints(m, wide);
+  const status = m.notice !== "" ? green(m.notice) : hints(m);
   out.push(fit(` ${status}`, cols));
   return out;
 }
 
-export type Hit = { kind: "menu"; section: number } | { kind: "session"; id: string };
+export type Hit =
+  | { kind: "menu"; section: number }
+  | { kind: "session"; id: string }
+  | { kind: "tab"; index: number }
+  | { kind: "card" };
 
 /** What is under a point of the screen (1-based column and row, as the terminal reports them). */
 export function hitTest(m: Model, { cols, rows }: Size, x: number, y: number): Hit | undefined {
@@ -694,20 +689,25 @@ export function hitTest(m: Model, { cols, rows }: Size, x: number, y: number): H
   const bodyHeight = rows - 3;
   const row = y - 3;
   if (m.section !== 0 || m.sessions.length === 0 || row < 0 || row >= bodyHeight) return undefined;
-  const wide = cols >= WIDE_COLS;
-  if (wide) {
-    if (x > listWidthFor(cols)) return undefined;
-    const id = listView(m, listWidthFor(cols), bodyHeight).ids[row];
+  const layout = layoutOf(m, cols);
+  if (layout.showList && x <= layout.listWidth) {
+    const id = listView(m, layout.listWidth, bodyHeight).ids[row];
     return id === undefined ? undefined : { kind: "session", id };
   }
-  if (m.focus === "card") return undefined;
-  const id = listView(m, cols - 1, bodyHeight).ids[row];
-  return id === undefined ? undefined : { kind: "session", id };
+  if (!layout.showCard || x < layout.cardX) return undefined;
+  const found = detailOf(m);
+  if (found && row === 1) {
+    const { spans } = tabStrip(found.d, m.tab, layout.cardWidth, m.focus === "card");
+    const at = x - layout.cardX;
+    const index = spans.findIndex(([from, to]) => at >= from && at < to);
+    if (index >= 0) return { kind: "tab", index };
+  }
+  return { kind: "card" };
 }
 
 /**
- * A click selects a session or a menu item and the wheel moves the selection; nothing else. A
- * decision is never made with the mouse: it takes a key and a confirmation.
+ * A click selects a session, a menu item or a tab, and the wheel moves the selection or scrolls;
+ * nothing else. A decision is never made with the mouse: it takes a key and a confirmation.
  */
 export function mouseUpdate(
   m: Model,
@@ -715,16 +715,32 @@ export function mouseUpdate(
   event: Extract<InputEvent, { type: "mouse" }>,
 ): Model {
   if (!m.mouse || m.confirm !== null) return m;
-  const wide = size.cols >= WIDE_COLS;
+  const layout = layoutOf(m, size.cols);
   if (event.action !== "press") {
     if (m.section !== 0) return m;
     const direction = event.action === "wheel_up" ? -1 : 1;
-    const overCard = wide ? event.x > listWidthFor(size.cols) : m.focus === "card";
-    return overCard ? scrollCard(m, size, direction * 3) : moveSelection(m, direction);
+    const overCard = layout.showCard && (!layout.showList || event.x >= layout.cardX);
+    if (!overCard) return moveSelection(m, direction);
+    const found = detailOf(m);
+    if (found && isListTab(m.tab) && !m.open) return moveCursor(m, found.d, direction);
+    return scrollCard(m, size, direction * 3);
   }
   const hit = hitTest(m, size, event.x, event.y);
   if (!hit) return m;
   if (hit.kind === "menu") return { ...m, section: hit.section, notice: "" };
-  if (!wide && hit.id === m.selected) return { ...m, focus: "card", notice: "" };
-  return { ...m, selected: hit.id, notice: "", cardScroll: 0 };
+  if (hit.kind === "tab") return toTab({ ...m, focus: "card" }, hit.index);
+  if (hit.kind === "card") return { ...m, focus: "card" };
+  if (hit.id === m.selected) {
+    return { ...m, focus: size.cols < WIDE_COLS ? "card" : "list", notice: "" };
+  }
+  return {
+    ...m,
+    selected: hit.id,
+    focus: "list",
+    notice: "",
+    cardScroll: 0,
+    tab: 0,
+    cursor: 0,
+    open: false,
+  };
 }

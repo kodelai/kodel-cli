@@ -1,6 +1,6 @@
 /** Sample sessions for `kodel tui --demo`. Nothing here is read from a project. */
 import type { Loaded } from "./load";
-import type { GateDetail, PathStep, Session, StepLine } from "./session";
+import type { Attempt, GateDetail, Session, StepDetail, StepLine } from "./session";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -190,61 +190,133 @@ export function demoSessions(now: number): Loaded {
   return { sessions, proposals: 1 };
 }
 
-const step = (slug: string, state: PathStep["state"], human = false, note?: string): PathStep => ({
-  slug,
-  state,
-  human,
-  ...(note ? { note } : {}),
+const attempt = (n: number, over: Partial<Attempt> = {}): Attempt => ({
+  n,
+  outcome: "passed",
+  ok: true,
+  checks: [],
+  ...over,
 });
 
+const stepOf = (
+  slug: string,
+  kind: string,
+  state: StepDetail["state"],
+  attempts: Attempt[],
+): StepDetail => ({ slug, kind, state, human: kind === "human", attempts });
+
 /** What the card of the sample run waiting for approval shows, shaped like a real run's. */
-export function demoGateDetail(runId: string, now: number): GateDetail | undefined {
+export function demoGateDetail(runId: string): GateDetail | undefined {
   if (runId !== "r_0mvo6g4mi") return undefined;
+  const steps: StepDetail[] = [
+    stepOf("plan", "agent", "done", [
+      attempt(1, {
+        ms: 46_000,
+        checks: [{ node: "plan", label: "plan diff", passed: true, ms: 153 }],
+      }),
+    ]),
+    stepOf("plan-approval", "human", "done", [
+      attempt(1, {
+        outcome: "approved",
+        ms: 9 * 60_000,
+        decision: { decision: "approved" },
+      }),
+    ]),
+    stepOf("impl", "agent", "done", [
+      attempt(1, {
+        outcome: "failed",
+        ok: false,
+        ms: 4 * 60_000,
+        reason: "The diff check: 1438 lines changed, the limit is 800.",
+        checks: [{ node: "impl", label: "impl diff", passed: false, ms: 158 }],
+      }),
+      attempt(2, {
+        ms: 3 * 60_000,
+        checks: [{ node: "impl", label: "impl diff", passed: true, ms: 160 }],
+      }),
+    ]),
+    stepOf("verify", "command", "done", [
+      attempt(1, {
+        ms: 1631,
+        exit: 0,
+        checks: [{ node: "verify", label: "verify", passed: true, ms: 1631 }],
+      }),
+    ]),
+    stepOf("test", "command", "done", [
+      attempt(1, {
+        outcome: "failed",
+        ok: false,
+        ms: 70_000,
+        exit: 1,
+        reason: "1 test failed: t40_wait_timeout_reports",
+        checks: [{ node: "test", label: "test", passed: false, ms: 70_000 }],
+      }),
+      attempt(2, {
+        ms: 85_684,
+        exit: 0,
+        checks: [{ node: "test", label: "test", passed: true, ms: 85_684 }],
+      }),
+    ]),
+    stepOf("build", "command", "done", [
+      attempt(1, {
+        ms: 282,
+        exit: 0,
+        checks: [{ node: "build", label: "build", passed: true, ms: 282 }],
+      }),
+    ]),
+    stepOf("review", "agent", "done", [
+      attempt(1, {
+        ms: 20_000,
+        checks: [{ node: "review", label: "review result", passed: true, ms: 61 }],
+        review: {
+          completeness: "complete",
+          findings: [
+            {
+              severity: "minor",
+              location: "packages/cli/test/cli.test.ts:296",
+              description:
+                "The plan lists a test for a run whose state cannot be read, and none was added. The code handles it, so this is a coverage gap only.",
+            },
+            {
+              severity: "minor",
+              location: "packages/cli/src/format.ts:9",
+              description:
+                "line.slice(0, max) counts UTF-16 units and can split a surrogate pair at the cut.",
+            },
+            {
+              severity: "info",
+              location: "packages/cli/src/cli.ts:168",
+              description:
+                "The --full description differs slightly from the plan's wording. Harmless.",
+            },
+          ],
+        },
+      }),
+    ]),
+    stepOf("final-approval", "human", "waiting", [{ n: 1, checks: [] }]),
+  ];
+  const journal = [
+    "09:12:00 run_started",
+    "09:12:01 node_entered       plan",
+    "09:12:47 check_finished     plan",
+    "09:22:00 gate_decided       plan-approval approved",
+    "09:22:01 node_entered       impl",
+    "09:26:10 check_finished     impl",
+    "09:26:11 node_entered       impl",
+    "09:29:20 check_finished     impl",
+    "09:29:21 command_finished   verify",
+    "09:30:31 command_finished   test",
+    "09:31:58 command_finished   test",
+    "09:32:00 command_finished   build",
+    "09:32:21 report_accepted    review",
+    "09:32:22 gate_waiting       final-approval",
+  ];
   return {
     node: "final-approval",
     position: "gate 2 of 2",
     prompt: "Look at the diff and try the change. Approve to finish, or reject with what is wrong.",
-    path: [
-      step("plan", "done"),
-      step("plan-approval", "done", true),
-      step("impl", "done", false, "×2"),
-      step("verify", "done"),
-      step("test", "done"),
-      step("build", "done"),
-      step("review", "done"),
-      step("final-approval", "waiting", true),
-    ],
-    checks: [
-      { node: "plan", label: "plan diff", passed: true, ms: 153 },
-      { node: "impl", label: "impl diff", passed: true, ms: 158 },
-      { node: "verify", label: "verify", passed: true, ms: 1631 },
-      { node: "test", label: "test", passed: true, ms: 85_684 },
-      { node: "build", label: "build", passed: true, ms: 282 },
-      { node: "review", label: "review result", passed: true, ms: 61 },
-    ],
-    review: {
-      node: "review",
-      completeness: "complete",
-      findings: [
-        {
-          severity: "minor",
-          location: "packages/cli/test/cli.test.ts:296",
-          description:
-            "The plan lists a test for a run whose state cannot be read, and none was added. The code handles it, so this is a coverage gap only.",
-        },
-        {
-          severity: "minor",
-          location: "packages/cli/src/format.ts:9",
-          description:
-            "line.slice(0, max) counts UTF-16 units and can split a surrogate pair at the cut.",
-        },
-        {
-          severity: "info",
-          location: "packages/cli/src/cli.ts:168",
-          description: "The --full description differs slightly from the plan's wording. Harmless.",
-        },
-      ],
-    },
+    steps,
+    checks: steps.flatMap((s) => s.attempts.at(-1)?.checks ?? []),
     changes: {
       kind: "files",
       files: [
@@ -258,7 +330,7 @@ export function demoGateDetail(runId: string, now: number): GateDetail | undefin
       totalLines: 379,
     },
     changedAfterChecks: [],
-    decisions: [{ node: "plan-approval", decision: "approved", ts: now - 6 * 3_600_000 }],
     comments: 0,
+    journal,
   };
 }

@@ -483,7 +483,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         const base = Date.now();
         await runTui(process.stdin, process.stdout, async () => demoSessions(base), "demo", {
           mouse: opts.mouse === true,
-          loadDetail: async (runId) => demoGateDetail(runId, base),
+          loadDetail: async (runId) => demoGateDetail(runId),
         });
         return;
       }

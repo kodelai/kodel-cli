@@ -294,8 +294,8 @@ function sinceLast(journal: JournalRecord[], state: RunState): number {
 
 const DETAIL_FIELDS = ["node", "outcome", "check", "reason", "code", "message"] as const;
 
-function logLines(journal: JournalRecord[], now: number): string[] {
-  return journal.slice(-14).map((r) => {
+export function logLines(journal: JournalRecord[], now: number, last = 14): string[] {
+  return journal.slice(-last).map((r) => {
     const detail = DETAIL_FIELDS.flatMap((f) =>
       typeof r[f] === "string" ? [String(r[f])] : [],
     ).join(" ");
