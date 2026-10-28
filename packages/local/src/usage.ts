@@ -65,13 +65,41 @@ import {
 /** A pass stops reading after this long and keeps what it has: a big log catches up over several passes. */
 export const USAGE_BUDGET_MS = 10_000;
 /**
- * What is kept in memory, bounded three ways so that one busy run cannot make another (or its own main session) forget:
- * the main sessions of all runs, the subagent logs of one run, and the runs that have subagent logs at all. The oldest go
- * first inside each.
+ * What is kept in memory, bounded per run so that one busy run cannot make another (or its own main session) forget:
+ * a run keeps the memos of its candidate sessions (the one of the environment and the newest of the hook index, 21 at
+ * most, with headroom) and of its subagent logs, and only a few runs are kept at all. Inside each bound, and among the
+ * runs, what was used least recently goes first (an entry is moved to the end every time it is used, not only when it
+ * is made). A run that is pushed out is not lost: its credited work is in the run's state, and its next pass reads on
+ * from there, from the start of the run's log.
  */
 const MAIN_MEMO_CAP = 32;
 const CHILD_MEMO_CAP = 48;
-const CHILD_RUN_CAP = 8;
+const RUN_CAP = 8;
+
+/** What is kept for one run: its candidate sessions and the subagent logs of them, each by session id. */
+interface RunMemos {
+  mains: Map<string, StreamMemo>;
+  children: Map<string, StreamMemo>;
+}
+
+/** The entry of `map` at `key`, moved to the end as the newest use; `undefined` if it is not there. */
+function touched<V>(map: Map<string, V>, key: string): V | undefined {
+  const found = map.get(key);
+  if (found !== undefined) {
+    map.delete(key);
+    map.set(key, found);
+  }
+  return found;
+}
+
+/** Keep `map` to `cap` entries, the least recently used going first. */
+function trimmed<V>(map: Map<string, V>, cap: number): void {
+  while (map.size > cap) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) return;
+    map.delete(oldest);
+  }
+}
 
 const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
 
@@ -174,10 +202,8 @@ interface PassContext {
 export class UsageWriter {
   private readonly now: () => number;
   private readonly budgetMs: number;
-  /** The main session of each run, by `runId|session`. */
-  private readonly mains = new Map<string, StreamMemo>();
-  /** The subagent logs of each run, by run and then by session. */
-  private readonly children = new Map<string, Map<string, StreamMemo>>();
+  /** What is kept for each run, least recently used first; see `RUN_CAP`. */
+  private readonly runs = new Map<string, RunMemos>();
   private readonly collectors = new Map<string, AgentHistoryCollector>();
   private readonly finder: SessionFinder;
 
@@ -189,9 +215,18 @@ export class UsageWriter {
 
   /** Let go of what is kept for a run that has ended. */
   forget(runId: string): void {
-    for (const key of [...this.mains.keys()])
-      if (key.startsWith(`${runId}|`)) this.mains.delete(key);
-    this.children.delete(runId);
+    this.runs.delete(runId);
+  }
+
+  /** What is kept for a run, made if there is none; using it makes the run the newest. */
+  private memosOf(runId: string): RunMemos {
+    let own = touched(this.runs, runId);
+    if (own === undefined) {
+      own = { mains: new Map(), children: new Map() };
+      this.runs.set(runId, own);
+      trimmed(this.runs, RUN_CAP);
+    }
+    return own;
   }
 
   private collector(configDir: string): AgentHistoryCollector {
@@ -205,44 +240,34 @@ export class UsageWriter {
     return found;
   }
 
-  /** The memo of a main session; it is never pushed out by the subagent logs of any run. */
+  /** The memo of a candidate session of a run; the subagent logs of any run do not push it out. */
   private mainMemo(runId: string, session: string, path: string): StreamMemo {
-    const key = `${runId}|${session}`;
-    let found = this.mains.get(key);
-    if (found === undefined || found.path !== path) found = { path, creditedSeq: 0 };
-    this.mains.delete(key);
-    this.mains.set(key, found);
-    if (this.mains.size > MAIN_MEMO_CAP) {
-      const oldest = this.mains.keys().next().value;
-      if (oldest !== undefined) this.mains.delete(oldest);
+    const own = this.memosOf(runId).mains;
+    let found = touched(own, session);
+    if (found === undefined || found.path !== path) {
+      found = { path, creditedSeq: 0 };
+      own.delete(session);
+      own.set(session, found);
+      trimmed(own, MAIN_MEMO_CAP);
     }
     return found;
   }
 
-  /** The memo of a subagent log if there is one; it takes no slot. */
+  /** The memo of a subagent log if there is one, used now; it takes no slot. */
   private peekChild(runId: string, session: string, path: string): StreamMemo | undefined {
-    const found = this.children.get(runId)?.get(session);
+    const own = this.runs.get(runId);
+    if (own === undefined) return undefined;
+    const found = touched(own.children, session);
     return found !== undefined && found.path === path ? found : undefined;
   }
 
-  /** A memo for a subagent log of a run, kept among the newest `CHILD_MEMO_CAP` of that run. */
+  /** A memo for a subagent log of a run, kept among the `CHILD_MEMO_CAP` most recently used of that run. */
   private childMemo(runId: string, session: string, path: string): StreamMemo {
-    const own = this.children.get(runId) ?? new Map<string, StreamMemo>();
-    // Touched runs go last, and the oldest run's logs are forgotten when too many runs have any.
-    this.children.delete(runId);
-    this.children.set(runId, own);
-    if (this.children.size > CHILD_RUN_CAP) {
-      const oldest = this.children.keys().next().value;
-      if (oldest !== undefined) this.children.delete(oldest);
-    }
-    let found = own.get(session);
-    if (found === undefined || found.path !== path) found = { path, creditedSeq: 0 };
+    const own = this.memosOf(runId).children;
+    const found: StreamMemo = { path, creditedSeq: 0 };
     own.delete(session);
     own.set(session, found);
-    if (own.size > CHILD_MEMO_CAP) {
-      const oldest = own.keys().next().value;
-      if (oldest !== undefined) own.delete(oldest);
-    }
+    trimmed(own, CHILD_MEMO_CAP);
     return found;
   }
 

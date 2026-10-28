@@ -1413,6 +1413,56 @@ describe("usage pass: the fifth review", () => {
     expect(freshMainReads(reads)).toBe(2);
   }, 60_000);
 
+  for (const runs of [2, 3]) {
+    test(`t9jrs_${runs}_concurrent_runs_with_a_full_hook_index_keep_their_main_memory`, async () => {
+      const reads: { sub: boolean; resumed: boolean }[] = [];
+      const first = await rig({ task: "indexed-0", collector: spyingCollector(reads) });
+      const log = sessionLog(first.runId);
+      const path = await install(log);
+      // The hook index lists the newest 20 sessions of the project: each is a candidate of every run, with a log of its
+      // own that does not hold any run, so each takes a memo (the old shared cap of 32 held one run's 21, not two).
+      const lines: string[] = [];
+      for (let i = 0; i < 20; i += 1) {
+        const other = `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+        const otherLog = new ClaudeLogBuilder({ sessionId: other, cwd: dir });
+        otherLog.user("something else").say(`other_${i}`, "unrelated", { input: 1, output: 1 });
+        await install(otherLog);
+        lines.push(JSON.stringify({ session_id: other, agent: "claude-code" }));
+      }
+      await writeFile(join(dir, ".kodel", "sessions.jsonl"), `${lines.join("\n")}\n`);
+      const all = [first.run];
+      for (let n = 1; n < runs; n += 1) {
+        const next = (
+          await first.host.start({ pipeline: "two", task: `indexed-${n}`, restart: false })
+        ).run as LocalRun;
+        log
+          .wait(1_000)
+          .call(
+            `msg_s${n}`,
+            {
+              id: `toolu_start_${n}`,
+              name: "mcp__kodel__pipeline_start",
+              input: { task: `indexed-${n}` },
+            },
+            { input: 10, output: 1 },
+          )
+          .result(`toolu_start_${n}`, [
+            { type: "text", text: JSON.stringify({ ok: true, run_id: next.runId }) },
+          ]);
+        all.push(next);
+      }
+      log.say("msg_ia", "step a", { input: 20, output: 2 });
+      await writeFile(path, log.text());
+      // Passes alternate over the runs, so a run's memos would be pushed out by the next run's if they shared a cap.
+      for (const run of all) await run.completeStep("a", 1);
+      log.say("msg_ib", "step b", { input: 30, output: 3 });
+      await writeFile(path, log.text());
+      for (const run of all) await run.completeStep("b", 1);
+      // One read from the start for each run, then each goes on from its checkpoint: none lost its memory to another.
+      expect(freshMainReads(reads)).toBe(runs);
+    }, 120_000);
+  }
+
   test("t9jrs_a_subagent_that_began_before_the_run_takes_no_slot_and_is_not_counted", async () => {
     const reads: { sub: boolean; resumed: boolean }[] = [];
     const r = await rig({ task: "early-subagents", collector: spyingCollector(reads) });

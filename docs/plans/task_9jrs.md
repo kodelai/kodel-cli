@@ -261,10 +261,29 @@ The main stream had 126 requests in `/usage` and 125 in the transcript.
   and a dated id resolves to the longest key with a date tail only, as the core's `keyFor` does; a test pins the script's matching to
   `resolvePrice` on a corpus and the page is tested in both orders.
 - **The memory of the usage pass** was one shared LRU of 16 streams, so a run with more than 15 subagent logs made the pass forget its
-  main session (and read it from the run's start again at every pass). The main sessions now have their own map, the subagent logs
-  of a run their own bounded map, and a subagent that began before the run takes no slot.
+  main session (and read it from the run's start again at every pass). The main sessions got a map of their own and the subagent logs
+  of a run a bounded map, and a subagent that began before the run takes no slot. (The main-session map was still one cap of 32 for
+  all runs; see "After the sixth review", which replaces it. The wording "runs do not push each other out" of that commit was
+  overstated.)
 - **A lost lock with the copy switched off** is now journaled as `busy`, and a cap reached in the middle of a pass as `cap`, not as a
   refused record.
 - **Still known:** the dedupe by `message.id` is per pass (a response whole in a subagent file read later in the same pass after being
   counted as a correction can be counted twice, which needs a log that repeats the main log's responses); `check-prices.mjs` compares
   `cache_write_1h` with the page, and a live page with no such column would read as changed.
+
+### After the sixth review
+
+- **The memory of the usage pass is now per run.** The map of main sessions was one LRU of 32 for all runs, but one run uses up to 21
+  slots (the session of the environment and the newest 20 of the hook index), so two concurrent runs in a project with a used hook
+  index pushed each other's main session and its read checkpoint out, and each pass read the log from the run's start again. Now a run
+  keeps its own bounded maps: up to 32 candidate memos and up to 48 subagent-log memos, both dropping the least *recently used* entry
+  first (an entry is moved to the end when it is used, not only when it is made), and at most 8 runs are kept, the run used least
+  recently going first. `forget` drops the run's memos when it ends. The total is bounded at 8 x (32 + 48) memos. A run pushed out
+  is not lost: the cursor in its state says what was credited, and its next pass reads on from there after a read from the run's start
+  (up to the budget). Tests: `t9jrs_2_concurrent_runs_with_a_full_hook_index_keep_their_main_memory` and the same for 3 runs (they
+  fail on the old shared map: 4 and 6 reads from the start instead of 2 and 3).
+- **`scripts/check-prices.mjs`** takes a dated API id (`claude-opus-5-20261001`, an eight-digit tail) as the model's own row while
+  `Claude Opus 5.5`, `Claude Opus 5-5` and `Claude Opus 50` are still not taken for `claude-opus-5`.
+- **Known, not changed here (3BK2 scope):** the copy of the agent's log (`agent-log.ts`) has its own `MEMO_CAP = 16`, below the 21
+  candidates of a project with a full hook index, so its pass proves its sessions again at every step end; it shares the step-end
+  lock with the usage pass and adds to the time before a step is judged.
