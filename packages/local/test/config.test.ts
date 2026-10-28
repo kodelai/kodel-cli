@@ -42,6 +42,7 @@ describe("the project config", () => {
         adapters: {},
       },
       history: DEFAULT_HISTORY,
+      storage: "project",
     });
   });
 

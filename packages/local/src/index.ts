@@ -7,6 +7,8 @@ export * from "./host";
 export * from "./integrity";
 export * from "./pipeline-host";
 export * from "./project-root";
+export * from "./storage";
+export * from "./storage-paths";
 export * from "./store";
 export * from "./tasks";
 export * from "./worktree";

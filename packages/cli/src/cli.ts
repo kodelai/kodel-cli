@@ -5,12 +5,17 @@
  * type them; the deny rules in the agent's settings are a second line, not the only one.
  */
 
+import { stat } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
 import {
   findProjectRoot,
   LocalPipelineHost,
   loadConfig,
   openTaskService,
   type ProjectRoot,
+  resolveStoragePlace,
+  type StoragePlace,
+  scrubHome,
 } from "@kodel-ai/local";
 import { MAX_PAYLOAD_BYTES, runHook } from "@kodel-ai/local/hooks";
 import {
@@ -182,16 +187,86 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     })();
     return found;
   };
+  // Where the config says the history is kept. Asked once per command, the first time it is needed
+  // (a command that reads a config the loader refuses says so once, not at every use); the server
+  // asks again at each call that opens a run, through `watchStorage`, silently.
+  const resolvePlace = async (silent: boolean): Promise<StoragePlace> => {
+    const { root, dataDir } = await project();
+    return resolveStoragePlace({
+      root,
+      dataDir,
+      env: env.environment ?? {},
+      // A config the loader refuses still names the place for a command that only reads; say so.
+      ...(silent
+        ? {}
+        : {
+            onConfigProblem: (message: string) =>
+              env.err(
+                `kodel: the config was refused (${plain(message)}); reading the place it names\n`,
+              ),
+          }),
+    });
+  };
+  let placed: Promise<StoragePlace> | undefined;
+  const storagePlace = (): Promise<StoragePlace> => {
+    placed ??= resolvePlace(false);
+    return placed;
+  };
+
+  /**
+   * Whether this machine keeps the history of some project under `~/.kodel` (or `KODEL_STATE_DIR`):
+   * the `projects` folder is there. Read from the command's own environment, not from the machine's.
+   * For a project that is not in `home` mode it is the sign that the history of an earlier mode may
+   * be in the other place (a branch without the keys was checked out, say).
+   */
+  const homeTreeInUse = async (): Promise<boolean> => {
+    const given = env.environment?.["KODEL_STATE_DIR"] ?? "";
+    const home = env.environment?.["HOME"] ?? env.environment?.["USERPROFILE"] ?? "";
+    const base = given !== "" ? given : home !== "" ? join(home, ".kodel") : "";
+    if (base === "" || !isAbsolute(base)) return false;
+    return stat(join(base, "projects")).then(
+      (info) => info.isDirectory(),
+      () => false,
+    );
+  };
   const host = async () => {
     const { root, dataDir } = await project();
-    return new LocalPipelineHost({ root, storeRoot: dataDir });
+    return new LocalPipelineHost({ root, storeRoot: dataDir, storage: await storagePlace() });
   };
   const storeRoot = async () => (await project()).dataDir;
 
+  /**
+   * The folder of the history for a person at a terminal. An agent's shell has none, and the folder
+   * (with the user's name in it) is not put into what an agent reads.
+   */
+  const shownPlace = (place: StoragePlace): string =>
+    env.interactive
+      ? plain(place.tree ?? place.lockRoot)
+      : scrubHome(plain(place.tree ?? "."), place);
+
   async function openRun(host_: LocalPipelineHost, runId: string) {
     const run = await host_.open(runId);
-    if (!run) throw new UserError(`there is no run "${runId}"`);
+    if (!run) {
+      // The default project on a machine that keeps no history under `~/.kodel` keeps its text; the
+      // hint is for a project that can have the history in the other place.
+      const place = await storagePlace().catch(() => undefined);
+      const hint =
+        place?.mode === "home" || (await homeTreeInUse())
+          ? "; if the storage setting in the config or KODEL_STATE_DIR is not what it was when the run was made, it may be kept in the other place"
+          : "";
+      throw new UserError(`there is no run "${runId}"${hint}`);
+    }
     return run;
+  }
+
+  /** A decision on a run that another clone of the project made is allowed, and said. */
+  async function warnIfForeign(run: Awaited<ReturnType<typeof openRun>>): Promise<void> {
+    const root = await run.foreignRoot().catch(() => undefined);
+    if (root !== undefined) {
+      env.err(
+        `kodel: run ${plain(run.runId)} was made by the checkout at ${plain(root)}, not this one; you are deciding on its behalf\n`,
+      );
+    }
   }
 
   /**
@@ -298,9 +373,29 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           agentDecisions: { gate: false, pipelineChange: false },
         }));
       const dialogTimeoutMs = dialogTimeoutFrom(env.environment);
+      // The place the config names when the server starts. A config that names a place that cannot
+      // be used (`home` without an id, a bad base) does not take the server down: the tools say why.
+      let storage: StoragePlace | undefined;
+      let storageError: KodelError | undefined;
+      try {
+        storage = await storagePlace();
+      } catch (error) {
+        // Whatever went wrong in finding the place (an unreadable config included) is carried to the
+        // calls that need the history; the rest of the server is served.
+        storageError =
+          error instanceof KodelError
+            ? error
+            : new KodelError(
+                "CONFIG_INVALID",
+                `the place of the history cannot be found: ${error instanceof Error ? error.message : String(error)}`,
+              );
+        env.err(`kodel: ${plain(storageError.message)}\n`);
+      }
       const local = new LocalPipelineHost({
         root: resolved.root,
         storeRoot: resolved.dataDir,
+        ...(storage === undefined ? {} : { storage, watchStorage: () => resolvePlace(true) }),
+        ...(storageError === undefined ? {} : { storageError }),
         agentDecisions: settings.agentDecisions,
         build: BUILD,
         // The same tie the tools were built for; without one the host asks the config itself.
@@ -324,6 +419,10 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     )
     .option("-y, --yes", "ask nothing: use the flags and the agents found here")
     .option("--tasks", "turn the local task tracker on (asked when not given)")
+    .option(
+      "--storage <mode>",
+      "where the history is kept: home (~/.kodel/projects/<id>, written into a new config) or project (.kodel, the default)",
+    )
     .option("--server-command <command>", "how the agent starts the server", "kodel mcp")
     .option("--hooks", "register the hooks without asking (they are on by default)")
     .option("--no-hooks", "do not register the hooks that let Kodel see your agent sessions")
@@ -334,11 +433,15 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         agent?: string;
         yes?: boolean;
         tasks?: true;
+        storage?: string;
         serverCommand: string;
         hooks?: boolean;
         force?: boolean;
         dryRun?: boolean;
       }) => {
+        if (opts.storage !== undefined && opts.storage !== "home" && opts.storage !== "project") {
+          throw new UserError(`--storage is "home" or "project", not "${plain(opts.storage)}"`);
+        }
         try {
           await runInit(
             {
@@ -350,6 +453,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
                 .filter(Boolean),
               yes: opts.yes ?? false,
               tasks: opts.tasks,
+              ...(opts.storage === undefined ? {} : { storage: opts.storage }),
               serverCommand: opts.serverCommand,
               hooks: opts.hooks,
               force: opts.force ?? false,
@@ -391,9 +495,26 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .option("--json", "print the run list as JSON")
     .option("--no-headers", "do not print the header row of the run list")
     .action(async (runId: string | undefined, opts: { json?: boolean; headers?: boolean }) => {
+      const place = await storagePlace();
       const h = await host();
       if (!runId) {
         const runs = await h.runSummaries();
+        // Only in `home` mode the history may hold runs of another clone of the project, and runs
+        // that have no recorded hash (moved here); the default mode prints what it always printed.
+        const home = place.mode === "home";
+        const foreign = new Map<string, string>();
+        let unhashed = 0;
+        if (home) {
+          for (const { meta } of runs) {
+            // Whose a run is needs only its record; whether it has a hash needs the run opened, which
+            // only the table has a use for.
+            const root = h.foreignRootOf(meta);
+            if (root !== undefined) foreign.set(meta.runId, root);
+            if (opts.json || opts.headers === false) continue;
+            const opened = await h.open(meta.runId).catch(() => undefined);
+            if ((await opened?.integrityStatus().catch(() => undefined)) === "unknown") unhashed++;
+          }
+        }
         if (opts.json) {
           const list = runs.map(({ meta, state }) => ({
             runId: meta.runId,
@@ -402,9 +523,25 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
             slug: slugOf(meta, state),
             task: meta.task,
             ...(state?.workdir === undefined ? {} : { workdir: state.workdir }),
+            ...(foreign.has(meta.runId) ? { foreign: foreign.get(meta.runId) } : {}),
           }));
           env.out(`${JSON.stringify(list, null, 2)}\n`);
           return;
+        }
+        // Notes before the table: a script that asks for no headers parses only the table.
+        const notes = home && opts.headers !== false;
+        if (notes) env.out(`storage: home (${shownPlace(place)})\n`);
+        // A project that keeps its history in `.kodel` on a machine that keeps some under `~/.kodel`:
+        // say which of the two this command reads, so a branch that dropped the keys is seen.
+        if (!home && opts.headers !== false && !opts.json && (await homeTreeInUse())) {
+          env.out(
+            "storage: project (this project keeps its history in .kodel; history kept under ~/.kodel is not read)\n",
+          );
+        }
+        if (notes && unhashed > 0) {
+          env.out(
+            `${unhashed} run${unhashed === 1 ? " has" : "s have"} no recorded hash here: ${unhashed === 1 ? "it is" : "they are"} trusted as found on first use\n`,
+          );
         }
         if (runs.length === 0) env.out("no runs yet\n");
         const rows: string[][] = [];
@@ -416,7 +553,8 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
               ? await h.open(meta.runId).catch(() => undefined)
               : undefined;
           const pending = open && (await open.pendingChange().catch(() => undefined));
-          const note = pending ? "  [pipeline change waiting]" : "";
+          const other = foreign.get(meta.runId);
+          const note = `${pending ? "  [pipeline change waiting]" : ""}${other === undefined ? "" : `  [foreign: made by ${plain(other)}]`}`;
           rows.push([
             plain(meta.runId),
             plain(meta.pipeline),
@@ -443,6 +581,12 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       if (where) env.out(`workdir:   ${plain(where.path)}\n`);
       if (where?.branch) env.out(`branch:    ${plain(where.branch)}\n`);
       if (state.taskKey !== undefined) env.out(`tracker:   ${plain(state.taskKey)}\n`);
+      const owner = await run.foreignRoot().catch(() => undefined);
+      if (owner !== undefined) {
+        env.out(
+          `owner:     ${plain(owner)} (another checkout of this project; it is not continued here)\n`,
+        );
+      }
       env.out(`integrity: ${await run.integrityStatus()}\n`);
       env.out(`seal:      ${await run.sealStatus()}\n`);
       env.out(`trail:     ${state.trail.map(plain).join(" > ")}\n`);
@@ -569,6 +713,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           throw new UserError(`the decision is "approve" or "reject", not "${decision}"`);
         }
         const run = await openRun(await host(), runId);
+        await warnIfForeign(run);
         await refuseWhilePending(run, opts.ignorePendingChange);
         const state = await run.state();
         const waiting = state.active.filter((v) => v.phase === "human");
@@ -623,6 +768,13 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .action(async (runId: string, opts: { ignorePendingChange?: boolean }) => {
       requireHuman();
       const run = await openRun(await host(), runId);
+      // Resuming continues the run, which only the checkout that made it does: said before asking.
+      const owner = await run.foreignRoot().catch(() => undefined);
+      if (owner !== undefined) {
+        throw new UserError(
+          `run ${plain(runId)} belongs to the checkout at ${plain(owner)}; it is resumed from there`,
+        );
+      }
       await refuseWhilePending(run, opts.ignorePendingChange);
       if ((await run.state()).status !== "paused") {
         throw new UserError(`run ${runId} is not paused`);
@@ -639,6 +791,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .action(async (runId: string, opts: { note?: string }) => {
       requireHuman();
       const run = await openRun(await host(), runId);
+      await warnIfForeign(run);
       await mustConfirm(`Accept the state of run ${runId} as it is now?`);
       failIfRefused(await run.acknowledge(opts.note));
       env.out(`${runId}: accepted\n`);
@@ -658,6 +811,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .description("The change that waits for you, if there is one")
     .action(async (runId: string) => {
       const run = await openRun(await host(), runId);
+      await warnIfForeign(run);
       const found = await run.pendingChange();
       if (!found) {
         env.out(`${runId}: no change of the pipeline waits\n`);
@@ -679,6 +833,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         throw new UserError('--from is "proposal" or "file"');
       }
       const run = await openRun(await host(), runId);
+      await warnIfForeign(run);
       const state = await run.state();
       if (state.status !== "running" && state.status !== "paused") {
         throw new UserError(`run ${runId} is ${state.status}; its pipeline cannot change now`);
@@ -717,6 +872,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .action(async (runId: string) => {
       requireHuman();
       const run = await openRun(await host(), runId);
+      await warnIfForeign(run);
       const found = await run.pendingChange();
       if (!found) {
         env.out(`${runId}: no change of the pipeline waits\n`);
@@ -768,6 +924,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .action(async (runId: string, hash: string | undefined) => {
       requireHuman();
       const run = await openRun(await host(), runId);
+      await warnIfForeign(run);
       const state = await run.state();
       await mustConfirm(
         `Write ${hash ? `version ${plain(hash)}` : "the version the run is on"} into ${plain(state.pipelineFile ?? "the pipeline file")}?`,
@@ -886,8 +1043,11 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .description("Accept the files of a finished run after a deliberate change")
     .action(async (runId: string) => {
       requireHuman();
+      const sealHost = await host();
+      const sealed = await sealHost.open(runId).catch(() => undefined);
+      if (sealed) await warnIfForeign(sealed);
       await mustConfirm(`Accept the files of finished run ${runId} as they are now?`);
-      await (await host()).seal(runId).catch((error: unknown) => {
+      await sealHost.seal(runId).catch((error: unknown) => {
         if (error instanceof KodelError) throw error;
         throw new UserError(error instanceof Error ? error.message : String(error));
       });

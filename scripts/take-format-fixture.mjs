@@ -2,6 +2,9 @@
 //
 //   node scripts/take-format-fixture.mjs <format> <run-dir> [<run-dir> ...]
 //
+// A run directory is the same under `.kodel/runs` and under the home tree of `storage: home`
+// (`~/.kodel/projects/<project_id>/runs`): either can be named here.
+//
 // The only changes: the run's absolute workdir becomes a placeholder, and seal.json is left out
 // (it holds hashes of state.json and journal.jsonl, which the edit changes; a fixture reads as
 // unsealed). Then hashes.json is rewritten for the whole format directory.

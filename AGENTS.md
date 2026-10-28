@@ -26,14 +26,15 @@ This repository adds these rules:
 
 - Do not edit `.mcp.json` or `.claude/settings*.json` (the person decides how the server starts and what
   the agent may do). The same goes for the `decisions` block of the project config: it says what the
-  agent may decide for the person (`docs/decisions.md`), so only the person changes it.
+  agent may decide for the person (`docs/decisions.md`), so only the person changes it. So do the `storage`
+  and `project_id` keys, which say where the history is kept (`docs/history.md`).
 - Do not edit the files in `.kodel/pipelines/` while a run is going. To change the pipeline of a run, ask
   the person whether to change it now, and then use `pipeline_propose_change`; the run stops at the end of
   its current step until the person accepts the change. A pipeline file edited by hand is noticed all the
   same and waits for the person in the same way, but the tool is the way to do it.
 - To add a pipeline, or to change one outside a run, use `pipeline_propose_change` without `run_id`; never
-  write into `.kodel/pipelines/` yourself. The proposal waits in `.kodel/proposals/` (do not edit it) until the
-  person accepts it.
+  write into `.kodel/pipelines/` yourself. The proposal waits in `.kodel/proposals/` (with `storage: home`, in the
+  project's folder under `~/.kodel`; do not edit it) until the person accepts it.
 - Do not run `gate`, `ack`, `seal`, `resume`, `pipeline changes apply|discard|restore` or
   `pipeline proposals apply|discard`: they refuse to run without a terminal and ask for a confirmation, so
   trying them only fails.
