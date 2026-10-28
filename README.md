@@ -3,20 +3,20 @@
 Spec-driven pipelines that run inside the coding agent you already use, and are checked outside of it.
 
 [![npm](https://img.shields.io/npm/v/@kodel-ai/kodel?include_prereleases)](https://www.npmjs.com/package/@kodel-ai/kodel)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/kodelai/kodel-cli/blob/main/LICENSE)
 
 > **Status: beta.** Formats and commands may still change before 1.0. The full documentation is not
-> written yet; until then this README and [AGENTS.md](AGENTS.md) are the entry points.
+> written yet; until then this README and [AGENTS.md](https://github.com/kodelai/kodel-cli/blob/main/AGENTS.md) are the entry points.
 
 ## Quick start
 
 Requirement: Node >= 22.19. Kodel works with Claude Code, Codex and OpenCode (see
-[adapters](adapters/README.md) for what is checked on a real agent).
+[adapters](https://github.com/kodelai/kodel-cli/blob/main/adapters/README.md) for what is checked on a real agent).
 
 **1. Install.**
 
 ```bash
-npm install -g @kodel-ai/kodel
+npm install -g @kodel-ai/kodel@beta
 ```
 
 **2. Set up your repository.** In the repository you want to work on:
@@ -56,7 +56,7 @@ kodel report <run>        # where the time went and what was redone
 ```
 
 An example of a full pipeline, with a plan, two human gates, a review and tests, is
-[`examples/pipelines/feature.yaml`](examples/pipelines/feature.yaml).
+[`examples/pipelines/feature.yaml`](https://github.com/kodelai/kodel-cli/blob/main/examples/pipelines/feature.yaml).
 
 ## Commands for people
 
@@ -93,8 +93,8 @@ A Bun workspace in TypeScript, shipped as a single JavaScript file that runs on 
 The engine knows nothing about transport or I/O, and node and check kinds are registered by `kind`.
 That is what lets a server backend implement the same adapter interfaces later. The principles
 behind this (untrusted agent input, fail-closed, redaction on every write, humans decide trust) are in
-[AGENTS.md](AGENTS.md). How Kodel reads the logs of your agent sessions is in
-[docs/history.md](docs/history.md).
+[AGENTS.md](https://github.com/kodelai/kodel-cli/blob/main/AGENTS.md). How Kodel reads the logs of your agent sessions is in
+[docs/history.md](https://github.com/kodelai/kodel-cli/blob/main/docs/history.md).
 
 ## Something went wrong?
 
@@ -106,7 +106,7 @@ kodel feedback "gate refuses to run in tmux" --type bug   # or: feature, feedbac
 ```
 
 It sends only your text and a short description of your system, shows both, and asks before it sends.
-For a security problem, see [SECURITY.md](SECURITY.md) instead.
+For a security problem, see [SECURITY.md](https://github.com/kodelai/kodel-cli/blob/main/SECURITY.md) instead.
 
 ## Contributing
 
@@ -123,9 +123,9 @@ bun run build && node scripts/check-artifact.mjs
 
 CI runs the same on Linux, macOS and Windows. Sign off your commits (`git commit -s`): the project uses
 the Developer Certificate of Origin. Open a pull request, never push to `main`. Everything committed,
-including comments and commit messages, is in English. Read [AGENTS.md](AGENTS.md) before you start:
+including comments and commit messages, is in English. Read [AGENTS.md](https://github.com/kodelai/kodel-cli/blob/main/AGENTS.md) before you start:
 it also says what an AI agent may and may not do in this repository.
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](https://github.com/kodelai/kodel-cli/blob/main/LICENSE).
