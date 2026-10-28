@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+  type AgentHistoryCollector,
   buildDelta,
   defaultAgentLog,
   defaultHistory,
@@ -70,6 +71,7 @@ interface RigOptions {
   rules?: RedactRule[];
   toolLog?: boolean;
   usage?: Partial<UsageConfig> | null;
+  collector?: (configDir: string) => AgentHistoryCollector;
   agentLog?: boolean;
   session?: string | null;
   budgetMs?: number;
@@ -99,6 +101,7 @@ async function rig(options: RigOptions = {}): Promise<Rig> {
     root: dir,
     rules: options.rules ?? [],
     env: () => env,
+    ...(options.collector === undefined ? {} : { collector: options.collector }),
     ...(options.budgetMs === undefined ? {} : { budgetMs: options.budgetMs }),
     ...(options.now === undefined ? {} : { now: options.now }),
   });
@@ -1078,10 +1081,39 @@ describe("usage pass: edges of the log and of the run", () => {
     };
     await r.run.completeStep("a", 1);
     await r.run.completeStep("b", 1);
+    // nothing was read (the copy threw before the count could run), so it is `busy`, as when the lock is lost
     const failed = (await journalOf(r)).filter(
-      (rec) => rec.event === "usage_failed" && rec["reason"] === "unreadable",
+      (rec) => rec.event === "usage_failed" && rec["reason"] === "busy",
     );
     expect(failed).toHaveLength(1);
+  });
+
+  test("t9jrs_an_unreadable_log_is_not_read_again_until_it_grows", async () => {
+    let reads = 0;
+    const r = await rig({
+      task: "unreadable-once",
+      collector: (configDir) => {
+        const inner = claudeCodeCollector({ configDir });
+        return {
+          ...inner,
+          read: (...args: Parameters<typeof inner.read>) => {
+            reads += 1;
+            return inner.read(...args);
+          },
+        };
+      },
+    });
+    const log = sessionLog(r.runId);
+    log.lines.forEach((line, i) => {
+      log.lines[i] = line.replace('"usage":', '"token_usage":');
+    });
+    await install(log);
+    await r.run.completeStep("a", 1);
+    expect((await stateOf(r)).usage?.failed).toContain("unreadable");
+    const afterFirst = reads;
+    expect(afterFirst).toBeGreaterThan(0);
+    await r.run.completeStep("b", 1);
+    expect(reads).toBe(afterFirst);
   });
 
   test("t9jrs_events_cap_is_said_once_and_the_log_is_not_read_again", async () => {

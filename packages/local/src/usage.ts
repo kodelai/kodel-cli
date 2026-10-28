@@ -17,6 +17,7 @@
  *  - A pass never fails the step: whatever goes wrong is a reason, journaled once.
  */
 import { createHash } from "node:crypto";
+import { stat } from "node:fs/promises";
 import { basename } from "node:path";
 import {
   type AgentHistoryCollector,
@@ -140,6 +141,11 @@ interface StreamMemo extends RunStartMemo {
   /** The `last_seq` the state had for this stream when this process last wrote it. */
   creditedSeq: number;
   stopped?: UsageFailure;
+  /**
+   * The size of the log when it was last found to be one this reader does not understand (responses and no usage):
+   * the log is not read again until it grows, so a log in that state is not read in full at every step end.
+   */
+  unreadableAt?: number;
 }
 
 interface PassContext {
@@ -359,6 +365,15 @@ export class UsageWriter {
     const stored = state.usage.sessions[session];
     const credited = stored?.last_seq ?? 0;
 
+    if (memo.unreadableAt !== undefined) {
+      const size = await stat(memo.path).then(
+        (info) => info.size,
+        () => undefined,
+      );
+      if (size === memo.unreadableAt) return "done";
+      memo.unreadableAt = undefined;
+    }
+
     // A checkpoint is good only for the stream the state says we left: after another process wrote, or after the log
     // itself changed under us, the pass starts again from the run's beginning and skips what is credited.
     let resume = memo.checkpoint;
@@ -462,6 +477,10 @@ export class UsageWriter {
       ((responses > 0 && usages === 0) || (usages > 0 && withTokens === 0))
     ) {
       memo.checkpoint = undefined;
+      memo.unreadableAt = await stat(memo.path).then(
+        (info) => info.size,
+        () => undefined,
+      );
       await this.fail(run, ctx.result, "unreadable", session);
       return "done";
     }

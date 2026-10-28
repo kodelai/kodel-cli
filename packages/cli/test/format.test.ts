@@ -335,6 +335,25 @@ describe("usage in the report", () => {
     expect(lines.find((l) => l.includes("impl #1"))).not.toContain("$");
   });
 
+  test("t9jrs_report_small_known_cost_never_reads_as_zero_dollars", () => {
+    const cheap = (usd: number) =>
+      usageLines(
+        full(
+          line({
+            cost: { usd, basis: "computed", partial: false, config: false, long_context: false },
+          }),
+        ),
+        (t) => t,
+      );
+    // one cheap Haiku call is a known cost below $0.00005: it must not print as `$0.0000`
+    expect(cheap(0.00003)[0]).toContain("< $0.0001");
+    expect(cheap(0.00003)[0]).not.toContain("$0.0000");
+    expect(cheap(0.0002)[0]).toContain("$0.0002");
+    expect(cheap(1.5)[0]).toContain("$1.50");
+    // a real zero (a free request) stays a zero
+    expect(cheap(0)[0]).toContain("$0.0000");
+  });
+
   test("t9jrs_report_each_not_collected_reason_is_named", () => {
     for (const reason of [
       "not_captured",

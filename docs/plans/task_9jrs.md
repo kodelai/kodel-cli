@@ -95,7 +95,7 @@ One-off, by the builder, in the PR (the sample kept as a fixture): tokens of 3+ 
 ## Affected files
 
 - New: `packages/pipeline-core/src/{price-table.json,price-table.ts,usage.ts,usage-record.ts}`, `packages/local/src/{usage,session-finder}.ts`, `scripts/check-prices.mjs`, `skills/kodel-prices/`, `fixtures/usage-run/`, `fixtures/history/claude-code/<new version>/`, `tests/agents/claude-code-usage.test.ts`, tests in `pipeline-core`, `local`, `cli`, `testkit`.
-- Changed: `pipeline-core/src/{agent-history,run,report,history-config,index}.ts`, `packages/local/src/{host,agent-log,agent-log-ticker,config,history/claude-code/normalize,history/claude-code/collector}.ts`, `packages/cli/src/{format,cli}.ts`, `tests/agents/{harness,harness.test}.ts`, `docs/history.md`, `packages/local/test/{config,agent-log-docs}.test.ts`, `packages/testkit`.
+- Changed: `pipeline-core/src/{agent-history,run,report,history-config,index}.ts`, `packages/local/src/{host,agent-log,config,history/claude-code/normalize,history/claude-code/collector}.ts`, `packages/cli/src/format.ts` (`cli.ts` and `agent-log-ticker.ts` needed no change), `tests/agents/{harness,harness.test}.ts`, `docs/history.md`, `packages/local/test/{config,agent-log-docs}.test.ts`, `packages/testkit`.
 - Not changed: MCP tool definitions; `fixtures/formats/v1/*`, `hashes.json`; `examples/pipelines/feature.yaml`.
 
 ## Rejected review findings
@@ -137,14 +137,17 @@ Written after the review of the build. What was done differently or not done, pl
   this build over a hand-made log, outside `fixtures/formats/v1/` so that `hashes.json` is untouched; it moves under the frozen
   formats at the first release.
 - **The price table is unverified against the live page.** Every entry has `checkedAt: null`. The 4.5 rows are from the vendor's
-  price page; the 5.x rows (Opus 5.5 $4/$20, Sonnet 5.5 $2/$10, Haiku 5.5 $0.10/$0.50, Fable 5.1 $10/$50) are from the model table
-  of the `claude-api` skill, cached 2026-10-06, after the second review found that the first version of them (assumed to be the 4.5
-  prices) was wrong. The cache read price of Haiku 5.5 is not published there and is assumed to be 10% of its input price. Haiku
-  5.5 prices a request over 100K prompt tokens higher, which is not modelled; its `long_context_tokens` is 100 000, so such calls are
-  flagged (the others: 200 000). There are no rows for `claude-opus-4-1`, `claude-opus-4`, `claude-sonnet-4`, `claude-3-7-sonnet` or `claude-3-5-*`, so a
-  run on those models reads `partial` (the accepted behaviour for an unknown model, never `$0`). `scripts/check-prices.mjs` lists the
-  unchecked entries; the saved price page it is tested on is also hand-made, so the repository does not show that the shipped
-  `sourceUrl` parses. The `cost-state` parser is written without a sample of the format.
+  price page; every other row (Opus 4.6, 4.7, 4.8, 5 and 5.5; Sonnet 4.6, 5 and 5.5; Haiku 5.5; Fable 5 and 5.1) is from the model
+  table of the `claude-api` skill, cached 2026-10-06, after the second review found that the first version of the 5.5 rows (assumed
+  to be the 4.5 prices) was wrong and the third that the whole generation between them was missing. That table gives the cache read
+  price only for Opus 5.5, Sonnet 5.5 and Fable 5.1; for the other rows (Haiku 5.5, Fable 5 among them) it is assumed to be 10% of the
+  input price, and the table's `note` says so. Haiku 5.5 prices a request over 100K prompt tokens higher, which is not modelled; its
+  `long_context_tokens` is 100 000, so such calls are flagged (the others: 200 000). **The model ids that still have no row** are
+  `claude-opus-4-1`, `claude-opus-4`, `claude-sonnet-4`, `claude-3-7-sonnet`, `claude-3-5-sonnet`, `claude-3-5-haiku`, `claude-3-opus`
+  and `claude-3-haiku` (and any id the vendor adds later, or a Bedrock or Vertex id), so a run on those models reads `partial` (the accepted
+  behaviour for an unknown model, never `$0`). `scripts/check-prices.mjs` lists the unchecked entries; the saved price page it is tested
+  on is also hand-made, so the repository does not show that the shipped `sourceUrl` parses. The `cost-state` parser is written
+  without a sample of the format.
 - **"A session shared with other work goes to unattributed" is not built.** Only the spans a person was waited for (gates, pauses)
   go to `unattributed`; whatever else the session says between two steps is credited to the next agent step, as decision 3 says for
   polling through command nodes. The test named for it is not written.
@@ -155,9 +158,9 @@ Written after the review of the build. What was done differently or not done, pl
   boundary tests of `splitBySpans` and the pass tests. `t9jrs_run_over_several_sessions` and `t9jrs_two_sessions_in_one_run` are one
   test, `t9jrs_two_sessions_in_one_run_and_session_from_hook_index`.
 - **`node_superseded` (a node dropped by a pipeline change) is not exercised.** A cancelled run is (`t9jrs_superseded_or_canceled_attempt_usage_not_lost`).
-- **The JSON import has no import attribute.** `price-table.ts` reads `price-table.json` with a plain `import`; that works for Bun
-  and for the bundled `dist/kodel.js`. An unbundled Node ESM consumer of `@kodel-ai/pipeline-core` (its exports point at `src/`) would
-  need `with { type: "json" }` or a bundler; Kodel Server must be told.
+- **The JSON import has an import attribute** (since the third review): `price-table.ts` reads `price-table.json` with
+  `with { type: "json" }`, which Bun, Node 22, the bundler and `tsc` accept, so an unbundled Node ESM consumer of
+  `@kodel-ai/pipeline-core` (its exports point at `src/`) can load it.
 - **Past 1000 `usage_recorded` events** a run says `cap` (a failure reason) and the log is not read again; past 2000 attempts the
   rest is counted in `unattributed`.
 - **`t9jrs_` is still a provisional prefix** (decision 7); the PR checklist greps that none is left at merge.
@@ -184,3 +187,25 @@ Written after the review of the build. What was done differently or not done, pl
   is `t9jrs_usage_pass_runs_after_agent_log_before_judging` (order in the journal) plus the new `t9jrs_step_end_takes_the_pass_lock_once_for_both_passes`
   (counts the acquisitions). `t9jrs_switch_off_writes_nothing_and_does_not_read` now has a collector spy
   (`t9jrs_switch_off_does_not_even_build_a_collector_or_read`).
+
+### After the third review
+
+- **Rows for the whole current generation** (the blocking finding): `claude-opus-4-6`, `-4-7`, `-4-8`, `claude-opus-5`, `claude-sonnet-4-6`,
+  `claude-sonnet-5` and `claude-fable-5` were added from the same cached table, with writes at 1.25x and 2x input
+  (`t9jrs_every_model_of_the_current_generations_is_priced_and_none_shadows_another`: `claude-opus-5` and `claude-opus-5-5` keep their own
+  prices because only a date or `-latest` is a tail the matching cuts). The table's `revision` is 2026-10-28. The ids still without a row
+  are listed in the note above.
+- **Other fixes:** the JSON import attribute (above); `money()` prints `< $0.0001` for a known cost below that, never `$0.0000`
+  (`t9jrs_report_small_known_cost_never_reads_as_zero_dollars`); an override without `long_context_tokens` keeps the shipped threshold of
+  its model and one with its own wins (`t9jrs_override_keeps_the_shipped_long_context_threshold_unless_it_gives_its_own`); a pass that
+  could not run because the copy threw, or the lock was lost, says `busy` (nothing was read), not `unreadable`; a log found unreadable is
+  not read again until it grows (`t9jrs_an_unreadable_log_is_not_read_again_until_it_grows`); the wording of the `kodel-prices` skill and
+  of the override example in `docs/history.md`; a line in the docs that a redaction rule matching a model id removes its cost.
+- **Not changed, known:** the `session` of `usage_recorded` is written as it is into the state and goes through `redactDeep` into the
+  journal, so a project rule that matches the shape of a session id makes the two differ (the same as `agent_log_saved`); the plan's
+  promise to hash such ids before both writes is not kept, and the report reads the state. The correction path does not add the key
+  of the response to the per-pass set of repeats, so a response that is also whole in a subagent file read later in the same pass could be
+  counted twice (rare). `scripts/check-prices.mjs` compares `cache_write_1h` with the page too: if the live page has no such column every
+  entry would read `changed`; this cannot be tried offline. `packages/cli/src/cli.ts` and `agent-log-ticker.ts` needed no change
+  (`report --json` serialises the whole report; the ticker never runs usage), although the list of affected files named them. Some test
+  names are used in more than one package; that is fine for `bun test` but "the test named in the plan" is then ambiguous.

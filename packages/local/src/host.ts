@@ -2141,14 +2141,13 @@ export class LocalRun {
     if (!counted) {
       // Said once: what the pass would have read is read by the next one, the cursor did not move. A step the copy
       // had nothing to do with (the run is over, or it is not at an agent step) has nothing to say either.
+      // The copy threw, or the lock was busy or lost, before the count could run: nothing was read, so it is `busy`.
       const reason =
-        copied?.skipped === "busy"
+        copied === undefined || copied.errored === true || copied.skipped === "busy"
           ? "busy"
-          : copied === undefined || copied.errored === true
-            ? "unreadable"
-            : copied.skipped === undefined
-              ? "busy" // the lock was lost before the count could run
-              : undefined;
+          : copied.skipped === undefined
+            ? "busy"
+            : undefined;
       if (reason !== undefined) {
         await this.apply({ type: "usage_failed", reason }).catch(() => undefined);
       }

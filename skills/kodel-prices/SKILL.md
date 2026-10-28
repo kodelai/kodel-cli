@@ -8,7 +8,7 @@ argument-hint: "[local]"
 
 The table that turns tokens into an estimated cost is `packages/pipeline-core/src/price-table.json`
 (dollars per million tokens; `revision`, and per model a list of dated entries with `input`, `output`,
-`cache_read`, `cache_write`, `cache_write_1h`, `effectiveFrom`, `sourceUrl`, `checkedAt`). A cost is
+`cache_read`, `cache_write`, `cache_write_1h`, `long_context_tokens`, `effectiveFrom`, `sourceUrl`, `checkedAt`). A cost is
 stored with the `revision` it was computed with and is never recomputed, so a change to the table
 affects only runs that start afterwards. This skill is for the people who maintain Kodel; it is not
 installed by `kodel init`.
@@ -27,9 +27,11 @@ installed by `kodel init`.
    not a verdict: read the price list before you change a price.
 3. When a price changed, do not edit the entry in place: add a new entry with `effectiveFrom` set to the
    day the new price began, so older events still use the price they had. When a model is new, add it with
-   all five prices. Set `checkedAt` to today only for an entry you compared with the price list yourself,
+   all its prices (`input`, `output`, `cache_read`, `cache_write`, `cache_write_1h`) and, where the vendor prices large prompts
+   differently, its own `long_context_tokens`. Set `checkedAt` to today only for an entry you compared with the price list yourself,
    and set a new `revision` (today's date).
 4. Run `bun test packages/local/test/check-prices.test.ts packages/pipeline-core/test/usage.test.ts`, then
    the whole suite, and show the person the diff of the table. Never commit a price you could not confirm.
 
-Long-context pricing (over 200k input tokens in one request) is not modelled; the report flags it.
+Long-context pricing is not modelled; the report flags the requests whose prompt is over the model's `long_context_tokens` (200 000
+unless the entry says otherwise, 100 000 for Haiku 5.5).

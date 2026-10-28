@@ -148,8 +148,12 @@ export function agentLogLine(report: RunReport["agent_log"]): string {
   return `agent log: ${parts.join(", ")} (unverified)`;
 }
 
+/** A known cost that is not zero never reads as `$0.0000`: below a hundredth of a cent it says so. */
+const dollars = (usd: number): string =>
+  usd > 0 && usd < 0.0001 ? "< $0.0001" : `$${usd.toFixed(usd < 1 ? 4 : 2)}`;
+
 const money = (usd: number | null, partial: boolean): string =>
-  usd === null ? "cost unknown" : `${partial ? "at least " : ""}$${usd.toFixed(usd < 1 ? 4 : 2)}`;
+  usd === null ? "cost unknown" : `${partial ? "at least " : ""}${dollars(usd)}`;
 
 const tokenText = (t: TokenSummary): string =>
   `${t.input} in, ${t.output} out, cache ${t.cache_read} read / ${t.cache_write} written (${t.cache_write_1h} for 1 h), ${t.api_calls} call(s)`;

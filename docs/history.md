@@ -307,7 +307,7 @@ history:
   usage:
     enabled: true   # false writes nothing and does not read the agent's log
     prices:         # optional; per model, replaces the shipped price of that model whole
-      claude-sonnet-5-5: { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75, cache_write_1h: 6 }  # USD per million tokens
+      claude-example-model: { input: 1.5, output: 7.5, cache_read: 0.15, cache_write: 1.875, cache_write_1h: 3 }  # an example, not a price: USD per million tokens
 ```
 
 **It has its own switch.** `agent_log: false` does not stop the transcript being read; only `usage: false` does. Usage stores
@@ -342,7 +342,9 @@ copy of the reader's state, marked `last_open` (its output may be low), and when
 dated entries with the prices of input, output, cache read, cache write and the 1-hour cache write (`cache_write_1h`, default
 twice the input price), `effectiveFrom`, `sourceUrl`, `checkedAt`. The entry is chosen by the time of the usage event; a model
 that is not in the table (a Bedrock or Vertex id, an alias) has no price, and a total over it is `partial`, never `$0`. An entry in
-`history.usage.prices` replaces the shipped entry of that model whole, and the report says the cost was priced from the config.
+`history.usage.prices` replaces the shipped entry of that model whole (it keeps the shipped `long_context_tokens` of the model unless it
+gives its own), and the report says the cost was priced from the config. A redaction rule of the project that matches a model id
+rewrites the id before it is priced, so that model has no price and the total is `partial`: such a rule removes the cost.
 Long context (more than 200 000 prompt tokens in one request, or the model's own `long_context_tokens` when the table gives one,
 priced higher by some models) is not modelled: such calls are
 counted in `long_context` and flagged, and the cost may be low. A cost is computed when the usage is read, stored in the delta
@@ -355,7 +357,7 @@ and is never shown as a run's cost.
 calls and the estimated cost with the table revisions, and the flags `complete`, `partial`, `unattributed`, `last_open`,
 `long_context`, `incomplete`, `includes subagents`; or `not_collected` with a reason: `not_captured` (the run did not ask for it),
 `disabled`, `session_unknown`, `log_missing`, `refused`, `unreadable`, `busy` (the lock was taken by another pass; said once, and
-nothing is lost because the cursor did not move; also said when the pass could not run or lost the lock), `agent_unsupported` (the
+nothing is lost because the cursor did not move; also said when the copy that carries the pass failed, or the lock was lost, before the pass could run: nothing was read), `agent_unsupported` (the
 run's agent has no collector), and, next to a report that has numbers, `cap` (the run journaled as many records as it may) and
 `record_refused` (the run's account refused a record, so the pass stopped; said once). A subagent log with no time on any entry cannot be
 told from one that began before the run: it is not guessed at and reads `unreadable`. A record written in a
