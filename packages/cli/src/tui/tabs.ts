@@ -1,39 +1,66 @@
-/** The tabs of the card of a run waiting at a human step: what each shows, as lines of text. */
-import { bold, dim, fit, green, inverse, red, stripAnsi, wrapText, yellow } from "./ansi";
-import { type Attempt, formatAge, type GateDetail, type Session, type StepDetail } from "./session";
+/** The card of a run waiting at a human step: the band on top, the tabs, and what each tab shows, as lines of text. */
+import {
+  bold,
+  cyan,
+  dim,
+  fit,
+  green,
+  inverse,
+  red,
+  stripAnsi,
+  visibleLength,
+  wrapText,
+  yellow,
+} from "./ansi";
+import {
+  type Attempt,
+  type DiffState,
+  formatAge,
+  type GateDetail,
+  type Session,
+  type Visit,
+} from "./session";
 
-export const TABS = ["Summary", "Changes", "Steps", "Journal"] as const;
+/** In the order a person reads a gate: the agent's words first, the way it went last. */
+export const TABS = ["Report", "Code", "Steps", "Comments", "Log"] as const;
+export const REPORT = 0;
+export const CODE = 1;
+export const STEPS = 2;
+export const COMMENTS = 3;
+export const LOG = 4;
 
-/** Where in the tabs the person is: which tab, which line of its list, and whether a line is open. */
+/** What an opened step shows. */
+export const SUBTABS = ["Result", "Changes", "Log"] as const;
+
+/** Where in the tabs the person is: which tab, which line of its list, and whether that line is open. */
 export interface TabState {
   tab: number;
   cursor: number;
   open: boolean;
+  /** Which part of an opened step. */
+  sub: number;
 }
 
-export const SUMMARY = 0;
-export const CHANGES = 1;
-export const STEPS = 2;
-export const JOURNAL = 3;
-
-/** The tabs that are a list of things to open. */
+/** The tabs that are a list of things to select. */
 export function isListTab(tab: number): boolean {
-  return tab === CHANGES || tab === STEPS;
+  return tab === CODE || tab === STEPS || tab === COMMENTS;
 }
 
 export function itemCount(d: GateDetail, tab: number): number {
-  if (tab === CHANGES) return d.changes.kind === "files" ? d.changes.files.length : 0;
-  if (tab === STEPS) return d.steps.length;
+  if (tab === CODE) return d.changes.kind === "files" ? d.changes.files.length : 0;
+  if (tab === STEPS) return d.visits.length;
+  if (tab === COMMENTS) return d.comments.length;
   return 0;
 }
 
 export interface Context {
   now: number;
   width: number;
-  /** The action keys of the decision, as the card words them. */
-  actions: string;
   /** The card has the keys; a selected line then stands out more. */
   focused: boolean;
+  /** The diffs read so far, by `diffKey`. */
+  diffs: Record<string, DiffState>;
+  runId: string;
 }
 
 export interface Content {
@@ -42,49 +69,21 @@ export interface Content {
   anchor?: number;
 }
 
-function tabText(d: GateDetail, i: number): { text: string; styled: string } {
-  const name = TABS[i] ?? "";
-  if (i === CHANGES) {
-    const n = d.changes.kind === "files" ? d.changes.totalFiles : 0;
-    const warn = d.changedAfterChecks.length > 0 || d.changes.kind === "unavailable";
-    return {
-      text: `${name} ${n}${warn ? " ⚠" : ""}`,
-      styled: `${name} ${n}${warn ? ` ${yellow("⚠")}` : ""}`,
-    };
-  }
-  if (i === STEPS) {
-    const broken = d.steps.some((s) => s.state === "failed");
-    return {
-      text: `${name} ${d.steps.length}${broken ? " ✗" : ""}`,
-      styled: `${name} ${d.steps.length}${broken ? ` ${red("✗")}` : ""}`,
-    };
-  }
-  if (i === JOURNAL)
-    return { text: `${name} ${d.journal.length}`, styled: `${name} ${d.journal.length}` };
-  return { text: name, styled: name };
+export const diffKey = (runId: string, path: string): string => `${runId}:${path}`;
+
+/** The file the cursor is on in the Code tab. */
+export function fileAt(d: GateDetail, cursor: number): string | undefined {
+  return d.changes.kind === "files" ? d.changes.files[cursor]?.[0] : undefined;
 }
 
-/** The row of tab names, and where each one is (columns, from 0) so a click can find it. */
-export function tabStrip(
-  d: GateDetail,
-  active: number,
-  width: number,
-  focused: boolean,
-): { line: string; spans: [number, number][] } {
-  let line = "";
-  let at = 0;
-  const spans: [number, number][] = [];
-  for (let i = 0; i < TABS.length; i++) {
-    const { text, styled } = tabText(d, i);
-    const cell = ` ${text} `;
-    spans.push([at, at + cell.length]);
-    at += cell.length;
-    if (i === active)
-      line += focused ? inverse(stripAnsi(cell)) : bold(`[${text}]`.padEnd(cell.length));
-    else line += dim(" ") + styled + dim(" ");
-  }
-  return { line: fit(line, width), spans };
+/** Where a comment made now is about: the file or the step the person is looking at, else the gate. */
+export function commentPlace(d: GateDetail, st: TabState): string {
+  if (st.tab === CODE) return fileAt(d, st.cursor) ?? d.node;
+  if (st.tab === STEPS) return d.visits[st.cursor]?.slug ?? d.node;
+  return d.node;
 }
+
+// ── small helpers ───────────────────────────────────────────────────────────
 
 const SEVERITY_RANK: Record<string, number> = {
   blocker: 0,
@@ -111,14 +110,41 @@ export function duration(ms: number): string {
   return `${Math.floor(ms / 60_000)}m${String(Math.round((ms % 60_000) / 1000)).padStart(2, "0")}`;
 }
 
+function thousands(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
 const MARK = { ok: green("✓"), bad: red("✗"), open: yellow("◐"), pending: dim("○") };
 
-function stepMark(s: StepDetail): string {
-  if (s.state === "done") return MARK.ok;
-  if (s.state === "failed") return MARK.bad;
-  if (s.state === "waiting" || s.state === "running") return MARK.open;
+function visitMark(v: Visit): string {
+  if (v.state === "done") return MARK.ok;
+  if (v.state === "failed") return MARK.bad;
+  if (v.state === "waiting" || v.state === "running") return MARK.open;
   return MARK.pending;
 }
+
+/** Tokens laid out in lines no wider than `width`, joined by `glue`. */
+function flow(tokens: { text: string; plain: number }[], glue: string, width: number): string[] {
+  const lines: string[] = [];
+  let line = "";
+  let used = 0;
+  for (const t of tokens) {
+    if (used > 0 && used + glue.length + t.plain > width) {
+      lines.push(line);
+      line = t.text;
+      used = t.plain;
+    } else {
+      line += used === 0 ? t.text : dim(glue) + t.text;
+      used += used === 0 ? t.plain : glue.length + t.plain;
+    }
+  }
+  if (line !== "") lines.push(line);
+  return lines;
+}
+
+const chip = (text: string, styled = text) => ({ text: styled, plain: visibleLength(text) });
 
 function row(text: string, selected: boolean, focused: boolean, width: number): string {
   const plain = fit(text, width);
@@ -126,68 +152,212 @@ function row(text: string, selected: boolean, focused: boolean, width: number): 
   return focused ? inverse(stripAnsi(plain)) : bold(plain);
 }
 
-function summary(s: Session, d: GateDetail, ctx: Context): string[] {
-  const { width } = ctx;
-  const inner = Math.max(10, width - 4);
-  const bar = yellow("│");
+/** Text as people write it: paragraphs and lists wrapped, headings bold, code left as it is. */
+export function prose(text: string, width: number): string[] {
   const out: string[] = [];
-  out.push(bold(yellow(`${d.position} · ${d.node} · waiting ${formatAge(ctx.now - s.since)}`)));
-  out.push(d.steps.map((st) => stepMark(st)).join(" "));
-  out.push("");
-  out.push(yellow("┌ You are asked"));
-  for (const line of wrapText(d.prompt, inner)) out.push(`${bar} ${line}`);
-  for (const line of wrapText(d.instructions ?? "", inner)) out.push(`${bar} ${dim(line)}`);
-  if (d.comments > 0) {
-    out.push(
-      `${bar} ${dim(`${d.comments} comment${d.comments === 1 ? "" : "s"} recorded at this step`)}`,
-    );
-  }
-  out.push(`${yellow("└")} ${ctx.actions}`);
-  out.push("");
-
-  const failed = d.checks.filter((c) => !c.passed);
-  if (d.checks.length === 0) out.push(dim("No checks ran before this step."));
-  else if (failed.length === 0)
-    out.push(`${green("✓")} Engine checks: all ${d.checks.length} passed`);
-  else
-    out.push(
-      red(
-        `✗ ${failed.length} of ${d.checks.length} checks failed: ${failed.map((c) => c.label).join(", ")}`,
-      ),
-    );
-  if (d.changedAfterChecks.length > 0) {
-    const n = d.changedAfterChecks.length;
-    out.push(
-      ...wrapText(`⚠ ${n} file${n === 1 ? "" : "s"} changed after the checks passed`, width).map(
-        yellow,
-      ),
-    );
-  }
-  const c = d.changes;
-  if (c.kind === "files") {
-    out.push(
-      `${dim("Changes")} ${c.totalFiles} file${c.totalFiles === 1 ? "" : "s"} · ${c.totalLines} lines`,
-    );
-  } else if (c.kind === "none") {
-    out.push(`${dim("Changes")} none`);
-  } else if (c.kind === "unavailable") {
-    out.push(...wrapText(`⚠ Cannot tell what changed: ${c.reason}`, width).map(yellow));
-  } else {
-    out.push(`${dim("Changes")} ${dim("not a git repository")}`);
-  }
-  const redone = d.steps.filter((st) => st.attempts.length > 1);
-  if (redone.length > 0) {
-    out.push(
-      `${dim("Steps")}   ${redone.map((st) => `${st.slug} ran ${st.attempts.length} times`).join(", ")}`,
-    );
+  let fenced = false;
+  for (const raw of text.split("\n")) {
+    const line = raw.replace(/\s+$/, "").replaceAll("**", "");
+    if (line.trimStart().startsWith("```")) {
+      fenced = !fenced;
+      out.push(dim(fit(line, width)));
+    } else if (fenced) {
+      out.push(dim(fit(line, width)));
+    } else if (line === "") {
+      out.push("");
+    } else {
+      const heading = /^#{1,6}\s+(.*)$/.exec(line);
+      if (heading) {
+        for (const l of wrapText(heading[1] ?? "", width)) out.push(bold(l));
+        continue;
+      }
+      const lead = /^(\s*(?:[-*+]|\d+[.)])\s+)/.exec(line)?.[1] ?? /^(\s*)/.exec(line)?.[1] ?? "";
+      const wrapped = wrapText(line.slice(lead.length), Math.max(10, width - lead.length));
+      for (const [i, l] of wrapped.entries())
+        out.push((i === 0 ? lead : " ".repeat(lead.length)) + l);
+    }
   }
   return out.map((l) => fit(l, width));
 }
 
-function changes(d: GateDetail, st: TabState, ctx: Context): Content {
+// ── the band on top ─────────────────────────────────────────────────────────
+
+/** The run's name and where it stands, in a frame of its own, with the numbers that sum it up. */
+export function headerBand(
+  s: Session,
+  d: GateDetail,
+  width: number,
+  glyph: string,
+  now: number,
+  compact = false,
+): string[] {
+  const inner = Math.max(10, width - 4);
+  const line = (content: string) => `${dim("│")} ${fit(content, inner)} ${dim("│")}`;
+  const right = dim(`${s.id} · ${s.pipeline}`);
+  const left = `${glyph} ${bold(fit(s.title, Math.max(8, inner - visibleLength(right) - 3)).trimEnd())}`;
+  const gap = Math.max(1, inner - visibleLength(left) - visibleLength(right));
+  const m = d.metrics;
+  const bar = (done: number, total: number) => {
+    const cells = 8;
+    const filled = total === 0 ? 0 : Math.round((cells * done) / total);
+    return "▮".repeat(filled) + "▯".repeat(cells - filled);
+  };
+  const chips = [
+    chip(`⏱ ${formatAge(m.workMs)} work · ${formatAge(m.waitMs)} waiting`),
+    chip(`${bar(m.stepsDone, m.stepsTotal)} ${m.stepsDone}/${m.stepsTotal} steps`),
+    ...(m.retries > 0 ? [chip(`⟳ ${m.retries} ${m.retries === 1 ? "retry" : "retries"}`)] : []),
+    m.checksPassed === m.checksTotal
+      ? chip(
+          `✓ ${m.checksPassed}/${m.checksTotal} checks`,
+          `${green("✓")} ${m.checksPassed}/${m.checksTotal} checks`,
+        )
+      : chip(
+          `✗ ${m.checksPassed}/${m.checksTotal} checks`,
+          red(`✗ ${m.checksPassed}/${m.checksTotal} checks`),
+        ),
+    d.changes.kind === "files"
+      ? chip(`± ${d.changes.totalFiles} files · ${d.changes.totalLines} lines`)
+      : chip("± no changes", dim("± no changes")),
+    m.tokens
+      ? chip(
+          `⛁ ${m.tokens.approx ? "~" : ""}${thousands(m.tokens.total)} tokens${m.tokens.cost === undefined ? "" : ` · $${m.tokens.cost.toFixed(2)}`}`,
+        )
+      : chip("⛁ —", dim("⛁ —")),
+  ];
+  const warnings = [
+    ...(d.changedAfterChecks.length > 0
+      ? [
+          chip(
+            `⚠ ${d.changedAfterChecks.length} files changed after the checks`,
+            yellow(`⚠ ${d.changedAfterChecks.length} files changed after the checks`),
+          ),
+        ]
+      : []),
+    ...(d.changes.kind === "unavailable"
+      ? [chip("⚠ changes unknown", yellow("⚠ changes unknown"))]
+      : []),
+  ];
+  const where = `${bold(yellow(`${d.position} · ${d.node}`))} ${dim(`· waiting ${formatAge(now - s.since)}`)}`;
+  if (compact) {
+    // Little room: no frame, and the numbers on one line, cut where they stop fitting.
+    const all = flow([...chips, ...warnings], "  ", inner)[0] ?? "";
+    return [fit(`${left}${" ".repeat(gap)}${right}`, width), fit(where, width), fit(all, width)];
+  }
+  return [
+    dim(`╭${"─".repeat(width - 2)}╮`),
+    line(`${left}${" ".repeat(gap)}${right}`),
+    line(where),
+    ...flow([...chips, ...warnings], "  ", inner).map(line),
+    dim(`╰${"─".repeat(width - 2)}╯`),
+  ];
+}
+
+// ── the tabs ────────────────────────────────────────────────────────────────
+
+function tabText(d: GateDetail, i: number): { text: string; styled: string } {
+  const name = TABS[i] ?? "";
+  const both = (text: string, styled = text) => ({ text, styled });
+  if (i === CODE) {
+    const n = d.changes.kind === "files" ? d.changes.totalFiles : 0;
+    const warn = d.changedAfterChecks.length > 0 || d.changes.kind === "unavailable";
+    return both(`${name} ${n}${warn ? " ⚠" : ""}`, `${name} ${n}${warn ? ` ${yellow("⚠")}` : ""}`);
+  }
+  if (i === STEPS) {
+    const broken = d.visits.some(
+      (v) => v.state === "failed" && v === d.visits.findLast((x) => x.slug === v.slug),
+    );
+    return both(
+      `${name} ${d.visits.length}${broken ? " ✗" : ""}`,
+      `${name} ${d.visits.length}${broken ? ` ${red("✗")}` : ""}`,
+    );
+  }
+  if (i === COMMENTS) return both(`${name} ${d.comments.length}`);
+  if (i === LOG) return both(`${name} ${d.journal.length}`);
+  return both(name);
+}
+
+/** A row of names; the active one stands out. Spans are where each name is (columns from 0), for a click. */
+function strip(
+  names: { text: string; styled: string }[],
+  active: number,
+  width: number,
+  focused: boolean,
+): { line: string; spans: [number, number][] } {
+  let line = "";
+  let at = 0;
+  const spans: [number, number][] = [];
+  for (const [i, { text, styled }] of names.entries()) {
+    const cell = ` ${text} `;
+    spans.push([at, at + cell.length]);
+    at += cell.length;
+    if (i === active)
+      line += focused ? inverse(stripAnsi(cell)) : bold(`[${text}]`.padEnd(cell.length));
+    else line += dim(" ") + styled + dim(" ");
+  }
+  return { line: fit(line, width), spans };
+}
+
+export function tabStrip(d: GateDetail, active: number, width: number, focused: boolean) {
+  return strip(
+    TABS.map((_, i) => tabText(d, i)),
+    active,
+    width,
+    focused,
+  );
+}
+
+function subStrip(active: number, width: number, focused: boolean) {
+  return strip(
+    SUBTABS.map((name) => ({ text: name, styled: name })),
+    active,
+    width,
+    focused,
+  );
+}
+
+// ── what each tab shows ─────────────────────────────────────────────────────
+
+function report(d: GateDetail, ctx: Context): Content {
+  const { width } = ctx;
+  const out: string[] = [dim("ASKED")];
+  out.push(...wrapText(d.prompt, width));
+  for (const l of wrapText(d.instructions ?? "", width)) out.push(dim(l));
+  out.push("");
+  if (d.report === undefined) {
+    out.push(dim("THE AGENT'S REPORT"));
+    out.push(
+      ...wrapText(
+        "No report found. The agent's own log can be read for Claude Code only, and no step left a summary.",
+        width,
+      ).map((l) => dim(l)),
+    );
+    return { lines: out.map((l) => fit(l, width)) };
+  }
+  const source =
+    d.report.from === "log"
+      ? `from its log, written ${formatAge(ctx.now - d.report.ts)} ago`
+      : "a step's summary (not checked)";
+  out.push(dim(`THE AGENT'S REPORT · ${source}`));
+  out.push(...prose(d.report.text, width));
+  return { lines: out.map((l) => fit(l, width)) };
+}
+
+function commentCount(d: GateDetail, path: string): number {
+  return d.comments.filter((c) => c.location === path || c.location.startsWith(`${path}:`)).length;
+}
+
+function diffLine(l: string, width: number): string {
+  if (l.startsWith("+++") || l.startsWith("---")) return bold(fit(l, width));
+  if (l.startsWith("+")) return green(fit(l, width));
+  if (l.startsWith("-")) return red(fit(l, width));
+  if (l.startsWith("@@")) return cyan(fit(l, width));
+  if (l.startsWith("diff ") || l.startsWith("index ")) return dim(fit(l, width));
+  return fit(l, width);
+}
+
+function code(d: GateDetail, st: TabState, ctx: Context): Content {
   const { width } = ctx;
   const c = d.changes;
-  const out: string[] = [];
   if (c.kind === "none") return { lines: ["No files changed."] };
   if (c.kind === "no_repo") return { lines: [dim("This is not a git repository.")] };
   if (c.kind === "unavailable") {
@@ -195,18 +365,32 @@ function changes(d: GateDetail, st: TabState, ctx: Context): Content {
   }
   if (st.open) {
     const [file, lines] = c.files[st.cursor] ?? ["", 0];
-    out.push(`${dim("Changes ›")} ${bold(tailFit(file, width - 10))}`);
+    const out: string[] = [`${dim("Code ›")} ${bold(tailFit(file, width - 8))}`];
+    const n = commentCount(d, file);
+    out.push(
+      dim(
+        `${lines} lines changed since the run began${n > 0 ? ` · ${n} comment${n === 1 ? "" : "s"}` : ""} · n/p other files · c comment`,
+      ),
+    );
     out.push("");
-    out.push(`${lines} lines changed since the run started.`);
-    out.push("");
-    out.push(dim("The diff of this file opens here in the next step."));
+    const diff = ctx.diffs[diffKey(ctx.runId, file)];
+    if (diff === undefined) out.push(dim("Reading the diff…"));
+    else if (diff.kind === "missing")
+      out.push(dim("No diff to show: the files were not recorded when the run began."));
+    else if (diff.kind === "error")
+      out.push(...wrapText(`Cannot read the diff: ${diff.message}`, width).map(red));
+    else {
+      for (const l of diff.text.split("\n")) out.push(diffLine(l, width));
+      if (diff.truncated)
+        out.push(yellow("… the diff is cut here, it is longer than can be shown"));
+    }
     return { lines: out.map((l) => fit(l, width)) };
   }
-  out.push(
+  const out: string[] = [
     dim(
       `${c.totalFiles} file${c.totalFiles === 1 ? "" : "s"} · ${c.totalLines} lines · Enter opens a file`,
     ),
-  );
+  ];
   if (d.changedAfterChecks.length > 0) {
     const n = d.changedAfterChecks.length;
     out.push(yellow(`⚠ ${n} file${n === 1 ? "" : "s"} changed after the checks passed:`));
@@ -215,68 +399,59 @@ function changes(d: GateDetail, st: TabState, ctx: Context): Content {
   }
   const first = out.length;
   for (const [i, [file, lines]] of c.files.entries()) {
-    out.push(
-      row(
-        `${i === st.cursor ? "▸" : " "} ${fit(tailFit(file, width - 9), width - 9)}${String(lines).padStart(5)}`,
-        i === st.cursor,
-        ctx.focused,
-        width,
-      ),
-    );
-  }
-  return { lines: out, anchor: first + st.cursor };
-}
-
-function stepNote(s: StepDetail): string {
-  const last = s.attempts.at(-1);
-  const parts: string[] = [];
-  if (s.attempts.length > 1) {
-    const bad = s.attempts.filter((a) => a.ok === false).length;
-    parts.push(`${s.attempts.length} tries${bad > 0 ? `, ${bad} failed` : ""}`);
-  }
-  if (last?.decision) parts.push(last.decision.decision);
-  if (last?.review) parts.push(`${last.review.findings.length} findings`);
-  if (s.state === "waiting") parts.push("waiting for you");
-  return parts.join(" · ");
-}
-
-function steps(d: GateDetail, st: TabState, ctx: Context): Content {
-  const { width } = ctx;
-  if (st.open) {
-    const step = d.steps[st.cursor];
-    return { lines: step ? stepDetail(step, width) : [] };
-  }
-  const out: string[] = [dim(`${d.steps.length} steps · Enter opens one`)];
-  const first = out.length;
-  for (const [i, s] of d.steps.entries()) {
-    const last = s.attempts.at(-1);
-    const time = last?.ms !== undefined ? duration(last.ms) : "";
-    const text = `${i === st.cursor ? "▸" : " "} ${stepMark(s)} ${fit(s.slug, 16)} ${fit(s.kind, 8)} ${time.padStart(6)}  ${stepNote(s)}`;
+    const notes = commentCount(d, file);
+    const mark = notes > 0 ? ` ✎${notes}` : "";
+    const text = `${i === st.cursor ? "▸" : " "} ${fit(tailFit(file, width - 14), width - 14)}${String(lines).padStart(5)}${mark.padEnd(5)}`;
     out.push(row(text, i === st.cursor, ctx.focused, width));
   }
   return { lines: out, anchor: first + st.cursor };
 }
 
-function attemptLines(a: Attempt, width: number): string[] {
+function visitNote(v: Visit): string {
+  const a = v.attempt;
+  const parts: string[] = [];
+  if (a.ok === false && a.reason) parts.push(a.reason.split("\n")[0] ?? "");
+  else if (a.ok === false) parts.push(a.outcome ?? "failed");
+  if (a.decision) parts.push(a.decision.decision);
+  if (a.review) parts.push(`${a.review.findings.length} findings`);
+  if (v.state === "waiting") parts.push("waiting for you");
+  return parts.join(" · ");
+}
+
+function steps(d: GateDetail, st: TabState, ctx: Context): Content {
+  const { width } = ctx;
+  if (st.open) return openVisit(d, st, ctx);
+  const out: string[] = [dim(`${d.visits.length} entries into steps · Enter opens one`)];
+  const first = out.length;
+  for (const [i, v] of d.visits.entries()) {
+    const time = v.attempt.ms !== undefined ? duration(v.attempt.ms) : "";
+    const name = `${v.rework ? "↺ " : "  "}${v.slug}${v.attempt.n > 1 ? ` #${v.attempt.n}` : ""}`;
+    const text = `${i === st.cursor ? "▸" : " "} ${visitMark(v)} ${fit(name, 20)} ${fit(v.kind, 7)} ${time.padStart(6)}  ${visitNote(v)}`;
+    out.push(row(text, i === st.cursor, ctx.focused, width));
+  }
+  return { lines: out, anchor: first + st.cursor };
+}
+
+function attemptResult(a: Attempt, width: number): string[] {
   const out: string[] = [];
   const mark = a.ok === true ? MARK.ok : a.ok === false ? MARK.bad : MARK.open;
   const bits = [a.outcome ?? "in progress"];
   if (a.ms !== undefined) bits.push(duration(a.ms));
   if (a.exit !== undefined) bits.push(`exit ${a.exit}`);
-  out.push(`${mark} ${bold(`try ${a.n}`)}  ${bits.join(" · ")}`);
-  for (const line of wrapText(a.reason ?? "", width - 4)) out.push(`  ${red(line)}`);
+  out.push(`${mark} ${bits.join(" · ")}`);
+  for (const line of wrapText(a.reason ?? "", width - 2)) out.push(`  ${red(line)}`);
   for (const c of a.checks) {
     out.push(
       `  ${c.passed ? MARK.ok : MARK.bad} ${c.label}${c.ms === undefined ? "" : dim(` ${duration(c.ms)}`)}`,
     );
   }
   if (a.summary) {
-    out.push(`  ${dim("Agent says (not verified):")}`);
-    for (const line of wrapText(a.summary, width - 4)) out.push(`    ${line}`);
+    out.push("", dim("The agent says (not verified):"));
+    out.push(...prose(a.summary, width));
   }
   if (a.decision) {
     const why = a.decision.reason ? ` — “${a.decision.reason}”` : "";
-    out.push(`  You: ${a.decision.decision}${why}`);
+    out.push("", `You: ${a.decision.decision}${why}`);
   }
   if (a.review) {
     const rows = [...a.review.findings].sort(
@@ -284,52 +459,82 @@ function attemptLines(a: Attempt, width: number): string[] {
     );
     const counts = new Map<string, number>();
     for (const f of rows) counts.set(f.severity, (counts.get(f.severity) ?? 0) + 1);
-    const summaryLine = [...counts.entries()]
+    const summary = [...counts.entries()]
       .map(([sev, n]) => severityStyle(sev, `${n} ${sev}`))
       .join(dim(" · "));
     out.push(
-      `  ${dim(`Findings (the agent's, ${a.review.completeness}):`)} ${rows.length === 0 ? green("none") : summaryLine}`,
+      "",
+      `${dim(`Findings (the agent's, ${a.review.completeness}):`)} ${rows.length === 0 ? green("none") : summary}`,
     );
     for (const f of rows) {
       out.push(
-        `    ${severityStyle(f.severity, fit(f.severity, 8))}${tailFit(f.location, width - 14)}`,
+        `  ${severityStyle(f.severity, fit(f.severity, 8))}${tailFit(f.location, width - 12)}`,
       );
-      for (const line of wrapText(f.description, width - 6)) out.push(`      ${dim(line)}`);
+      for (const line of wrapText(f.description, width - 4)) out.push(`    ${dim(line)}`);
     }
   }
   return out;
 }
 
-function stepDetail(s: StepDetail, width: number): string[] {
-  const out: string[] = [];
-  out.push(`${dim("Steps ›")} ${bold(s.slug)}`);
-  const tries = s.attempts.length;
-  out.push(
-    dim(
-      `${s.kind || "step"} · ${tries === 0 ? "not started" : `${tries} ${tries === 1 ? "try" : "tries"}`}`,
-    ),
-  );
+function openVisit(d: GateDetail, st: TabState, ctx: Context): Content {
+  const { width } = ctx;
+  const v = d.visits[st.cursor];
+  if (!v) return { lines: [] };
+  const name = `${v.slug}${v.attempt.n > 1 ? ` #${v.attempt.n}` : ""}`;
+  const out: string[] = [
+    `${dim("Steps ›")} ${bold(name)} ${dim(`· ${v.kind || "step"}${v.rework ? " · after a failure" : ""}`)}`,
+  ];
+  out.push(subStrip(st.sub, width, ctx.focused).line);
   out.push("");
-  for (const a of [...s.attempts].reverse()) {
-    out.push(...attemptLines(a, width));
-    out.push("");
+  if (v.attempt.n === 0) {
+    out.push(dim("This step has not started yet."));
+  } else if (st.sub === 0) {
+    out.push(...attemptResult(v.attempt, width));
+  } else if (st.sub === 1) {
+    out.push(
+      ...wrapText(
+        "What this step changed is not recorded for it yet. All the changes are under Code.",
+        width,
+      ).map((l) => dim(l)),
+    );
+  } else {
+    out.push(
+      ...(v.attempt.log.length === 0 ? [dim("No records.")] : v.attempt.log.map((l) => dim(l))),
+    );
   }
-  return out.map((l) => fit(l, width));
+  return { lines: out.map((l) => fit(l, width)) };
 }
 
-function journal(d: GateDetail, ctx: Context): Content {
-  return { lines: d.journal.map((l) => fit(dim(l), ctx.width)) };
+function comments(d: GateDetail, st: TabState, ctx: Context): Content {
+  const { width } = ctx;
+  const out: string[] = [
+    dim("They go back to the agent when you reject. c adds one, d deletes the selected."),
+  ];
+  if (d.comments.length === 0) {
+    out.push("", dim("No comments yet."));
+    return { lines: out.map((l) => fit(l, width)) };
+  }
+  let anchor = out.length;
+  for (const [i, c] of d.comments.entries()) {
+    if (i === st.cursor) anchor = out.length;
+    const head = `${i === st.cursor ? "▸" : " "} ${fit(c.severity, 8)}${tailFit(c.location, width - 12)}`;
+    out.push(row(head, i === st.cursor, ctx.focused, width));
+    for (const line of wrapText(c.description, width - 4).slice(0, 3)) out.push(`    ${dim(line)}`);
+  }
+  return { lines: out.map((l) => fit(l, width)), anchor };
 }
 
-export function tabContent(s: Session, d: GateDetail, st: TabState, ctx: Context): Content {
+export function tabContent(d: GateDetail, st: TabState, ctx: Context): Content {
   switch (st.tab) {
-    case CHANGES:
-      return changes(d, st, ctx);
+    case CODE:
+      return code(d, st, ctx);
     case STEPS:
       return steps(d, st, ctx);
-    case JOURNAL:
-      return journal(d, ctx);
+    case COMMENTS:
+      return comments(d, st, ctx);
+    case LOG:
+      return { lines: d.journal.map((l) => fit(dim(l), ctx.width)) };
     default:
-      return { lines: summary(s, d, ctx) };
+      return report(d, ctx);
   }
 }

@@ -6,7 +6,7 @@ import type {
   ResultReport,
   RunState,
 } from "@kodel-ai/pipeline-core";
-import { type GateRun, loadGateDetail } from "../src/tui/gate";
+import { addComment, type GateRun, loadDiff, loadGateDetail, removeComment } from "../src/tui/gate";
 
 const NOW = Date.UTC(2026, 9, 27, 15, 0, 0);
 const MIN = 60_000;
@@ -68,7 +68,7 @@ const rec = (event: string, minutesAgo: number, rest: Record<string, unknown> = 
   ({ v: 1, seq: 1, ts: NOW - minutesAgo * MIN, event, ...rest }) as JournalRecord;
 
 const JOURNAL: JournalRecord[] = [
-  rec("node_entered", 80, { node: "plan", attempt: 1 }),
+  rec("node_entered", 80, { node: "plan", attempt: 1, rework: false }),
   rec("agent_completed", 79, {
     node: "plan",
     attempt: 1,
@@ -83,7 +83,7 @@ const JOURNAL: JournalRecord[] = [
     duration_ms: 150,
   }),
   rec("node_finished", 79, { node: "plan", attempt: 1, outcome: "passed", status: "passed" }),
-  rec("node_entered", 70, { node: "plan-approval", attempt: 1 }),
+  rec("node_entered", 70, { node: "plan-approval", attempt: 1, rework: false }),
   rec("gate_decided", 60, { node: "plan-approval", decision: "approved", reason: null }),
   rec("node_finished", 60, {
     node: "plan-approval",
@@ -91,7 +91,7 @@ const JOURNAL: JournalRecord[] = [
     outcome: "approved",
     status: "passed",
   }),
-  rec("node_entered", 59, { node: "impl", attempt: 1 }),
+  rec("node_entered", 59, { node: "impl", attempt: 1, rework: false }),
   rec("check_finished", 50, {
     node: "impl",
     attempt: 1,
@@ -101,7 +101,7 @@ const JOURNAL: JournalRecord[] = [
     reason: "too many lines",
   }),
   rec("node_finished", 50, { node: "impl", attempt: 1, outcome: "failed", status: "failed" }),
-  rec("node_entered", 49, { node: "impl", attempt: 2 }),
+  rec("node_entered", 49, { node: "impl", attempt: 2, rework: true }),
   rec("check_finished", 45, {
     node: "impl",
     attempt: 2,
@@ -110,7 +110,7 @@ const JOURNAL: JournalRecord[] = [
     duration_ms: 160,
   }),
   rec("node_finished", 45, { node: "impl", attempt: 2, outcome: "passed", status: "passed" }),
-  rec("node_entered", 44, { node: "test", attempt: 1 }),
+  rec("node_entered", 44, { node: "test", attempt: 1, rework: false }),
   rec("command_finished", 43, {
     node: "test",
     attempt: 1,
@@ -120,7 +120,7 @@ const JOURNAL: JournalRecord[] = [
     reason: "1 test failed",
   }),
   rec("node_finished", 43, { node: "test", attempt: 1, outcome: "failed", status: "failed" }),
-  rec("node_entered", 42, { node: "test", attempt: 2 }),
+  rec("node_entered", 42, { node: "test", attempt: 2, rework: true }),
   rec("command_finished", 40, {
     node: "test",
     attempt: 2,
@@ -129,7 +129,7 @@ const JOURNAL: JournalRecord[] = [
     duration_ms: 85_000,
   }),
   rec("node_finished", 40, { node: "test", attempt: 2, outcome: "passed", status: "passed" }),
-  rec("node_entered", 39, { node: "review", attempt: 1 }),
+  rec("node_entered", 39, { node: "review", attempt: 1, rework: false }),
   rec("report_accepted", 38, { node: "review", attempt: 1, completeness: "complete", rows: 2 }),
   rec("check_finished", 38, {
     node: "review",
@@ -139,7 +139,7 @@ const JOURNAL: JournalRecord[] = [
     duration_ms: 60,
   }),
   rec("node_finished", 38, { node: "review", attempt: 1, outcome: "passed", status: "passed" }),
-  rec("node_entered", 37, { node: "final-approval", attempt: 1 }),
+  rec("node_entered", 37, { node: "final-approval", attempt: 1, rework: false }),
   rec("gate_waiting", 37, { node: "final-approval", attempt: 1 }),
 ];
 
@@ -153,6 +153,8 @@ const gateNext = {
   },
 } as unknown as NextStep;
 
+type Written = { ok: true } | { ok: false; code: string; message: string };
+
 interface Fake {
   state?: RunState;
   next?: NextStep;
@@ -160,20 +162,33 @@ interface Fake {
   since?: Awaited<ReturnType<GateRun["changesSinceStart"]>>;
   after?: Awaited<ReturnType<GateRun["changesSinceGate"]>>;
   reports?: Record<string, ResultReport>;
+  said?: { text: string; ts: number } | undefined;
+  tokens?: { tokens: number; cost?: number; approx: boolean } | undefined;
+  /** Every call to `reportResult`, in order. */
+  written?: { node: string; attempt: number; raw: unknown; replace: boolean }[];
+  refuse?: Written;
 }
 
-const source = (fake: Fake = {}) => ({
-  open: async (): Promise<GateRun> => ({
-    state: async () => fake.state ?? state(),
-    currentSpec: async () => SPEC,
-    inspect: async () => fake.next ?? gateNext,
-    journal: async () => fake.journal ?? JOURNAL,
-    changesSinceStart: async () =>
-      fake.since ?? { kind: "changes", files: { "a.ts": 5, "b.ts": 30 } },
-    changesSinceGate: async () => fake.after ?? { kind: "changes", files: {} },
-    resultsOf: async (n, a) => fake.reports?.[`${n}:${a}`],
-  }),
+const run = (fake: Fake = {}): GateRun => ({
+  state: async () => fake.state ?? state(),
+  currentSpec: async () => SPEC,
+  inspect: async () => fake.next ?? gateNext,
+  journal: async () => fake.journal ?? JOURNAL,
+  changesSinceStart: async () =>
+    fake.since ?? { kind: "changes", files: { "a.ts": 5, "b.ts": 30 } },
+  changesSinceGate: async () => fake.after ?? { kind: "changes", files: {} },
+  resultsOf: async (n, a) => fake.reports?.[`${n}:${a}`],
+  agentReport: async () => fake.said,
+  agentTokens: async () => fake.tokens,
+  diffOf: async (path) =>
+    path === "a.ts" ? { text: "@@ -1 +1 @@\n-x\n+y", truncated: false } : undefined,
+  reportResult: async (node, attempt, raw, options) => {
+    fake.written?.push({ node, attempt, raw, replace: options?.replace === true });
+    return fake.refuse ?? { ok: true };
+  },
 });
+
+const source = (fake?: Fake) => ({ open: async () => run(fake) });
 
 const REVIEW: ResultReport = {
   completeness: "complete",
@@ -189,48 +204,56 @@ describe("tui gate detail", () => {
   test("the question is the node's own text; this is the second gate on the way", async () => {
     const d = await load();
     expect(d?.node).toBe("final-approval");
+    expect(d?.attempt).toBe(1);
     expect(d?.prompt).toBe("Look at the diff.");
     expect(d?.instructions).toBe("Try the change.");
     expect(d?.position).toBe("gate 2 of 2");
   });
 
-  test("the steps are what was walked, each once, then where the usual outcomes lead", async () => {
+  test("the visits are the entries into steps in the order they happened, repeats marked, then where the usual outcomes lead", async () => {
     const d = await load();
-    expect(d?.steps.map((s) => s.slug)).toEqual([
-      "plan",
-      "plan-approval",
-      "impl",
-      "test",
-      "review",
-      "final-approval",
-      "release",
+    expect(d?.visits.map((v) => [v.slug, v.attempt.n, v.rework, v.state])).toEqual([
+      ["plan", 1, false, "done"],
+      ["plan-approval", 1, false, "done"],
+      ["impl", 1, false, "failed"],
+      ["impl", 2, true, "done"],
+      ["test", 1, false, "failed"],
+      ["test", 2, true, "done"],
+      ["review", 1, false, "done"],
+      ["final-approval", 1, false, "waiting"],
+      ["release", 0, false, "pending"],
     ]);
-    expect(d?.steps.find((s) => s.slug === "final-approval")?.state).toBe("waiting");
-    expect(d?.steps.find((s) => s.slug === "release")).toMatchObject({
-      state: "pending",
-      attempts: [],
+    expect(d?.visits.filter((v) => v.human).map((v) => v.slug)).toEqual([
+      "plan-approval",
+      "final-approval",
+    ]);
+    expect(d?.visits[0]?.kind).toBe("agent");
+  });
+
+  test("each visit keeps how it ended, for how long, why it failed, and its own records", async () => {
+    const d = await load();
+    const testOne = d?.visits[4]?.attempt;
+    expect(testOne).toMatchObject({
+      n: 1,
+      outcome: "failed",
+      ok: false,
+      ms: MIN,
+      exit: 1,
+      reason: "1 test failed",
     });
-    expect(d?.steps.filter((s) => s.human).map((s) => s.slug)).toEqual([
-      "plan-approval",
-      "final-approval",
-    ]);
-    expect(d?.steps.find((s) => s.slug === "impl")?.kind).toBe("agent");
+    expect(testOne?.log).toHaveLength(3);
+    expect(testOne?.log.join("\n")).toContain("command_finished");
+    expect(d?.visits[2]?.attempt).toMatchObject({ ok: false, reason: "too many lines" });
+    expect(d?.visits[3]?.attempt).toMatchObject({ ok: true, ms: 4 * MIN });
   });
 
-  test("every try at a step is kept, with how it ended and for how long", async () => {
+  test("the try the gate is on counts its time up to now", async () => {
     const d = await load();
-    const test = d?.steps.find((s) => s.slug === "test")?.attempts;
-    expect(test?.map((a) => [a.n, a.outcome, a.ok, a.ms, a.exit])).toEqual([
-      [1, "failed", false, MIN, 1],
-      [2, "passed", true, 2 * MIN, 0],
-    ]);
-    expect(test?.[0]?.reason).toBe("1 test failed");
-    const impl = d?.steps.find((s) => s.slug === "impl")?.attempts;
-    expect(impl?.[0]).toMatchObject({ ok: false, reason: "too many lines" });
-    expect(impl?.[1]).toMatchObject({ ok: true });
+    expect(d?.visits[7]?.attempt.ms).toBe(37 * MIN);
+    expect(d?.visits[7]?.attempt.ok).toBeUndefined();
   });
 
-  test("checks of the verdict are those of the latest try: a red first try does not count", async () => {
+  test("checks of the verdict are those of the latest try of each step", async () => {
     const d = await load();
     expect(d?.checks.every((c) => c.passed)).toBe(true);
     expect(d?.checks.filter((c) => c.node === "test")).toEqual([
@@ -239,9 +262,11 @@ describe("tui gate detail", () => {
     expect(d?.checks.filter((c) => c.node === "impl")).toEqual([
       { node: "impl", label: "impl diff", passed: true, ms: 160 },
     ]);
+    expect(d?.metrics.checksTotal).toBe(d?.checks.length);
+    expect(d?.metrics.checksPassed).toBe(d?.checks.length);
   });
 
-  test("a check that failed in the latest try is a failed check", async () => {
+  test("a check that failed in the latest try is a failed check, and the count says so", async () => {
     const journal = JOURNAL.map((r) =>
       r.event === "command_finished" && r.attempt === 2
         ? ({ ...r, passed: false } as JournalRecord)
@@ -249,12 +274,13 @@ describe("tui gate detail", () => {
     );
     const d = await load({ journal });
     expect(d?.checks.filter((c) => !c.passed).map((c) => c.node)).toEqual(["test"]);
+    expect((d?.metrics.checksPassed ?? 0) < (d?.metrics.checksTotal ?? 0)).toBe(true);
   });
 
   test("what the agent said about a step is kept as its word, and only when it said something", async () => {
     const d = await load();
-    expect(d?.steps.find((s) => s.slug === "plan")?.attempts[0]?.summary).toBe("Wrote the plan.");
-    expect(d?.steps.find((s) => s.slug === "impl")?.attempts[0]?.summary).toBeUndefined();
+    expect(d?.visits[0]?.attempt.summary).toBe("Wrote the plan.");
+    expect(d?.visits[2]?.attempt.summary).toBeUndefined();
   });
 
   test("a person's decisions sit on the try they were made at, with the reason", async () => {
@@ -263,27 +289,74 @@ describe("tui gate detail", () => {
         ? ({ ...r, decision: "rejected", reason: "no tests" } as JournalRecord)
         : r,
     );
-    const d = await load({ journal });
-    expect(d?.steps.find((s) => s.slug === "plan-approval")?.attempts[0]?.decision).toEqual({
+    expect((await load({ journal }))?.visits[1]?.attempt.decision).toEqual({
       decision: "rejected",
       reason: "no tests",
     });
-    const approved = await load();
-    expect(approved?.steps.find((s) => s.slug === "plan-approval")?.attempts[0]?.decision).toEqual({
-      decision: "approved",
-    });
+    expect((await load())?.visits[1]?.attempt.decision).toEqual({ decision: "approved" });
   });
 
   test("the findings of a review are on the try that made them", async () => {
     const d = await load({ reports: { "review:1": REVIEW } });
-    expect(d?.steps.find((s) => s.slug === "review")?.attempts[0]?.review).toEqual({
+    expect(d?.visits[6]?.attempt.review).toEqual({
       completeness: "complete",
       findings: [
         { severity: "minor", location: "a.ts:1", description: "small" },
         { severity: "info", location: "b.ts:2", description: "fyi" },
       ],
     });
-    expect(d?.steps.find((s) => s.slug === "impl")?.attempts[0]?.review).toBeUndefined();
+    expect(d?.visits[2]?.attempt.review).toBeUndefined();
+  });
+
+  test("the comments are the rows of the gate's own report", async () => {
+    const d = await load({
+      reports: {
+        "final-approval:1": {
+          completeness: "complete",
+          rows: [{ severity: "major", location: "a.ts:3", description: "why?" }],
+        },
+      },
+    });
+    expect(d?.comments).toEqual([{ severity: "major", location: "a.ts:3", description: "why?" }]);
+    expect((await load())?.comments).toEqual([]);
+  });
+
+  test("the report is what the agent last wrote in its log; failing that, the last summary a step left; failing that, nothing", async () => {
+    const said = { text: "All done.", ts: NOW - 5 * MIN };
+    expect((await load({ said }))?.report).toEqual({
+      text: "All done.",
+      ts: NOW - 5 * MIN,
+      from: "log",
+    });
+    expect((await load())?.report).toEqual({ text: "Wrote the plan.", ts: 0, from: "journal" });
+    const quiet = JOURNAL.map((r) => (r.event === "agent_completed" ? { ...r, summary: null } : r));
+    expect((await load({ journal: quiet }))?.report).toBeUndefined();
+  });
+
+  test("the log is looked at from when the gate was reached", async () => {
+    let asked: number | undefined;
+    const open = async (): Promise<GateRun> => ({
+      ...run(),
+      agentReport: async (since) => {
+        asked = since;
+        return undefined;
+      },
+    });
+    await loadGateDetail({ open }, "r_1", NOW);
+    expect(asked).toBe(NOW - 37 * MIN);
+  });
+
+  test("the numbers: time at work and waiting for a person, steps, repeats, tokens", async () => {
+    const d = await load({ tokens: { tokens: 412_000, cost: 3.4, approx: true } });
+    expect(d?.metrics).toMatchObject({
+      waitMs: 10 * MIN + 37 * MIN,
+      workMs: 90 * MIN - 47 * MIN,
+      stepsDone: 5,
+      stepsTotal: 7,
+      retries: 2,
+      tokens: { total: 412_000, cost: 3.4, approx: true },
+    });
+    expect((await load())?.metrics.tokens).toBeUndefined();
   });
 
   test("changes are counted by file and line, the biggest first", async () => {
@@ -326,23 +399,111 @@ describe("tui gate detail", () => {
       waiting: { reason: "paused", node_slug: "impl", prompt: "p", how_to_decide: { cli: "c" } },
     } as unknown as NextStep;
     expect(await load({ next: paused })).toBeUndefined();
-    const working = { node: { slug: "impl" } } as unknown as NextStep;
-    expect(await load({ next: working })).toBeUndefined();
+    expect(await load({ next: { node: { slug: "impl" } } as unknown as NextStep })).toBeUndefined();
     expect(await loadGateDetail({ open: async () => undefined }, "r_1", NOW)).toBeUndefined();
   });
 
   test("one failing read does not take the whole detail down", async () => {
-    const run = await source().open();
     const broken = {
       open: async (): Promise<GateRun> => ({
-        ...run,
+        ...run(),
         changesSinceStart: async () => {
           throw new Error("no git");
+        },
+        agentReport: async () => {
+          throw new Error("log unreadable");
+        },
+        agentTokens: async () => {
+          throw new Error("log unreadable");
         },
       }),
     };
     const d = await loadGateDetail(broken, "r_1", NOW);
     expect(d?.changes).toEqual({ kind: "unavailable", reason: "no git" });
     expect(d?.prompt).toBe("Look at the diff.");
+    expect(d?.report?.from).toBe("journal");
+    expect(d?.metrics.tokens).toBeUndefined();
+  });
+});
+
+describe("tui comments and diffs", () => {
+  test("a comment is recorded as a row of the gate's report, the way the agent records the ones it is told", async () => {
+    const written: NonNullable<Fake["written"]> = [];
+    await addComment(source({ written }), "r_1", "final-approval", 2, {
+      severity: "major",
+      location: "a.ts:3",
+      description: "why?",
+    });
+    expect(written).toEqual([
+      {
+        node: "final-approval",
+        attempt: 2,
+        raw: { rows: [{ severity: "major", location: "a.ts:3", description: "why?" }] },
+        replace: false,
+      },
+    ]);
+  });
+
+  test("a comment the engine refuses is an error with the engine's words", async () => {
+    const refuse: Written = { ok: false, code: "INVALID_RESULT_ROWS", message: "row 0: bad" };
+    await expect(
+      addComment(source({ refuse }), "r_1", "final-approval", 1, {
+        severity: "x",
+        location: "",
+        description: "",
+      }),
+    ).rejects.toThrow("INVALID_RESULT_ROWS: row 0: bad");
+  });
+
+  test("deleting a comment writes the list again without it", async () => {
+    const written: NonNullable<Fake["written"]> = [];
+    const rows = [
+      { severity: "major", location: "a.ts", description: "one" },
+      { severity: "minor", location: "b.ts", description: "two" },
+      { severity: "info", location: "c.ts", description: "three" },
+    ];
+    const reports = { "final-approval:1": { completeness: "complete", rows } as ResultReport };
+    await removeComment(source({ written, reports }), "r_1", "final-approval", 1, 1);
+    expect(written).toEqual([
+      { node: "final-approval", attempt: 1, raw: { rows: [rows[0], rows[2]] }, replace: true },
+    ]);
+    await expect(
+      removeComment(source({ written, reports }), "r_1", "final-approval", 1, 7),
+    ).rejects.toThrow("already gone");
+  });
+
+  test("a run that cannot take comments says so", async () => {
+    const open = async (): Promise<GateRun> => {
+      const { reportResult: _unused, ...rest } = run();
+      return rest;
+    };
+    await expect(
+      addComment({ open }, "r_1", "final-approval", 1, {
+        severity: "major",
+        location: "x",
+        description: "y",
+      }),
+    ).rejects.toThrow("cannot take comments");
+  });
+
+  test("a diff is the text git gives; no diff and a failing read are answers, not crashes", async () => {
+    expect(await loadDiff(source(), "r_1", "a.ts")).toEqual({
+      kind: "text",
+      text: "@@ -1 +1 @@\n-x\n+y",
+      truncated: false,
+    });
+    expect(await loadDiff(source(), "r_1", "other.ts")).toEqual({ kind: "missing" });
+    expect(await loadDiff({ open: async () => undefined }, "r_1", "a.ts")).toEqual({
+      kind: "missing",
+    });
+    const broken = {
+      open: async (): Promise<GateRun> => ({
+        ...run(),
+        diffOf: async () => {
+          throw new Error("git failed");
+        },
+      }),
+    };
+    expect(await loadDiff(broken, "r_1", "a.ts")).toEqual({ kind: "error", message: "git failed" });
   });
 });

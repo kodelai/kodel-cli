@@ -172,6 +172,9 @@ export async function readRunCommits(
   return { head, commits: commits.slice(0, MAX_RUN_COMMITS), ...(truncated ? { truncated } : {}) };
 }
 
+/** The most of a file's diff that is read for display; a larger one is cut and says so. */
+const MAX_PATCH_BYTES = 512 * 1024;
+
 export interface SnapshotterOptions {
   /** Directories that are never part of a snapshot (relative to the repository root). */
   exclude?: string[];
@@ -310,5 +313,44 @@ export class GitSnapshotter {
   /** What changed in the working tree since the snapshot `baseline`. */
   async changesSince(baseline: string): Promise<ChangeSet> {
     return this.changes(baseline, await this.snapshot());
+  }
+
+  /**
+   * The unified diff of one path between two snapshots, cut at `maxBytes`. The path is one the change
+   * list named: a path that leaves the repository, or could be taken for an option, is refused.
+   */
+  async patch(
+    from: string,
+    to: string,
+    path: string,
+    maxBytes = MAX_PATCH_BYTES,
+  ): Promise<{ text: string; truncated: boolean }> {
+    if (path === "" || path.startsWith("/") || path.split("/").includes("..")) {
+      throw new Error(`not a path inside the repository: ${path}`);
+    }
+    const { stdout } = await git(
+      [
+        "diff",
+        "--no-renames",
+        "--no-textconv",
+        "--no-ext-diff",
+        "--no-color",
+        "--relative",
+        "-U3",
+        from,
+        to,
+        "--",
+        path,
+      ],
+      this.root,
+    );
+    return stdout.length > maxBytes
+      ? { text: stdout.slice(0, maxBytes), truncated: true }
+      : { text: stdout, truncated: false };
+  }
+
+  /** The diff of one path from the snapshot `baseline` to the working tree as it is now. */
+  async patchSince(baseline: string, path: string): Promise<{ text: string; truncated: boolean }> {
+    return this.patch(baseline, await this.snapshot(), path);
   }
 }

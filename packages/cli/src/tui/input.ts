@@ -21,6 +21,8 @@ const KEYS: Record<string, string> = {
   "\t": "tab",
   [ESC]: "escape",
   "\u0003": "ctrl-c",
+  "\u007f": "backspace",
+  "\b": "backspace",
 };
 
 export function keyName(chunk: string): string {

@@ -132,33 +132,73 @@ export interface Attempt {
   checks: CheckLine[];
   decision?: { decision: string; reason?: string };
   review?: { completeness: string; findings: Finding[] };
+  /** The journal records of this try, formatted. */
+  log: string[];
 }
 
-/** One step on the way a run goes, in the order it goes. */
-export interface StepDetail {
+/** One entry of a run into a step, in the order it happened: the call list of the run. */
+export interface Visit {
   slug: string;
   kind: string;
-  state: StepState;
-  /** A person decides it. */
   human: boolean;
-  attempts: Attempt[];
+  state: StepState;
+  /** The step was entered again after something failed. */
+  rework: boolean;
+  attempt: Attempt;
+}
+
+/** One row of the comments a person made at the gate. */
+export interface Comment {
+  severity: string;
+  location: string;
+  description: string;
+}
+
+export interface Metrics {
+  /** Time the run was not waiting for a person, and time it was. */
+  workMs: number;
+  waitMs: number;
+  stepsDone: number;
+  stepsTotal: number;
+  /** Entries into a step beyond the first. */
+  retries: number;
+  checksPassed: number;
+  checksTotal: number;
+  /** From the agent's own logs, when they can be read. */
+  tokens?: { total: number; cost?: number; approx: boolean };
+}
+
+export interface AgentWords {
+  text: string;
+  ts: number;
+  /** Where it came from: the agent's log, or the summary a step left in the journal. */
+  from: "log" | "journal";
 }
 
 /** Everything the card of a run waiting at a human step shows beyond the list row. */
 export interface GateDetail {
   node: string;
+  /** The try the gate is on; comments are kept against it. */
+  attempt: number;
   /** `gate 2 of 2` on the way this run takes. */
   position: string;
   prompt: string;
   instructions?: string;
-  steps: StepDetail[];
+  report?: AgentWords;
+  visits: Visit[];
   /** The latest attempt of each step, as the engine judged it. */
   checks: CheckLine[];
   changes: ChangeSummary;
   /** Files that changed after the checks passed: the agent kept working. */
   changedAfterChecks: string[];
-  /** Comments already recorded at this step. */
-  comments: number;
+  comments: Comment[];
+  metrics: Metrics;
   /** The journal of the run, oldest first. */
   journal: string[];
 }
+
+/** A file's diff, once it has been read. */
+export type DiffState =
+  | { kind: "text"; text: string; truncated: boolean }
+  | { kind: "missing" }
+  | { kind: "error"; message: string };

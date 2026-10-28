@@ -1,18 +1,22 @@
 /** The terminal loop: alternate screen, raw keys, redraw on a key, a resize, a frame or new data. */
 import { MOUSE_OFF, MOUSE_ON, parseInput } from "./input";
 import type { Loaded } from "./load";
-import type { GateDetail } from "./session";
+import type { Comment, DiffState, GateDetail } from "./session";
+import { diffKey } from "./tabs";
 import {
   detailKey,
+  type Effect,
   initialModel,
   isAnimated,
   type Model,
   mouseUpdate,
   render,
+  takeEffects,
   tick,
   update,
   withData,
   withDetail,
+  withDiff,
 } from "./view";
 
 const FRAME_MS = 100;
@@ -23,6 +27,11 @@ export interface TuiOptions {
   mouse?: boolean;
   /** Reads what the card of a run at a human step shows; called for the selected run only. */
   loadDetail?: (runId: string) => Promise<GateDetail | undefined>;
+  /** Reads the diff of one changed file of a run. */
+  loadDiff?: (runId: string, path: string) => Promise<DiffState>;
+  /** Records a comment at the gate of a run, or takes one out. A person's act, never an agent's. */
+  addComment?: (runId: string, node: string, attempt: number, comment: Comment) => Promise<void>;
+  deleteComment?: (runId: string, node: string, attempt: number, index: number) => Promise<void>;
 }
 
 export async function runTui(
@@ -56,6 +65,49 @@ export async function runTui(
         reading.delete(key);
         draw();
       });
+  };
+  /** What the screen asked for and cannot do itself: a diff to read, a comment to write. */
+  const perform = (effect: Effect) => {
+    const failed = (what: string) => (error: unknown) => {
+      model = {
+        ...model,
+        notice: `${what}: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    };
+    if (effect.type === "load_diff") {
+      const read = options.loadDiff?.(effect.runId, effect.path);
+      if (!read) return;
+      read
+        .then((diff) => {
+          model = withDiff(model, diffKey(effect.runId, effect.path), diff);
+        })
+        .catch(failed("Cannot read the diff"))
+        .finally(draw);
+      return;
+    }
+    const write =
+      effect.type === "add_comment"
+        ? options.addComment?.(effect.runId, effect.node, effect.attempt, effect.comment)
+        : options.deleteComment?.(effect.runId, effect.node, effect.attempt, effect.index);
+    if (!write) {
+      model = { ...model, notice: "Comments cannot be written here." };
+      return;
+    }
+    write
+      .then(() => {
+        model = {
+          ...model,
+          notice: effect.type === "add_comment" ? "Comment saved." : "Comment deleted.",
+        };
+        ensureDetail(true);
+      })
+      .catch(failed("Could not change the comments"))
+      .finally(draw);
+  };
+  const flush = () => {
+    const [clean, effects] = takeEffects(model);
+    model = clean;
+    for (const effect of effects) perform(effect);
   };
   const draw = () => {
     if (model.mouse !== mouseSent) {
@@ -126,6 +178,7 @@ export async function runTui(
         finish();
         return;
       }
+      flush();
       ensureDetail(model.selected !== before);
       draw();
     };

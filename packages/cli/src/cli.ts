@@ -478,21 +478,29 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       requireHuman();
       const { runTui } = await import("./tui/run");
       if (opts.demo) {
-        const { demoGateDetail, demoSessions } = await import("./tui/demo");
+        const { demoAddComment, demoDeleteComment, demoDiff, demoGateDetail, demoSessions } =
+          await import("./tui/demo");
         // One start time for the whole run, so the sample waits keep their identity and only age.
         const base = Date.now();
         await runTui(process.stdin, process.stdout, async () => demoSessions(base), "demo", {
           mouse: opts.mouse === true,
-          loadDetail: async (runId) => demoGateDetail(runId),
+          loadDetail: async (runId) => demoGateDetail(runId, base),
+          loadDiff: (_runId, path) => demoDiff(path),
+          addComment: (runId, _node, _attempt, comment) => demoAddComment(runId, comment),
+          deleteComment: (runId, _node, _attempt, index) => demoDeleteComment(runId, index),
         });
         return;
       }
       const { loadSessions } = await import("./tui/load");
-      const { loadGateDetail } = await import("./tui/gate");
+      const { addComment, loadDiff, loadGateDetail, removeComment } = await import("./tui/gate");
       const h = await host();
       await runTui(process.stdin, process.stdout, () => loadSessions(h, Date.now()), "project", {
         mouse: opts.mouse === true,
         loadDetail: (runId) => loadGateDetail(h, runId),
+        loadDiff: (runId, path) => loadDiff(h, runId, path),
+        addComment: (runId, node, attempt, comment) => addComment(h, runId, node, attempt, comment),
+        deleteComment: (runId, node, attempt, index) =>
+          removeComment(h, runId, node, attempt, index),
       });
     });
 

@@ -40,7 +40,7 @@ function terminal(cols = 120, rows = 32) {
 const start = (t: ReturnType<typeof terminal>, mouse = false) =>
   runTui(t.stdin, t.stdout, async () => demoSessions(BASE), "demo", {
     mouse,
-    loadDetail: async (id) => demoGateDetail(id),
+    loadDetail: async (id) => demoGateDetail(id, BASE),
   });
 
 describe("tui loop", () => {
@@ -58,8 +58,8 @@ describe("tui loop", () => {
     t.type("\u001b[B");
     await wait(80);
     const card = t.since(mark);
-    expect(card).toContain("Summary");
-    expect(card).toContain("You are asked");
+    expect(card).toContain("Report");
+    expect(card).toContain("ASKED");
 
     t.type("q");
     expect(await done).toBe(0);
@@ -78,19 +78,19 @@ describe("tui loop", () => {
     expect(t.since(mark)).toContain("┃");
 
     mark = t.mark();
-    t.type("\t"); // Changes
+    t.type("\t"); // Code
     t.type("\t"); // Steps
-    expect(t.since(mark)).toContain("8 steps · Enter opens one");
+    expect(t.since(mark)).toContain("10 entries into steps · Enter opens one");
 
     mark = t.mark();
-    t.type("\u001b[B\u001b[B\u001b[B\u001b[B"); // down to test
+    t.type("\u001b[B\u001b[B\u001b[B\u001b[B\u001b[B"); // down to the first test
     t.type("\r");
     expect(t.since(mark)).toContain("Steps › test");
-    expect(t.since(mark)).toContain("try 2");
+    expect(t.since(mark)).toContain("1 test failed");
 
     mark = t.mark();
     t.type("\u001b"); // back to the steps
-    expect(t.since(mark)).toContain("8 steps · Enter opens one");
+    expect(t.since(mark)).toContain("10 entries into steps · Enter opens one");
 
     mark = t.mark();
     t.type("z");
@@ -125,12 +125,18 @@ describe("tui loop", () => {
     await wait(60);
     t.type("\u001b[B\u001b[B\u001b[B");
     await wait(80);
-    // The screen is drawn row by row with a cursor move before each; row 4 is the tab strip.
-    const strip = (t.since().split("\u001b[4;1H").at(-1) ?? "").split("\u001b[")[0] ?? "";
-    const x = strip.indexOf("Steps") + 2;
+    // The screen is drawn row by row with a cursor move before each; find the row of the tabs.
+    const rowText = (n: number) =>
+      (t.since().split(`\u001b[${n};1H`).at(-1) ?? "").split("\u001b[")[0] ?? "";
+    const y =
+      [3, 4, 5, 6, 7, 8, 9, 10].find(
+        (n) => rowText(n).includes("Report") && rowText(n).includes("Comments"),
+      ) ?? 0;
+    expect(y).toBeGreaterThan(0);
+    const x = rowText(y).indexOf("Steps") + 2;
     const mark = t.mark();
-    t.type(`\u001b[<0;${x};4M`);
-    expect(t.since(mark)).toContain("8 steps · Enter opens one");
+    t.type(`\u001b[<0;${x};${y}M`);
+    expect(t.since(mark)).toContain("entries into steps");
     t.type("q");
     await done;
   });

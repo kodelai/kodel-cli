@@ -1,6 +1,6 @@
 /** Sample sessions for `kodel tui --demo`. Nothing here is read from a project. */
 import type { Loaded } from "./load";
-import type { Attempt, GateDetail, Session, StepDetail, StepLine } from "./session";
+import type { Attempt, Comment, DiffState, GateDetail, Session, StepLine, Visit } from "./session";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -195,79 +195,185 @@ const attempt = (n: number, over: Partial<Attempt> = {}): Attempt => ({
   outcome: "passed",
   ok: true,
   checks: [],
+  log: [],
   ...over,
 });
 
-const stepOf = (
+const visit = (
   slug: string,
   kind: string,
-  state: StepDetail["state"],
-  attempts: Attempt[],
-): StepDetail => ({ slug, kind, state, human: kind === "human", attempts });
+  state: Visit["state"],
+  a: Attempt,
+  rework = false,
+): Visit => ({ slug, kind, human: kind === "human", state, rework, attempt: a });
+
+const REPORT = `## Done: \`kodel status\` prints one short line per run
+
+I changed three files:
+
+- \`packages/cli/src/format.ts\`: a new \`shortLine(run, max)\` that cuts the task text at its first line and adds "…"
+- \`packages/cli/src/cli.ts\`: \`status\` uses it; \`--full\` keeps the old output
+- \`packages/cli/test/\`: 9 new tests, all pass
+
+**Not done:** the plan asked for a test for a run whose state cannot be read. The code handles it, but I did not add the test.
+
+To try it: \`bun packages/cli/src/main.ts status\`, then \`status --full\`.
+
+Approve to finish, or reject with what is wrong.`;
+
+const SAMPLE_DIFF = `diff --git a/packages/cli/src/format.ts b/packages/cli/src/format.ts
+--- a/packages/cli/src/format.ts
++++ b/packages/cli/src/format.ts
+@@ -1,6 +1,18 @@
+ import { formatTable } from "./table";
+
++/** One line for a run: its task cut at the first line, with "…" where it was cut. */
++export function shortLine(task: string, max: number): string {
++  const line = (task.split("\\n")[0] ?? "").trim();
++  return line.length <= max ? line : \`\${line.slice(0, max - 1)}…\`;
++}
++
+ export function formatRuns(runs: Run[]): string {
+-  return formatTable(runs.map((r) => [r.id, r.task]));
++  return formatTable(runs.map((r) => [r.id, shortLine(r.task, 60)]));
+ }`;
+
+/** The comments made on the sample gate; they live as long as the process does. */
+const made = new Map<string, Comment[]>();
+
+export async function demoAddComment(runId: string, comment: Comment): Promise<void> {
+  made.set(runId, [...(made.get(runId) ?? []), comment]);
+}
+
+export async function demoDeleteComment(runId: string, index: number): Promise<void> {
+  made.set(
+    runId,
+    (made.get(runId) ?? []).filter((_, i) => i !== index),
+  );
+}
+
+export async function demoDiff(path: string): Promise<DiffState> {
+  return path.endsWith("format.ts")
+    ? { kind: "text", text: SAMPLE_DIFF, truncated: false }
+    : {
+        kind: "text",
+        text: `diff --git a/${path} b/${path}\n@@ -1,3 +1,4 @@\n unchanged\n+added in the sample\n`,
+        truncated: false,
+      };
+}
 
 /** What the card of the sample run waiting for approval shows, shaped like a real run's. */
-export function demoGateDetail(runId: string): GateDetail | undefined {
+export function demoGateDetail(runId: string, now: number = Date.now()): GateDetail | undefined {
   if (runId !== "r_0mvo6g4mi") return undefined;
-  const steps: StepDetail[] = [
-    stepOf("plan", "agent", "done", [
+  const check = (node: string, label: string, ms: number, passed = true) => ({
+    node,
+    label,
+    passed,
+    ms,
+  });
+  const visits: Visit[] = [
+    visit(
+      "plan",
+      "agent",
+      "done",
       attempt(1, {
         ms: 46_000,
-        checks: [{ node: "plan", label: "plan diff", passed: true, ms: 153 }],
+        checks: [check("plan", "plan diff", 153)],
+        log: ["09:12:01 node_entered       plan", "09:12:47 check_finished     plan diff"],
       }),
-    ]),
-    stepOf("plan-approval", "human", "done", [
+    ),
+    visit(
+      "plan-approval",
+      "human",
+      "done",
       attempt(1, {
         outcome: "approved",
         ms: 9 * 60_000,
         decision: { decision: "approved" },
+        log: ["09:12:47 gate_waiting       plan-approval", "09:22:00 gate_decided       approved"],
       }),
-    ]),
-    stepOf("impl", "agent", "done", [
+    ),
+    visit(
+      "impl",
+      "agent",
+      "failed",
       attempt(1, {
         outcome: "failed",
         ok: false,
         ms: 4 * 60_000,
         reason: "The diff check: 1438 lines changed, the limit is 800.",
-        checks: [{ node: "impl", label: "impl diff", passed: false, ms: 158 }],
+        checks: [check("impl", "impl diff", 158, false)],
+        log: ["09:22:01 node_entered       impl", "09:26:10 check_finished     impl diff failed"],
       }),
+    ),
+    visit(
+      "impl",
+      "agent",
+      "done",
       attempt(2, {
         ms: 3 * 60_000,
-        checks: [{ node: "impl", label: "impl diff", passed: true, ms: 160 }],
+        summary: "Split the change: the table printer stays as it was.",
+        checks: [check("impl", "impl diff", 160)],
+        log: ["09:26:11 node_entered       impl", "09:29:20 check_finished     impl diff"],
       }),
-    ]),
-    stepOf("verify", "command", "done", [
+      true,
+    ),
+    visit(
+      "verify",
+      "command",
+      "done",
       attempt(1, {
         ms: 1631,
         exit: 0,
-        checks: [{ node: "verify", label: "verify", passed: true, ms: 1631 }],
+        checks: [check("verify", "verify", 1631)],
+        log: ["09:29:21 command_finished   verify exit 0"],
       }),
-    ]),
-    stepOf("test", "command", "done", [
+    ),
+    visit(
+      "test",
+      "command",
+      "failed",
       attempt(1, {
         outcome: "failed",
         ok: false,
         ms: 70_000,
         exit: 1,
         reason: "1 test failed: t40_wait_timeout_reports",
-        checks: [{ node: "test", label: "test", passed: false, ms: 70_000 }],
+        checks: [check("test", "test", 70_000, false)],
+        log: ["09:30:31 command_finished   test exit 1"],
       }),
+    ),
+    visit(
+      "test",
+      "command",
+      "done",
       attempt(2, {
         ms: 85_684,
         exit: 0,
-        checks: [{ node: "test", label: "test", passed: true, ms: 85_684 }],
+        checks: [check("test", "test", 85_684)],
+        log: ["09:31:58 command_finished   test exit 0"],
       }),
-    ]),
-    stepOf("build", "command", "done", [
+      true,
+    ),
+    visit(
+      "build",
+      "command",
+      "done",
       attempt(1, {
         ms: 282,
         exit: 0,
-        checks: [{ node: "build", label: "build", passed: true, ms: 282 }],
+        checks: [check("build", "build", 282)],
+        log: ["09:32:00 command_finished   build exit 0"],
       }),
-    ]),
-    stepOf("review", "agent", "done", [
+    ),
+    visit(
+      "review",
+      "agent",
+      "done",
       attempt(1, {
         ms: 20_000,
-        checks: [{ node: "review", label: "review result", passed: true, ms: 61 }],
+        checks: [check("review", "review result", 61)],
+        log: ["09:32:21 report_accepted    review 3 rows"],
         review: {
           completeness: "complete",
           findings: [
@@ -292,31 +398,30 @@ export function demoGateDetail(runId: string): GateDetail | undefined {
           ],
         },
       }),
-    ]),
-    stepOf("final-approval", "human", "waiting", [{ n: 1, checks: [] }]),
+    ),
+    visit("final-approval", "human", "waiting", {
+      n: 1,
+      checks: [],
+      ms: 21 * 60_000,
+      log: ["09:32:22 gate_waiting       final-approval"],
+    }),
   ];
-  const journal = [
-    "09:12:00 run_started",
-    "09:12:01 node_entered       plan",
-    "09:12:47 check_finished     plan",
-    "09:22:00 gate_decided       plan-approval approved",
-    "09:22:01 node_entered       impl",
-    "09:26:10 check_finished     impl",
-    "09:26:11 node_entered       impl",
-    "09:29:20 check_finished     impl",
-    "09:29:21 command_finished   verify",
-    "09:30:31 command_finished   test",
-    "09:31:58 command_finished   test",
-    "09:32:00 command_finished   build",
-    "09:32:21 report_accepted    review",
-    "09:32:22 gate_waiting       final-approval",
-  ];
+  const journal = visits.flatMap((v) => v.attempt.log);
   return {
     node: "final-approval",
+    attempt: 1,
     position: "gate 2 of 2",
     prompt: "Look at the diff and try the change. Approve to finish, or reject with what is wrong.",
-    steps,
-    checks: steps.flatMap((s) => s.attempts.at(-1)?.checks ?? []),
+    report: { text: REPORT, ts: now - 20 * 60_000, from: "log" },
+    visits,
+    checks: [
+      check("plan", "plan diff", 153),
+      check("impl", "impl diff", 160),
+      check("verify", "verify", 1631),
+      check("test", "test", 85_684),
+      check("build", "build", 282),
+      check("review", "review result", 61),
+    ],
     changes: {
       kind: "files",
       files: [
@@ -330,7 +435,17 @@ export function demoGateDetail(runId: string): GateDetail | undefined {
       totalLines: 379,
     },
     changedAfterChecks: [],
-    comments: 0,
+    comments: made.get(runId) ?? [],
+    metrics: {
+      workMs: 92 * 60_000,
+      waitMs: 30 * 60_000,
+      stepsDone: 8,
+      stepsTotal: 9,
+      retries: 2,
+      checksPassed: 6,
+      checksTotal: 6,
+      tokens: { total: 412_000, approx: false },
+    },
     journal,
   };
 }

@@ -15,6 +15,8 @@ import {
 import type { InputEvent } from "./input";
 import type { Loaded } from "./load";
 import {
+  type Comment,
+  type DiffState,
   formatAge,
   type GateDetail,
   NEED_KEYS,
@@ -23,7 +25,23 @@ import {
   type StepState,
   sortSessions,
 } from "./session";
-import { isListTab, itemCount, JOURNAL, TABS, type TabState, tabContent, tabStrip } from "./tabs";
+import {
+  CODE,
+  COMMENTS,
+  commentPlace,
+  diffKey,
+  fileAt,
+  headerBand,
+  isListTab,
+  itemCount,
+  LOG,
+  STEPS,
+  SUBTABS,
+  TABS,
+  type TabState,
+  tabContent,
+  tabStrip,
+} from "./tabs";
 
 export const SECTIONS = ["Sessions", "Pipeline", "Tasks", "Report"] as const;
 
@@ -36,7 +54,7 @@ export interface Model {
   selected: string;
   /** On a narrow terminal the list and the card take turns. */
   focus: "list" | "card";
-  confirm: "a" | "r" | null;
+  confirm: "a" | "r" | "d" | null;
   notice: string;
   quit: boolean;
   /** `demo`: sample data, and a decision only moves a sample around. `project`: nothing can be decided here yet. */
@@ -56,7 +74,27 @@ export interface Model {
   open: boolean;
   /** The list is put away and the card has the whole width. */
   zoom: boolean;
+  /** Which part of an opened step is shown. */
+  sub: number;
+  /** A comment being typed, or nothing. */
+  input: Input | null;
+  /** The diffs read so far, by `diffKey`. */
+  diffs: Record<string, DiffState>;
+  /** Things the screen cannot do by itself (write a comment, read a diff); the loop does them. */
+  effects: Effect[];
 }
+
+export interface Input {
+  text: string;
+  severity: string;
+  /** The file or the step the comment is about. */
+  place: string;
+}
+
+export type Effect =
+  | { type: "add_comment"; runId: string; node: string; attempt: number; comment: Comment }
+  | { type: "delete_comment"; runId: string; node: string; attempt: number; index: number }
+  | { type: "load_diff"; runId: string; path: string };
 
 /** A run's gate detail is good for the wait it was read for: a new wait is a new key. */
 export function detailKey(s: Session): string {
@@ -116,11 +154,24 @@ export function initialModel(
     cursor: 0,
     open: false,
     zoom: false,
+    sub: 0,
+    input: null,
+    diffs: {},
+    effects: [],
   };
 }
 
 export function withDetail(m: Model, key: string, detail: GateDetail): Model {
   return { ...m, details: { ...m.details, [key]: detail } };
+}
+
+export function withDiff(m: Model, key: string, diff: DiffState): Model {
+  return { ...m, diffs: { ...m.diffs, [key]: diff } };
+}
+
+/** The things waiting to be done, and the model without them. */
+export function takeEffects(m: Model): [Model, Effect[]] {
+  return m.effects.length === 0 ? [m, []] : [{ ...m, effects: [] }, m.effects];
 }
 
 /** New data from disk: the selection stays on the same session when it is still there. */
@@ -153,6 +204,7 @@ function selectedSession(m: Model): Session | undefined {
 
 export function update(m: Model, key: string, size: Size = DEFAULT_SIZE): Model {
   if (key === "ctrl-c") return { ...m, quit: true };
+  if (m.input) return typing(m, key);
   const current = selectedSession(m);
   if (m.confirm !== null && current) {
     if (key === "y") return decide(m, current, m.confirm);
@@ -215,6 +267,44 @@ export function update(m: Model, key: string, size: Size = DEFAULT_SIZE): Model 
   }
 }
 
+/** Where a comment lands in the middle of being typed. */
+const SEVERITIES = ["blocker", "critical", "major", "minor", "info"];
+
+/** A comment is being typed: every key is the comment's, except the few that end it. */
+function typing(m: Model, key: string): Model {
+  const input = m.input;
+  if (!input) return m;
+  switch (key) {
+    case "escape":
+      return { ...m, input: null, notice: "Cancelled." };
+    case "enter": {
+      const description = input.text.trim();
+      const found = detailOf(m);
+      if (description === "" || !found) return { ...m, input: null, notice: "" };
+      const comment = { severity: input.severity, location: input.place, description };
+      const effect: Effect = {
+        type: "add_comment",
+        runId: found.s.id,
+        node: found.d.node,
+        attempt: found.d.attempt,
+        comment,
+      };
+      return { ...m, input: null, notice: "", effects: [...m.effects, effect] };
+    }
+    case "tab": {
+      const next = SEVERITIES[(SEVERITIES.indexOf(input.severity) + 1) % SEVERITIES.length];
+      return { ...m, input: { ...input, severity: next ?? "major" } };
+    }
+    case "backspace":
+      return { ...m, input: { ...input, text: [...input.text].slice(0, -1).join("") } };
+    default:
+      // One printable character is text; the names of other keys (up, enter, ...) are longer.
+      return [...key].length === 1 && key >= " "
+        ? { ...m, input: { ...input, text: input.text + key } }
+        : m;
+  }
+}
+
 /** The keys of a card that has the focus; anything it does not use goes on to the general ones. */
 function cardKey(m: Model, key: string, size: Size): Model | undefined {
   const found = detailOf(m);
@@ -222,14 +312,20 @@ function cardKey(m: Model, key: string, size: Size): Model | undefined {
   const down = key === "down" || key === "j";
   if (!found) return up || down ? scrollCard(m, size, up ? -1 : 1) : undefined;
   const onList = isListTab(m.tab) && !m.open;
+  const inStep = m.open && m.tab === STEPS;
   switch (key) {
     case "tab":
-      return toTab(m, (m.tab + 1) % TABS.length);
+      return inStep ? toSub(m, (m.sub + 1) % SUBTABS.length) : toTab(m, (m.tab + 1) % TABS.length);
     case "shift-tab":
-      return toTab(m, (m.tab + TABS.length - 1) % TABS.length);
+      return inStep
+        ? toSub(m, (m.sub + SUBTABS.length - 1) % SUBTABS.length)
+        : toTab(m, (m.tab + TABS.length - 1) % TABS.length);
     case "right":
-      return toTab(m, Math.min(TABS.length - 1, m.tab + 1));
+      return inStep
+        ? toSub(m, Math.min(SUBTABS.length - 1, m.sub + 1))
+        : toTab(m, Math.min(TABS.length - 1, m.tab + 1));
     case "left":
+      if (inStep) return toSub(m, Math.max(0, m.sub - 1));
       return m.tab > 0 ? toTab(m, m.tab - 1) : m;
     case "up":
     case "k":
@@ -245,21 +341,42 @@ function cardKey(m: Model, key: string, size: Size): Model | undefined {
     case " ":
       return onList ? moveCursor(m, found.d, PAGE) : scrollCard(m, size, PAGE);
     case "enter":
-      return onList && itemCount(found.d, m.tab) > 0 ? { ...m, open: true, cardScroll: 0 } : m;
+      if (!onList || m.tab === COMMENTS || itemCount(found.d, m.tab) === 0) return m;
+      return wantDiff({ ...m, open: true, sub: 0, cardScroll: 0 }, found);
     case "n":
     case "p":
-      return m.open ? moveCursor(m, found.d, key === "n" ? 1 : -1) : m;
+      return m.open ? wantDiff(moveCursor(m, found.d, key === "n" ? 1 : -1), found) : m;
     case "escape":
       return m.open ? { ...m, open: false, cardScroll: 0 } : { ...m, focus: "list", zoom: false };
+    case "c": {
+      const place = commentPlace(found.d, tabState(m, found.d));
+      return { ...m, input: { text: "", severity: "major", place }, notice: "" };
+    }
+    case "d":
+      return m.tab === COMMENTS && onList && found.d.comments.length > 0
+        ? { ...m, confirm: "d", notice: "" }
+        : undefined;
     default:
       return undefined;
   }
 }
 
+/** Open on a file in the Code tab: its diff is asked for, once. */
+function wantDiff(m: Model, found: { s: Session; d: GateDetail }): Model {
+  if (m.tab !== CODE || !m.open) return m;
+  const path = fileAt(found.d, Math.min(m.cursor, itemCount(found.d, CODE) - 1));
+  if (path === undefined || diffKey(found.s.id, path) in m.diffs) return m;
+  return { ...m, effects: [...m.effects, { type: "load_diff", runId: found.s.id, path }] };
+}
+
 function toTab(m: Model, tab: number): Model {
-  // The journal is read from its end: the newest records are the ones people look for.
-  const scroll = tab === JOURNAL ? Number.MAX_SAFE_INTEGER : 0;
-  return { ...m, tab, cursor: 0, open: false, cardScroll: scroll, notice: "" };
+  // The log is read from its end: the newest records are the ones people look for.
+  const scroll = tab === LOG ? Number.MAX_SAFE_INTEGER : 0;
+  return { ...m, tab, cursor: 0, open: false, sub: 0, cardScroll: scroll, notice: "" };
+}
+
+function toSub(m: Model, sub: number): Model {
+  return { ...m, sub, cardScroll: 0 };
 }
 
 function moveCursor(m: Model, d: GateDetail, by: number): Model {
@@ -292,6 +409,7 @@ function moveSelection(m: Model, by: -1 | 1): Model {
     tab: 0,
     cursor: 0,
     open: false,
+    sub: 0,
   };
 }
 
@@ -325,7 +443,7 @@ function layoutOf(m: Model, cols: number): Layout {
 }
 
 interface Panel {
-  /** Lines that stay at the top: the name of the run and the tabs. */
+  /** Lines that stay at the top: the band with the run's name and numbers, and the tabs. */
   head: string[];
   body: string[];
   /** The line to keep in sight, in `body`. */
@@ -335,29 +453,35 @@ interface Panel {
 
 function tabState(m: Model, d: GateDetail): TabState {
   const count = itemCount(d, m.tab);
-  return { tab: m.tab, cursor: Math.min(m.cursor, Math.max(0, count - 1)), open: m.open };
+  return {
+    tab: m.tab,
+    cursor: Math.min(m.cursor, Math.max(0, count - 1)),
+    open: m.open,
+    sub: m.sub,
+  };
 }
 
 /** What the right side shows for the selected run. */
-function panel(m: Model, width: number): Panel {
+function panel(m: Model, width: number, height: number): Panel {
   const s = selectedSession(m);
   if (!s) return { head: [], body: [dim("No session selected.")] };
   const found = detailOf(m);
   if (!found) return { head: [], body: cardLines(s, m, width) };
   const focused = m.focus === "card";
-  const strip = tabStrip(found.d, m.tab, width, focused);
-  const content = tabContent(s, found.d, tabState(m, found.d), {
+  const tabs = tabStrip(found.d, m.tab, width, focused);
+  const content = tabContent(found.d, tabState(m, found.d), {
     now: m.now,
     width,
-    actions: actionLine(s, m.source === "project"),
     focused,
+    diffs: m.diffs,
+    runId: s.id,
   });
-  const name = `${glyph(s, m.frame)} ${bold(s.title)}  ${dim(`${s.id} · ${s.pipeline}`)}`;
+  const band = headerBand(s, found.d, width, glyph(s, m.frame), m.now, height < 22);
   return {
-    head: [fit(name, width), strip.line],
+    head: [...band, tabs.line],
     body: content.lines,
     ...(content.anchor === undefined ? {} : { anchor: content.anchor }),
-    spans: strip.spans,
+    spans: tabs.spans,
   };
 }
 
@@ -371,13 +495,26 @@ function panelLines(m: Model, p: Panel, width: number, height: number): string[]
 
 /** Scroll the card, never past its last line. */
 function scrollCard(m: Model, size: Size, by: number): Model {
-  const p = panel(m, layoutOf(m, size.cols).cardWidth);
-  const room = Math.max(1, size.rows - 3 - p.head.length);
+  const height = size.rows - 3;
+  const p = panel(m, layoutOf(m, size.cols).cardWidth, height);
+  const room = Math.max(1, height - p.head.length);
   const max = Math.max(0, p.body.length - room);
   return { ...m, cardScroll: Math.min(max, Math.max(0, m.cardScroll + by)) };
 }
 
-function decide(m: Model, s: Session, key: "a" | "r"): Model {
+function decide(m: Model, s: Session, key: "a" | "r" | "d"): Model {
+  if (key === "d") {
+    const found = detailOf(m);
+    if (!found) return { ...m, confirm: null };
+    const effect: Effect = {
+      type: "delete_comment",
+      runId: s.id,
+      node: found.d.node,
+      attempt: found.d.attempt,
+      index: m.cursor,
+    };
+    return { ...m, confirm: null, notice: "", effects: [...m.effects, effect] };
+  }
   const label = s.need ? (NEED_KEYS[s.need][key] ?? "") : "";
   const next: Session =
     s.need === "hand_edit"
@@ -588,6 +725,8 @@ function menuLine(m: Model, cols: number): string {
 
 function hints(m: Model): string {
   const current = selectedSession(m);
+  if (m.confirm === "d")
+    return `${bold("Delete this comment?")}  ${bold("y")} yes   ${bold("n")} no`;
   if (m.confirm !== null) {
     const label = current?.need ? (NEED_KEYS[current.need][m.confirm] ?? "") : "";
     return `${bold(label)} «${current?.title ?? ""}»?  ${bold("y")} yes   ${bold("n")} no`;
@@ -596,12 +735,19 @@ function hints(m: Model): string {
   const decide = `${keys.a ? `   ${bold("a")} ${keys.a}` : ""}${keys.r ? `   ${bold("r")} ${keys.r}` : ""}`;
   const zoom = `   ${bold("z")} ${m.zoom ? "show list" : "zoom"}`;
   if (m.focus === "card" && m.section === 0) {
+    const found = detailOf(m);
     let nav: string;
-    if (!detailOf(m)) nav = `${bold("↑↓")} scroll   ${bold("Esc")} list`;
-    else if (m.open) nav = `${bold("↑↓")} scroll   ${bold("n/p")} next/prev   ${bold("Esc")} back`;
-    else if (isListTab(m.tab)) {
-      nav = `${bold("←→")} tabs   ${bold("↑↓")} select   ${bold("Enter")} open   ${bold("Esc")} list`;
-    } else nav = `${bold("←→")} tabs   ${bold("↑↓")} scroll   ${bold("Esc")} list`;
+    if (!found) nav = `${bold("↑↓")} scroll   ${bold("Esc")} list`;
+    else if (m.open && m.tab === STEPS) {
+      nav = `${bold("←→")} result/changes/log   ${bold("n/p")} next/prev   ${bold("c")} comment   ${bold("Esc")} back`;
+    } else if (m.open) {
+      nav = `${bold("↑↓")} scroll   ${bold("n/p")} next/prev   ${bold("c")} comment   ${bold("Esc")} back`;
+    } else if (m.tab === COMMENTS) {
+      nav = `${bold("←→")} tabs   ${bold("↑↓")} select   ${bold("c")} add   ${bold("d")} delete   ${bold("Esc")} list`;
+    } else if (isListTab(m.tab)) {
+      nav = `${bold("←→")} tabs   ${bold("↑↓")} select   ${bold("Enter")} open   ${bold("c")} comment   ${bold("Esc")} list`;
+    } else
+      nav = `${bold("←→")} tabs   ${bold("↑↓")} scroll   ${bold("c")} comment   ${bold("Esc")} list`;
     return `${nav}${decide}${zoom}   ${bold("q")} quit`;
   }
   const open = `   ${bold("Enter")} details`;
@@ -611,6 +757,12 @@ function hints(m: Model): string {
       : "";
   const mouse = `   ${bold("m")} mouse ${m.mouse ? green("on") : dim("off")}`;
   return `${bold("↑↓")} select${open}${decide}   ${bold("Tab")} menu${mouse}   ${bold("q")} quit${proposals}`;
+}
+
+/** The line at the bottom while a comment is being typed. */
+function inputLine(input: Input): string {
+  const place = input.place.length > 28 ? `…${input.place.slice(-27)}` : input.place;
+  return `${bold("Comment")} on ${cyan(place)} [${yellow(input.severity)}]: ${input.text}${inverse(" ")}   ${dim("Enter save · Tab severity · Esc cancel")}`;
 }
 
 function emptyState(): string[] {
@@ -644,7 +796,7 @@ export function render(m: Model, { cols, rows }: Size): string[] {
   } else {
     const layout = layoutOf(m, cols);
     const right = layout.showCard
-      ? panelLines(m, panel(m, layout.cardWidth), layout.cardWidth, bodyHeight)
+      ? panelLines(m, panel(m, layout.cardWidth, bodyHeight), layout.cardWidth, bodyHeight)
       : [];
     const left = layout.showList ? listView(m, layout.listWidth, bodyHeight).lines : [];
     if (layout.showList && layout.showCard) {
@@ -662,7 +814,7 @@ export function render(m: Model, { cols, rows }: Size): string[] {
   }
   for (let i = 0; i < bodyHeight; i++) out.push(fit(body[i] ?? "", cols));
 
-  const status = m.notice !== "" ? green(m.notice) : hints(m);
+  const status = m.input ? inputLine(m.input) : m.notice !== "" ? green(m.notice) : hints(m);
   out.push(fit(` ${status}`, cols));
   return out;
 }
@@ -696,11 +848,14 @@ export function hitTest(m: Model, { cols, rows }: Size, x: number, y: number): H
   }
   if (!layout.showCard || x < layout.cardX) return undefined;
   const found = detailOf(m);
-  if (found && row === 1) {
-    const { spans } = tabStrip(found.d, m.tab, layout.cardWidth, m.focus === "card");
-    const at = x - layout.cardX;
-    const index = spans.findIndex(([from, to]) => at >= from && at < to);
-    if (index >= 0) return { kind: "tab", index };
+  if (found) {
+    const head = panel(m, layout.cardWidth, bodyHeight).head;
+    if (row === head.length - 1) {
+      const { spans } = tabStrip(found.d, m.tab, layout.cardWidth, m.focus === "card");
+      const at = x - layout.cardX;
+      const index = spans.findIndex(([from, to]) => at >= from && at < to);
+      if (index >= 0) return { kind: "tab", index };
+    }
   }
   return { kind: "card" };
 }

@@ -3,6 +3,7 @@ import { stripAnsi, visibleLength } from "../src/tui/ansi";
 import { demoGateDetail, demoSessions } from "../src/tui/demo";
 import type { GateDetail, Session } from "../src/tui/session";
 import { formatAge } from "../src/tui/session";
+import { diffKey } from "../src/tui/tabs";
 import {
   detailKey,
   hitTest,
@@ -11,11 +12,13 @@ import {
   mouseUpdate,
   ordered,
   render,
+  takeEffects,
   tick,
   update,
   WIDE_COLS,
   withData,
   withDetail,
+  withDiff,
 } from "../src/tui/view";
 
 const NOW = Date.UTC(2026, 9, 27, 15, 0, 0);
@@ -293,8 +296,8 @@ describe("tui mouse", () => {
   test("the wheel over a card scrolls the card, not the selection; other sections are left alone", () => {
     const gate = demoSessions(NOW).sessions.find((s) => s.need === "approve");
     const key = detailKey(gate as Session);
-    const detail = demoGateDetail(gate?.id ?? "") as GateDetail;
-    const base = { ...withDetail({ ...on(), selected: gate?.id ?? "" }, key, detail), tab: 3 };
+    const detail = demoGateDetail(gate?.id ?? "", NOW) as GateDetail;
+    const base = { ...withDetail({ ...on(), selected: gate?.id ?? "" }, key, detail), tab: 4 };
     const small = { cols: 70, rows: 14 };
     const card = { ...base, focus: "card" as const };
     const scrolled = mouseUpdate(card, small, wheel("wheel_down"));
@@ -348,10 +351,10 @@ describe("tui mouse", () => {
 });
 
 describe("tui card of a run waiting for approval", () => {
-  const SIZE = { cols: 120, rows: 36 };
+  const SIZE = { cols: 120, rows: 44 };
   const SMALL = { cols: 120, rows: 16 };
   const gate = () => demoSessions(NOW).sessions.find((s) => s.need === "approve") as Session;
-  const detail = () => demoGateDetail(gate().id) as GateDetail;
+  const detail = () => demoGateDetail(gate().id, NOW) as GateDetail;
   const withCard = (d: GateDetail = detail()) => {
     const g = gate();
     return withDetail({ ...demo(), selected: g.id }, detailKey(g), d);
@@ -362,223 +365,371 @@ describe("tui card of a run waiting for approval", () => {
     ...keys: string[]
   ) => keys.reduce((acc, k) => update(acc, k, size), m);
   const text = (m: ReturnType<typeof demo>, size = SIZE) => plain(render(m, size)).join("\n");
-  const STEP = { plan: 0, impl: 2, test: 4, review: 6, final: 7 };
+  const n = (count: number, key: string) => Array<string>(count).fill(key);
+  const TAB = { report: 0, code: 1, steps: 2, comments: 3, log: 4 };
+  /** The keys that go to a tab: Enter on the list, then the tabs to the right. */
+  const toTab = (tab: number) => ["enter", ...n(tab, "right")];
 
-  test("Enter puts the focus on the card and Esc gives it back; the divider shows where it is", () => {
-    let m = withCard();
-    expect(m.focus).toBe("list");
-    expect(text(m)).toContain(" │ ");
-    m = press(m, SIZE, "enter");
-    expect(m.focus).toBe("card");
-    expect(text(m)).toContain(" ┃ ");
-    expect(text(m)).toMatch(/›.*capture-usage-cost/);
-    m = press(m, SIZE, "escape");
-    expect(m.focus).toBe("list");
-  });
-
-  test("Summary is short: the question, the engine's verdict and the counts, nothing to wade through", () => {
-    const out = text(press(withCard(), SIZE, "enter"));
-    expect(out).toContain("gate 2 of 2 · final-approval");
-    expect(out).toContain("You are asked");
-    expect(out).toContain("Look at the diff and try the change.");
-    expect(out).toContain("Engine checks: all 6 passed");
-    expect(out).toContain("Changes 5 files · 379 lines");
-    expect(out).toContain("impl ran 2 times");
-    for (const gone of ["cli.test.ts", "Findings", "minor", "try 1", "JOURNAL"]) {
-      expect(out).not.toContain(gone);
-    }
-  });
-
-  test("the tabs show what is behind them: counts on the tabs, a mark where something is wrong", () => {
+  test("the band on top gives the name, where the run stands and its numbers", () => {
     const out = text(withCard());
-    expect(out).toContain("Summary");
-    expect(out).toContain("Changes 5");
-    expect(out).toContain("Steps 8");
-    expect(out).toContain("Journal 14");
-    const late = text(withCard({ ...detail(), changedAfterChecks: ["x.ts"] }));
-    expect(late).toContain("Changes 5 ⚠");
-    const broken = detail();
-    const steps = broken.steps.map((s) =>
-      s.slug === "test" ? { ...s, state: "failed" as const } : s,
-    );
-    expect(text(withCard({ ...broken, steps }))).toContain("Steps 8 ✗");
+    expect(out).toContain("╭");
+    expect(out).toContain("capture-usage-cost");
+    expect(out).toContain("r_0mvo6g4mi · dev");
+    expect(out).toContain("gate 2 of 2 · final-approval");
+    expect(out).toContain("⏱ 1h32 work · 30m waiting");
+    expect(out).toContain("8/9 steps");
+    expect(out).toContain("⟳ 2 retries");
+    expect(out).toContain("✓ 6/6 checks");
+    expect(out).toContain("± 5 files · 379 lines");
+    expect(out).toContain("⛁ 412k tokens");
   });
 
-  test("→ and Tab go to the next tab, ← and Shift+Tab to the previous, and ← stops at the first", () => {
-    let m = press(withCard(), SIZE, "enter");
-    expect(m.tab).toBe(0);
-    m = press(m, SIZE, "left");
-    expect(m.tab).toBe(0);
-    expect(m.focus).toBe("card");
-    m = press(m, SIZE, "right");
-    expect(m.tab).toBe(1);
-    m = press(m, SIZE, "tab", "tab");
-    expect(m.tab).toBe(3);
-    expect(press(m, SIZE, "right").tab).toBe(3);
-    expect(press(m, SIZE, "tab").tab).toBe(0);
-    expect(press(m, SIZE, "shift-tab").tab).toBe(2);
-  });
-
-  test("Changes lists the files, ↑↓ pick one, Enter opens it, n and p walk the files, Esc comes back", () => {
-    let m = press(withCard(), SIZE, "enter", "right");
-    const list = text(m);
-    expect(list).toContain("5 files · 379 lines");
-    expect(list).toContain("▸ packages/cli/test/cli.test.ts");
-    m = press(m, SIZE, "down", "down");
-    expect(text(m)).toContain("▸ packages/cli/src/format.ts");
-    m = press(m, SIZE, "enter");
-    expect(m.open).toBe(true);
-    expect(text(m)).toContain("Changes › packages/cli/src/format.ts");
-    m = press(m, SIZE, "n");
-    expect(text(m)).toContain("Changes › docs/plans/make-status-readable.md");
-    m = press(m, SIZE, "p", "p");
-    expect(text(m)).toContain("Changes › packages/cli/src/cli.ts");
-    m = press(m, SIZE, "escape");
-    expect(m.open).toBe(false);
-    expect(m.focus).toBe("card");
-    expect(m.cursor).toBe(1);
-    expect(press(m, SIZE, "escape").focus).toBe("list");
-  });
-
-  test("Steps has a line per step with its verdict and what was notable", () => {
-    const out = text(press(withCard(), SIZE, "enter", "right", "right"));
-    expect(out).toContain("8 steps · Enter opens one");
-    expect(out).toMatch(/✓ plan-approval\s+human\s+9m00\s+approved/);
-    expect(out).toMatch(/✓ impl\s+agent\s+3m00\s+2 tries, 1 failed/);
-    expect(out).toMatch(/✓ test\s+command\s+1m26\s+2 tries, 1 failed/);
-    expect(out).toMatch(/✓ review\s+agent\s+20\.0s\s+3 findings/);
-    expect(out).toMatch(/◐ final-approval\s+human\s+waiting for you/);
-  });
-
-  test("a step opens to its tries, the newest first, with why the failed one failed", () => {
-    const m = press(
-      withCard(),
-      SIZE,
-      "enter",
-      "tab",
-      "tab",
-      ...Array<string>(STEP.test).fill("down"),
-      "enter",
-    );
-    const out = text(m);
-    expect(out).toContain("Steps › test");
-    expect(out).toContain("command · 2 tries");
-    expect(out.indexOf("try 2")).toBeGreaterThan(-1);
-    expect(out.indexOf("try 2")).toBeLessThan(out.indexOf("try 1"));
-    expect(out).toContain("exit 1");
-    expect(out).toContain("1 test failed: t40_wait_timeout_reports");
-  });
-
-  test("findings belong to the review step, in full, marked as the agent's", () => {
-    const m = press(
-      withCard(),
-      SIZE,
-      "enter",
-      "tab",
-      "tab",
-      ...Array<string>(STEP.review).fill("down"),
-      "enter",
-    );
-    const out = text(m, { cols: 120, rows: 50 });
-    expect(out).toContain("Steps › review");
-    expect(out).toContain("Findings (the agent's, complete): 2 minor · 1 info");
-    expect(out).toContain("packages/cli/test/cli.test.ts:296");
-    expect(out).toContain("coverage gap only");
-  });
-
-  test("what the agent says about a step is marked as not verified, and a person's decision shows its reason", () => {
+  test("the band says when a number is not known and when something is wrong", () => {
     const d = detail();
-    const steps = d.steps.map((s) => {
-      if (s.slug === "impl") {
-        return {
-          ...s,
-          attempts: s.attempts.map((a) => ({ ...a, summary: "Rewrote the table printer." })),
-        };
-      }
-      if (s.slug === "plan-approval") {
-        return {
-          ...s,
-          attempts: [
-            {
-              ...s.attempts[0],
-              n: 1,
-              checks: [],
-              decision: { decision: "rejected", reason: "no tests in the plan" },
-            },
-          ],
-        };
-      }
-      return s;
-    }) as GateDetail["steps"];
-    const base = withCard({ ...d, steps });
-    const impl = text(press(base, SIZE, "enter", "tab", "tab", "down", "down", "enter"));
-    expect(impl).toContain("Agent says (not verified):");
-    expect(impl).toContain("Rewrote the table printer.");
-    const human = text(press(base, SIZE, "enter", "tab", "tab", "down", "enter"));
-    expect(human).toContain("You: rejected — “no tests in the plan”");
+    const none = text(
+      withCard({ ...d, metrics: { ...d.metrics, tokens: undefined } as GateDetail["metrics"] }),
+    );
+    expect(none).toContain("⛁ —");
+    const approx = text(
+      withCard({ ...d, metrics: { ...d.metrics, tokens: { total: 5000, approx: true } } }),
+    );
+    expect(approx).toContain("⛁ ~5.0k tokens");
+    const late = text(withCard({ ...d, changedAfterChecks: ["a.ts", "b.ts"] }));
+    expect(late).toContain("⚠ 2 files changed after the checks");
+    const red = text(withCard({ ...d, metrics: { ...d.metrics, checksPassed: 5 } }));
+    expect(red).toContain("✗ 5/6 checks");
   });
 
-  test("warnings are on Summary: files that changed after the checks, a check that failed, changes that cannot be told", () => {
+  test("the tabs are in the order a gate is read, with what is behind each", () => {
+    const out = text(withCard());
+    const strip = out.split("\n").find((l) => l.includes("Comments")) ?? "";
+    const at = (name: string) => strip.indexOf(name);
+    expect(at("Report")).toBeGreaterThan(-1);
+    expect(at("Code 5")).toBeGreaterThan(at("Report"));
+    expect(at("Steps 10")).toBeGreaterThan(at("Code"));
+    expect(at("Comments 0")).toBeGreaterThan(at("Steps"));
+    expect(at("Log 14")).toBeGreaterThan(at("Comments"));
+  });
+
+  test("it opens on the agent's report, whole, with what was asked above it", () => {
+    const out = text(press(withCard(), SIZE, "enter"));
+    expect(out).toContain("ASKED");
+    expect(out).toContain("Look at the diff and try the change.");
+    expect(out).toContain("THE AGENT'S REPORT · from its log, written 20m ago");
+    expect(out).toContain("Done: `kodel status` prints one short line per run");
+    expect(out).toContain("- `packages/cli/src/format.ts`: a new `shortLine(run, max)`");
+    expect(out).toContain("Not done: the plan asked for a test");
+    expect(out).toContain("Approve to finish, or reject with what is wrong.");
+    expect(out).not.toContain("**");
+    expect(out).not.toContain("## ");
+  });
+
+  test("a report that is only a step's summary says it is the agent's word, and no report says so", () => {
     const d = detail();
-    const after = text(
-      press(withCard({ ...d, changedAfterChecks: ["a.ts", "b.ts"] }), SIZE, "enter"),
-    );
-    expect(after).toContain("⚠ 2 files changed after the checks passed");
-    const failed = text(
+    const fromJournal = text(
       press(
-        withCard({ ...d, checks: [{ node: "test", label: "test", passed: false }] }),
+        withCard({ ...d, report: { text: "I did it.", ts: 0, from: "journal" } }),
         SIZE,
         "enter",
       ),
     );
-    expect(failed).toContain("✗ 1 of 1 checks failed: test");
-    const unknown = withCard({ ...d, changes: { kind: "unavailable", reason: "git failed" } });
-    expect(text(press(unknown, SIZE, "enter"))).toContain("⚠ Cannot tell what changed: git failed");
-    expect(text(press(unknown, SIZE, "enter", "right"))).toContain(
-      "Cannot tell what changed: git failed",
-    );
-    expect(text(press(unknown, SIZE, "enter", "right"))).not.toContain("No files changed");
+    expect(fromJournal).toContain("a step's summary (not checked)");
+    expect(fromJournal).toContain("I did it.");
+    const none = text(press(withCard({ ...d, report: undefined }), SIZE, "enter"));
+    expect(none).toContain("No report found.");
   });
 
-  test("Journal opens at its end, where the newest records are, and scrolls up from there", () => {
-    let m = press(withCard(), SMALL, "enter", "tab", "tab", "tab");
+  test("a long report scrolls", () => {
+    const long = Array.from({ length: 80 }, (_, i) => `Line ${i} of the report.`).join("\n");
+    let m = press(
+      withCard({ ...detail(), report: { text: long, ts: Date.now(), from: "log" } }),
+      SMALL,
+      "enter",
+    );
+    expect(text(m, SMALL)).toContain("▼ PgDn for more");
+    m = press(m, SMALL, "pagedown");
+    expect(m.cardScroll).toBeGreaterThan(0);
+    expect(text(m, SMALL)).toContain("▲ PgUp for earlier");
+  });
+
+  test("Code lists the files with the comments on each, and Enter opens one and asks for its diff once", () => {
+    const d = {
+      ...detail(),
+      comments: [{ severity: "major", location: "packages/cli/src/format.ts:9", description: "x" }],
+    };
+    let m = press(withCard(d), SIZE, ...toTab(TAB.code));
+    const list = text(m);
+    expect(list).toContain("5 files · 379 lines · Enter opens a file");
+    expect(list).toContain("▸ packages/cli/test/cli.test.ts");
+    expect(list).toMatch(/packages\/cli\/src\/format\.ts\s+61 ✎1/);
+    m = press(m, SIZE, "down", "down", "enter");
+    expect(m.open).toBe(true);
+    expect(m.effects).toEqual([
+      { type: "load_diff", runId: gate().id, path: "packages/cli/src/format.ts" },
+    ]);
+    expect(text(m)).toContain("Code › packages/cli/src/format.ts");
+    expect(text(m)).toContain("Reading the diff…");
+    const [clean] = takeEffects(m);
+    const read = withDiff(clean, diffKey(gate().id, "packages/cli/src/format.ts"), {
+      kind: "text",
+      text: "@@ -1,2 +1,3 @@\n unchanged\n-old\n+new",
+      truncated: false,
+    });
+    const shown = render(read, SIZE).join("\n");
+    expect(stripAnsi(shown)).toContain("+new");
+    expect(shown).toContain("\u001b[32m"); // added lines are green
+    expect(shown).toContain("\u001b[31m"); // removed ones red
+    // The same file again asks for nothing; another file asks for its own.
+    const next = press(read, SIZE, "n");
+    expect(next.effects).toEqual([
+      { type: "load_diff", runId: gate().id, path: "docs/plans/make-status-readable.md" },
+    ]);
+    expect(press(takeEffects(next)[0], SIZE, "p").effects).toEqual([]);
+    expect(press(read, SIZE, "escape").open).toBe(false);
+  });
+
+  test("a diff that cannot be read says why, and one that is cut says so", () => {
+    const path = "packages/cli/test/cli.test.ts";
+    const base = press(withCard(), SIZE, ...toTab(TAB.code), "enter");
+    const key = diffKey(gate().id, path);
+    expect(text(withDiff(base, key, { kind: "error", message: "git failed" }))).toContain(
+      "Cannot read the diff: git failed",
+    );
+    expect(text(withDiff(base, key, { kind: "missing" }))).toContain("No diff to show");
+    expect(text(withDiff(base, key, { kind: "text", text: "+a", truncated: true }))).toContain(
+      "the diff is cut here",
+    );
+  });
+
+  test("Steps is the run's calls in the order they happened: repeats after a failure are marked", () => {
+    const out = text(press(withCard(), SIZE, ...toTab(TAB.steps)));
+    expect(out).toContain("10 entries into steps · Enter opens one");
+    expect(out).toMatch(/✗\s+impl\s+agent\s+4m00\s+The diff check: 1438 line/);
+    expect(out).toMatch(/✓ ↺ impl #2\s+agent\s+3m00/);
+    expect(out).toMatch(/✗\s+test\s+command\s+1m10\s+1 test failed/);
+    expect(out).toMatch(/✓ ↺ test #2\s+command\s+1m26/);
+    expect(out).toMatch(/✓\s+plan-approval\s+human\s+9m00\s+approved/);
+    expect(out).toMatch(/✓\s+review\s+agent\s+20\.0s\s+3 findings/);
+    expect(out).toMatch(/◐\s+final-approval\s+human\s+21m00\s+waiting for you/);
+  });
+
+  test("a step opens on its result; ← and → show its changes and its log; n and p walk the steps", () => {
+    let m = press(withCard(), SIZE, ...toTab(TAB.steps), ...n(5, "down"), "enter");
+    let out = text(m);
+    expect(out).toContain("Steps › test");
+    expect(out).toContain("Result  Changes  Log");
+    expect(out).toContain("1 test failed: t40_wait_timeout_reports");
+    expect(out).toContain("exit 1");
+    m = press(m, SIZE, "right");
+    out = text(m);
+    expect(out).toContain("not recorded for it yet");
+    m = press(m, SIZE, "right");
+    out = text(m);
+    expect(out).toContain("09:30:31 command_finished   test exit 1");
+    m = press(m, SIZE, "n");
+    expect(text(m)).toContain("Steps › test #2");
+    expect(text(m)).toContain("09:31:58 command_finished   test exit 0");
+    m = press(m, SIZE, "escape");
+    expect(m.open).toBe(false);
+    expect(m.tab).toBe(TAB.steps);
+  });
+
+  test("the findings are inside the review step, in full, marked as the agent's", () => {
+    const m = press(withCard(), SIZE, ...toTab(TAB.steps), ...n(8, "down"), "enter");
+    const out = text(m);
+    expect(out).toContain("Steps › review");
+    expect(out).toContain("Findings (the agent's, complete): 2 minor · 1 info");
+    expect(out).toContain("packages/cli/test/cli.test.ts:296");
+    expect(out).toContain("coverage gap");
+    // and not on the first screen
+    expect(text(press(withCard(), SIZE, "enter"))).not.toContain("Findings");
+  });
+
+  test("what the agent said about a step is marked as not verified; a person's decision shows its reason", () => {
+    const d = detail();
+    const visits = d.visits.map((v) =>
+      v.slug === "plan-approval"
+        ? {
+            ...v,
+            attempt: {
+              ...v.attempt,
+              decision: { decision: "rejected", reason: "no tests in the plan" },
+            },
+          }
+        : v,
+    );
+    const base = withCard({ ...d, visits });
+    const impl = text(press(base, SIZE, ...toTab(TAB.steps), ...n(3, "down"), "enter"));
+    expect(impl).toContain("The agent says (not verified):");
+    expect(impl).toContain("Split the change: the table printer stays as it was.");
+    const human = text(press(base, SIZE, ...toTab(TAB.steps), "down", "enter"));
+    expect(human).toContain("You: rejected — “no tests in the plan”");
+  });
+
+  test("a step that has not started says so", () => {
+    const d = detail();
+    const next = {
+      ...d.visits[0],
+      slug: "release",
+      kind: "command",
+      state: "pending" as const,
+      attempt: { n: 0, checks: [], log: [] },
+    } as GateDetail["visits"][number];
+    const out = text(
+      press(
+        withCard({ ...d, visits: [...d.visits, next] }),
+        SIZE,
+        ...toTab(TAB.steps),
+        ...n(10, "down"),
+        "enter",
+      ),
+    );
+    expect(out).toContain("This step has not started yet.");
+  });
+
+  test("c opens a comment about what is on the screen: the file, the step, or the gate", () => {
+    const code = press(withCard(), SIZE, ...toTab(TAB.code), "down", "c");
+    expect(code.input).toEqual({ text: "", severity: "major", place: "packages/cli/src/cli.ts" });
+    const step = press(withCard(), SIZE, ...toTab(TAB.steps), ...n(4, "down"), "c");
+    expect(step.input?.place).toBe("verify");
+    const report = press(withCard(), SIZE, "enter", "c");
+    expect(report.input?.place).toBe("final-approval");
+    const open = press(withCard(), SIZE, ...toTab(TAB.code), "enter", "n", "c");
+    expect(open.input?.place).toBe("packages/cli/src/cli.ts");
+  });
+
+  test("typing a comment: text goes in, backspace takes it out, Tab changes the severity, Esc leaves, Enter saves", () => {
+    let m = press(withCard(), SIZE, ...toTab(TAB.code), "c");
+    expect(text(m)).toContain("cli.test.ts [major]: ");
+    m = press(m, SIZE, ..."Not needed!".split(""));
+    m = press(
+      m,
+      SIZE,
+      "backspace",
+      "backspace",
+      "backspace",
+      "backspace",
+      "backspace",
+      "backspace",
+      "backspace",
+      "backspace",
+      "backspace",
+    );
+    m = press(m, SIZE, ..."Why?".split(""));
+    expect(m.input?.text).toBe("NoWhy?");
+    expect(text(m)).toContain("NoWhy?");
+    m = press(m, SIZE, "tab");
+    expect(m.input?.severity).toBe("minor");
+    // keys with names are not text, and q does not quit while typing
+    m = press(m, SIZE, "up", "q");
+    expect(m.quit).toBe(false);
+    expect(m.input?.text).toBe("NoWhy?q");
+    expect(press(m, SIZE, "escape").input).toBeNull();
+    const saved = press(m, SIZE, "enter");
+    expect(saved.input).toBeNull();
+    expect(saved.effects).toEqual([
+      {
+        type: "add_comment",
+        runId: gate().id,
+        node: "final-approval",
+        attempt: 1,
+        comment: {
+          severity: "minor",
+          location: "packages/cli/test/cli.test.ts",
+          description: "NoWhy?q",
+        },
+      },
+    ]);
+    // nothing typed, nothing saved
+    expect(press(press(withCard(), SIZE, "enter", "c"), SIZE, "enter").effects).toEqual([]);
+  });
+
+  test("text in any language goes in as it is", () => {
+    const m = press(withCard(), SIZE, "enter", "c", ..."Тест 👍".split(""));
+    expect(m.input?.text).toBe("Тест 👍");
+  });
+
+  test("the comments are listed with their text; d asks, y deletes the selected one, n keeps it", () => {
+    const d = {
+      ...detail(),
+      comments: [
+        { severity: "major", location: "a.ts:1", description: "first" },
+        { severity: "info", location: "b.ts:2", description: "second one" },
+      ],
+    };
+    let m = press(withCard(d), SIZE, ...toTab(TAB.comments));
+    const out = text(m);
+    expect(out).toContain("They go back to the agent when you reject.");
+    expect(out).toContain("▸ major");
+    expect(out).toContain("a.ts:1");
+    expect(out).toContain("second one");
+    m = press(m, SIZE, "down", "d");
+    expect(m.confirm).toBe("d");
+    expect(text(m)).toContain("Delete this comment?");
+    expect(press(m, SIZE, "n").effects).toEqual([]);
+    expect(press(m, SIZE, "y").effects).toEqual([
+      { type: "delete_comment", runId: gate().id, node: "final-approval", attempt: 1, index: 1 },
+    ]);
+    expect(text(withCard())).not.toContain("Delete this");
+    expect(press(withCard(), SIZE, ...toTab(TAB.comments), "d").confirm).toBeNull();
+    expect(text(press(withCard(), SIZE, ...toTab(TAB.comments)))).toContain("No comments yet.");
+  });
+
+  test("the commands for deciding are still there from inside any tab", () => {
+    for (const tab of [0, 1, 2, 3, 4]) {
+      const m = press(withCard(), SIZE, ...toTab(tab));
+      expect(update(m, "a", SIZE).confirm).toBe("a");
+      expect(update(m, "r", SIZE).confirm).toBe("r");
+    }
+  });
+
+  test("Log opens at its end, where the newest records are, and scrolls up from there", () => {
+    let m = press(withCard(), SMALL, ...toTab(TAB.log));
     const out = text(m, SMALL);
     expect(out).toContain("gate_waiting       final-approval");
-    expect(out).not.toContain("run_started");
+    expect(out).not.toContain("09:12:01 node_entered       plan");
     expect(out).toContain("▲ PgUp for earlier");
     m = press(m, SMALL, "pageup", "pageup");
-    expect(text(m, SMALL)).toContain("run_started");
+    expect(text(m, SMALL)).toContain("09:12:01 node_entered       plan");
+  });
+
+  test("→ and Tab go to the next tab, ← and Shift+Tab to the previous, and ← stops at the first", () => {
+    let m = press(withCard(), SIZE, "enter");
+    expect(m.focus).toBe("card");
+    m = press(m, SIZE, "left");
+    expect(m.tab).toBe(0);
+    expect(m.focus).toBe("card");
+    m = press(m, SIZE, "right", "tab", "tab", "tab");
+    expect(m.tab).toBe(4);
+    expect(press(m, SIZE, "right").tab).toBe(4);
+    expect(press(m, SIZE, "tab").tab).toBe(0);
+    expect(press(m, SIZE, "shift-tab").tab).toBe(3);
+  });
+
+  test("Esc steps back one level at a time: step, tab, list", () => {
+    let m = press(withCard(), SIZE, ...toTab(TAB.steps), "enter");
+    expect(m.open).toBe(true);
+    m = press(m, SIZE, "escape");
+    expect([m.open, m.focus]).toEqual([false, "card"]);
+    m = press(m, SIZE, "escape");
+    expect(m.focus).toBe("list");
   });
 
   test("z puts the list away and gives the card the whole width; z or Esc brings the list back", () => {
     let m = press(withCard(), SIZE, "z");
-    expect(m.zoom).toBe(true);
-    expect(m.focus).toBe("card");
-    const out = text(m);
-    expect(out).not.toContain("WAITING FOR YOU");
-    expect(out).toContain("Summary");
-    expect(out).toContain("z show list");
+    expect([m.zoom, m.focus]).toEqual([true, "card"]);
+    expect(text(m)).not.toContain("WAITING FOR YOU");
+    expect(text(m)).toContain("z show list");
     expect(press(m, SIZE, "z").zoom).toBe(false);
     m = press(m, SIZE, "escape");
-    expect(m.zoom).toBe(false);
-    expect(m.focus).toBe("list");
-    expect(text(m)).toContain("WAITING FOR YOU");
+    expect([m.zoom, m.focus]).toEqual([false, "list"]);
   });
 
-  test("moving to another run starts it on Summary", () => {
-    let m = press(withCard(), SIZE, "enter", "right", "down");
-    expect(m.tab).toBe(1);
-    expect(m.cursor).toBe(1);
-    m = press(m, SIZE, "escape", "down");
-    expect(m.tab).toBe(0);
-    expect(m.cursor).toBe(0);
-    expect(m.open).toBe(false);
-  });
-
-  test("the keys that decide still work from inside the card", () => {
-    const m = press(withCard(), SIZE, "enter", "right");
-    expect(update(m, "a", SIZE).confirm).toBe("a");
-    expect(update(m, "q", SIZE).quit).toBe(true);
+  test("moving to another run starts it on the Report", () => {
+    let m = press(withCard(), SIZE, ...toTab(TAB.steps), "down", "enter");
+    expect([m.tab, m.cursor, m.open]).toEqual([2, 1, true]);
+    m = press(m, SIZE, "escape", "escape", "down");
+    expect([m.tab, m.cursor, m.open, m.sub]).toEqual([0, 0, false, 0]);
   });
 
   test("until the details are read the card shows what it has, and says it is reading", () => {
@@ -586,7 +737,14 @@ describe("tui card of a run waiting for approval", () => {
     const out = text(m);
     expect(out).toContain("Reading the details…");
     expect(out).toContain("Step «review» waits for your decision");
-    expect(out).not.toContain("Summary  Changes");
+    expect(out).not.toContain("╭");
+  });
+
+  test("with little room the band shrinks to three lines and there is no frame", () => {
+    const out = text(press(withCard(), SMALL, "enter"), SMALL);
+    expect(out).not.toContain("╭");
+    expect(out).toContain("gate 2 of 2 · final-approval");
+    expect(out).toContain("⏱ 1h32 work");
   });
 
   test("every line fits the width, in every tab, wide, zoomed and narrow", () => {
@@ -600,19 +758,36 @@ describe("tui card of a run waiting for approval", () => {
         totalFiles: 1,
         totalLines: 9,
       },
+      comments: [
+        {
+          severity: "major",
+          location:
+            "packages/pipeline-core/src/some/very/deep/folder/with/a/long-file-name-indeed.ts:12",
+          description: "a long thought ".repeat(20),
+        },
+      ],
+      report: {
+        text: `${"long ".repeat(80)}\n\n- ${"item ".repeat(40)}\n\`\`\`\n${"x".repeat(300)}\n\`\`\``,
+        ts: Date.now(),
+        from: "log" as const,
+      },
     };
-    for (const size of [SIZE, { cols: 70, rows: 36 }, { cols: 41, rows: 20 }]) {
+    for (const size of [SIZE, { cols: 70, rows: 36 }, { cols: 41, rows: 20 }, SMALL]) {
       for (const zoom of [false, true]) {
-        for (let tab = 0; tab < 4; tab++) {
+        for (let tab = 0; tab < 5; tab++) {
           for (const open of [false, true]) {
-            const m = {
-              ...withCard(long),
-              focus: "card" as const,
-              zoom: zoom && size.cols >= WIDE_COLS,
-              tab,
-              open,
-            };
-            for (const line of render(m, size)) expect(visibleLength(line)).toBe(size.cols);
+            for (const sub of [0, 1, 2]) {
+              const m = {
+                ...withCard(long),
+                focus: "card" as const,
+                zoom: zoom && size.cols >= WIDE_COLS,
+                tab,
+                open,
+                sub,
+                input: sub === 1 ? { text: "hello", severity: "major", place: "x" } : null,
+              };
+              for (const line of render(m, size)) expect(visibleLength(line)).toBe(size.cols);
+            }
           }
         }
       }
@@ -621,16 +796,15 @@ describe("tui card of a run waiting for approval", () => {
 });
 
 describe("tui card tabs with the mouse", () => {
-  const SIZE = { cols: 120, rows: 36 };
+  const SIZE = { cols: 120, rows: 44 };
   const gate = () => demoSessions(NOW).sessions.find((s) => s.need === "approve") as Session;
   const loaded = () => {
     const g = gate();
-    const m = withDetail(
+    return withDetail(
       { ...demo(), selected: g.id, mouse: true },
       detailKey(g),
-      demoGateDetail(g.id) as GateDetail,
+      demoGateDetail(g.id, NOW) as GateDetail,
     );
-    return m;
   };
   const press = (x: number, y: number) => ({
     type: "mouse" as const,
@@ -642,11 +816,13 @@ describe("tui card tabs with the mouse", () => {
     type: "mouse" as const,
     action,
     x,
-    y: 8,
+    y: 12,
   });
+  /** Where a tab name is drawn: the row with all the tabs, and a column inside the name. */
   const stripAt = (m: ReturnType<typeof loaded>, name: string) => {
-    const line = plain(render(m, SIZE))[3] ?? "";
-    return { x: line.indexOf(name) + 2, y: 4 };
+    const lines = plain(render(m, SIZE));
+    const y = lines.findIndex((l) => l.includes("Report") && l.includes("Comments")) + 1;
+    return { x: (lines[y - 1] ?? "").indexOf(name) + 2, y };
   };
 
   test("a click on a tab name opens that tab and puts the focus on the card", () => {
@@ -654,42 +830,42 @@ describe("tui card tabs with the mouse", () => {
     const { x, y } = stripAt(m, "Steps");
     expect(hitTest(m, SIZE, x, y)).toEqual({ kind: "tab", index: 2 });
     const next = mouseUpdate(m, SIZE, press(x, y));
-    expect(next.tab).toBe(2);
-    expect(next.focus).toBe("card");
-    const changes = stripAt(m, "Changes");
-    expect(mouseUpdate(m, SIZE, press(changes.x, changes.y)).tab).toBe(1);
+    expect([next.tab, next.focus]).toEqual([2, "card"]);
+    const code = stripAt(m, "Code");
+    expect(mouseUpdate(m, SIZE, press(code.x, code.y)).tab).toBe(1);
+    const log = stripAt(m, "Log");
+    expect(mouseUpdate(m, SIZE, press(log.x, log.y)).tab).toBe(4);
   });
 
   test("a click inside the card puts the focus on it, a click on the list puts it back", () => {
     const m = loaded();
-    const onCard = mouseUpdate(m, SIZE, press(100, 12));
+    const onCard = mouseUpdate(m, SIZE, press(100, 25));
     expect(onCard.focus).toBe("card");
     const row =
       plain(render(m, SIZE)).findIndex((l) => l.slice(0, 50).includes("capture-usage-cost")) + 1;
-    const back = mouseUpdate(onCard, SIZE, press(3, row));
-    expect(back.focus).toBe("list");
+    expect(mouseUpdate(onCard, SIZE, press(3, row)).focus).toBe("list");
   });
 
-  test("a click on another run moves there and starts it on Summary", () => {
-    let m = loaded();
-    m = { ...m, tab: 2, cursor: 3, focus: "card" };
+  test("a click on another run moves there and starts it on the Report", () => {
+    const m = { ...loaded(), tab: 2, cursor: 3, focus: "card" as const };
     const other = ordered(m.sessions).find((s) => s.id !== m.selected && s.status === "waiting");
-    const row = plain(render(m, SIZE)).findIndex((l) => l.includes(other?.title ?? "?")) + 1;
+    const row =
+      plain(render(m, SIZE)).findIndex((l) => l.slice(0, 50).includes(other?.title ?? "?")) + 1;
     const next = mouseUpdate(m, SIZE, press(3, row));
-    expect(next.selected).toBe(other?.id ?? "");
-    expect(next.tab).toBe(0);
-    expect(next.cursor).toBe(0);
-    expect(next.focus).toBe("list");
+    expect([next.selected, next.tab, next.cursor, next.focus]).toEqual([
+      other?.id ?? "",
+      0,
+      0,
+      "list",
+    ]);
   });
 
   test("the wheel over a list tab moves its selection, over other tabs it scrolls", () => {
     const m = { ...loaded(), tab: 2, focus: "card" as const };
     expect(mouseUpdate(m, SIZE, wheel("wheel_down", 100)).cursor).toBe(1);
     expect(mouseUpdate(m, SIZE, wheel("wheel_down", 5)).selected).not.toBe(m.selected);
-    const journal = { ...m, tab: 3 };
-    const small = { cols: 120, rows: 14 };
-    expect(
-      mouseUpdate({ ...journal, cardScroll: 0 }, small, wheel("wheel_down", 100)).cardScroll,
-    ).toBeGreaterThan(0);
+    const log = { ...m, tab: 4, cardScroll: 0 };
+    const small = { cols: 120, rows: 20 };
+    expect(mouseUpdate(log, small, wheel("wheel_down", 100)).cardScroll).toBeGreaterThan(0);
   });
 });

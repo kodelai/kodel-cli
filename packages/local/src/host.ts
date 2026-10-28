@@ -72,6 +72,12 @@ import {
   UNKNOWN_BUILD,
 } from "./executor";
 import { GitSnapshotter, readHead, readRunCommits, repoPrefix } from "./git";
+import {
+  type AgentReport,
+  type AgentUsage,
+  agentUsage,
+  lastAgentReport,
+} from "./history/claude-code/report";
 import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integrity";
 import { fitServed, promptHashOf, type ServedNode, servedKeyOf } from "./served";
 import { FileStore, META_VERSION, newRunId, type RunMeta } from "./store";
@@ -1257,6 +1263,38 @@ export class LocalRun {
     } catch (error) {
       return { kind: "unavailable", reason: describeError(error) };
     }
+  }
+
+  /**
+   * The unified diff of one changed file, from where the run began to the files as they are now.
+   * Read-only; the secrets the rules know are taken out. The path must be one the change list named.
+   */
+  async diffOf(path: string): Promise<{ text: string; truncated: boolean } | undefined> {
+    const tree = (await this.host.store.readSnapshots(this.runId)).run;
+    if (tree === undefined) return undefined;
+    const found = await (await this.snapshotter()).patchSince(tree, path);
+    return { text: redactText(found.text, this.host.rules), truncated: found.truncated };
+  }
+
+  /** What the agent last wrote in the run's directory at or after `since`: the report it gives at a gate. */
+  async agentReport(since: number): Promise<AgentReport | undefined> {
+    return lastAgentReport({
+      root: this.host.options.root,
+      workdir: await this.cwd(),
+      since,
+      rules: this.host.rules,
+    });
+  }
+
+  /** The tokens the agent used in the run's directory since the run began, when its logs can be read. */
+  async agentTokens(): Promise<AgentUsage | undefined> {
+    const state = await this.state();
+    return agentUsage({
+      root: this.host.options.root,
+      workdir: await this.cwd(),
+      from: state.startedAt,
+      to: state.finishedAt ?? this.host.clock(),
+    });
   }
 
   /** Accept the files of this finished run after a deliberate change, and seal them again. */
