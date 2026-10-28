@@ -5,95 +5,52 @@ Spec-driven pipelines that run inside the coding agent you already use, and are 
 [![npm](https://img.shields.io/npm/v/@kodel-ai/kodel?include_prereleases)](https://www.npmjs.com/package/@kodel-ai/kodel)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-> **Status: beta.** `@kodel-ai/kodel` is on npm as `0.1.0-beta.0`; formats and commands may still
-> change before 1.0. The full English documentation is not written yet; until then this README and
-> [AGENTS.md](AGENTS.md) are the entry points.
-
-Coding agents are good at doing a step and bad at knowing when it is really done. Kodel is a local
-[MCP](https://modelcontextprotocol.io) server that holds the process: you describe how you work as a
-pipeline file in your repository, the agent walks through it with `pipeline_*` tools, and the engine,
-not the agent, decides whether each step passed.
-
-## Why Kodel
-
-- **The agent's word is not enough.** Every step result is validated by the engine: the diff touched
-  only the files it should, the build and tests pass, the review has no blocking findings. A missing or
-  invalid result never closes a step (fail-closed).
-- **A person decides what matters.** Approvals, rejections and changes to the pipeline itself are
-  commands you run in a terminal. They are not MCP tools, so an agent cannot approve its own work.
-- **The process lives in your repository.** The pipeline is a YAML file you review like code, and the
-  history of every run is kept next to it, so you can see where time went and what was redone.
-- **It improves.** Run history is analyzed to propose changes to the pipeline, which you accept or not.
-- **No new agent to adopt.** Claude Code, Codex and OpenCode talk to the same server (see
-  [adapters](adapters/README.md) for what is checked on a real agent and what is not yet).
-
-Kodel is not a replacement for your agent, a hosted service, or a CI system. It is the layer between
-"the agent says it is done" and "it really is".
-
-## How it looks
-
-A pipeline is a graph of nodes. A node is something the agent does (`agent`), something the engine
-runs (`command`), or a decision that waits for you (`human`). `checks` verify the result of a node, and
-`edges` say where to go next, including back to an earlier step with the reason for the failure.
-
-```yaml
-version: 1
-name: feature
-nodes:
-  - slug: plan
-    kind: agent
-    prompt: |
-      Task: {{task}}
-      Write an implementation plan to docs/plans/{{task.slug}}.md. Change no other file.
-    checks:
-      - { kind: diff, paths: ["docs/plans/{{task.slug}}.md"], mode: changed_only }
-  - { slug: plan-approval, kind: human, prompt: "Approve the plan or reject it with a reason." }
-  - slug: impl
-    kind: agent
-    prompt: "Implement the approved plan. Add or update tests."
-    checks:
-      - { kind: diff, paths: ["packages/**", "tests/**"], max_lines: 800 }
-  - { slug: test, kind: command, command: "bun test" }
-edges:
-  - { from: plan,          to: plan-approval }
-  - { from: plan-approval, to: impl, when: approved }
-  - { from: plan-approval, to: plan, when: rejected }
-  - { from: impl,          to: test }
-  - { from: test,          to: impl, when: failed }
-```
-
-The full reference pipeline, with a review step, an e2e run and a manual test, is
-[`examples/pipelines/feature.yaml`](examples/pipelines/feature.yaml).
-
-You start a run from your agent in plain words ("fix the login timeout through the pipeline"), or with
-the `/kodel-run` skill. The agent then asks the server for the next step, does it, reports it, and
-repeats. When a run needs you, the agent tells you what to look at and the command to decide with.
+> **Status: beta.** Formats and commands may still change before 1.0. The full documentation is not
+> written yet; until then this README and [AGENTS.md](AGENTS.md) are the entry points.
 
 ## Quick start
 
-Requirement: Node >= 22.19.
+Requirement: Node >= 22.19. Kodel works with Claude Code, Codex and OpenCode (see
+[adapters](adapters/README.md) for what is checked on a real agent).
+
+**1. Install.** The agents' hooks call `kodel-hook`, so install globally rather than using `npx`.
 
 ```bash
 npm install -g @kodel-ai/kodel
 ```
 
-This puts `kodel` and `kodel-hook` on your `PATH`; the agents' hooks call `kodel-hook`, so install it
-globally rather than running `kodel` through `npx`. Then, in the repository you want to work on:
+**2. Set up your repository.** In the repository you want to work on:
 
 ```bash
-kodel init          # MCP server, the /kodel-run skill, config and hooks for the agents found here
+kodel init
 ```
 
-`kodel init` asks before it writes, and `--dry-run` shows what would change. It supports
-`--agent claude-code,codex,opencode`, `--tasks` for the optional task tracker, and `--no-hooks`.
+It adds the MCP server, the `/kodel-design` and `/kodel-run` skills, the config and the hooks for the
+agents it finds. It asks before it writes; `--dry-run` shows what would change. Other options:
+`--agent claude-code,codex,opencode`, `--tasks` for the optional task tracker, `--no-hooks`.
 
-Restart your agent so it picks up the new MCP server, put a pipeline in `.kodel/pipelines/`, and ask:
+**3. Create a pipeline.** Restart your agent so it picks up the MCP server, then ask it to design one:
+
+```text
+/kodel-design
+```
+
+The agent looks at your project and proposes a pipeline: the steps, what is checked after each one,
+and where you decide. The proposal waits for you. Read it and accept it in a terminal:
+
+```bash
+kodel pipeline proposals show
+kodel pipeline proposals apply <name>
+```
+
+**4. Run it.** Give the agent a task:
 
 ```text
 /kodel-run fix the login timeout
 ```
 
-The agent starts the run and works through the steps. You stay in control from a terminal:
+The agent works through the steps, and the engine checks each result. When a run needs you, the agent
+says what to look at and which command to decide with:
 
 ```bash
 kodel status              # list the runs, or show one
@@ -101,12 +58,13 @@ kodel gate approve <run>  # decide the human step a run is waiting at (or: gate 
 kodel report <run>        # where the time went and what was redone
 ```
 
-A new pipeline is not written by hand into `.kodel/pipelines/`. Ask the agent to propose it
-(`pipeline_propose_change`), then accept it with `kodel pipeline proposals apply`.
+An example of a full pipeline, with a plan, two human gates, a review and tests, is
+[`examples/pipelines/feature.yaml`](examples/pipelines/feature.yaml).
 
 ## Commands for people
 
-These ask for confirmation and refuse to run without a terminal, on purpose.
+These ask for confirmation and refuse to run without a terminal, on purpose: an agent can propose,
+only a person decides.
 
 | Command | What it does |
 | --- | --- |
