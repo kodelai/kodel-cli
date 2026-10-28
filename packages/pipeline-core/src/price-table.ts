@@ -4,7 +4,7 @@
  * by a clock. A cost computed from this is an estimate and is stored with the table's `revision`.
  */
 import { z } from "zod";
-import shipped from "./price-table.json";
+import shipped from "./price-table.json" with { type: "json" };
 import { MODEL_ID } from "./usage-record";
 
 export const MAX_PRICE_MODELS = 64;
@@ -24,7 +24,10 @@ export interface Price {
   long_context_tokens?: number;
 }
 
-/** The override of one model: all four prices (a partial entry is refused), the 1-hour write optional. */
+/**
+ * The override of one model: all four prices (a partial entry is refused), the 1-hour write optional. A model whose
+ * override gives no `long_context_tokens` keeps the threshold of its shipped entry.
+ */
 export const priceOverrideSchema = z
   .object({
     input: rate,
@@ -32,6 +35,7 @@ export const priceOverrideSchema = z
     cache_read: rate,
     cache_write: rate,
     cache_write_1h: rate.optional(),
+    long_context_tokens: z.number().int().positive().optional(),
   })
   .strict();
 
@@ -129,11 +133,28 @@ export function resolvePrice(
     const key = keyFor(model, Object.keys(given));
     const entry = key === undefined ? undefined : given[key];
     if (entry !== undefined) {
-      return { price: entry, source: "config", revision: context.table.revision };
+      const threshold =
+        entry.long_context_tokens ?? tableEntry(context.table, model, ts)?.long_context_tokens;
+      return {
+        price: threshold === undefined ? entry : { ...entry, long_context_tokens: threshold },
+        source: "config",
+        revision: context.table.revision,
+      };
     }
   }
-  const key = keyFor(model, Object.keys(context.table.models));
-  const entries = key === undefined ? undefined : context.table.models[key];
+  const chosen = tableEntry(context.table, model, ts);
+  if (chosen === undefined) return undefined;
+  return { price: chosen, source: "shipped", revision: context.table.revision };
+}
+
+/** The entry of the table that holds for `model` at `ts`: the latest `effectiveFrom` not after the event's day. */
+function tableEntry(
+  table: PriceTable,
+  model: string,
+  ts: string,
+): PriceTable["models"][string][number] | undefined {
+  const key = keyFor(model, Object.keys(table.models));
+  const entries = key === undefined ? undefined : table.models[key];
   if (entries === undefined) return undefined;
   const today = dayOf(ts);
   let chosen: (typeof entries)[number] | undefined;
@@ -142,6 +163,5 @@ export function resolvePrice(
     if (from > today) continue;
     if (chosen === undefined || from > (chosen.effectiveFrom ?? "")) chosen = entry;
   }
-  if (chosen === undefined) return undefined;
-  return { price: chosen, source: "shipped", revision: context.table.revision };
+  return chosen;
 }

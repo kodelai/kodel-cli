@@ -1,7 +1,7 @@
 {
   "format": 1,
-  "revision": "2026-10-27",
-  "note": "Prices are US dollars per million tokens. Entries marked checkedAt null have not been compared with the live price page yet: run scripts/check-prices.mjs. The 5.x rows come from the model table of the claude-api skill (cached 2026-10-06), not from the live page; the cache read price of claude-haiku-5-5 is not published there and is assumed to be 10% of its input price. Cache writes are priced at 1.25x input (5 minutes) and 2x input (1 hour). long_context_tokens is the prompt size above which a request is flagged as long context (default 200000); the higher price of such requests is not modelled.",
+  "revision": "2026-10-28",
+  "note": "Prices are US dollars per million tokens. Entries marked checkedAt null have not been compared with the live price page yet: run scripts/check-prices.mjs. The rows of claude-opus-4-6 to claude-opus-5-5, claude-sonnet-4-6 to claude-sonnet-5-5, claude-haiku-5-5 and claude-fable-5 to claude-fable-5-1 come from the model table of the claude-api skill (cached 2026-10-06), not from the live page. That table gives the cache read price only for claude-opus-5-5, claude-sonnet-5-5 and claude-fable-5-1; for the others it is assumed to be 10% of the input price (claude-haiku-5-5 and claude-fable-5 included). Cache writes are priced at 1.25x input (5 minutes) and 2x input (1 hour). long_context_tokens is the prompt size above which a request is flagged as long context (default 200000); the higher price of such requests is not modelled.",
   "models": {
     "claude-opus-4-5": [
       {
@@ -75,6 +75,83 @@
         "input": 10,
         "output": 50,
         "cache_read": 0.25,
+        "cache_write": 12.5,
+        "cache_write_1h": 20,
+        "sourceUrl": "https://docs.claude.com/en/docs/about-claude/pricing",
+        "checkedAt": null
+      }
+    ],
+    "claude-opus-5": [
+      {
+        "input": 5,
+        "output": 25,
+        "cache_read": 0.5,
+        "cache_write": 6.25,
+        "cache_write_1h": 10,
+        "sourceUrl": "https://docs.claude.com/en/docs/about-claude/pricing",
+        "checkedAt": null
+      }
+    ],
+    "claude-opus-4-8": [
+      {
+        "input": 5,
+        "output": 25,
+        "cache_read": 0.5,
+        "cache_write": 6.25,
+        "cache_write_1h": 10,
+        "sourceUrl": "https://docs.claude.com/en/docs/about-claude/pricing",
+        "checkedAt": null
+      }
+    ],
+    "claude-opus-4-7": [
+      {
+        "input": 5,
+        "output": 25,
+        "cache_read": 0.5,
+        "cache_write": 6.25,
+        "cache_write_1h": 10,
+        "sourceUrl": "https://docs.claude.com/en/docs/about-claude/pricing",
+        "checkedAt": null
+      }
+    ],
+    "claude-opus-4-6": [
+      {
+        "input": 5,
+        "output": 25,
+        "cache_read": 0.5,
+        "cache_write": 6.25,
+        "cache_write_1h": 10,
+        "sourceUrl": "https://docs.claude.com/en/docs/about-claude/pricing",
+        "checkedAt": null
+      }
+    ],
+    "claude-sonnet-5": [
+      {
+        "input": 2,
+        "output": 10,
+        "cache_read": 0.2,
+        "cache_write": 2.5,
+        "cache_write_1h": 4,
+        "sourceUrl": "https://docs.claude.com/en/docs/about-claude/pricing",
+        "checkedAt": null
+      }
+    ],
+    "claude-sonnet-4-6": [
+      {
+        "input": 3,
+        "output": 15,
+        "cache_read": 0.3,
+        "cache_write": 3.75,
+        "cache_write_1h": 6,
+        "sourceUrl": "https://docs.claude.com/en/docs/about-claude/pricing",
+        "checkedAt": null
+      }
+    ],
+    "claude-fable-5": [
+      {
+        "input": 10,
+        "output": 50,
+        "cache_read": 1,
         "cache_write": 12.5,
         "cache_write_1h": 20,
         "sourceUrl": "https://docs.claude.com/en/docs/about-claude/pricing",

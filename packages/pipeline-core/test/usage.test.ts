@@ -162,6 +162,69 @@ describe("t9jrs the price table and the cost of an event", () => {
     expect(calls([event({ model: "claude-future-9", ...over200k })], "claude-future-9")).toBe(1);
   });
 
+  test("t9jrs_every_model_of_the_current_generations_is_priced_and_none_shadows_another", () => {
+    const at = "2026-10-28T00:00:00.000Z";
+    const input = (model: string) => resolvePrice(defaultPricing(), model, at)?.price.input;
+    for (const [model, price] of [
+      ["claude-opus-5", 5],
+      ["claude-opus-5-5", 4],
+      ["claude-opus-4-8", 5],
+      ["claude-opus-4-7", 5],
+      ["claude-opus-4-6", 5],
+      ["claude-opus-4-5", 5],
+      ["claude-sonnet-5", 2],
+      ["claude-sonnet-5-5", 2],
+      ["claude-sonnet-4-6", 3],
+      ["claude-sonnet-4-5", 3],
+      ["claude-haiku-5-5", 0.1],
+      ["claude-haiku-4-5", 1],
+      ["claude-fable-5", 10],
+      ["claude-fable-5-1", 10],
+    ] as const) {
+      expect(input(model)).toBe(price);
+      // a dated form resolves to the same row
+      expect(input(`${model}-20261001`)).toBe(price);
+    }
+    // `claude-opus-5` is not a dated form of `claude-opus-5-5` (and the other way round): each keeps its own price
+    expect(input("claude-opus-5-5")).not.toBe(input("claude-opus-5"));
+    expect(resolvePrice(defaultPricing(), "claude-opus-5-6", at)).toBeUndefined();
+    // a 1h write is twice the input for the whole generation, a 5m write 1.25 times
+    for (const row of Object.values(SHIPPED_PRICES.models)) {
+      const price = row[0];
+      if (price === undefined) continue;
+      expect(price.cache_write).toBeCloseTo(price.input * 1.25, 6);
+      expect(price.cache_write_1h).toBeCloseTo(price.input * 2, 6);
+    }
+  });
+
+  test("t9jrs_override_keeps_the_shipped_long_context_threshold_unless_it_gives_its_own", () => {
+    const at = "2026-10-28T00:00:00.000Z";
+    const prices = { input: 1, output: 1, cache_read: 1, cache_write: 1 };
+    const inherits = defaultPricing(pricesOverrideSchema.parse({ "claude-haiku-5-5": prices }));
+    const resolved = resolvePrice(inherits, "claude-haiku-5-5", at);
+    expect(resolved?.source).toBe("config");
+    expect(resolved?.price.long_context_tokens).toBe(100_000);
+    // a model with no threshold in the table has none from the override either (the default one applies)
+    const plain = defaultPricing(pricesOverrideSchema.parse({ "claude-sonnet-5-5": prices }));
+    expect(resolvePrice(plain, "claude-sonnet-5-5", at)?.price.long_context_tokens).toBeUndefined();
+    // its own threshold wins; a bad one is refused
+    const own = defaultPricing(
+      pricesOverrideSchema.parse({
+        "claude-haiku-5-5": { ...prices, long_context_tokens: 50_000 },
+      }),
+    );
+    expect(resolvePrice(own, "claude-haiku-5-5", at)?.price.long_context_tokens).toBe(50_000);
+    expect(
+      pricesOverrideSchema.safeParse({ "claude-haiku-5-5": { ...prices, long_context_tokens: 0 } })
+        .success,
+    ).toBe(false);
+    expect(
+      pricesOverrideSchema.safeParse({
+        "claude-haiku-5-5": { ...prices, long_context_tokens: 1.5 },
+      }).success,
+    ).toBe(false);
+  });
+
   test("t9jrs_model_line_made_of_a_correction_has_its_cost", () => {
     // the correction of a response counted while it was open adds dollars and no call (`correctionDelta`):
     // a model line made of one only must not read as an unknown cost, and must agree with the total
