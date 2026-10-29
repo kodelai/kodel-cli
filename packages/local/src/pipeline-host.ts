@@ -95,7 +95,6 @@ function askWhich(found: Loaded, file: string, committedText: string): PipelineC
   };
 }
 
-/** A proposed pipeline as the person who accepts it needs to see it. */
 /** A run on disk, with its state, or with why it could not be read (`format`: its run-state format, when that is why). */
 export interface RunSummary {
   meta: RunMeta;
@@ -103,6 +102,7 @@ export interface RunSummary {
   unreadable?: { code: string; message: string; format?: number };
 }
 
+/** A proposed pipeline as the person who accepts it needs to see it. */
 export interface PipelineProposalView {
   record: PipelineProposalRecord;
   /** Absent when the stored text is not a pipeline this kodel reads; `refused` says so. */

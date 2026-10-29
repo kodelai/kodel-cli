@@ -419,11 +419,35 @@ describe("t40 claims on the host", () => {
   });
 
   test("t40_two_takes_race_under_lock", async () => {
-    const { run } = await openAgents();
+    const { h, run } = await openAgents();
+    // Two processes on one run: a second host with a queue of its own (in one process the apply
+    // queue puts the takes in line before either reaches the lock). A latch inside the lock: the
+    // first take holds the run's lock until the other has asked for it, so the second really stands
+    // in line at the lock file and judges the step after the first claim is written.
+    const h2 = new LocalHost(AGENT_FORK, { root: dir, heartbeatMs: 0 });
+    const other = h2.open(run.runId);
+    let asked = 0;
+    let secondAsked!: () => void;
+    const second = new Promise<void>((resolve) => {
+      secondAsked = resolve;
+    });
+    for (const store of [h.store, h2.store]) {
+      const real = store.withLock.bind(store);
+      store.withLock = <T>(runId: string, fn: () => Promise<T>) => {
+        asked += 1;
+        if (asked === 2) secondAsked();
+        if (asked > 1) return real(runId, fn);
+        return real(runId, async () => {
+          await second;
+          return fn();
+        });
+      };
+    }
     const [one, two] = await Promise.all([
       run.takeStep({ node: "a" }),
-      run.takeStep({ node: "a" }),
+      other.takeStep({ node: "a" }),
     ]);
+    expect(asked).toBeGreaterThanOrEqual(2);
     expect([one.status, two.status].sort()).toEqual(["claimed", "taken"]);
     const winner = one.status === "claimed" ? one : two;
     const loser = one.status === "taken" ? one : two;

@@ -5,7 +5,8 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalPipelineHost, type LocalRun } from "@kodel-ai/local";
@@ -100,6 +101,45 @@ const FAILED_BRANCH = [
   "",
 ].join("\n");
 
+/** Two steps: the person's approval ends the run. */
+const ENDS = [
+  "name: ends",
+  "nodes:",
+  "  - { slug: write, kind: agent, prompt: write }",
+  "  - { slug: approve, kind: human, prompt: fine? }",
+  "edges:",
+  "  - { from: write, to: approve }",
+  "  - { from: approve, to: write, when: rejected }",
+  "",
+].join("\n");
+
+/** A command that fails pauses the run at once; the resume takes the way on, and that ends the run. */
+const RESUME_ENDS = [
+  "name: resume-ends",
+  "nodes:",
+  "  - { slug: write, kind: agent, prompt: write }",
+  `  - { slug: check, kind: command, command: "node -e \\"process.exit(1)\\"", max_consecutive_failures: 1 }`,
+  `  - { slug: done, kind: command, command: "node -e \\"process.exit(0)\\"" }`,
+  "edges:",
+  "  - { from: write, to: check }",
+  "  - { from: check, to: done, when: failed }",
+  "  - { from: done, to: write, when: failed }",
+  "",
+].join("\n");
+
+/** A step whose check fails pauses the run at once; a repair of the check, accepted, ends the run. */
+const APPLY_ENDS = [
+  "name: apply-ends",
+  "nodes:",
+  "  - slug: write",
+  "    kind: agent",
+  "    prompt: write",
+  "    max_consecutive_failures: 1",
+  `    checks: [{ kind: command, command: "node -e \\"process.exit(1)\\"" }]`,
+  "edges: []",
+  "",
+].join("\n");
+
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "kodel-fork-cli-"));
   const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
@@ -113,6 +153,9 @@ beforeEach(async () => {
     ["slow", GATE_AND_SLOW],
     ["pauses", PAUSES],
     ["failed-branch", FAILED_BRANCH],
+    ["ends", ENDS],
+    ["resume-ends", RESUME_ENDS],
+    ["apply-ends", APPLY_ENDS],
   ]) {
     await writeFile(join(dir, ".kodel", "pipelines", `${name}.yaml`), text as string);
   }
@@ -347,6 +390,65 @@ describe("t40 several gates at once", () => {
     expect(decided.out).toContain("running at b#1 [b]");
     await run.waitForRest(10_000);
     expect((await run.state()).active.map((v) => v.node)).toEqual(["merge"]);
+  });
+});
+
+describe("t40 a decision that ends the run", () => {
+  /** Whether the patch of the whole run and its journal note are there, right now. */
+  async function recorded(runId: string) {
+    const of = join(dir, ".kodel", "runs", runId);
+    return {
+      patch: existsSync(join(of, "changes", "run.patch")),
+      journal: (await readFile(join(of, "journal.jsonl"), "utf8")).includes(
+        '"event":"changes_recorded"',
+      ),
+    };
+  }
+
+  /** A run of `pipeline` after the agent wrote a file and handed its step in. */
+  async function afterWrite(pipeline: string) {
+    const run = (await host().start({ pipeline, task: "t", restart: false })).run as LocalRun;
+    await writeFile(join(dir, "made.txt"), "by the agent\n");
+    await run.completeStep("write", 1);
+    await run.waitForRest(10_000);
+    return run;
+  }
+
+  // The command returns only when the patch of the run is recorded: a `kodel gate` that ends the run
+  // exits right after, and the job must not be lost with the process.
+  test("t40_gate_that_ends_the_run_waits_for_its_patch", async () => {
+    const run = await afterWrite("ends");
+    expect((await run.state()).active.map((v) => v.node)).toEqual(["approve"]);
+    const decided = await cli("gate", "approve", run.runId);
+    expect(decided.code).toBe(0);
+    expect(decided.out).toContain("completed");
+    expect(await recorded(run.runId)).toEqual({ patch: true, journal: true });
+  });
+
+  test("t40_resume_that_ends_the_run_waits_for_its_patch", async () => {
+    const run = await afterWrite("resume-ends");
+    expect((await run.state()).pauses.map((p) => [p.reason, p.node])).toEqual([
+      ["consecutive", "check"],
+    ]);
+    const resumed = await cli("resume", run.runId);
+    expect(resumed.code).toBe(0);
+    expect(resumed.out).toContain("completed");
+    expect(await recorded(run.runId)).toEqual({ patch: true, journal: true });
+  });
+
+  test("t40_changes_apply_that_ends_the_run_waits_for_its_patch", async () => {
+    const run = await afterWrite("apply-ends");
+    expect((await run.state()).pauses.map((p) => [p.reason, p.node])).toEqual([
+      ["consecutive", "write"],
+    ]);
+    await writeFile(
+      join(dir, ".kodel", "pipelines", "apply-ends.yaml"),
+      APPLY_ENDS.replace("process.exit(1)", "process.exit(0)"),
+    );
+    const applied = await cli("pipeline", "changes", "apply", run.runId);
+    expect(applied.code).toBe(0);
+    expect(applied.out).toContain("completed");
+    expect(await recorded(run.runId)).toEqual({ patch: true, journal: true });
   });
 });
 

@@ -318,6 +318,33 @@ describe("t40 the dialog on a run with a fork", () => {
     await s.close();
   });
 
+  test("t40_dialog_keeps_decision_when_sibling_arrived_while_dialog_open", async () => {
+    // the sibling writes to the tree and arrives at the join while the dialog is open: when the
+    // person answers, only the gate is active, and the decision stands all the same (the writes were
+    // the sibling's, as the journal since the gate was reached says)
+    let runId = "";
+    const s = await connect(async () => {
+      await writeFile(join(dir, "sibling.txt"), "written by the other branch\n");
+      const run = await s.host.open(runId);
+      while ((await run?.state())?.active.some((v) => v.node === "b")) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      expect((await run?.state())?.active.map((v) => v.node)).toEqual(["a-gate"]);
+      return approve;
+    });
+    runId = await start(s, "slow");
+    await complete(s, runId, "plan");
+    const next = await complete(s, runId, "a");
+    expect(s.forms).toHaveLength(1);
+    expect(next.body.dialog).toMatchObject({ answer: "decided" });
+    expect(await journalOf(runId)).toContain('"event":"gate_decided","node":"a-gate"');
+    await (await s.host.open(runId))?.waitForRest(10_000);
+    expect((await s.host.open(runId).then((r) => r?.state()))?.active.map((v) => v.node)).toEqual([
+      "merge",
+    ]);
+    await s.close();
+  });
+
   test("t40_paused_dialog_resumes_chosen_node", async () => {
     const s = await connect((form) => {
       // the question is about one branch and says so, naming the other

@@ -5,7 +5,7 @@
  */
 import { canonicalNode } from "./canonical";
 import type { PipelineSpec } from "./pipeline";
-import type { ForkState, RunState } from "./run";
+import { type ForkState, type RunState, routeEntersBranch } from "./run";
 
 export type NodeChange = "added" | "removed" | "work" | "checks" | "routing";
 
@@ -133,16 +133,19 @@ export function diffPipelines(
   }
   for (const pause of state.pauses) {
     if (!pause.blocked) continue;
-    standing.push(pause.blocked.from, pause.blocked.to);
+    const ahead = pause.blocked.heads ?? [pause.blocked.to];
+    standing.push(pause.blocked.from, ...ahead);
     if (changesOf(pause.blocked.from).includes("removed")) {
       return refuse(
         `node "${pause.blocked.from}" is where the run is held back, so it cannot be removed`,
       );
     }
-    if (changesOf(pause.blocked.to).includes("removed")) {
-      return refuse(
-        `node "${pause.blocked.to}" is the one a paused step is about to enter, so it cannot be removed`,
-      );
+    for (const to of ahead) {
+      if (changesOf(to).includes("removed")) {
+        return refuse(
+          `node "${to}" is the one a paused step is about to enter, so it cannot be removed`,
+        );
+      }
     }
   }
 
@@ -204,9 +207,16 @@ export function diffPipelines(
     if (!blocked) continue;
     const failure = state.nodes[blocked.from]?.lastFailure;
     const from = changesOf(blocked.from);
-    if (from.includes("checks") && failure?.source.startsWith("check:")) {
+    const ahead = blocked.heads ?? [blocked.to];
+    // A head held back at the fork's own edge is not rechecked: the fork fired on that verdict and
+    // its other branches are going; the route into the head is taken again instead.
+    if (
+      from.includes("checks") &&
+      failure?.source.startsWith("check:") &&
+      !routeEntersBranch(state, blocked)
+    ) {
       effects.push({ kind: "recheck", node: blocked.from });
-    } else if (from.length > 0 || changesOf(blocked.to).length > 0) {
+    } else if (from.length > 0 || ahead.some((to) => changesOf(to).length > 0)) {
       effects.push({ kind: "reroute", node: blocked.from });
     }
   }

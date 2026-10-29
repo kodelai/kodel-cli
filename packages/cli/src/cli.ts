@@ -761,7 +761,10 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         `Resume run ${runId}${state.pauses.length > 1 ? ` at "${plain(pause.node)}"` : ""} with more attempts?`,
       );
       failIfRefused(await run.resume(opts.node));
-      await afterDecision(run, [pause.node, pause.blocked?.to ?? pause.node]);
+      await afterDecision(run, [
+        pause.node,
+        ...(pause.blocked?.heads ?? [pause.blocked?.to ?? pause.node]),
+      ]);
     });
 
   program

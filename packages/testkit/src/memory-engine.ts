@@ -17,6 +17,7 @@ import {
   evaluateCommand,
   evaluateDiff,
   evaluateResult,
+  KodelError,
   liveClaim,
   nextStep,
   type PipelineSpec,
@@ -190,12 +191,19 @@ export class MemoryEngine implements ScenarioEngine {
       case "pipeline_next_step": {
         if (!this.state)
           return { ok: false, code: "NODE_NOT_RUNNING", message: "the run has not started" };
-        return {
-          ok: true,
-          ...nextStep(this.spec, this.state, this.clock, undefined, {
-            ...(typeof args.node_slug === "string" ? { nodeSlug: args.node_slug } : {}),
-          }),
-        };
+        try {
+          return {
+            ok: true,
+            ...nextStep(this.spec, this.state, this.clock, undefined, {
+              ...(typeof args.node_slug === "string" ? { nodeSlug: args.node_slug } : {}),
+            }),
+          };
+        } catch (error) {
+          if (error instanceof KodelError) {
+            return { ok: false, code: error.code, message: error.message };
+          }
+          throw error;
+        }
       }
       default:
         return { ok: false, code: "UNKNOWN_TOOL", message: `unknown tool "${tool}"` };

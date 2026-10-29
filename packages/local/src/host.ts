@@ -2021,7 +2021,8 @@ export class LocalRun {
 
   /**
    * Wait until the work running in this process has finished and its results are applied.
-   * `parked` says how many tasks are known to be stuck on purpose (tests), so they are not waited for.
+   * `parked` says how many tasks are known to be stuck on purpose (tests), so they are not waited for;
+   * it counts tasks of the whole run, so it is only meant for a wait without `node`.
    */
   async settle(
     parked: () => number = () => 0,
@@ -2029,11 +2030,15 @@ export class LocalRun {
     node?: string,
   ): Promise<void> {
     // Only the jobs of one node, when one is named: a decision about one branch waits for that
-    // branch's work, not for a sibling's command that may run for an hour.
+    // branch's work, not for a sibling's command that may run for an hour. The jobs that record the
+    // end of the run are everyone's: a decision that ended the run waits for its patch, or a command
+    // that exits right after would lose it.
     const mine = () =>
       node === undefined
         ? [...this.pending.keys()]
-        : [...this.pending].filter(([, of]) => of === node).map(([job]) => job);
+        : [...this.pending]
+            .filter(([job, of]) => of === node || this.endJobs.has(job))
+            .map(([job]) => job);
     // The queue too is waited for no longer than the deadline: it may stand behind another process's lock.
     const queued = async () => {
       let timer: ReturnType<typeof setTimeout> | undefined;

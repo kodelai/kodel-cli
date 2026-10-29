@@ -174,8 +174,9 @@ export async function checkForkRun(artifact, { Client, StdioClientTransport, fai
     if (report.critical_path?.length !== 1 || report.critical_path[0].fork !== "f1") {
       fail(`the report has no critical path for the fork: ${JSON.stringify(report.critical_path)}`);
     }
-    // the attempts are rounded to a tenth each before they are summed; the clock once
-    if (typeof report.busy_wall_s !== "number" || report.busy_wall_s > report.work_s + 0.5) {
+    // both are summed in milliseconds and rounded once (report.ts), and the union of the attempts'
+    // intervals is never longer than their sum, so the wall time never reads above the work time
+    if (typeof report.busy_wall_s !== "number" || report.busy_wall_s > report.work_s) {
       fail(`busy_wall_s is not a bounded number: ${report.busy_wall_s} vs work ${report.work_s}`);
     }
     if (report.forks?.[0]?.overlaps?.length !== 1) {

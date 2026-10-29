@@ -5,6 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   defineScenario,
+  expectError,
   expectOk,
   formatReport,
   LocalScenarioEngine,
@@ -58,6 +59,21 @@ const scenario = defineScenario("t40-take-step")
   ])
   .build();
 
+/** A step asked for by a slug the pipeline has not is refused as an answer, never as a thrown error. */
+const unknownSlug = defineScenario("t40-unknown-slug")
+  .pipeline({ inline: FORK })
+  .task("split the work")
+  .agent("manual")
+  .call("pipeline_complete_step", { run_id: "$run", node_slug: "plan", attempt: 1 }, expectOk())
+  .call(
+    "pipeline_next_step",
+    { run_id: "$run", node_slug: "nope" },
+    expectError("UNKNOWN_NODE", { message: 'the pipeline has no node "nope"' }),
+  )
+  .call("pipeline_next_step", { run_id: "$run", node_slug: "a" }, expectOk({ node: { slug: "a" } }))
+  .expect([matcher("nodeStatus", { a: "running", b: "running" })])
+  .build();
+
 const engines: { name: string; make: () => ScenarioEngine }[] = [
   { name: "core-memory", make: () => new MemoryEngine() },
   { name: "local", make: () => new LocalScenarioEngine() },
@@ -67,6 +83,11 @@ describe("t40 take_step in both test engines", () => {
   for (const { name, make } of engines) {
     test(`t40_take_step_in_both_test_engines (${name})`, async () => {
       const report = await runScenario(scenario, make());
+      expect(report.ok, formatReport(report)).toBe(true);
+    }, 60_000);
+
+    test(`t40_next_step_unknown_node_slug_refused_in_both_test_engines (${name})`, async () => {
+      const report = await runScenario(unknownSlug, make());
       expect(report.ok, formatReport(report)).toBe(true);
     }, 60_000);
   }

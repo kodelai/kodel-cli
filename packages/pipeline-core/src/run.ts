@@ -19,7 +19,7 @@ import { type ChangesRef, changesField, isTreeId, MAX_CHANGES_ERROR } from "./ch
 import { type ErrorCode, KodelError } from "./errors";
 import type { EngineRecord, ExecutorRecord } from "./executor";
 import type { HistoryConfig } from "./history-config";
-import type { EdgeSpec, NodeSpec, PipelineSpec } from "./pipeline";
+import type { NodeSpec, PipelineSpec } from "./pipeline";
 import { type AcceptEffect, diffPipelines, standingOf } from "./pipeline-diff";
 import { defaultRegistry, labelsOf, RESTART_FAILED, type Registry } from "./registry";
 import { renderContextOf, renderDeep, renderTemplate } from "./render";
@@ -222,6 +222,20 @@ export interface BlockedRoute {
   fork?: ForkRef;
   /** The fork instance whose join this route enters. */
   join?: string;
+  /**
+   * A fork held back before it fired (`from` failed too often in a row): the heads it will enter, in
+   * edge order, `to` being the first. Taking the route forks once, into every head.
+   */
+  heads?: string[];
+}
+
+/**
+ * Whether a held-back route enters a branch from outside it: a fork's own edge into a head, or the
+ * join's `restart_failed` into a branch. Such a route is taken as it is when the run goes on; working
+ * it out again from `from` would fire the fork a second time beside the open instance.
+ */
+export function routeEntersBranch(state: RunState, route: BlockedRoute): boolean {
+  return route.fork !== undefined && state.nodes[route.from]?.fork?.id !== route.fork.id;
 }
 
 export interface Pause {
@@ -1058,7 +1072,12 @@ class Machine {
     }
     const edges = this.spec.edges.filter((e) => e.from === node.slug && e.when === label);
     if (edges.length >= 2) {
-      this.fork(node, label, edges, own);
+      this.fork(
+        node,
+        label,
+        edges.map((e) => e.to),
+        own,
+      );
       return;
     }
     const edge = edges[0];
@@ -1108,6 +1127,11 @@ class Machine {
   private proceed(route: BlockedRoute) {
     const from = this.node(route.from);
     const fromRun = this.run(route.from);
+    if (route.heads !== undefined) {
+      // A fork held back before it fired: it fires now, once, into every head.
+      this.fork(from, route.label, route.heads, fromRun.lastFailure);
+      return;
+    }
     const automatic = this.handler(from).automaticFailures;
     const pauseFields = route.fork === undefined ? {} : { fork: route.fork };
     // A route into a join comes from arrivals that are settled; a branch that failed too often in a
@@ -1163,14 +1187,37 @@ class Machine {
 
   // forks
 
-  private fork(node: NodeSpec, label: string, edges: EdgeSpec[], own: Feedback | undefined) {
-    const heads = edges.map((e) => e.to);
+  private fork(node: NodeSpec, label: string, heads: string[], own: Feedback | undefined) {
     const join = this.joinOf(heads);
     if (join === undefined) {
       this.end(
         "failed",
         `node "${node.slug}" has several edges for "${label}" but no \`join: all\` node where the branches meet`,
       );
+      return;
+    }
+    const fromRun = this.run(node.slug);
+    const [first] = heads;
+    if (
+      first !== undefined &&
+      fromRun.status === "failed" &&
+      this.handler(node).automaticFailures &&
+      fromRun.consecutiveFailures >= node.max_consecutive_failures
+    ) {
+      // Judged once for the fork, not once per head: one pause, and the resume or the repair that
+      // lifts it enters every head under one instance. Each head's own attempt limit stays its own.
+      this.pause({
+        reason: "consecutive",
+        node: node.slug,
+        blocked: {
+          from: node.slug,
+          label,
+          to: first,
+          rework: false,
+          ...(own ? { feedback: { ...own, from: node.slug } } : {}),
+          heads,
+        },
+      });
       return;
     }
     const forks = this.s.forks ?? {};
@@ -2039,9 +2086,10 @@ class Machine {
       const pause = this.takePause((p) => p.blocked?.from === effect.node);
       const blocked = pause?.blocked;
       if (!blocked) return;
-      if (blocked.join !== undefined) {
+      if (blocked.join !== undefined || routeEntersBranch(this.s, blocked)) {
         // The join was held back at its attempt limit; the branches have arrived and stay arrived,
-        // so the way into the join is taken again, not the last branch's way out.
+        // so the way into the join is taken again, not the last branch's way out. The same for a
+        // head held back at the fork's own edge: the instance is open, and must not fire again.
         this.proceed(blocked);
         return;
       }

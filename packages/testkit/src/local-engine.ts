@@ -175,13 +175,20 @@ export class LocalScenarioEngine implements ScenarioEngine {
         return { ok: true, id: `f-${this.feedbackCount}` };
       }
       case "pipeline_next_step":
-        return {
-          ok: true,
-          ...(await this.run.nextStep({
-            serve: {},
-            ...(typeof args.node_slug === "string" ? { nodeSlug: args.node_slug } : {}),
-          })),
-        };
+        try {
+          return {
+            ok: true,
+            ...(await this.run.nextStep({
+              serve: {},
+              ...(typeof args.node_slug === "string" ? { nodeSlug: args.node_slug } : {}),
+            })),
+          };
+        } catch (error) {
+          if (error instanceof KodelError) {
+            return { ok: false, code: error.code, message: error.message };
+          }
+          throw error;
+        }
       default:
         return { ok: false, code: "UNKNOWN_TOOL", message: `unknown tool "${tool}"` };
     }

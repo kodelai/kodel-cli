@@ -64,7 +64,11 @@ format 2 as written by a newer kodel, which is the right answer, and must not be
 
 They were made by a script in place of the agent, in a scratch repository with the pipeline's commands
 answered by a stub (as `packages/local/test/changes-dev-yaml.test.ts` does), each run in a worktree
-of its own, so `meta.json` carries the placeholder workdir and branch. The run directories hold what
+of its own, so `meta.json` carries the placeholder workdir and branch. The journal is redacted when
+it is written, and the random name of the scratch directory read as a secret to the redaction, so
+`run_started.workdir` in the journals was `[REDACTED:high-entropy]...` and not the text of
+`meta.json`; the script puts the placeholder into such a record too (`placeholderInJournal`), and
+the three files agree. The run directories hold what
 the engine writes for such a run: `changes/` (the patch of every handed-in attempt and of the run),
 `artifacts/` (the output of the stubbed commands), `reports/`, `snapshots.json` and `specs/`. The
 script ran with no `CLAUDE_CODE_SESSION_ID` (or any other `CLAUDE*` variable) in its environment and

@@ -45,16 +45,35 @@ for (const source of runDirs) {
     const path = join(out, name);
     // A Windows path is written with doubled backslashes inside JSON, so both spellings are replaced.
     const escaped = JSON.stringify(meta.workdir).slice(1, -1);
-    const text = (await readFile(path, "utf8"))
+    let text = (await readFile(path, "utf8"))
       .split(meta.workdir)
       .join(placeholder)
       .split(escaped)
       .join(placeholder);
+    if (name === "journal.jsonl") text = placeholderInJournal(text, placeholder);
     if (/\/Users\/|\/home\/|[A-Za-z]:\\{1,2}Users/.test(text)) {
       throw new Error(`${runId}/${name}: a path of this machine is left after the replacement`);
     }
     await writeFile(path, text);
   }
+}
+
+/**
+ * The journal is redacted when it is written, and the random name of a temporary directory can read
+ * as a secret to the redaction (`[REDACTED:high-entropy]...`): then the record's `workdir` is not the
+ * text of `meta.json` and the replacement above misses it. Such a record gets the placeholder too, so
+ * the three files agree, as the README says.
+ */
+function placeholderInJournal(text, placeholder) {
+  return text
+    .split("\n")
+    .map((line) => {
+      if (!line.includes('"workdir":')) return line;
+      const record = JSON.parse(line);
+      if (typeof record.workdir !== "string" || record.workdir === placeholder) return line;
+      return JSON.stringify({ ...record, workdir: placeholder });
+    })
+    .join("\n");
 }
 
 const hashes = {};

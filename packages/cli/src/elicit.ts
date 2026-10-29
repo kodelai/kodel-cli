@@ -527,13 +527,14 @@ async function gateQuestion(
         return stale("a change of the pipeline is waiting for you; decide on it first");
       }
       // What is decided is what was shown: files that moved while the dialog was open are new facts.
-      // Unless another branch of a fork is active: it writes to the same tree, so its work would
-      // make every gate of the fork undecidable here (the tree is one; a limit recorded in T-40).
-      const othersActive = again.active.some((v) => v.node !== node);
-      if (
-        !othersActive &&
-        changesFingerprint(await run.changesSinceGate(node)) !== changesFingerprint(found)
-      ) {
+      // Unless another branch of a fork was active since the gate was reached: it writes to the same
+      // tree, so its work would make every gate of the fork undecidable here (the tree is one; a
+      // limit recorded in T-40). The host judges that from the journal and says so with a note on
+      // the report, so a sibling that arrived at the join while the dialog was open counts too.
+      const now = await run.changesSinceGate(node);
+      const shared = (report: ChangeReport) =>
+        report.kind === "changes" && report.note !== undefined;
+      if (!shared(now) && !shared(found) && changesFingerprint(now) !== changesFingerprint(found)) {
         return stale("the files changed while the dialog was open");
       }
       const done = await run.decideHuman(
