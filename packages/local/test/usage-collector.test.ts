@@ -185,33 +185,60 @@ describe("t9jrs the usage events of the collector", () => {
   });
 
   test("t9jrs_big_log_is_streamed", async () => {
-    // A synthetic log of some 15 MB is read as a stream: the heap does not grow with the size of the log.
-    const root = await project("big");
+    // Two synthetic logs, one four times the size of the other, are read as streams. The heap that stays live (sampled
+    // after two full collections, so garbage waiting for the next one does not count) is compared between them: an
+    // absolute limit on heapUsed measures the collector's timing, not its streaming, and is what failed on CI.
+    // The collector does keep a small key per response for the fold of repeated lines (bounded by SEEN_CAP), so the
+    // live heap grows with the number of responses: measured, about 0.45 of a byte per extra byte of this log (its
+    // responses are short). A log held whole keeps more than one (measured 1.4 when the test held the file as a
+    // string). The limit, 0.9, sits between the two; a change that makes the collector keep the log fails it.
     const session = "66666666-6666-4666-8666-666666666666";
-    const log = new ClaudeLogBuilder({ sessionId: session, cwd: root });
-    log.user("go");
-    const responses = 30_000;
-    for (let i = 0; i < responses; i += 1) {
-      log.say(`msg_${i}`, "x".repeat(300), { input: 10, output: 5 });
+    // The log is written in a function of its own, so that its lines (the builder keeps them) are garbage, not a
+    // part of the baseline, by the time the heap is measured.
+    async function writeLog(root: string, responses: number): Promise<number> {
+      const log = new ClaudeLogBuilder({ sessionId: session, cwd: root });
+      log.user("go");
+      for (let i = 0; i < responses; i += 1) {
+        log.say(`msg_${i}`, "x".repeat(300), { input: 10, output: 5 });
+      }
+      const bytes = (await stat(await log.install(configDir))).size;
+      log.lines.length = 0;
+      return bytes;
     }
-    const where = await log.install(configDir);
-    const bytes = (await stat(where)).size;
-    log.lines.length = 0;
-    const collector = claudeCodeCollector({ configDir });
-    const ref = (await collector.locate(root)).find((r) => r.session_id === session);
-    expect(ref).toBeDefined();
-    Bun.gc(true);
-    const baseline = process.memoryUsage().heapUsed;
-    let peak = 0;
-    let seen = 0;
-    for await (const event of collector.read(ref as SessionRef, undefined, { usageDetail: true })) {
-      if (event.kind !== "usage") continue;
-      seen += 1;
-      if (seen % 2_000 === 0) peak = Math.max(peak, process.memoryUsage().heapUsed - baseline);
+    async function liveHeapWhileReading(name: string, responses: number) {
+      const root = await project(name);
+      const bytes = await writeLog(root, responses);
+      const collector = claudeCodeCollector({ configDir });
+      const ref = (await collector.locate(root)).find((r) => r.session_id === session);
+      expect(ref).toBeDefined();
+      // the live heap while reading: sampled after a full collection (two, the second frees what the first only
+      // finalised), the highest sample of the read
+      const settle = async () => {
+        Bun.gc(true);
+        await Bun.sleep(1);
+        Bun.gc(true);
+        return process.memoryUsage().heapUsed;
+      };
+      await settle();
+      let peak = 0;
+      let seen = 0;
+      for await (const event of collector.read(ref as SessionRef, undefined, {
+        usageDetail: true,
+      })) {
+        if (event.kind !== "usage") continue;
+        seen += 1;
+        if (seen % 1_000 === 0) peak = Math.max(peak, await settle());
+      }
+      expect(seen).toBe(responses);
+      return { bytes, peak };
     }
-    expect(seen).toBe(responses);
-    expect(bytes).toBeGreaterThan(10_000_000);
-    // the file was never held whole: far less than its size in extra heap
-    expect(peak).toBeLessThan(bytes);
+    // a first read warms up what the process allocates once (compiled code, caches), so it is not charged to the first log
+    await liveHeapWhileReading("big-warm", 1_000);
+    const small = await liveHeapWhileReading("big-small", 3_000);
+    const big = await liveHeapWhileReading("big-big", 12_000);
+    expect(big.bytes).toBeGreaterThan(4 * small.bytes * 0.9);
+    expect(big.bytes).toBeGreaterThan(8_000_000);
+    const grown = big.peak - small.peak;
+    expect(grown).toBeLessThan((big.bytes - small.bytes) * 0.9);
   }, 60_000);
 });
