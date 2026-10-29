@@ -114,8 +114,8 @@ export interface NodeState {
 
 export interface ScenarioState {
   runStatus: "running" | "paused" | "completed" | "failed" | "canceled";
-  /** The human node the run is waiting on, if any. */
-  waitingGate?: string;
+  /** The human nodes the run is waiting on, in the order they were entered (several in a fork). */
+  waitingGates: string[];
   nodes: NodeState[];
   /** Node slugs in the order they were entered from another node (rework does not add). */
   trail: string[];

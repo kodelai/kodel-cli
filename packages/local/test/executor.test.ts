@@ -144,7 +144,7 @@ describe("who ran the run", () => {
     expect(started?.engine).toMatchObject({
       version: "1.2.3",
       commit: "abc123def456",
-      record_version: 1,
+      record_version: 2,
       contract_version: CONTRACT_VERSION,
     });
     expect(started?.engine.instructions_hash).toMatch(/^[0-9a-f]{64}$/);
@@ -380,7 +380,7 @@ describe("what the host will not trust or cannot read", () => {
     expect(record).toEqual({
       version: "1.2.3",
       commit: "abc123def456",
-      record_version: 1,
+      record_version: 2,
       meta_version: 2,
     });
   });

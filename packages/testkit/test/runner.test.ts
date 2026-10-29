@@ -30,7 +30,7 @@ const state = (over: Partial<ScenarioState> = {}): ScenarioState => ({
   ],
   trail: ["plan", "plan-approval"],
   journal: ["run_started"],
-  waitingGate: "plan-approval",
+  waitingGates: ["plan-approval"],
   ...over,
 });
 
@@ -77,7 +77,7 @@ describe("validateScenario", () => {
       .expect([
         matcher("attempts", { bild: 1 }),
         matcher("trail", ["plan", "nope"]),
-        matcher("waitingGate", "ghost"),
+        matcher("waitingGates", ["ghost"]),
       ])
       .build();
     const text = problems(s).join("\n");
@@ -85,7 +85,7 @@ describe("validateScenario", () => {
     expect(text).toContain('names unknown node "plan-aproval"');
     expect(text).toContain('attempts names unknown node "bild"');
     expect(text).toContain('trail names unknown node "nope"');
-    expect(text).toContain('waitingGate names unknown node "ghost"');
+    expect(text).toContain('waitingGates names unknown node "ghost"');
   });
 
   test("a human decision must target a human node", () => {
@@ -134,7 +134,7 @@ describe("runScenario", () => {
       .on(humanApprove("plan-approval"))
       .expect([
         matcher("runStatus", "running"),
-        matcher("waitingGate", "plan-approval"),
+        matcher("waitingGates", ["plan-approval"]),
         matcher("attempts", { plan: 2 }),
         matcher("trail", ["plan", "plan-approval"]),
         matcher("executed", ["plan"]),

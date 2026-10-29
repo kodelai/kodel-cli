@@ -1336,6 +1336,7 @@ describe("a store made from the golden runs of the stored formats", () => {
     "formats",
     "v1",
   );
+  /** Two finished runs written in run-state format 1, which this kodel refuses to read. */
   const RUNS = ["r_0mviewgvl_i1ig", "r_0mvimyn54_tc9o"];
 
   let outer: string;
@@ -1346,50 +1347,84 @@ describe("a store made from the golden runs of the stored formats", () => {
     for (const id of RUNS) {
       await cp(join(V1, id), join(dir, ".kodel", "runs", id), { recursive: true });
     }
-    // A store is a project only with the marker, which the golden runs do not carry.
-    await writeFile(join(dir, ".kodel", "config.yaml"), "");
+    // A store is a project only with the marker, which the golden runs do not carry; the demo
+    // pipeline and a repository let a run of the current format be made beside them.
+    await mkdir(join(dir, ".kodel", "pipelines"), { recursive: true });
+    await writeFile(join(dir, ".kodel", "pipelines", "demo.yaml"), DEMO);
+    await writeFile(join(dir, ".kodel", "config.yaml"), "worktree:\n  mode: off\n");
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+    git("init", "-q");
+    git("config", "user.email", "t@example.com");
+    git("config", "user.name", "T");
+    git("commit", "-q", "--allow-empty", "-m", "initial");
   });
   afterEach(async () => {
     await rm(join(dir, ".."), { recursive: true, force: true });
     dir = outer;
   });
 
-  test("formats_status_lists_both_runs_and_shows_one_as_unsealed", async () => {
+  /** What a command says about a run of format 1: the code and the format, never "modified". */
+  const expectRefusedClearly = (result: { code: number; out: string; err: string }) => {
+    expect(result.code).not.toBe(0);
+    expect(result.err).toContain("run-state format 1");
+    expect(result.err).toContain("older kodel");
+    expect(result.err).not.toContain("modified");
+    expect(result.err).not.toContain("TypeError");
+  };
+
+  test("t40_status_list_marks_v1_runs", async () => {
     const list = await cli("status");
     expect(list.code).toBe(0);
     for (const id of RUNS) expect(list.out).toContain(id);
     expect(list.out.match(/ dev /g)?.length).toBe(2);
-    expect(list.out.match(/completed/g)?.length).toBe(2);
+    expect(list.out.match(/format 1/g)?.length).toBe(2);
+    expect(list.out).not.toContain("unreadable");
+    expect(list.out).not.toContain("completed");
+  });
+
+  test("t40_status_json_says_format_1", async () => {
+    const parsed = JSON.parse((await cli("status", "--json")).out) as {
+      runId: string;
+      status: string;
+    }[];
+    expect(parsed.map((r) => r.status)).toEqual(["format 1", "format 1"]);
+    expect(parsed.map((r) => r.runId).sort()).toEqual([...RUNS].sort());
+  });
+
+  test("t40_v1_run_refused_clearly", async () => {
     for (const id of RUNS) {
-      const one = await cli("status", id);
-      expect(one.code).toBe(0);
-      expect(one.out).toContain("status:    completed");
-      expect(one.out).toContain("seal:      unsealed");
+      expectRefusedClearly(await cli("status", id));
+      expectRefusedClearly(await cli("report", id));
+      expectRefusedClearly(await cli("report", id, "--json"));
+      expectRefusedClearly(await cli("resume", id));
+      expectRefusedClearly(await cli("gate", "approve", id));
     }
   });
 
-  test("formats_report_shows_where_the_time_went", async () => {
-    for (const id of RUNS) {
-      const report = await cli("report", id);
-      expect(report.code).toBe(0);
-      expect(report.out).toContain(`run ${id}  completed`);
-      expect(report.out).toContain("final-approval");
-      expect(report.out).toContain("(a person decides)");
-    }
-    const parsed = JSON.parse((await cli("report", "r_0mviewgvl_i1ig", "--json")).out);
-    expect(parsed).toMatchObject({ status: "completed", extra_attempts: 9, feedback: 1 });
+  test("t40_v1_run_refused_by_ack_seal_wait_cancel_changes", async () => {
+    const id = RUNS[0] as string;
+    expectRefusedClearly(await cli("ack", id));
+    expectRefusedClearly(await cli("seal", id));
+    expectRefusedClearly(await cliAs({ pollMs: 10 }, "wait", id, "--timeout", "1"));
+    expectRefusedClearly(await cli("pipeline", "changes", "show", id));
+    expectRefusedClearly(await cli("pipeline", "changes", "history", id));
+    expectRefusedClearly(await cli("pipeline", "changes", "apply", id));
   });
 
-  test("v75e_old_run_report_line_in_cli", async () => {
-    for (const id of RUNS) {
-      const report = await cli("report", id);
-      expect(report.out).toContain("prompts: not_collected");
-      expect(report.out.indexOf("prompts: not_collected")).toBeGreaterThan(
-        report.out.indexOf("final-approval"),
-      );
-    }
-    const parsed = JSON.parse((await cli("report", "r_0mviewgvl_i1ig", "--json")).out);
-    expect(parsed.prompts).toEqual({ not_collected: true });
+  test("t40_report_without_run_picks_latest_readable", async () => {
+    // with only runs of format 1 there is nothing to report on
+    const none = await cli("report");
+    expect(none.code).not.toBe(0);
+    expect(none.err).toContain("there are no runs yet");
+    // a run of this kodel beside them is the one `report` picks
+    const id = await runAtGate();
+    const report = await cli("report");
+    expect(report.code).toBe(0);
+    expect(report.out).toContain(`run ${id}  running`);
+    const list = await cli("status");
+    expect(list.out).toContain(`${id}`);
+    expect(list.out.match(/format 1/g)?.length).toBe(2);
+    expect(list.out).toContain("running at approve#1");
   });
 });
 

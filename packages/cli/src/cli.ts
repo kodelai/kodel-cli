@@ -130,13 +130,22 @@ export function safeJson(value: unknown): string {
   return out;
 }
 
-function describeRun(state: RunState | undefined): string {
-  if (!state) return "unreadable";
+/** The status of a run whose state could not be read: its format when that is the reason, else "unreadable". */
+function unreadableStatus(unreadable: { format?: number } | undefined): string {
+  return unreadable?.format === undefined ? "unreadable" : `format ${unreadable.format}`;
+}
+
+function describeRun(
+  state: RunState | undefined,
+  unreadable?: { code: string; format?: number },
+): string {
+  if (!state) return unreadableStatus(unreadable);
   const status = plain(String(state.status));
-  if (state.status === "paused")
-    return `paused (${plain(state.pause?.reason ?? "?")} at ${plain(state.pause?.node ?? "?")})`;
+  const paused = state.pauses.map((p) => `${plain(p.reason)} at ${plain(p.node)}`).join("; ");
+  if (state.status === "paused") return `paused (${paused || "?"})`;
   const at = state.active.map((v) => `${plain(v.node)}#${v.attempt}`).join(", ");
-  return at ? `${status} at ${at}` : status;
+  const held = paused ? ` (paused: ${paused})` : "";
+  return at ? `${status} at ${at}${held}` : `${status}${held}`;
 }
 
 /** The run's slug: the one it was started with, or the name its task text would have given an older run. */
@@ -397,10 +406,10 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       if (!runId) {
         const runs = await h.runSummaries();
         if (opts.json) {
-          const list = runs.map(({ meta, state }) => ({
+          const list = runs.map(({ meta, state, unreadable }) => ({
             runId: meta.runId,
             pipeline: meta.pipeline,
-            status: state?.status ?? "unreadable",
+            status: state?.status ?? unreadableStatus(unreadable),
             slug: slugOf(meta, state),
             task: meta.task,
             ...(state?.workdir === undefined ? {} : { workdir: state.workdir }),
@@ -410,7 +419,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         }
         if (runs.length === 0) env.out("no runs yet\n");
         const rows: string[][] = [];
-        for (const { meta, state } of runs) {
+        for (const { meta, state, unreadable } of runs) {
           // Only a run that works somewhere other than the root says where.
           const where = state?.workdir === undefined ? "-" : plain(state.workdir);
           const open =
@@ -422,7 +431,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           rows.push([
             plain(meta.runId),
             plain(meta.pipeline),
-            `${describeRun(state)}${note}`,
+            `${describeRun(state, unreadable)}${note}`,
             where,
             plain(slugOf(meta, state)),
             plain(meta.task),
@@ -626,7 +635,8 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       requireHuman();
       const run = await openRun(await host(), runId);
       await refuseWhilePending(run, opts.ignorePendingChange);
-      if ((await run.state()).status !== "paused") {
+      const state = await run.state();
+      if (state.pauses.length === 0 || (state.status !== "running" && state.status !== "paused")) {
         throw new UserError(`run ${runId} is not paused`);
       }
       await mustConfirm(`Resume run ${runId} with more attempts?`);
@@ -708,7 +718,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         }),
       );
       await afterDecision(run);
-      if ((await run.state()).status === "paused") {
+      if ((await run.state()).pauses.length > 0) {
         env.out(`The run is still paused; carry it on with: kodel resume ${runId}\n`);
       }
     });
@@ -869,7 +879,9 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .option("--json", "print the report as JSON")
     .action(async (runId: string | undefined, opts: { json?: boolean }) => {
       const h = await host();
-      const id = runId ?? (await h.runSummaries()).at(-1)?.meta.runId;
+      // The latest run whose state this kodel reads: one of an older format is skipped, not reported.
+      const id =
+        runId ?? (await h.runSummaries()).filter((r) => r.state !== undefined).at(-1)?.meta.runId;
       if (!id) throw new UserError("there are no runs yet");
       const run = await openRun(h, id);
       const report = await run.report();

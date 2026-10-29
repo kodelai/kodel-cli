@@ -4,9 +4,9 @@
  */
 import type { PipelineSpec } from "./pipeline";
 import type { AcceptEffect, NodeDiff } from "./pipeline-diff";
-import { defaultRegistry, type Registry } from "./registry";
+import { defaultRegistry, labelsOf, type Registry } from "./registry";
 import { renderContextOf, renderTemplate } from "./render";
-import type { RunState, RunStatus, Visit } from "./run";
+import type { Feedback, RunState, RunStatus, Visit } from "./run";
 
 /** Longest a single `pipeline_next_step` may wait, so a call never hangs for minutes. */
 export const MAX_WAIT_S = 45;
@@ -310,14 +310,16 @@ function baseStep(
   };
   const render = (text: string) => renderTemplate(text, renderContextOf(state));
 
-  if (state.status === "paused" && state.pause) {
-    const failure = state.nodes[state.pause.node]?.lastFailure;
+  // `paused` means nothing can move; a pause of one branch while another goes on is not this.
+  const pause = state.status === "paused" ? state.pauses[0] : undefined;
+  if (pause) {
+    const failure = state.nodes[pause.node]?.lastFailure;
     const detail = failure ? ` Last failure: ${failure.reason}` : "";
     return {
       waiting: {
         reason: "paused",
-        node_slug: state.pause.node,
-        prompt: `The run is paused: ${PAUSE_TEXT[state.pause.reason]} ("${state.pause.node}").${detail}`,
+        node_slug: pause.node,
+        prompt: `The run is paused: ${PAUSE_TEXT[pause.reason]} ("${pause.node}").${detail}`,
         how_to_decide: { cli: `kodel resume ${state.runId}` },
         tell_the_person: TELL_WHEN_PAUSED + tellToWait(state.runId, waitHint),
       },
@@ -338,7 +340,8 @@ function baseStep(
       if (text) parts.push(text);
       if (checkHandler?.exposeSpec && resultSpec === undefined) resultSpec = check.params;
     }
-    const failure = state.nodes[agentVisit.node]?.lastFailure;
+    const run = state.nodes[agentVisit.node];
+    const failure = run?.lastFailure;
     const out: Extract<NextStep, { node: unknown }>["node"] = {
       slug: spec_.slug,
       kind: spec_.kind,
@@ -346,22 +349,25 @@ function baseStep(
       prompt: parts.filter(Boolean).join("\n\n"),
     };
     if (spec_.name !== undefined) out.name = spec_.name;
-    if (failure) {
-      const at = failure.from ? ` at "${failure.from}"` : "";
-      const which = failure.check_id ? ` (${failure.check_id})` : "";
+    // A join that was reached after failures names every failed branch; its own rework (a check of
+    // the join failed) is said as for any node.
+    const branches = run?.lastFailures ?? [];
+    if (spec_.join !== undefined && branches.length > 0 && failure === branches[0]) {
+      out.reentry_feedback = `Branches of the fork failed: ${branches.map(describeFailure).join("; ")}`;
+    } else if (failure) {
       out.reentry_feedback =
         failure.source === "human"
-          ? `A person sent this back${at}: ${failure.reason}`
+          ? `A person sent this back${failure.from ? ` at "${failure.from}"` : ""}: ${failure.reason}`
           : failure.source === "pipeline"
             ? `The pipeline was changed under this run: ${failure.reason}`
             : failure.from
-              ? `"${failure.from}" failed (${failure.source}): ${failure.reason}${which}`
-              : `The previous attempt failed (${failure.source}): ${failure.reason}${which}`;
+              ? describeFailure(failure)
+              : `The previous attempt failed (${failure.source}): ${failure.reason}${checkOf(failure)}`;
     }
     if (resultSpec) out.result_spec = resultSpec;
     const how = handler?.instruction?.(spec_.params);
     if (how) out.execution = { instruction: how };
-    const others = handler?.labels(spec_).success.slice(1) ?? [];
+    const others = labelsOf(registry, spec_)?.success.slice(1) ?? [];
     if (others.length > 0) out.outcomes = others;
     return { node: out };
   }
@@ -413,6 +419,12 @@ function baseStep(
     },
   };
 }
+
+const checkOf = (failure: Feedback) => (failure.check_id ? ` (${failure.check_id})` : "");
+
+/** A failure handed on from another node, as the agent reads it. */
+const describeFailure = (failure: Feedback) =>
+  `"${failure.from}" failed (${failure.source}): ${failure.reason}${checkOf(failure)}`;
 
 function runningHint(active: { node_slug: string; remaining_s?: number }[]): string {
   const known = active.filter((a) => a.remaining_s !== undefined);

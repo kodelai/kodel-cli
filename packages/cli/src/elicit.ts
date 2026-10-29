@@ -42,7 +42,8 @@ export interface HumanRun {
     reason?: string,
     byAgent?: AgentDecision,
   ): Promise<Decision>;
-  resume(): Promise<Decision>;
+  /** `node`: which paused branch, when more than one is paused. */
+  resume(node?: string): Promise<Decision>;
   acknowledge(note?: string): Promise<Decision>;
   acceptChange(input: {
     source: "file" | "proposal";
@@ -517,7 +518,9 @@ async function gateQuestion(
 async function pausedQuestion(runId: string, run: HumanRun): Promise<Question | undefined> {
   const state = await run.state();
   if (state.status !== "paused") return undefined;
-  const why = `${plain(state.pause?.reason ?? "?")} at ${plain(state.pause?.node ?? "?")}`;
+  const pause = state.pauses[0];
+  if (!pause) return undefined;
+  const why = `${plain(pause.reason)} at ${plain(pause.node)}`;
   return {
     key: `${runId}|paused|${why}`,
     notDecided: NOT_DECIDED,
@@ -536,11 +539,14 @@ async function pausedQuestion(runId: string, run: HumanRun): Promise<Question | 
     async apply(content) {
       if (content["confirm"] !== true) return none("declined", NOT_DECIDED);
       const again = await run.state();
-      if (again.status !== "paused") return stale("the run is no longer paused");
+      const still =
+        (again.status === "running" || again.status === "paused") &&
+        again.pauses.some((p) => p.node === pause.node);
+      if (!still) return stale("the run is no longer paused");
       if (await blockingChange(run, again)) {
         return stale("a change of the pipeline is waiting for you; decide on it first");
       }
-      const done = await run.resume();
+      const done = await run.resume(pause.node);
       return done.ok ? { done: "applied", said: "resumed the run" } : refusedBy(done);
     },
   };

@@ -124,6 +124,14 @@ For stored data:
 4. Before the first release, formats may break freely. At the first release, freeze what exists as v1:
    add the golden fixtures above for it, and from then on rules 1-3 apply to every change.
 
+One exception was made under rule 4, before the first release (decision T-40, forks in the run
+engine): run-state format 1 (`state.json` and the journal records with `v: 1`, written by
+`@kodel-ai/kodel@0.1.0-beta.0` and earlier; a beta is pre-release) was replaced by format 2 without
+a reader. The engine refuses a format-1 run with `UNSUPPORTED_FORMAT`, names the format and says to
+finish or cancel it with the kodel that started it; it never guesses from the shape and never calls
+such a run modified, and `fixtures/formats/v1/` keeps the real runs that prove the refusal. The
+decision is refuted if a user outside this repository reports history lost to it.
+
 ## Decisions and tests
 
 Every decision recorded in the decision log (local notes, referred to by id) has a test plan and a refutation criterion.

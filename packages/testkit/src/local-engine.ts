@@ -168,10 +168,9 @@ export class LocalScenarioEngine implements ScenarioEngine {
   async readState(): Promise<ScenarioState> {
     const state = await this.run.state();
     const journal = (await this.host.store.readJournal(this.run.runId)).map((r) => r.event);
-    const waiting = state.active.find((v) => v.phase === "human")?.node;
     return {
       runStatus: state.status,
-      ...(waiting === undefined ? {} : { waitingGate: waiting }),
+      waitingGates: state.active.filter((v) => v.phase === "human").map((v) => v.node),
       nodes: this.context.spec.nodes.map((node) => {
         const run = state.nodes[node.slug];
         return {

@@ -96,6 +96,13 @@ function askWhich(found: Loaded, file: string, committedText: string): PipelineC
 }
 
 /** A proposed pipeline as the person who accepts it needs to see it. */
+/** A run on disk, with its state, or with why it could not be read (`format`: its run-state format, when that is why). */
+export interface RunSummary {
+  meta: RunMeta;
+  state: RunState | undefined;
+  unreadable?: { code: string; message: string; format?: number };
+}
+
 export interface PipelineProposalView {
   record: PipelineProposalRecord;
   /** Absent when the stored text is not a pipeline this kodel reads; `refused` says so. */
@@ -667,14 +674,29 @@ export class LocalPipelineHost implements PipelineHost {
     return !input.restart && (await this.store.findLatest(name, task)) !== undefined;
   }
 
-  /** Every run on disk, oldest first, with its state when it can be read. */
-  async runSummaries(): Promise<{ meta: RunMeta; state: RunState | undefined }[]> {
+  /**
+   * Every run on disk, oldest first, with its state when it can be read, and otherwise why not: a
+   * run of another run-state format says which format, so a list can show it as that and not as
+   * something broken.
+   */
+  async runSummaries(): Promise<RunSummary[]> {
     const metas = await this.store.listRuns();
     return Promise.all(
-      metas.map(async (meta) => ({
-        meta,
-        state: await this.store.readState(meta.runId).catch(() => undefined),
-      })),
+      metas.map(async (meta): Promise<RunSummary> => {
+        try {
+          return { meta, state: await this.store.readState(meta.runId) };
+        } catch (error) {
+          const code = error instanceof KodelError ? error.code : "ERROR";
+          const message = error instanceof Error ? error.message : String(error);
+          const format =
+            code === "UNSUPPORTED_FORMAT" ? (await this.store.peekState(meta.runId))?.v : undefined;
+          return {
+            meta,
+            state: undefined,
+            unreadable: { code, message, ...(format === undefined ? {} : { format }) },
+          };
+        }
+      }),
     );
   }
 
@@ -694,7 +716,7 @@ export class LocalPipelineHost implements PipelineHost {
     if ((meta.v as number) !== META_VERSION) {
       throw new KodelError(
         "UNSUPPORTED_FORMAT",
-        `run ${runId} was written before pipelines were kept in versions (format ${meta.v}, this kodel reads ${META_VERSION}); finish it with the kodel that started it, or remove it`,
+        `run ${runId} was written before pipelines were kept in versions (meta format ${meta.v}, this kodel reads meta format ${META_VERSION}); finish it with the kodel that started it, or remove it`,
       );
     }
     const kept = await this.store.readSpec(runId, state.specHash);

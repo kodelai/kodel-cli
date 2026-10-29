@@ -6,17 +6,25 @@
  * Vocabulary: a node is *entered* (a visit, from the start or from another node); each go at it is
  * an *attempt*. A failed attempt of an agent node with no edge for its label is retried as a new
  * attempt of the same visit (rework). Limits: `max_consecutive_failures` and `max_attempts`.
+ *
+ * Several edges with the same `from` and `when` *fork*: their targets are entered together, each
+ * visit carrying the fork and its branch, and the `join: all` node they all lead to is entered once
+ * every branch has *arrived* (settled with any label that has an edge to the join). A branch that
+ * stops with no way on is *dead*: the join never starts and the run ends `failed` once the other
+ * branches have settled. Pauses are per branch (`pauses[]`); the run is `paused` only when nothing
+ * can move.
  */
 import { canonicalNode, checkIdOf, type NodeForms, stableJson } from "./canonical";
 import { type ChangesRef, changesField, isTreeId, MAX_CHANGES_ERROR } from "./changes";
 import { type ErrorCode, KodelError } from "./errors";
 import type { EngineRecord, ExecutorRecord } from "./executor";
 import type { HistoryConfig } from "./history-config";
-import type { NodeSpec, PipelineSpec } from "./pipeline";
+import type { EdgeSpec, NodeSpec, PipelineSpec } from "./pipeline";
 import { diffPipelines } from "./pipeline-diff";
-import { defaultRegistry, type Registry } from "./registry";
+import { defaultRegistry, labelsOf, RESTART_FAILED, type Registry } from "./registry";
 import { renderContextOf, renderDeep, renderTemplate } from "./render";
 import { runSlug } from "./slug";
+import { RECORD_VERSION } from "./version";
 
 export const DEFAULT_STALE_MS = 30_000;
 export const DEFAULT_MAX_RESTARTS = 3;
@@ -70,6 +78,39 @@ export interface RunFacts {
   commitsTruncated?: boolean;
 }
 
+/** Which branch of which fork a visit, a route or a pause belongs to. */
+export interface ForkRef {
+  /** The fork instance (`RunState.forks`). */
+  id: string;
+  /** The branch, named by its first node (the target of the fork edge). */
+  branch: string;
+}
+
+/** How a branch of a fork settled. */
+export interface Arrival {
+  /** The node the branch ended at, and the label it ended with. */
+  node: string;
+  label: string;
+  /** Set when the branch arrived by a failure label: what the join is told. */
+  failure?: Feedback;
+  /** The branch stopped with no way on; the join can never start. */
+  dead?: true;
+}
+
+/** One time a fork fired. A fork in a loop fires once per pass, each pass its own instance. */
+export interface ForkState {
+  id: string;
+  /** The node and label that forked. */
+  from: string;
+  label: string;
+  join: string;
+  /** The branches, named by their first nodes, in the order of the edges. */
+  branches: string[];
+  arrived: Record<string, Arrival>;
+  /** How many times the join was entered for this instance (`restart_failed` enters it again). */
+  joined: number;
+}
+
 export interface NodeRun {
   slug: string;
   status: NodeStatus;
@@ -83,18 +124,33 @@ export interface NodeRun {
   /** The current visit (entry into the node from the start or from another node). */
   visitId: number;
   lastFailure?: Feedback;
+  /** For a join: why each branch that arrived failed (empty when none did); kept over its rework. */
+  lastFailures?: Feedback[];
+  /** The branch the node was last entered in, when it was entered inside a fork. */
+  fork?: ForkRef;
   /** The node is no longer in the pipeline; its attempts stay in the history. */
   removed?: boolean;
 }
 
 export type Phase = "agent" | "engine" | "checks" | "human";
 
-/** An attempt that is in progress. The state holds a set of them (one at a time in the MVP). */
+/** A worker's hold on an agent step; a mark, not a lock (the host writes it, the engine never refuses on it). */
+export interface StepClaim {
+  /** The token, hashed by the host. */
+  token: string;
+  at: number;
+  by?: string;
+}
+
+/** An attempt that is in progress. The state holds a set of them: one per node, several in a fork. */
 export interface Visit {
   node: string;
   attempt: number;
   visitId: number;
   phase: Phase;
+  /** The branch this visit belongs to, when it is inside a fork. */
+  fork?: ForkRef;
+  claim?: StepClaim;
   /** Which check is running, in the `checks` phase. */
   checkIndex: number;
   /** Last sign of life of the process running engine work. */
@@ -121,6 +177,12 @@ export interface BlockedRoute {
   rework: boolean;
   /** Why the node before failed, handed to the node this route enters (a rejection, a red build). */
   feedback?: Feedback;
+  /** For a route into a join: why each failed branch failed, in branch order. */
+  feedbacks?: Feedback[];
+  /** The branch the route stays in, so a node entered later still belongs to it. */
+  fork?: ForkRef;
+  /** The fork instance whose join this route enters. */
+  join?: string;
 }
 
 export interface Pause {
@@ -128,10 +190,12 @@ export interface Pause {
   /** The node whose limit was hit (the one `resume` gives a fresh budget). */
   node: string;
   blocked?: BlockedRoute;
+  /** The branch that paused, when the node is inside a fork; the other branches go on. */
+  fork?: ForkRef;
 }
 
 export interface RunState {
-  v: 1;
+  v: typeof RECORD_VERSION;
   runId: string;
   task: string;
   /**
@@ -150,7 +214,10 @@ export interface RunState {
   active: Visit[];
   /** Nodes entered, in order (rework inside a visit adds nothing). */
   trail: string[];
-  pause?: Pause;
+  /** Where the run waits for `resume`, one entry per paused branch (or one for a run without forks). */
+  pauses: Pause[];
+  /** Every time a fork fired, by instance id, in order; absent until the first fork. */
+  forks?: Record<string, ForkState>;
   nextVisitId: number;
   /** Sequence number of the last journal record. */
   seq: number;
@@ -456,7 +523,8 @@ export type RunEvent =
    * host knows to be gone, so their work restarts at once instead of after `staleMs`.
    */
   | { type: "tick"; deadOwners?: string[] }
-  | { type: "resume" }
+  /** Carry a paused branch on; `node` picks the pause when more than one branch is paused. */
+  | { type: "resume"; node?: string }
   | { type: "cancel" }
   /**
    * The patch of the whole run, or why there is none. Applied once the run has finished, like
@@ -500,7 +568,7 @@ export type Effect =
   | { type: "await_human"; node: string; attempt: number; prompt: string; instructions?: string };
 
 export interface JournalRecord {
-  v: 1;
+  v: typeof RECORD_VERSION;
   seq: number;
   ts: number;
   event: string;
@@ -589,7 +657,72 @@ class Machine {
 
   private log(event: string, data: Record<string, unknown> = {}) {
     this.s.seq += 1;
-    this.journal.push({ v: 1, seq: this.s.seq, ts: this.now, event, ...data });
+    this.journal.push({ v: RECORD_VERSION, seq: this.s.seq, ts: this.now, event, ...data });
+  }
+
+  private get ended(): boolean {
+    return this.s.status !== "running" && this.s.status !== "paused";
+  }
+
+  /** The journal fields that say which branch something belongs to. */
+  private forkFields(fork: ForkRef | undefined): Record<string, unknown> {
+    return fork === undefined ? {} : { fork: fork.id, branch: fork.branch };
+  }
+
+  private forkState(ref: ForkRef): ForkState {
+    const fork = this.s.forks?.[ref.id];
+    if (!fork) {
+      throw fail(
+        "STATE_MODIFIED_EXTERNALLY",
+        `the state names a fork "${ref.id}" that it does not hold`,
+      );
+    }
+    return fork;
+  }
+
+  /** The instance whose join `slug` is: the latest one, since a join belongs to one fork and a fork in a loop fires again. */
+  private forkOfJoin(slug: string): ForkState | undefined {
+    const all = Object.values(this.s.forks ?? {});
+    for (let i = all.length - 1; i >= 0; i--) {
+      const fork = all[i];
+      if (fork?.join === slug) return fork;
+    }
+    return undefined;
+  }
+
+  /** The join the branches starting at `heads` lead to: the first `join: all` node reached without passing another. */
+  private joinOf(heads: string[]): string | undefined {
+    const seen = new Set<string>();
+    const queue = [...heads];
+    for (let slug = queue.shift(); slug !== undefined; slug = queue.shift()) {
+      if (seen.has(slug)) continue;
+      seen.add(slug);
+      if (this.nodes.get(slug)?.join !== undefined) return slug;
+      for (const edge of this.spec.edges) if (edge.from === slug) queue.push(edge.to);
+    }
+    return undefined;
+  }
+
+  /** The nodes of a branch: what its first node reaches without passing the join. */
+  private branchNodes(ref: ForkRef): Set<string> {
+    const { join } = this.forkState(ref);
+    const seen = new Set<string>();
+    const queue = [ref.branch];
+    for (let slug = queue.shift(); slug !== undefined; slug = queue.shift()) {
+      if (seen.has(slug) || slug === join) continue;
+      seen.add(slug);
+      for (const edge of this.spec.edges) if (edge.from === slug) queue.push(edge.to);
+    }
+    return seen;
+  }
+
+  /** The branches of a fork that `restart_failed` runs again: failed, and not by a person's rejection. */
+  private restartable(fork: ForkState | undefined): string[] {
+    if (!fork) return [];
+    return fork.branches.filter((branch) => {
+      const failure = fork.arrived[branch]?.failure;
+      return failure !== undefined && failure.source !== "human";
+    });
   }
 
   /** The active visit an event is about, or a precise error, or `Repeat` for a duplicate. */
@@ -637,11 +770,38 @@ class Machine {
 
   // entering nodes
 
-  private enter(slug: string, rework: boolean, feedback?: Feedback) {
+  /**
+   * `fork`: the branch the node is entered in. `feedbacks`: for a join, why each failed branch failed
+   * (given on every fresh entry of a join, empty when none failed; a rework keeps the last ones).
+   */
+  private enter(
+    slug: string,
+    rework: boolean,
+    feedback?: Feedback,
+    fork?: ForkRef,
+    feedbacks?: Feedback[],
+  ) {
     const node = this.node(slug);
     const run = this.run(slug);
+    if (this.s.active.some((v) => v.node === slug)) {
+      // One attempt of a node at a time is what every reader of the state relies on. The validator
+      // keeps the branches of a fork apart, so this is a defect of the pipeline or the state, and the
+      // run says so instead of going on with two visits of one node.
+      this.end("failed", `node "${slug}" was entered while an attempt of it was still going`);
+      return;
+    }
     run.attempt += 1;
     if (feedback) run.lastFailure = feedback;
+    if (fork) run.fork = fork;
+    else delete run.fork;
+    if (feedbacks !== undefined) {
+      run.lastFailures = feedbacks;
+      const first = feedbacks[0];
+      if (first) run.lastFailure = first;
+      else delete run.lastFailure;
+    } else if (!rework) {
+      delete run.lastFailures;
+    }
     if (!rework) {
       run.visitId = this.s.nextVisitId++;
       this.s.trail.push(slug);
@@ -652,6 +812,7 @@ class Machine {
       attempt: run.attempt,
       visitId: run.visitId,
       phase: begin.needs === "engine" ? "engine" : begin.needs,
+      ...(fork === undefined ? {} : { fork }),
       checkIndex: 0,
       restarts: 0,
       startedAt: this.now,
@@ -663,6 +824,7 @@ class Machine {
       attempt: run.attempt,
       visit: run.visitId,
       rework,
+      ...this.forkFields(fork),
       ...this.definitionOf(node),
     });
 
@@ -776,61 +938,277 @@ class Machine {
       attempt: visit.attempt,
       outcome: label,
       status: run.status,
+      ...this.forkFields(visit.fork),
       ...(failure ? { source: failure.source, reason: failure.reason } : {}),
     });
     this.route(node, label, failure !== undefined);
   }
 
   private route(node: NodeSpec, label: string, failure: boolean) {
-    const edge = this.spec.edges.find((e) => e.from === node.slug && e.when === label);
+    const run = this.run(node.slug);
+    const fork = run.fork;
+    const own = failure ? run.lastFailure : undefined;
+    if (node.join !== undefined && label === RESTART_FAILED) {
+      this.restartFailed(node);
+      return;
+    }
+    const edges = this.spec.edges.filter((e) => e.from === node.slug && e.when === label);
+    if (edges.length >= 2) {
+      this.fork(node, label, edges, own);
+      return;
+    }
+    const edge = edges[0];
     if (edge) {
-      const own = failure ? this.run(node.slug).lastFailure : undefined;
+      if (fork && this.forkState(fork).join === edge.to) {
+        this.arrive(fork, node.slug, label, own);
+        return;
+      }
       this.proceed({
         from: node.slug,
         label,
         to: edge.to,
         rework: false,
         ...(own ? { feedback: { ...own, from: node.slug } } : {}),
+        ...(fork ? { fork } : {}),
       });
       return;
     }
     if (!failure) {
-      if (this.s.active.length === 0) this.end("completed");
+      if (fork) {
+        // The validator does not let a branch end anywhere but at the join; said here all the same.
+        this.die(fork, node.slug, label, {
+          source: "pipeline",
+          reason: `node "${node.slug}" finished with "${label}" and its branch has no way on`,
+        });
+      } else if (this.s.active.length === 0 && this.s.pauses.length === 0) {
+        this.end("completed");
+      }
       return;
     }
     if (this.handler(node).requiresRoutes) {
-      this.end("failed", `node "${node.slug}" failed with "${label}" and nothing handles that`);
+      const reason = `node "${node.slug}" failed with "${label}" and nothing handles that`;
+      if (fork) this.die(fork, node.slug, label, own ?? { source: "pipeline", reason });
+      else this.end("failed", reason);
       return;
     }
-    this.proceed({ from: node.slug, label, to: node.slug, rework: true });
+    this.proceed({
+      from: node.slug,
+      label,
+      to: node.slug,
+      rework: true,
+      ...(fork ? { fork } : {}),
+    });
   }
 
-  /** Take a route unless a limit forbids the next attempt; then the run pauses. */
+  /** Take a route unless a limit forbids the next attempt; then the branch (or the run) pauses. */
   private proceed(route: BlockedRoute) {
     const from = this.node(route.from);
     const fromRun = this.run(route.from);
     const automatic = this.handler(from).automaticFailures;
+    const pauseFields = route.fork === undefined ? {} : { fork: route.fork };
+    // A route into a join comes from arrivals that are settled; a branch that failed too often in a
+    // row paused itself before it arrived, or arrived by a failure label the join is told about.
     if (
+      route.join === undefined &&
       fromRun.status === "failed" &&
       automatic &&
       fromRun.consecutiveFailures >= from.max_consecutive_failures
     ) {
-      this.pause({ reason: "consecutive", node: route.from, blocked: route });
+      this.pause({ reason: "consecutive", node: route.from, blocked: route, ...pauseFields });
       return;
     }
     const to = this.node(route.to);
     const toRun = this.run(route.to);
     if (toRun.attempt + 1 > to.max_attempts + toRun.extraAttempts) {
-      this.pause({ reason: "total", node: route.to, blocked: route });
+      this.pause({ reason: "total", node: route.to, blocked: route, ...pauseFields });
       return;
     }
-    this.enter(route.to, route.rework, route.feedback);
+    this.enter(route.to, route.rework, route.feedback, route.fork, route.feedbacks);
   }
 
   private pause(pause: Pause) {
-    this.s.status = "paused";
-    this.s.pause = pause;
-    this.log("run_paused", { reason: pause.reason, node: pause.node });
+    this.s.pauses.push(pause);
+    this.log("run_paused", {
+      reason: pause.reason,
+      node: pause.node,
+      ...this.forkFields(pause.fork),
+    });
+  }
+
+  /** Drop the pause a change or a resume takes care of, and say which it was. */
+  private takePause(matches: (pause: Pause) => boolean): Pause | undefined {
+    const index = this.s.pauses.findIndex(matches);
+    if (index < 0) return undefined;
+    const [pause] = this.s.pauses.splice(index, 1);
+    return pause;
+  }
+
+  // forks
+
+  private fork(node: NodeSpec, label: string, edges: EdgeSpec[], own: Feedback | undefined) {
+    const heads = edges.map((e) => e.to);
+    const join = this.joinOf(heads);
+    if (join === undefined) {
+      this.end(
+        "failed",
+        `node "${node.slug}" has several edges for "${label}" but no \`join: all\` node where the branches meet`,
+      );
+      return;
+    }
+    const forks = this.s.forks ?? {};
+    this.s.forks = forks;
+    const id = `f${Object.keys(forks).length + 1}`;
+    const fork: ForkState = {
+      id,
+      from: node.slug,
+      label,
+      join,
+      branches: heads,
+      arrived: {},
+      joined: 0,
+    };
+    forks[id] = fork;
+    this.log("fork_started", { fork: id, node: node.slug, label, branches: heads, join });
+    for (const head of heads) {
+      const ref: ForkRef = { id, branch: head };
+      if (head === join) {
+        // A branch with no step of its own: it has arrived as soon as the fork starts.
+        this.arrive(ref, node.slug, label, own);
+      } else {
+        this.proceed({
+          from: node.slug,
+          label,
+          to: head,
+          rework: false,
+          ...(own ? { feedback: { ...own, from: node.slug } } : {}),
+          fork: ref,
+        });
+      }
+      if (this.ended) return;
+    }
+  }
+
+  /** A branch settled at a node with an edge to the join. */
+  private arrive(ref: ForkRef, node: string, label: string, failure: Feedback | undefined) {
+    const fork = this.forkState(ref);
+    const arrival: Arrival = {
+      node,
+      label,
+      ...(failure ? { failure: { ...failure, from: node } } : {}),
+    };
+    fork.arrived[ref.branch] = arrival;
+    this.log("branch_settled", {
+      fork: fork.id,
+      branch: ref.branch,
+      node,
+      label,
+      failed: failure !== undefined,
+      ...(failure ? { source: failure.source, reason: failure.reason } : {}),
+    });
+    this.tryJoin(fork);
+  }
+
+  /** A branch stopped with nothing to handle its failure: it is settled, but the join cannot start. */
+  private die(ref: ForkRef, node: string, label: string, failure: Feedback) {
+    const fork = this.forkState(ref);
+    fork.arrived[ref.branch] = { node, label, failure: { ...failure, from: node }, dead: true };
+    this.log("branch_settled", {
+      fork: fork.id,
+      branch: ref.branch,
+      node,
+      label,
+      failed: true,
+      dead: true,
+      source: failure.source,
+      reason: failure.reason,
+    });
+  }
+
+  /** Enter the join once every branch has arrived and none is dead. */
+  private tryJoin(fork: ForkState) {
+    const arrivals = fork.branches.map((branch) => fork.arrived[branch]);
+    if (arrivals.some((a) => a === undefined || a.dead)) return;
+    const failed = fork.branches.filter((branch) => fork.arrived[branch]?.failure !== undefined);
+    const feedbacks = failed.map((branch) => fork.arrived[branch]?.failure as Feedback);
+    const last = Object.values(fork.arrived).at(-1) as Arrival;
+    fork.joined += 1;
+    this.log("join_reached", {
+      fork: fork.id,
+      join: fork.join,
+      failed,
+      ...(feedbacks.length === 0 ? {} : { feedbacks }),
+    });
+    this.proceed({
+      from: last.node,
+      label: last.label,
+      to: fork.join,
+      rework: false,
+      feedbacks,
+      join: fork.id,
+    });
+  }
+
+  /** The join finished with `restart_failed`: its failed branches start again, and it waits for them. */
+  private restartFailed(node: NodeSpec) {
+    const fork = this.forkOfJoin(node.slug);
+    const branches = this.restartable(fork);
+    if (!fork || branches.length === 0) {
+      // The completion was checked for this; here nothing can be refused, so the run says what happened.
+      this.end(
+        "failed",
+        `node "${node.slug}" finished with "${RESTART_FAILED}" but no branch of its fork had failed`,
+      );
+      return;
+    }
+    for (const branch of branches) {
+      const arrival = fork.arrived[branch] as Arrival;
+      delete fork.arrived[branch];
+      this.proceed({
+        from: node.slug,
+        label: RESTART_FAILED,
+        to: branch,
+        rework: false,
+        ...(arrival.failure ? { feedback: arrival.failure } : {}),
+        fork: { id: fork.id, branch },
+      });
+      if (this.ended) return;
+    }
+  }
+
+  /** The dead branches of every fork, each with why, in branch order. */
+  private deadBranches(): { branch: string; arrival: Arrival }[] {
+    return Object.values(this.s.forks ?? {}).flatMap((fork) =>
+      fork.branches.flatMap((branch) => {
+        const arrival = fork.arrived[branch];
+        return arrival?.dead ? [{ branch, arrival }] : [];
+      }),
+    );
+  }
+
+  /**
+   * After every event: the status follows what can move, and a run left with nothing to do because a
+   * branch died ends `failed` with every dead branch named. Nothing else ends a run here.
+   */
+  settle() {
+    if (this.ended) return;
+    const { active, pauses } = this.s;
+    if (active.length === 0 && pauses.length === 0) {
+      const dead = this.deadBranches();
+      if (dead.length > 0) {
+        this.end(
+          "failed",
+          dead
+            .map(({ branch, arrival }) => {
+              const failure = arrival.failure;
+              return `branch "${branch}" failed at "${arrival.node}" (${failure?.source ?? "unknown"}): ${failure?.reason ?? arrival.label}`;
+            })
+            .join("; "),
+        );
+      }
+      return;
+    }
+    const movable = active.some((v) => v.phase === "agent" || v.phase === "human" || !v.suspended);
+    this.s.status = movable ? "running" : "paused";
   }
 
   private end(status: "completed" | "failed" | "canceled", reason?: string) {
@@ -943,7 +1321,7 @@ class Machine {
       else throw new Repeat();
       return;
     }
-    if (event.type === "resume") return this.resume();
+    if (event.type === "resume") return this.resume(event.node);
     if (event.type === "pipeline_accepted") return this.acceptPipeline(event);
     if (event.type === "tick" || event.type === "heartbeat") {
       if (this.s.status !== "running") throw new Repeat();
@@ -973,7 +1351,9 @@ class Machine {
         }
         const node = this.node(event.node);
         if (event.outcome !== undefined && event.outcome !== "passed") {
-          const others = this.handler(node).labels(node).success.slice(1);
+          const others = (
+            labelsOf(this.registry, node) ?? this.handler(node).labels(node)
+          ).success.slice(1);
           if (!others.includes(event.outcome)) {
             throw fail(
               "UNKNOWN_OUTCOME",
@@ -981,6 +1361,24 @@ class Machine {
                 ? `node "${node.slug}" has no outcome "${event.outcome}" (it only finishes the usual way)`
                 : `node "${node.slug}" has no outcome "${event.outcome}" (it may finish with: ${others.join(", ")})`,
             );
+          }
+          // The reserved outcome is a claim like any other, checked here where a refusal reaches the
+          // agent; once the checks have passed, `route` can only act on it.
+          if (event.outcome === RESTART_FAILED) {
+            const fork = this.forkOfJoin(node.slug);
+            if (this.restartable(fork).length === 0) {
+              const rejected = fork?.branches.some(
+                (b) => fork.arrived[b]?.failure?.source === "human",
+              );
+              throw fail(
+                "INVALID_ARGUMENTS",
+                `node "${node.slug}" cannot finish with "${RESTART_FAILED}": no branch of its fork failed${
+                  rejected
+                    ? " (a branch a person sent back is not run again by the agent; the person decides at its gate or with kodel resume)"
+                    : ""
+                }`,
+              );
+            }
           }
           visit.declared = event.outcome;
         }
@@ -1278,18 +1676,24 @@ class Machine {
     // Work whose process went silent counts against `maxRestarts`. Work whose process is known to be
     // gone is counted apart and allowed more: closing the agent in the middle of a build is a normal
     // thing to do, and the next session picks the build up again; it is not a crash.
+    const suspend = () => {
+      visit.suspended = true;
+      this.pause({
+        reason: "restarts",
+        node: visit.node,
+        ...(visit.fork === undefined ? {} : { fork: visit.fork }),
+      });
+    };
     if (ownerGone) {
       visit.takeovers = (visit.takeovers ?? 0) + 1;
       if (visit.takeovers > MAX_TAKEOVERS) {
-        visit.suspended = true;
-        this.pause({ reason: "restarts", node: visit.node });
+        suspend();
         return;
       }
     } else {
       visit.restarts += 1;
       if (visit.restarts > this.maxRestarts) {
-        visit.suspended = true;
-        this.pause({ reason: "restarts", node: visit.node });
+        suspend();
         return;
       }
     }
@@ -1313,11 +1717,9 @@ class Machine {
     else this.emitCheck(visit, true);
   }
 
-  /** Clear a pause that the change takes care of. */
-  private unpause() {
-    if (this.s.status !== "paused") return;
-    this.s.status = "running";
-    delete this.s.pause;
+  /** Clear the pause of a node that the change takes care of. */
+  private unpause(node: string) {
+    this.takePause((p) => p.node === node || p.blocked?.from === node);
   }
 
   private acceptPipeline(event: Extract<RunEvent, { type: "pipeline_accepted" }>) {
@@ -1365,15 +1767,20 @@ class Machine {
       // and it does not use up an attempt of the node.
       this.s.active = this.s.active.filter((v) => v !== visit);
       this.log("node_superseded", { node: visit.node, attempt: visit.attempt });
-      this.unpause();
+      this.unpause(visit.node);
       this.run(visit.node).extraAttempts += 1;
-      this.enter(visit.node, true, {
-        source: "pipeline",
-        reason:
-          "the definition of this step was changed; the work done so far is still in the working directory",
-      });
+      this.enter(
+        visit.node,
+        true,
+        {
+          source: "pipeline",
+          reason:
+            "the definition of this step was changed; the work done so far is still in the working directory",
+        },
+        visit.fork,
+      );
     } else if (effect.kind === "recheck") {
-      this.unpause();
+      this.unpause(effect.node);
       const visit = this.s.active.find((v) => v.node === effect.node);
       if (visit) {
         visit.suspended = false;
@@ -1394,6 +1801,7 @@ class Machine {
         attempt: run.attempt,
         visitId: run.visitId,
         phase: "checks",
+        ...(run.fork === undefined ? {} : { fork: run.fork }),
         checkIndex: 0,
         restarts: 0,
         heartbeatAt: this.now,
@@ -1403,22 +1811,45 @@ class Machine {
       this.log("checks_rerun", { node: effect.node, attempt: run.attempt });
       this.emitCheck(reopened, false);
     } else if (effect.kind === "reroute") {
-      const blocked = this.s.pause?.blocked;
+      const pause =
+        this.takePause((p) => p.blocked?.from === effect.node) ??
+        this.takePause((p) => p.blocked !== undefined);
+      const blocked = pause?.blocked;
       if (!blocked) return;
-      this.unpause();
       this.route(this.node(blocked.from), blocked.label, true);
     }
   }
 
-  private resume() {
-    const pause = this.s.pause;
-    if (this.s.status !== "paused" || !pause) throw new Repeat();
-    this.s.status = "running";
-    delete this.s.pause;
-    this.log("run_resumed", { reason: pause.reason, node: pause.node });
+  private resume(node: string | undefined) {
+    if (this.ended) throw fail("NODE_NOT_RUNNING", `the run is ${this.s.status}`);
+    const { pauses } = this.s;
+    if (pauses.length === 0) throw new Repeat();
+    const named = pauses.map((p) => `"${p.node}"`).join(", ");
+    const details = [{ field: "node", valid: pauses.map((p) => p.node) }];
+    const pause = node === undefined ? pauses[0] : pauses.find((p) => p.node === node);
+    if (node === undefined && pauses.length > 1) {
+      throw new KodelError(
+        "INVALID_ARGUMENTS",
+        `the run is paused at several steps (${named}); say which one to resume`,
+        details,
+      );
+    }
+    if (!pause) {
+      throw new KodelError(
+        "INVALID_ARGUMENTS",
+        `the run is not paused at "${node}" (it is paused at ${named})`,
+        details,
+      );
+    }
+    this.s.pauses = pauses.filter((p) => p !== pause);
+    this.log("run_resumed", {
+      reason: pause.reason,
+      node: pause.node,
+      ...this.forkFields(pause.fork),
+    });
 
     if (pause.reason === "restarts") {
-      const visit = this.s.active.find((v) => v.suspended);
+      const visit = this.s.active.find((v) => v.suspended && v.node === pause.node);
       if (visit) {
         visit.suspended = false;
         visit.restarts = 0;
@@ -1429,12 +1860,15 @@ class Machine {
     }
     // A human saying "go on" gives a fresh budget: the node that caused the pause starts its failure
     // count over, and every node that has used up its attempts gets another `max_attempts` (a loop
-    // runs through several nodes, so topping up only one would just pause again at the next).
+    // runs through several nodes, so topping up only one would just pause again at the next). In a
+    // fork only the paused branch is meant: its sibling did not ask for anything.
     this.run(pause.node).consecutiveFailures = 0;
-    for (const node of this.spec.nodes) {
-      const run = this.run(node.slug);
-      if (run.attempt >= node.max_attempts + run.extraAttempts)
-        run.extraAttempts += node.max_attempts;
+    const scope = pause.fork === undefined ? undefined : this.branchNodes(pause.fork);
+    for (const spec of this.spec.nodes) {
+      if (scope !== undefined && !scope.has(spec.slug) && spec.slug !== pause.node) continue;
+      const run = this.run(spec.slug);
+      if (run.attempt >= spec.max_attempts + run.extraAttempts)
+        run.extraAttempts += spec.max_attempts;
     }
     if (pause.blocked) this.proceed(pause.blocked);
   }
@@ -1443,7 +1877,7 @@ class Machine {
 /** A run that has not started yet; `decide` fills it in on the `start` event. */
 function emptyState(now: number): RunState {
   return {
-    v: 1,
+    v: RECORD_VERSION,
     runId: "",
     task: "",
     specHash: "",
@@ -1452,6 +1886,7 @@ function emptyState(now: number): RunState {
     nodes: {},
     active: [],
     trail: [],
+    pauses: [],
     nextVisitId: 1,
     seq: 0,
   };
@@ -1490,6 +1925,7 @@ export function decide(
   const machine = new Machine(spec, draft, now, options, facts);
   try {
     machine.apply(event);
+    machine.settle();
   } catch (error) {
     if (error instanceof KodelError) return { ok: false, error };
     if (error instanceof Repeat && state) {

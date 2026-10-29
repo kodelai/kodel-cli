@@ -965,7 +965,7 @@ describe("a write never follows a planted link", () => {
     await writeFile(victim, "keep me\n");
     await symlink(victim, join(runDir(id), "state.json.tmp-4242-2"));
     await store.writeState(id, {
-      v: 1,
+      v: 2,
       runId: id,
       task: "t",
       specHash: "h",
@@ -974,6 +974,7 @@ describe("a write never follows a planted link", () => {
       nodes: {},
       active: [],
       trail: [],
+      pauses: [],
       nextVisitId: 1,
       seq: 0,
     });

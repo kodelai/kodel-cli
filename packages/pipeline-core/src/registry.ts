@@ -18,6 +18,8 @@ export interface NodeInfo {
   checks: CheckInfo[];
   /** The kind-specific parameters, for kinds whose labels depend on them (`outcomes`). */
   params?: Record<string, unknown>;
+  /** The node is where the branches of a fork meet. */
+  join?: "all";
 }
 
 export interface Labels {
@@ -25,6 +27,23 @@ export interface Labels {
   success: string[];
   /** Labels that mean "the node did not succeed". */
   failure: string[];
+}
+
+/** The reserved outcome of a join: run the branches of its fork that failed again. */
+export const RESTART_FAILED = "restart_failed";
+
+/**
+ * Every label a node can emit, the reserved outcome of a join included. It is the one source for
+ * the validation of edges and `outcomes`, for what the agent is offered, and for the check of a
+ * completion: a kind knows its own labels, and a join of a kind that takes `outcomes` gets
+ * `restart_failed` on top, so no caller lists the reserved label itself.
+ */
+export function labelsOf(registry: Registry, node: NodeInfo): Labels | undefined {
+  const handler = registry.node(node.kind);
+  if (!handler) return undefined;
+  const labels = handler.labels(node);
+  if (node.join === undefined || !("outcomes" in handler.shape)) return labels;
+  return { success: [...labels.success, RESTART_FAILED], failure: labels.failure };
 }
 
 /** What a node needs in order to do its work. Strings are already rendered (placeholders filled). */

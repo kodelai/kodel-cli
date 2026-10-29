@@ -93,19 +93,32 @@ export function diffPipelines(
     return refuse("the first node of the pipeline cannot change in a run that has started");
   }
 
-  // Where the run stands: the nodes with an attempt in progress, or, when it is held back at a
+  // Where the run stands: the nodes with an attempt in progress, and, where it is held back at a
   // failure, the node that failed and the one it was going to.
-  const blocked = state.pause?.blocked;
+  const blocked = state.pauses.find((p) => p.blocked !== undefined)?.blocked;
   const standing = state.active.map((v) => v.node);
-  if (standing.length === 0 && blocked) standing.push(blocked.from, blocked.to);
+  for (const pause of state.pauses) {
+    if (pause.blocked) standing.push(pause.blocked.from, pause.blocked.to);
+  }
   for (const slug of standing) {
     if (changesOf(slug).includes("removed")) {
       return refuse(`node "${slug}" is where the run stands, so it cannot be removed`);
     }
   }
 
-  // A node that has finished and cannot be reached again is part of what already happened.
+  // A node that has finished and cannot be reached again is part of what already happened. The
+  // branches of an open fork are not: a branch that arrived failed can be run again from the join
+  // (`restart_failed`), so its steps may still be repaired.
   const ahead = reachable(after, standing);
+  for (const fork of Object.values(state.forks ?? {})) {
+    const open =
+      state.active.some((v) => v.node === fork.join) ||
+      fork.branches.some((branch) => fork.arrived[branch] === undefined);
+    if (!open) continue;
+    for (const slug of reachable(after, fork.branches)) {
+      if (slug !== fork.join) ahead.add(slug);
+    }
+  }
   for (const { slug, changes } of nodes) {
     if (changes.includes("added") || changes.includes("removed")) continue;
     const run = state.nodes[slug];

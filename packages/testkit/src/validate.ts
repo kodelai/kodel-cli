@@ -4,7 +4,7 @@ import { createMatchers } from "./matchers";
 import type { Assertion, Scenario } from "./types";
 
 const NODE_MAP_KEYS = new Set(["attempts", "nodeStatus", "nodeOutcome"]);
-const NODE_LIST_KEYS = new Set(["trail", "executed", "never"]);
+const NODE_LIST_KEYS = new Set(["trail", "executed", "never", "waitingGates"]);
 
 /**
  * Static checks of a scenario against the pipeline it runs on, so a typo in a node name fails
@@ -77,9 +77,6 @@ function validateAssertion(
   if (NODE_LIST_KEYS.has(a.key) && Array.isArray(a.expected)) {
     for (const slug of a.expected)
       if (!nodes.has(String(slug))) problems.push(unknown(String(slug)));
-  }
-  if (a.key === "waitingGate" && typeof a.expected === "string" && !nodes.has(a.expected)) {
-    problems.push(unknown(a.expected));
   }
   return problems;
 }

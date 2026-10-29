@@ -1375,7 +1375,12 @@ export class LocalRun {
         try {
           raw = await store.readStateRaw(this.runId);
         } catch (error) {
-          if (error instanceof KodelError && error.code === "STATE_MODIFIED_EXTERNALLY") {
+          // A state this kodel cannot read, or one that is not as it was written: the event is
+          // refused with that, so a caller (a cancel, a decision) gets the reason and not a crash.
+          if (
+            error instanceof KodelError &&
+            (error.code === "STATE_MODIFIED_EXTERNALLY" || error.code === "UNSUPPORTED_FORMAT")
+          ) {
             return { ok: false, error } satisfies Decision;
           }
           throw error;
@@ -1477,7 +1482,11 @@ export class LocalRun {
 
   /** Whether the state file is what kodel last wrote. `unknown`: kodel has not seen this run yet. */
   async integrityStatus(): Promise<"ok" | "modified" | "unknown"> {
-    const raw = await this.host.store.readStateRaw(this.runId).catch(() => undefined);
+    // A format this kodel does not read is not a modified state; that error is passed on as it is.
+    const raw = await this.host.store.readStateRaw(this.runId).catch((error: unknown) => {
+      if (error instanceof KodelError && error.code === "UNSUPPORTED_FORMAT") throw error;
+      return undefined;
+    });
     if (!raw) return "modified";
     const trusted = await this.host.integrity.trusts(this.runId, raw.hash);
     if (trusted === undefined) return "unknown";
@@ -2280,8 +2289,9 @@ export class LocalRun {
     });
   }
 
-  resume() {
-    return this.apply({ type: "resume" });
+  /** `node`: which paused branch to carry on, when more than one is paused. */
+  resume(node?: string) {
+    return this.apply({ type: "resume", ...(node === undefined ? {} : { node }) });
   }
 
   async cancel() {

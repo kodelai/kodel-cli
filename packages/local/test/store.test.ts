@@ -24,7 +24,7 @@ const meta = (runId: string, over: Partial<RunMeta> = {}): RunMeta => ({
 });
 
 const state = (over: Partial<RunState> = {}): RunState => ({
-  v: 1,
+  v: 2,
   runId: "r_000000001_aaaa",
   task: "add a limit",
   specHash: "h",
@@ -33,13 +33,14 @@ const state = (over: Partial<RunState> = {}): RunState => ({
   nodes: {},
   active: [],
   trail: [],
+  pauses: [],
   nextVisitId: 1,
   seq: 0,
   ...over,
 });
 
 const record = (seq: number, extra: Record<string, unknown> = {}): JournalRecord => ({
-  v: 1,
+  v: 2,
   seq,
   ts: seq * 10,
   event: "node_entered",

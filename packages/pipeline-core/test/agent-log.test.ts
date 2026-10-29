@@ -300,7 +300,7 @@ describe("t3bk2 the report with many copies", () => {
     const journal = [...first.journal];
     for (let i = 0; i < MAX_AGENT_LOG_TICKS; i++) {
       journal.push({
-        v: 1,
+        v: 2,
         seq: journal.length + 1,
         ts: 1_000 + i * 10_000,
         event: "agent_log_saved",

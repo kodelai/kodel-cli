@@ -266,7 +266,10 @@ export class FileStore {
     return metas.sort((a, b) => a.createdAt - b.createdAt || a.runId.localeCompare(b.runId));
   }
 
-  /** The newest run of this pipeline and task, finished or not. */
+  /**
+   * The newest run of this pipeline and task, finished or not, among those this kodel reads: a run
+   * of a format it does not read is passed over (it cannot be reported on or carried on here).
+   */
   async findLatest(
     pipeline: string,
     task: string,
@@ -276,10 +279,38 @@ export class FileStore {
       (m) => m.pipeline === pipeline && m.task === redactedTask,
     );
     for (const meta of candidates.reverse()) {
-      const state = await this.readState(meta.runId);
+      let state: RunState | undefined;
+      try {
+        state = await this.readState(meta.runId);
+      } catch (error) {
+        if (error instanceof KodelError && error.code === "UNSUPPORTED_FORMAT") continue;
+        throw error;
+      }
       if (state) return { meta, state };
     }
     return undefined;
+  }
+
+  /** The `v` and `status` fields of a state file as they are, without reading it as a run; nothing when there is no file or no JSON. */
+  async peekState(runId: string): Promise<{ v?: number; status?: string } | undefined> {
+    let text: string;
+    try {
+      text = await readFile(join(this.runDir(runId), "state.json"), "utf8");
+    } catch (error) {
+      if (isMissing(error)) return undefined;
+      throw error;
+    }
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (typeof parsed !== "object" || parsed === null) return {};
+      const { v, status } = parsed as { v?: unknown; status?: unknown };
+      return {
+        ...(typeof v === "number" ? { v } : {}),
+        ...(typeof status === "string" ? { status } : {}),
+      };
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -468,7 +499,11 @@ export class FileStore {
     await this.writeAtomic(path, content);
   }
 
-  /** The newest run of this pipeline and task that has not finished. */
+  /**
+   * The newest run of this pipeline and task that has not finished. An open run of a format this
+   * kodel does not read is not passed over: it is refused with its format, so no second run for the
+   * same task is started beside it.
+   */
   async findActive(
     pipeline: string,
     task: string,
@@ -478,7 +513,20 @@ export class FileStore {
       (m) => m.pipeline === pipeline && m.task === redactedTask,
     );
     for (const meta of candidates.reverse()) {
-      const state = await this.readState(meta.runId);
+      let state: RunState | undefined;
+      try {
+        state = await this.readState(meta.runId);
+      } catch (error) {
+        if (!(error instanceof KodelError) || error.code !== "UNSUPPORTED_FORMAT") throw error;
+        const peek = await this.peekState(meta.runId);
+        if (peek?.status === "running" || peek?.status === "paused") {
+          throw new KodelError(
+            error.code,
+            `${error.message}; no new run for this task starts while it is open`,
+          );
+        }
+        continue;
+      }
       if (state && (state.status === "running" || state.status === "paused"))
         return { meta, state };
     }
@@ -509,10 +557,26 @@ export class FileStore {
         `the state of run ${runId} is not valid JSON; it was changed outside kodel`,
       );
     }
-    if (state.v > RECORD_VERSION) {
+    // The format comes first, before anything reads a field: this is the one place a run of another
+    // run-state format is refused, and it is refused as such, never as a modified state. "Run-state
+    // format" so it is not taken for the format of `meta.json`, which has its own number.
+    const v: unknown = state.v;
+    if (typeof v !== "number") {
+      throw new KodelError(
+        "STATE_MODIFIED_EXTERNALLY",
+        `the state of run ${runId} has no run-state format version; it was changed outside kodel`,
+      );
+    }
+    if (v > RECORD_VERSION) {
       throw new KodelError(
         "UNSUPPORTED_FORMAT",
-        `run ${runId} was written by a newer kodel (state format ${state.v}); upgrade kodel`,
+        `run ${runId} was written by a newer kodel (run-state format ${v}, this kodel reads ${RECORD_VERSION}); upgrade kodel`,
+      );
+    }
+    if (v < RECORD_VERSION) {
+      throw new KodelError(
+        "UNSUPPORTED_FORMAT",
+        `run ${runId} was written in run-state format ${v} by an older kodel (this kodel reads ${RECORD_VERSION}); finish or cancel it with the kodel that started it`,
       );
     }
     return { state, hash: sha256(text) };

@@ -129,7 +129,7 @@ describe("jspb_report_per_check", () => {
     kind = "command",
   ): JournalRecord =>
     ({
-      v: 1,
+      v: 2,
       seq: next(),
       ts: last * 1000,
       event: "check_finished",
@@ -143,7 +143,7 @@ describe("jspb_report_per_check", () => {
     }) as JournalRecord;
   const note = (category: string, check?: string): JournalRecord =>
     ({
-      v: 1,
+      v: 2,
       seq: next(),
       ts: last * 1000,
       event: "feedback_reported",

@@ -4,7 +4,17 @@ import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { FileStore, LocalPipelineHost, readStoredAgentLog } from "../src";
+import { parsePipeline, RECORD_VERSION } from "@kodel-ai/pipeline-core";
+import { listOpenRuns } from "../../../scripts/list-v1-runs.mjs";
+import { FileStore, LocalHost, LocalPipelineHost, META_VERSION, readStoredAgentLog } from "../src";
+
+/** A host of one pipeline over the store, as the MCP server would build it for a run. */
+const plainHost = (root: string, tmp: string) =>
+  new LocalHost(parsePipeline("name: dev\nnodes:\n  - { slug: a, kind: agent, prompt: a }\n"), {
+    root,
+    heartbeatMs: 0,
+    integrityDir: join(tmp, "integrity"),
+  });
 
 /** The golden runs: one directory per stored format, `fixtures/formats/v<N>/<run id>/`. */
 const FORMATS = resolve(
@@ -17,42 +27,11 @@ const FORMATS = resolve(
   "formats",
 );
 
-/** What the two format-1 runs contain, written down by hand so a change of the engine shows. */
-const V1_RUNS: Record<
-  string,
-  { gates: number; extraAttempts: number; feedback: number; nodes: Record<string, number> }
-> = {
-  r_0mvimyn54_tc9o: {
-    gates: 3,
-    extraAttempts: 7,
-    feedback: 0,
-    nodes: {
-      plan: 2,
-      "plan-approval": 2,
-      impl: 2,
-      verify: 2,
-      test: 2,
-      build: 2,
-      review: 2,
-      "final-approval": 1,
-    },
-  },
-  r_0mviewgvl_i1ig: {
-    gates: 3,
-    extraAttempts: 9,
-    feedback: 1,
-    nodes: {
-      plan: 1,
-      "plan-approval": 1,
-      impl: 3,
-      verify: 3,
-      test: 3,
-      build: 2,
-      review: 2,
-      "final-approval": 2,
-    },
-  },
-};
+/**
+ * The two format-1 runs. Written by the engine before forks (run-state format 1), which this kodel
+ * refuses to read: the fixtures prove the refusal, and that nothing on disk is touched by it.
+ */
+const V1_RUNS = ["r_0mviewgvl_i1ig", "r_0mvimyn54_tc9o"];
 
 const sha256 = (data: Uint8Array) => createHash("sha256").update(data).digest("hex");
 
@@ -92,16 +71,16 @@ async function expectFixturesUntouched(formatDir: string): Promise<void> {
   }
 }
 
-async function formatDirs(): Promise<string[]> {
-  return (await readdir(FORMATS, { withFileTypes: true }))
+async function formatDirs(root = FORMATS): Promise<string[]> {
+  return (await readdir(root, { withFileTypes: true }))
     .filter((e) => e.isDirectory() && /^v\d+$/.test(e.name))
     .map((e) => e.name)
     .sort();
 }
 
 /** The run directories of a format; other directories (`history/`, golden events) are not runs. */
-async function runIds(format: string): Promise<string[]> {
-  return (await readdir(join(FORMATS, format), { withFileTypes: true }))
+async function runIds(format: string, root = FORMATS): Promise<string[]> {
+  return (await readdir(join(root, format), { withFileTypes: true }))
     .filter((e) => e.isDirectory() && e.name.startsWith("r_"))
     .map((e) => e.name)
     .sort();
@@ -120,20 +99,59 @@ afterEach(async () => {
   await rm(tmp, { recursive: true, force: true });
 });
 
-async function copyRuns(format: string, only?: string): Promise<void> {
-  for (const id of await runIds(format)) {
+async function copyRuns(format: string, only?: string, from = FORMATS): Promise<void> {
+  for (const id of await runIds(format, from)) {
     if (only && id !== only) continue;
-    await cp(join(FORMATS, format, id), join(runsDir(), id), { recursive: true });
+    await cp(join(from, format, id), join(runsDir(), id), { recursive: true });
   }
 }
 
 const hostFor = () =>
   new LocalPipelineHost({ root, heartbeatMs: 0, integrityDir: join(tmp, "integrity") });
+const storeFor = () => new FileStore({ root: join(root, ".kodel") });
+
+const statePath = (id: string) => join(runsDir(), id, "state.json");
+const readState = async (id: string) =>
+  JSON.parse(await readFile(statePath(id), "utf8")) as Record<string, unknown>;
+const writeState = (id: string, state: Record<string, unknown>) =>
+  writeFile(statePath(id), `${JSON.stringify(state, null, 2)}\n`);
+
+/**
+ * A run of the current run-state format made from a format-1 fixture, for the tests of how a run
+ * that *is* read behaves (an unknown field, a newer format, a state that is not JSON). It is not a
+ * reader of format 1: the two fields that differ are set by hand, and the result stands in for a
+ * `v2/` fixture until real runs of this engine are kept there.
+ */
+async function asCurrentFormat(id: string): Promise<void> {
+  const state = await readState(id);
+  await writeState(id, { ...state, v: RECORD_VERSION, pauses: [] });
+}
+
+const refusal = (promise: Promise<unknown>) =>
+  promise.then(
+    () => undefined,
+    (e: unknown) => e as { code?: string; message?: string; name?: string },
+  );
+
+/** The refusal of a run of format 1: its code, its format, never "modified" and never a crash. */
+function expectRefusedClearly(
+  error: { code?: string; message?: string; name?: string } | undefined,
+) {
+  expect(error).toBeDefined();
+  expect(error?.name).not.toBe("TypeError");
+  expect(error?.code).toBe("UNSUPPORTED_FORMAT");
+  const message = error?.message ?? "";
+  expect(message).toContain("run-state format 1");
+  expect(message).toContain("older kodel");
+  expect(message).toContain("finish or cancel it with the kodel that started it");
+  expect(message).not.toContain("modified");
+  expect(message).not.toContain("changed outside");
+}
 
 describe("the golden runs of the stored formats", () => {
   test("formats_fixtures_have_a_known_set_of_formats_and_runs", async () => {
     expect(await formatDirs()).toContain("v1");
-    expect(await runIds("v1")).toEqual(Object.keys(V1_RUNS).sort());
+    expect(await runIds("v1")).toEqual([...V1_RUNS].sort());
   });
 
   test("formats_a_fixture_file_that_was_edited_fails_the_hash_list", async () => {
@@ -143,7 +161,7 @@ describe("the golden runs of the stored formats", () => {
     // The check itself: a copy with one file edited, one removed and one added is reported.
     const copy = join(tmp, "copy");
     await cp(join(FORMATS, "v1"), copy, { recursive: true });
-    const id = Object.keys(V1_RUNS)[0] as string;
+    const id = V1_RUNS[0] as string;
     await writeFile(join(copy, id, "state.json"), "{}");
     await rm(join(copy, id, "snapshots.json"));
     await writeFile(join(copy, id, "extra.txt"), "x");
@@ -166,70 +184,240 @@ describe("the golden runs of the stored formats", () => {
       }
     }
   });
+
+  test("formats_v1_keeps_every_report_file_of_the_runs", async () => {
+    // 3 and 2: the task text said 4 and 2, but the source run directories hold these.
+    const count = async (id: string) => (await readdir(join(FORMATS, "v1", id, "reports"))).length;
+    expect([await count("r_0mvimyn54_tc9o"), await count("r_0mviewgvl_i1ig")]).toEqual([3, 2]);
+  });
 });
 
-describe("every stored format is opened by the current engine", () => {
-  test("formats_every_fixture_run_is_read_and_nothing_on_disk_changes", async () => {
-    for (const format of await formatDirs()) {
-      await rm(join(root, ".kodel"), { recursive: true, force: true });
-      await copyRuns(format);
-      const before = await hashTree(runsDir());
-      const host = hostFor();
-      const store = new FileStore({ root: join(root, ".kodel") });
-
-      const listed = (await store.listRuns()).map((m) => m.runId).sort();
-      expect(listed).toEqual(await runIds(format));
-      for (const id of listed) {
-        const run = await host.open(id);
-        expect(run).toBeDefined();
-        expect((await run?.state())?.status).toBe("completed");
-        expect((await store.readJournal(id)).length).toBeGreaterThan(0);
-        expect((await run?.report())?.runId).toBe(id);
-        expect(await run?.integrityStatus()).toBe("unknown");
+/**
+ * Every format directory, against the current engine: a run of a format before this one is refused
+ * (clearly, and without a byte changing); a run of this format or later opens with `status` and
+ * `report`. Returns how many of each were seen.
+ */
+async function checkFormats(from: string): Promise<{ refused: number; opened: number }> {
+  let refused = 0;
+  let opened = 0;
+  for (const format of await formatDirs(from)) {
+    const n = Number(format.slice(1));
+    await rm(join(root, ".kodel"), { recursive: true, force: true });
+    await copyRuns(format, undefined, from);
+    await mkdir(runsDir(), { recursive: true });
+    const before = await hashTree(runsDir());
+    const host = hostFor();
+    const store = storeFor();
+    const listed = (await store.listRuns()).map((m) => m.runId).sort();
+    expect(listed).toEqual(await runIds(format, from));
+    for (const id of listed) {
+      if (n < RECORD_VERSION) {
+        expectRefusedClearly(await refusal(host.open(id)));
+        const summary = (await host.runSummaries()).find((r) => r.meta.runId === id);
+        expect(summary?.state).toBeUndefined();
+        expect(summary?.unreadable).toMatchObject({ code: "UNSUPPORTED_FORMAT", format: n });
+        refused += 1;
+        continue;
       }
-      expect(await hashTree(runsDir())).toEqual(before);
+      const run = await host.open(id);
+      expect(run).toBeDefined();
+      expect((await run?.state())?.status).toBe("completed");
+      expect((await store.readJournal(id)).length).toBeGreaterThan(0);
+      expect((await run?.report())?.runId).toBe(id);
+      expect(await run?.integrityStatus()).toBe("unknown");
+      opened += 1;
+    }
+    expect(await hashTree(runsDir())).toEqual(before);
+  }
+  return { refused, opened };
+}
+
+describe("every stored format against the current engine", () => {
+  test("t40_formats_loop_refuses_v1_runs_and_opens_every_later_one", async () => {
+    const { refused, opened } = await checkFormats(FORMATS);
+    expect(refused).toBe(V1_RUNS.length);
+    expect(opened).toBe((await formatDirs()).includes("v2") ? (await runIds("v2")).length : 0);
+  });
+
+  test("t40_formats_loop_passes_with_empty_v2_dir", async () => {
+    const copy = join(tmp, "formats");
+    await cp(FORMATS, copy, { recursive: true });
+    await mkdir(join(copy, "v2"), { recursive: true });
+    expect(await checkFormats(copy)).toEqual({ refused: V1_RUNS.length, opened: 0 });
+  });
+
+  test("t40_v1_history_fixtures_skipped_by_refusal_loop", async () => {
+    expect(await readdir(join(FORMATS, "v1"))).toContain("history");
+    expect(await runIds("v1")).not.toContain("history");
+  });
+
+  test("t40_v1_run_refused_clearly", async () => {
+    await copyRuns("v1");
+    const pipelineHost = hostFor();
+    for (const id of V1_RUNS) {
+      // status, report, next_step and every decision go through the host's open, or through the
+      // store's one read of the state: each says the format, none says "modified" or crashes
+      expectRefusedClearly(await refusal(pipelineHost.open(id)));
+      expectRefusedClearly(await refusal(storeFor().readState(id)));
+      const run = plainHost(root, tmp).open(id);
+      expectRefusedClearly(await refusal(run.state()));
+      expectRefusedClearly(await refusal(run.report()));
+      expectRefusedClearly(await refusal(run.nextStep()));
+      expectRefusedClearly(await refusal(run.inspect()));
+      for (const decision of [
+        await run.resume(),
+        await run.decideHuman("a", "approved"),
+        await run.acknowledge(),
+        await run.cancel(),
+      ]) {
+        expect(decision.ok).toBe(false);
+        if (!decision.ok) expectRefusedClearly(decision.error);
+      }
     }
   });
 
-  test("t3bk2_old_run_still_opens", async () => {
+  test("t40_v1_state_with_matching_hash_is_not_modified", async () => {
+    await copyRuns("v1");
+    const id = V1_RUNS[0] as string;
+    const run = plainHost(root, tmp).open(id);
+    // the format is judged before the hash: the state is untrusted and unknown, and still the
+    // answer is its format, not "modified"
+    expectRefusedClearly(await refusal(run.integrityStatus()));
+    expect(await storeFor().checkSeal(id)).toBe("unsealed");
+  });
+
+  test("t40_v1_run_refused_by_ack_seal_wait_cancel_changes", async () => {
     await copyRuns("v1");
     const host = hostFor();
-    for (const id of Object.keys(V1_RUNS)) {
-      const run = await host.open(id);
-      // `status` and `report` read a run from before the agent's log: nothing was captured, and nothing is made up
-      expect((await run?.state())?.agentLog).toBeUndefined();
-      expect((await run?.report())?.agent_log).toEqual({
-        not_collected: true,
-        reason: "not_captured",
-      });
-      expect(await readdir(join(runsDir(), id))).not.toContain("agent_log");
-    }
-    expect((await host.runSummaries()).map((r) => r.meta.runId).sort()).toEqual(
-      Object.keys(V1_RUNS).sort(),
-    );
+    const id = V1_RUNS[1] as string;
+    expectRefusedClearly(await refusal(host.seal(id)));
+    expectRefusedClearly(await refusal(host.open(id).then((run) => run?.acknowledge())));
+    expectRefusedClearly(await refusal(host.open(id).then((run) => run?.pendingChange())));
+    expectRefusedClearly(await refusal(host.open(id).then((run) => run?.history())));
   });
 
-  test("t3bk2_agent_log_run_opens", async () => {
-    // a real run of this engine with the agent's log kept, taken once; it lives outside the hashed formats
-    // directory (the format of `agent_log/` is frozen with the others at the first release)
+  test("t40_cancel_of_v1_run_gives_clear_message", async () => {
+    await copyRuns("v1");
+    const id = V1_RUNS[0] as string;
+    const before = await hashTree(runsDir());
+    const run = plainHost(root, tmp).open(id);
+    const decision = await run.cancel();
+    expect(decision.ok).toBe(false);
+    if (!decision.ok) expectRefusedClearly(decision.error);
+    expect(await hashTree(runsDir())).toEqual(before);
+  });
+
+  test("t40_find_active_and_latest_skip_v1_runs", async () => {
+    await copyRuns("v1");
+    const store = storeFor();
+    const meta = await store.readMeta(V1_RUNS[0] as string);
+    expect(meta).toBeDefined();
+    const { pipeline, task } = meta as { pipeline: string; task: string };
+    // a finished run of format 1 is passed over by both: no report on it, no "already done"
+    expect(await store.findLatest(pipeline, task)).toBeUndefined();
+    expect(await store.findActive(pipeline, task)).toBeUndefined();
+  });
+
+  test("t40_start_refuses_when_open_v1_run_for_same_pipeline_and_task", async () => {
+    await copyRuns("v1");
+    const id = V1_RUNS[0] as string;
+    const store = storeFor();
+    const { pipeline, task } = (await store.readMeta(id)) as { pipeline: string; task: string };
+    // the same run, still open in the older format: the state's `v` stays 1
+    await writeState(id, { ...(await readState(id)), status: "running" });
+    const error = await refusal(store.findActive(pipeline, task));
+    expectRefusedClearly(error);
+    expect(error?.message ?? "").toContain("no new run for this task starts while it is open");
+    // and `findLatest` still passes it over: it is not a run this kodel can report on
+    expect(await store.findLatest(pipeline, task)).toBeUndefined();
+  });
+
+  test("t40_pipeline_start_works_with_v1_runs_on_disk", async () => {
+    await copyRuns("v1");
+    const { execFileSync } = await import("node:child_process");
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
+    git("init", "-q");
+    git("config", "user.email", "t@example.com");
+    git("config", "user.name", "T");
+    git("commit", "-q", "--allow-empty", "-m", "initial");
+    const host = plainHost(root, tmp);
+    const meta = (await storeFor().readMeta(V1_RUNS[0] as string)) as { task: string };
+    // the finished run of format 1 for the same pipeline and task is neither picked up nor reported
+    // as "done before": a new run starts
+    const started = await host.start(meta.task);
+    expect(started.reused).toBe(false);
+    expect(started.terminal).toBe(false);
+    expect(V1_RUNS).not.toContain(started.run.runId);
+    expect((await started.run.state()).v).toBe(RECORD_VERSION);
+    const listed = (await hostFor().runSummaries()).map((r) => [
+      r.meta.runId,
+      r.state?.status ?? `format ${r.unreadable?.format}`,
+    ]);
+    expect(listed).toContainEqual([started.run.runId, "running"]);
+    for (const id of V1_RUNS) expect(listed).toContainEqual([id, "format 1"]);
+  });
+
+  test("t40_status_list_marks_v1_runs", async () => {
+    await copyRuns("v1");
+    const summaries = await hostFor().runSummaries();
+    expect(summaries.map((r) => r.meta.runId).sort()).toEqual([...V1_RUNS].sort());
+    for (const summary of summaries) {
+      expect(summary.state).toBeUndefined();
+      expect(summary.unreadable).toMatchObject({ code: "UNSUPPORTED_FORMAT", format: 1 });
+      expect(summary.unreadable?.message).toContain("run-state format 1");
+    }
+  });
+
+  test("t40_report_without_run_picks_latest_readable", async () => {
+    await copyRuns("v1");
+    const id = V1_RUNS[1] as string;
+    await asCurrentFormat(id);
+    const summaries = await hostFor().runSummaries();
+    const readable = summaries.filter((r) => r.state !== undefined).map((r) => r.meta.runId);
+    expect(readable).toEqual([id]);
+    expect(summaries.filter((r) => r.state === undefined).map((r) => r.meta.runId)).toEqual([
+      V1_RUNS[0] as string,
+    ]);
+  });
+
+  test("t40_meta_version_unchanged_and_messages_distinct", async () => {
+    expect(META_VERSION).toBe(2);
+    expect(RECORD_VERSION).toBe(2);
+    await copyRuns("v1");
+    const id = V1_RUNS[0] as string;
+    // a state of the current format with a meta of an old one: the message names the meta format
+    await asCurrentFormat(id);
+    const metaPath = join(runsDir(), id, "meta.json");
+    const meta = JSON.parse(await readFile(metaPath, "utf8"));
+    await writeFile(metaPath, JSON.stringify({ ...meta, v: 1 }));
+    const error = await refusal(hostFor().open(id));
+    expect(error?.code).toBe("UNSUPPORTED_FORMAT");
+    expect(error?.message ?? "").toContain("meta format 1");
+    expect(error?.message ?? "").not.toContain("run-state format");
+    // and the other way round the message names the run-state format, not the meta format
+    const other = V1_RUNS[1] as string;
+    const stateError = await refusal(hostFor().open(other));
+    expect(stateError?.message ?? "").toContain("run-state format 1");
+    expect(stateError?.message ?? "").not.toContain("meta format");
+  });
+
+  test("t40_v1_agent_log_fixture_is_refused_and_its_streams_still_read", async () => {
+    // a real run of this engine with the agent's log kept, taken once before forks; it lives outside
+    // the hashed formats directory (the format of `agent_log/` is frozen with the others at the
+    // first release). Its state is of format 1, so the run is refused; the stored streams are
+    // display data and read without the state.
     const fixtures = resolve(FORMATS, "..", "agent-log");
     const [id] = (await readdir(fixtures)).filter((name) => name.startsWith("r_"));
     expect(id).toBeDefined();
     await cp(join(fixtures, id as string), join(runsDir(), id as string), { recursive: true });
-    const host = hostFor();
-    const run = await host.open(id as string);
-    const report = await run?.report();
-    expect(report?.status).toBe("completed");
-    expect(report?.agent_log).toMatchObject({
-      sessions: 2,
-      mode: "full",
-      final_pass: true,
-      unverified: true,
-      passes: { step: 3, tick: 0 },
-    });
-    const state = await run?.state();
-    const store = new FileStore({ root: join(root, ".kodel") });
-    const streams = Object.entries(state?.agentLog?.sessions ?? {});
+    expectRefusedClearly(await refusal(hostFor().open(id as string)));
+    const raw = JSON.parse(await readFile(statePath(id as string), "utf8")) as {
+      v: number;
+      agentLog?: { sessions: Record<string, { length: number; entries: number }> };
+    };
+    expect(raw.v).toBe(1);
+    const store = storeFor();
+    const streams = Object.entries(raw.agentLog?.sessions ?? {});
     expect(streams).toHaveLength(2);
     for (const [session, kept] of streams) {
       const read = await readStoredAgentLog(store, id as string, session, kept.length);
@@ -246,97 +434,33 @@ describe("every stored format is opened by the current engine", () => {
     }
   });
 
-  test("v75e_old_run_reports_not_collected", async () => {
+  test("hp9r_v1_journals_have_no_check_id_and_params_hash", async () => {
+    // the journal of a format-1 run is read as records (the store refuses only the state); the
+    // fields that came later are absent, not made up
     await copyRuns("v1");
-    const host = hostFor();
-    for (const id of Object.keys(V1_RUNS)) {
-      const report = await (await host.open(id))?.report();
-      expect(report?.prompts).toEqual({ not_collected: true });
-    }
-    // reading a run does not make the folder of what the agent was shown
-    for (const id of Object.keys(V1_RUNS)) {
-      expect(await readdir(join(runsDir(), id))).not.toContain("served");
-    }
-  });
-
-  test("formats_v1_reports_count_what_the_runs_did", async () => {
-    await copyRuns("v1");
-    const host = hostFor();
-    for (const [id, want] of Object.entries(V1_RUNS)) {
-      const report = await (await host.open(id))?.report();
-      expect(report?.status).toBe("completed");
-      const gateAttempts = (report?.nodes ?? [])
-        .filter((n) => n.gate)
-        .reduce((sum, n) => sum + n.attempts.length, 0);
-      expect(gateAttempts).toBe(want.gates);
-      expect(report?.extra_attempts).toBe(want.extraAttempts);
-      expect(report?.feedback).toBe(want.feedback);
-      expect(report?.restarts).toBe(0);
-      expect(
-        Object.fromEntries(report?.nodes.map((n) => [n.node, n.attempts.length]) ?? []),
-      ).toEqual(want.nodes);
-      expect(report?.workdir).toBe(`/kodel-fixture/workdir/${id}`);
-    }
-  });
-
-  test("jspb_v1_reports_have_no_check_rows_and_no_task_size", async () => {
-    await copyRuns("v1");
-    const host = hostFor();
-    for (const id of Object.keys(V1_RUNS)) {
-      const report = await (await host.open(id))?.report();
-      expect(report?.checks).toEqual([]);
-      expect(report?.task_size).toEqual({ not_collected: true });
-    }
-  });
-
-  test("jspb_a_run_without_recorded_changes_is_not_sized_even_if_a_patch_lies_there", async () => {
-    await copyRuns("v1");
-    const [id] = Object.keys(V1_RUNS);
-    const dir = join(runsDir(), id as string);
-    const journal = join(dir, "journal.jsonl");
-    const lines = (await readFile(journal, "utf8")).split("\n");
-    const at = lines.findIndex((l) => l.includes('"run_started"'));
-    const started = JSON.parse(lines[at] as string);
-    lines[at] = JSON.stringify({ ...started, history: { changes: { enabled: false } } });
-    await writeFile(journal, lines.join("\n"));
-    await mkdir(join(dir, "changes"), { recursive: true });
-    await writeFile(join(dir, "changes", "run.patch"), "diff --git a/x b/x\n");
-    const report = await (await hostFor().open(id as string))?.report();
-    expect(report?.task_size).toEqual({ not_collected: true });
-  });
-
-  test("hp9r_v1_check_results_without_check_id_and_params_hash_are_read", async () => {
-    await copyRuns("v1");
-    const host = hostFor();
-    const store = new FileStore({ root: join(root, ".kodel") });
+    const store = storeFor();
     let seen = 0;
-    for (const id of Object.keys(V1_RUNS)) {
+    for (const id of V1_RUNS) {
       const finished = (await store.readJournal(id)).filter((r) => r.event === "check_finished");
       for (const record of finished) {
         expect(record.check_id).toBeUndefined();
         expect(record.params_hash).toBeUndefined();
       }
       seen += finished.length;
-      const report = await (await host.open(id))?.report();
-      const checks = report?.nodes.flatMap((n) => n.attempts.flatMap((a) => a.checks ?? []));
-      expect(checks?.length).toBe(finished.length);
     }
     expect(seen).toBeGreaterThan(0);
   });
 
   test("formats_a_fixture_reads_as_unsealed_never_as_modified", async () => {
     await copyRuns("v1");
-    const host = hostFor();
-    const store = new FileStore({ root: join(root, ".kodel") });
-    for (const id of Object.keys(V1_RUNS)) {
-      expect(await store.checkSeal(id)).toBe("unsealed");
-      expect(await (await host.open(id))?.sealStatus()).toBe("unsealed");
-    }
+    const store = storeFor();
+    for (const id of V1_RUNS) expect(await store.checkSeal(id)).toBe("unsealed");
   });
 
   test("formats_a_finished_run_opens_with_no_git_repository_and_no_workdir", async () => {
     await copyRuns("v1");
-    const id = Object.keys(V1_RUNS)[0] as string;
+    const id = V1_RUNS[0] as string;
+    await asCurrentFormat(id);
     // The root is not a repository, the snapshots name git objects that exist nowhere, and the
     // workdir in the state is a placeholder path that does not exist.
     expect((await readdir(root)).includes(".git")).toBe(false);
@@ -345,21 +469,15 @@ describe("every stored format is opened by the current engine", () => {
     expect(workdir).toStartWith("/kodel-fixture/");
     expect(await readdir(workdir).catch(() => undefined)).toBeUndefined();
     expect((await run?.state())?.status).toBe("completed");
-  });
-
-  test("formats_v1_keeps_every_report_file_of_the_runs", async () => {
-    // 3 and 2: the task text said 4 and 2, but the source run directories hold these.
-    const count = async (id: string) => (await readdir(join(FORMATS, "v1", id, "reports"))).length;
-    expect([await count("r_0mvimyn54_tc9o"), await count("r_0mviewgvl_i1ig")]).toEqual([3, 2]);
+    expect(await run?.sealStatus()).toBe("unsealed");
   });
 
   test("formats_a_field_the_engine_does_not_know_is_kept_not_an_error", async () => {
     await copyRuns("v1");
-    const id = Object.keys(V1_RUNS)[0] as string;
-    const statePath = join(runsDir(), id, "state.json");
+    const id = V1_RUNS[0] as string;
+    await asCurrentFormat(id);
     const journalPath = join(runsDir(), id, "journal.jsonl");
-    const state = JSON.parse(await readFile(statePath, "utf8"));
-    await writeFile(statePath, JSON.stringify({ ...state, from_the_future: { n: 1 } }));
+    await writeState(id, { ...(await readState(id)), from_the_future: { n: 1 } });
     const lines = (await readFile(journalPath, "utf8")).trimEnd().split("\n");
     lines[0] = JSON.stringify({ ...JSON.parse(lines[0] as string), from_the_future: true });
     await writeFile(journalPath, `${lines.join("\n")}\n`);
@@ -368,36 +486,80 @@ describe("every stored format is opened by the current engine", () => {
     const run = await hostFor().open(id);
     expect((await run?.report())?.status).toBe("completed");
     expect(await hashTree(runsDir())).toEqual(before);
-    expect(await readFile(statePath, "utf8")).toContain("from_the_future");
+    expect(await readFile(statePath(id), "utf8")).toContain("from_the_future");
   });
 
   test("formats_a_run_in_a_format_the_engine_does_not_know_is_unsupported_not_modified", async () => {
     await copyRuns("v1");
-    const id = Object.keys(V1_RUNS)[0] as string;
-    const statePath = join(runsDir(), id, "state.json");
-    const state = JSON.parse(await readFile(statePath, "utf8"));
-    await writeFile(statePath, JSON.stringify({ ...state, v: 99 }));
-    const error = await hostFor()
-      .open(id)
-      .then(
-        () => undefined,
-        (e: unknown) => e as { code: string; message: string },
-      );
+    const id = V1_RUNS[0] as string;
+    await writeState(id, { ...(await readState(id)), v: 99 });
+    const error = await refusal(hostFor().open(id));
     expect(error?.code).toBe("UNSUPPORTED_FORMAT");
-    expect(error?.message).toContain("format 99");
-    expect(error?.message).toContain("upgrade");
+    expect(error?.message ?? "").toContain("run-state format 99");
+    expect(error?.message ?? "").toContain("upgrade");
+    expect(error?.message ?? "").not.toContain("modified");
   });
 
   test("formats_a_state_that_is_not_json_is_modified_not_unsupported", async () => {
     await copyRuns("v1");
-    const id = Object.keys(V1_RUNS)[0] as string;
-    await writeFile(join(runsDir(), id, "state.json"), "{ not json");
-    const error = await hostFor()
-      .open(id)
-      .then(
-        () => undefined,
-        (e: unknown) => e as { code: string },
-      );
+    const id = V1_RUNS[0] as string;
+    await writeFile(statePath(id), "{ not json");
+    const error = await refusal(hostFor().open(id));
     expect(error?.code).toBe("STATE_MODIFIED_EXTERNALLY");
+  });
+
+  test("formats_a_state_without_a_format_version_is_modified_not_unsupported", async () => {
+    await copyRuns("v1");
+    const id = V1_RUNS[0] as string;
+    const { v: _v, ...rest } = await readState(id);
+    await writeState(id, rest);
+    const error = await refusal(hostFor().open(id));
+    expect(error?.code).toBe("STATE_MODIFIED_EXTERNALLY");
+    expect(error?.message ?? "").toContain("no run-state format version");
+  });
+
+  test("t40_scripts_list_v1_runs_finds_them", async () => {
+    await copyRuns("v1");
+    // both finished: nothing to list
+    expect(await listOpenRuns(root)).toEqual([]);
+    // one running and one paused in format 1, one running in the current format
+    const [running, paused] = V1_RUNS as [string, string];
+    await writeState(running, { ...(await readState(running)), status: "running" });
+    await writeState(paused, { ...(await readState(paused)), status: "paused" });
+    const current = "r_0mvqyegg2_zzzz";
+    await cp(join(runsDir(), running), join(runsDir(), current), { recursive: true });
+    await writeState(current, {
+      ...(await readState(current)),
+      v: RECORD_VERSION,
+      runId: current,
+      pauses: [],
+    });
+    const found = await listOpenRuns(root);
+    expect(found.map((r) => [r.runId, r.status, r.pipeline])).toEqual([
+      [running, "running", "dev"],
+      [paused, "paused", "dev"],
+    ]);
+    expect(found[0]?.task).toContain("pipeline_docs");
+    expect(await listOpenRuns(root, RECORD_VERSION)).toMatchObject([
+      { runId: current, status: "running" },
+    ]);
+    // a project without runs
+    expect(await listOpenRuns(tmp)).toEqual([]);
+    // and the command itself, on this store
+    const { execFileSync } = await import("node:child_process");
+    const script = resolve(FORMATS, "..", "..", "scripts", "list-v1-runs.mjs");
+    let out = "";
+    let code = 0;
+    try {
+      out = execFileSync("node", [script, root], { encoding: "utf8" });
+    } catch (error) {
+      const failed = error as { status: number; stdout: string };
+      code = failed.status;
+      out = failed.stdout;
+    }
+    expect(code).toBe(1);
+    expect(out).toContain(`${running}  running  dev`);
+    expect(out).toContain(`${paused}  paused  dev`);
+    expect(out).not.toContain(current);
   });
 });

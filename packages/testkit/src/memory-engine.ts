@@ -46,6 +46,8 @@ export class MemoryEngine implements ScenarioEngine {
   private tasks: { node: string; attempt: number; alive: boolean }[] = [];
   private journal: string[] = [];
   private feedbackCount = 0;
+  /** Follow-ups the engine refused (a result that came after the run had moved on), as decisions. */
+  readonly refused: { event: RunEvent; code: string; message: string }[] = [];
 
   constructor(private readonly options: EngineOptions = {}) {}
 
@@ -142,10 +144,9 @@ export class MemoryEngine implements ScenarioEngine {
   async readState(): Promise<ScenarioState> {
     const state = this.state;
     if (!state) throw new Error("the run has not started");
-    const waiting = state.active.find((v) => v.phase === "human")?.node;
     return {
       runStatus: state.status,
-      ...(waiting === undefined ? {} : { waitingGate: waiting }),
+      waitingGates: state.active.filter((v) => v.phase === "human").map((v) => v.node),
       nodes: this.spec.nodes.map((node) => {
         const run = state.nodes[node.slug];
         return {
@@ -172,7 +173,12 @@ export class MemoryEngine implements ScenarioEngine {
       firstResult ??= result;
       if (!result.ok) {
         if (event === first) return result;
-        throw result.error; // a follow-up the host built itself cannot be invalid
+        // A follow-up the host built from an effect can be refused once the run has moved on (a
+        // branch that died ended the run before a sibling's result came in). It is a decision like
+        // any other: kept for the test to look at, and the rest of the queue goes on.
+        this.refused.push({ event, code: result.error.code, message: result.error.message });
+        this.journal.push(`refused:${result.error.code}`);
+        continue;
       }
       this.state = result.state;
       for (const record of result.journal) this.journal.push(record.event);

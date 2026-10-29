@@ -216,7 +216,7 @@ export const featureScenarios: Scenario[] = [
     .on(humanApprove("plan-approval"))
     .on(humanReject("manual-test", "the button does nothing"))
     .expect([
-      matcher("waitingGate", "manual-test"),
+      matcher("waitingGates", ["manual-test"]),
       matcher("attempts", { impl: 3, build: 2, "manual-test": 2 }),
     ])
     .on(humanApprove("manual-test"))
@@ -260,7 +260,7 @@ export const featureScenarios: Scenario[] = [
     .on(resume())
     .expect([
       matcher("runStatus", "running"),
-      matcher("waitingGate", "manual-test"),
+      matcher("waitingGates", ["manual-test"]),
       matcher("attempts", { impl: 4, build: 4 }),
       matcher("journalHas", ["run_paused", "run_resumed"]),
     ])
@@ -282,7 +282,7 @@ export const featureScenarios: Scenario[] = [
     .expect([
       matcher("journalHas", "node_restarted"),
       matcher("attempts", { build: 1 }),
-      matcher("waitingGate", "manual-test"),
+      matcher("waitingGates", ["manual-test"]),
     ])
     .build(),
 
@@ -328,7 +328,7 @@ export const featureScenarios: Scenario[] = [
       },
       expectOk({ advanced: true }),
     )
-    .expect([matcher("waitingGate", "plan-approval")])
+    .expect([matcher("waitingGates", ["plan-approval"])])
     .build(),
 
   base("feature/stale-attempt-is-rejected")

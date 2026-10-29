@@ -276,7 +276,7 @@ describe("a run held back at a failure", () => {
   test("the run is paused with the failure of the check behind it", () => {
     const state = heldAtCheck();
     expect(state.status).toBe("paused");
-    expect(state.pause).toMatchObject({ reason: "consecutive", node: "impl" });
+    expect(state.pauses[0]).toMatchObject({ reason: "consecutive", node: "impl" });
     expect(state.nodes.impl?.lastFailure?.source).toBe("check:diff");
   });
 
@@ -284,7 +284,7 @@ describe("a run held back at a failure", () => {
     const after = specOf(HELD.replace("max_lines: 800", "max_lines: 2000"));
     const decision = ok(accept(before, after, heldAtCheck()));
     expect(decision.state.status).toBe("running");
-    expect(decision.state.pause).toBeUndefined();
+    expect(decision.state.pauses).toEqual([]);
     expect(decision.state.active[0]).toMatchObject({
       node: "impl",
       attempt: 1,
@@ -341,7 +341,7 @@ describe("a run held back at a failure", () => {
       reason: "red",
     }).state;
     expect(state.status).toBe("paused");
-    expect(state.pause).toMatchObject({ reason: "total", node: "impl" });
+    expect(state.pauses[0]).toMatchObject({ reason: "total", node: "impl" });
 
     const loose = specOf(TEXT.replace("  - slug: impl\n", "  - slug: impl\n    max_attempts: 5\n"));
     const decision = ok(accept(tight, loose, state));
