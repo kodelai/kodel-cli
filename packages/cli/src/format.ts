@@ -187,8 +187,37 @@ export function formatReport(
   }
   lines.push(
     `total ${formatDuration(report.total_s)}: work ${formatDuration(report.work_s)}, ` +
-      `waiting for a person ${formatDuration(report.waiting_s)}`,
+      `waiting for a person ${formatDuration(report.waiting_s)}` +
+      (report.forks.length > 0 ? `, busy wall clock ${formatDuration(report.busy_wall_s)}` : ""),
   );
+  if (report.failed_branches) {
+    lines.push(
+      report.status === "completed"
+        ? "completed with failed branches: a join was entered after branches of a fork had failed"
+        : "branches of a fork failed before their join was entered",
+    );
+  }
+  for (const fork of report.forks) {
+    const path = report.critical_path.find((p) => p.fork === fork.fork);
+    const chain = path?.attempts.map((a) => `${plain(a.node)}#${a.attempt}`).join(" > ") ?? "";
+    lines.push(
+      `fork ${plain(fork.fork)} at ${plain(fork.from)} (${fork.branches.map(plain).join(", ")}) -> ${plain(fork.join)}` +
+        (fork.failed.length > 0 ? `; failed: ${fork.failed.map(plain).join(", ")}` : "") +
+        (fork.unfinished.length > 0
+          ? `; still going: ${fork.unfinished.map(plain).join(", ")}`
+          : ""),
+    );
+    if (path) {
+      lines.push(
+        `  critical path: branch ${plain(path.branch)} ${formatDuration(path.seconds)}${chain ? ` (${chain})` : ""}`,
+      );
+    }
+    for (const overlap of fork.overlaps) {
+      lines.push(
+        `  ${plain(overlap.branches[0])} and ${plain(overlap.branches[1])} ran together for ${formatDuration(overlap.seconds)}`,
+      );
+    }
+  }
   lines.push(
     `redone: ${report.extra_attempts} extra attempt(s); ${report.restarts} restart(s), ` +
       `${report.pauses} pause(s), ${report.feedback} note(s) from the agent, ` +

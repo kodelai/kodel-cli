@@ -436,6 +436,8 @@ export type RunEvent =
       changesError?: string;
       /** The work tree at this hand-in; the next hand-in's patch starts there. */
       tree?: string;
+      /** A limit of the patch the host knows of (another branch wrote to the same tree meanwhile). */
+      changesNote?: string;
     }
   /** The engine work of a node (its own command) finished. The host judged the exit code. */
   | {
@@ -1490,6 +1492,9 @@ class Machine {
             ? { changes_error: event.changesError.slice(0, MAX_CHANGES_ERROR) }
             : {}),
           ...(isTreeId(event.tree) ? { tree: event.tree } : {}),
+          ...(typeof event.changesNote === "string"
+            ? { changes_note: event.changesNote.slice(0, MAX_CHANGES_ERROR) }
+            : {}),
         });
         this.afterWork(visit);
         return;

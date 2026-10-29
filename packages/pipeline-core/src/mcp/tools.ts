@@ -396,7 +396,9 @@ export const TOOLS: ToolDescriptor[] = [
       "Report a problem you noticed in a step description: an unclear or contradictory prompt, a check that " +
       "looks wrong, a missing step, a tool problem. It never blocks the run. Use it when it would help improve " +
       "the pipeline, not for every small remark. For a check that fired for nothing, use category " +
-      "wrong_check and name the check in `check`; a check of another node is refused with the valid ids.",
+      "wrong_check and name the check in `check`; a check of another node is refused with the valid ids. " +
+      "Give node_slug when the note is about a step: with several steps open at once (a fork) a note with " +
+      "`check` is refused without it.",
     shape: {
       run_id: runId,
       node_slug: nodeSlug.optional(),

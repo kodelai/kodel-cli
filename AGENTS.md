@@ -44,6 +44,16 @@ This repository adds these rules:
   again, tell the person you stopped watching. A project can turn the offer off with
   `agent_hints: { wait: false }` in the project config; then no answer mentions `kodel wait`, and you just
   end your turn and wait to be told.
+- A pipeline may fork: a `node` answer then lists every open step in `steps`, and `execution.mode` says how
+  this project works them. In `parallel` mode start one subagent (a worker) per step that has no `taken_by`
+  and give it these rules: call `pipeline_take_step` with the run id and its step's slug and keep the
+  `claim_token`; if the answer is `taken`, stop; do the step where its `workdir` says; call
+  `pipeline_complete_step` with `node_slug`, `attempt` and that `claim_token`; report the answer back to the
+  agent that started you as it is (`node`, `waiting`, `running`, `done` or `also_waiting`), never write to
+  the person, and never start `kodel wait` as a worker. In `sequential` mode do the steps one by one. When
+  the workers are back, call `pipeline_next_step` yourself; what waits for a person (`also_waiting` names
+  every gate and pause) is for you to tell them, with the command of each (`--node <slug>` when several
+  wait).
 
 Tasks (`docs/tasks.md`) are off unless `.kodel/config.yaml` has `tasks: { enabled: true }`; when they are on the
 server also offers the `task_*` tools. When the user asks you to "create a task" for something you should not

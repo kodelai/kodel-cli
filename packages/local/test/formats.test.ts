@@ -39,9 +39,12 @@ const V1_RUNS = ["r_0mviewgvl_i1ig", "r_0mvimyn54_tc9o"];
  * three gate decisions, the whole path to `publish`) and `r_0mvtewgdn_zfhl` (a change made in the
  * pipeline file accepted with nothing redone, a note, `nothing_to_change` with its gate rejected once).
  */
-const V2_RUNS = ["r_0mvtewczh_4i2w", "r_0mvtewgdn_zfhl"];
+const DEV_RUNS = ["r_0mvtewczh_4i2w", "r_0mvtewgdn_zfhl"];
+/** The format-2 fork run: `verify` and `test` at once, `test` failing once, the join `fix` restarting it. */
+const FORK_RUN = "r_0mvthh4vp_9gqe";
+const V2_RUNS = [...DEV_RUNS, FORK_RUN];
 /** The format-2 run that stands in for "a finished run of this engine" in the tests of how a run that is read behaves. */
-const V2_RUN = V2_RUNS[1] as string;
+const V2_RUN = DEV_RUNS[1] as string;
 
 const sha256 = (data: Uint8Array) => createHash("sha256").update(data).digest("hex");
 
@@ -254,7 +257,7 @@ describe("every stored format against the current engine", () => {
     const before = await hashTree(runsDir());
     const host = hostFor();
     const store = storeFor();
-    for (const id of V2_RUNS) {
+    for (const id of DEV_RUNS) {
       const run = await host.open(id);
       expect(run).toBeDefined();
       if (!run) continue;
@@ -277,7 +280,7 @@ describe("every stored format against the current engine", () => {
       );
     }
     // the proposal accepted while the critique step was being worked restarted that step
-    const proposal = (await host.open(V2_RUNS[0] as string)) as NonNullable<
+    const proposal = (await host.open(DEV_RUNS[0] as string)) as NonNullable<
       Awaited<ReturnType<typeof host.open>>
     >;
     const { versions } = await proposal.history();
@@ -299,6 +302,82 @@ describe("every stored format against the current engine", () => {
     });
     expect((await store.readJournal(V2_RUN)).map((r) => r.event)).toContain("gate_decided");
     // reading changed nothing on disk
+    expect(await hashTree(runsDir())).toEqual(before);
+  });
+
+  test("t40_fork_run_fixture_in_v2_shows_forks_and_pauses", async () => {
+    // a real fork run of this engine: the state carries the fork instance, every branch visit was
+    // attributed to its branch, the journal shows the overlap and the join entered after a failure,
+    // and the run (no pause left, none ever taken) reads with `status`, `report` and the fork summary
+    await copyRuns("v2", FORK_RUN);
+    const before = await hashTree(runsDir());
+    const host = hostFor();
+    const run = await host.open(FORK_RUN);
+    expect(run).toBeDefined();
+    if (!run) return;
+    const state = await run.state();
+    expect(state.v).toBe(RECORD_VERSION);
+    expect(state.status).toBe("completed");
+    expect(state.pauses).toEqual([]);
+    expect(state.active).toEqual([]);
+    expect(state.trail).toEqual(["impl", "verify", "test", "fix", "test", "fix"]);
+    expect(state.forks?.f1).toMatchObject({
+      from: "impl",
+      label: "passed",
+      join: "fix",
+      branches: ["verify", "test"],
+      joined: 2,
+    });
+    expect(Object.keys(state.forks?.f1?.arrived ?? {}).sort()).toEqual(["test", "verify"]);
+    const journal = await storeFor().readJournal(FORK_RUN);
+    expect(journal.every((r) => r.v === RECORD_VERSION)).toBe(true);
+    const entered = journal.filter((r) => r.event === "node_entered");
+    expect(entered.map((r) => [r.node, r.branch])).toEqual([
+      ["impl", undefined],
+      ["verify", "verify"],
+      ["test", "test"],
+      ["fix", undefined],
+      ["test", "test"],
+      ["fix", undefined],
+    ]);
+    // the two branches ran at the same time: `test` settled before `verify` finished
+    const events = journal.map((r) => r.event);
+    const settledTest = journal.findIndex(
+      (r) => r.event === "branch_settled" && r.branch === "test",
+    );
+    const finishedVerify = journal.findIndex(
+      (r) => r.event === "node_finished" && r.node === "verify",
+    );
+    expect(settledTest).toBeGreaterThan(0);
+    expect(settledTest).toBeLessThan(finishedVerify);
+    expect(events.filter((e) => e === "join_reached")).toHaveLength(2);
+    expect(journal.find((r) => r.event === "join_reached")?.failed).toEqual(["test"]);
+    expect(journal.filter((r) => r.event === "run_paused")).toHaveLength(0);
+    expect(journal.find((r) => r.event === "agent_completed" && r.node === "fix")?.outcome).toBe(
+      "restart_failed",
+    );
+    const report = await run.report();
+    expect(report.status).toBe("completed");
+    // the failed branch was run again by `restart_failed` and passed: the run does not stand on it
+    expect(report.failed_branches).toBe(false);
+    expect(report.forks).toHaveLength(1);
+    expect(report.forks[0]).toMatchObject({
+      fork: "f1",
+      branches: ["verify", "test"],
+      arrived: ["verify", "test"],
+      failed: [],
+      unfinished: [],
+      joined: 2,
+    });
+    expect(report.forks[0]?.overlaps).toEqual([
+      { branches: ["verify", "test"], seconds: expect.any(Number) },
+    ]);
+    expect(report.critical_path).toHaveLength(1);
+    expect(report.critical_path[0]?.fork).toBe("f1");
+    expect(report.busy_wall_s).toBeGreaterThan(0);
+    expect(report.busy_wall_s).toBeLessThanOrEqual(report.work_s);
+    expect(report.pauses).toBe(0);
+    expect(await run.integrityStatus()).toBe("unknown");
     expect(await hashTree(runsDir())).toEqual(before);
   });
 

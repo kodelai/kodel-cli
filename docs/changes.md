@@ -66,6 +66,8 @@ Each line is a limit and names the test that pins it (`policy`: it cannot be tes
 | Files matched by `history.changes.exclude`; `!pattern` means "every path but that one" | `t36tw_exclude_*`, `t36tw_limit_negated_glob_means_everything_but` |
 | Work between two hand-ins (a check, a command, a person) is in the next agent patch and in `run.patch`; an attempt that never hands in has no file | `t36tw_limit_parallel_double_counting_and_untouched_work_between_hand_ins` |
 | Agent steps that are active at the same time share one tree, and the second hand-in repeats the first's work | `t36tw_limit_parallel_double_counting_and_untouched_work_between_hand_ins` (the case of work in between), the rest: policy |
+| In a fork (T-40) the branches share one tree, so the patches of hand-ins of open steps may overlap: the base of a patch is the tree of the hand-in just before it, whatever branch that was, and the record of the hand-in says so (`changes_note`); the back-off after two slow hand-ins is not applied while another branch is active | `t40_hand_in_backoff_not_applied_in_open_fork`, `t40_gate_note_when_other_branches_active`, the overlap itself: policy |
+| A run of run-state format 2 (forks) opened with `@kodel-ai/kodel@0.1.0-beta.0` is refused as written by a newer kodel; the beta cannot read a fork run and must not be used on one (nor on a config with an `agents:` block) | policy; `fixtures/formats/README.md` |
 | A redacted patch may not apply: a secret in a context line, a lockfile integrity string | `t36tw_limit_a_redacted_patch_does_not_apply` |
 | A secret that spans lines changes the line counts of its hunk | `t36tw_limit_multi_line_redaction_breaks_the_hunk` |
 | A cut patch may cut a key in the middle | `t36tw_limit_cut_pem` |

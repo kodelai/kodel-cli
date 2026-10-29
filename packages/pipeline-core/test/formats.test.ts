@@ -112,9 +112,10 @@ test("t40_v2_fixtures_open", () => {
   // real runs of the `dev` pipeline written by this engine: the state and every record carry
   // format 2, the summary reads them, and the accepted change carries its `effects` list
   const ids = runIds(FORMATS, "v2");
-  expect(ids).toEqual(["r_0mvtewczh_4i2w", "r_0mvtewgdn_zfhl"]);
+  expect(ids).toEqual(["r_0mvtewczh_4i2w", "r_0mvtewgdn_zfhl", "r_0mvthh4vp_9gqe"]);
   const effects: unknown[] = [];
-  for (const id of ids) {
+  // the two runs of the `dev` pipeline; the fork run is looked at by its own test below
+  for (const id of ids.slice(0, 2)) {
     const { state, journal } = load(FORMATS, "v2", id);
     expect(state.v).toBe(RECORD_VERSION);
     expect(state.status).toBe("completed");
@@ -133,6 +134,44 @@ test("t40_v2_fixtures_open", () => {
     expect(Array.isArray(accepted?.effects)).toBe(true);
   }
   expect(effects).toEqual([[{ kind: "restart", node: "plan-critique" }], []]);
+});
+
+test("t40_fork_run_fixture_in_v2_shows_forks_and_pauses", () => {
+  // the real fork run: the summary reads the fork instance, the overlap, the critical path and the
+  // flag that the join was entered after a failed branch, from the state and journal alone
+  const { state, journal } = load(FORMATS, "v2", "r_0mvthh4vp_9gqe");
+  expect(state.v).toBe(RECORD_VERSION);
+  expect(state.status).toBe("completed");
+  expect(state.pauses).toEqual([]);
+  expect(Object.keys(state.forks ?? {})).toEqual(["f1"]);
+  expect(state.forks?.f1?.branches).toEqual(["verify", "test"]);
+  expect(journal.filter((r) => r.event === "fork_started")).toHaveLength(1);
+  expect(journal.filter((r) => r.event === "branch_settled")).toHaveLength(3);
+  const report = summarizeRun(state, journal);
+  // the first join saw a failed branch; it was redone and passed, so the run does not stand on it
+  expect(journal.find((r) => r.event === "join_reached")?.failed).toEqual(["test"]);
+  expect(report.failed_branches).toBe(false);
+  expect(report.forks.map((f) => [f.fork, f.join, f.joined])).toEqual([["f1", "fix", 2]]);
+  expect(report.forks[0]?.overlaps.map((o) => o.branches)).toEqual([["verify", "test"]]);
+  expect(report.critical_path).toEqual([
+    {
+      fork: "f1",
+      branch: expect.any(String),
+      seconds: expect.any(Number),
+      attempts: expect.any(Array),
+    },
+  ]);
+  // `verify` ran for about 1.5 s while `test` failed at once and ran again after `restart_failed`
+  // (two short attempts, both in its branch): the longest chain is the one attempt of `verify`
+  expect(report.critical_path[0]).toMatchObject({
+    branch: "verify",
+    attempts: [{ node: "verify", attempt: 1 }],
+  });
+  expect(report.critical_path[0]?.seconds).toBeGreaterThan(1);
+  const spans = journal.filter((r) => r.event === "node_entered" && r.branch === "test");
+  expect(spans.map((r) => r.attempt)).toEqual([1, 2]);
+  expect(report.busy_wall_s).toBeLessThanOrEqual(report.work_s);
+  expect(report.nodes.find((n) => n.node === "test")?.attempts).toHaveLength(2);
 });
 
 test("t40_formats_loop_passes_with_empty_v2_dir", () => {

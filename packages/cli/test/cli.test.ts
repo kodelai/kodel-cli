@@ -352,7 +352,15 @@ describe("status", () => {
     const result = await cli("status", "--json");
     expect(result.code).toBe(0);
     expect(JSON.parse(result.out)).toEqual([
-      { runId: id, pipeline: "demo", status: "running", slug: "t", task: "t" },
+      {
+        runId: id,
+        pipeline: "demo",
+        status: "running",
+        slug: "t",
+        task: "t",
+        active: [{ node: "approve", attempt: 1, phase: "human" }],
+        pauses: [],
+      },
     ]);
   });
 
@@ -759,7 +767,8 @@ describe("what status shows and does", () => {
     const one = await cli("status", run.runId);
     for (const text of [list.out, one.out]) {
       expect(text).not.toContain("\u001b");
-      expect(text.split("\n").filter(Boolean).length).toBeLessThanOrEqual(7);
+      // the lines of one run: run, slug, task, status, integrity, seal, trail, active
+      expect(text.split("\n").filter(Boolean).length).toBeLessThanOrEqual(8);
     }
   });
 

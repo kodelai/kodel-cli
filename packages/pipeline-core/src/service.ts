@@ -148,8 +148,8 @@ export interface RunHandle {
    * changes nothing about the run: a person decides.
    */
   proposeChange(input: { yaml: string; summary: string }): Promise<ProposeOutcome>;
-  /** Wait until the engine's work has come to rest, but no longer than `ms`. */
-  waitForRest(ms: number): Promise<void>;
+  /** Wait until the engine's work has come to rest, but no longer than `ms`; with `node`, only that node's work. */
+  waitForRest(ms: number, node?: string): Promise<void>;
 }
 
 /** Where a run's commands and checks run, when that is not the directory the agent started in. */
@@ -679,7 +679,8 @@ export class PipelineService {
       );
       if (!decision.ok)
         return failure(decision.error.code, decision.error.message, decision.error.issues);
-      await run.waitForRest(this.budget);
+      // Only the completed node's own checks: a sibling branch's command is not this caller's wait.
+      await run.waitForRest(this.budget, input.node_slug);
       const node = (await run.state()).nodes[input.node_slug];
       const failed = node?.lastFailure;
       const checkFailed =

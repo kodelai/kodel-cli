@@ -100,7 +100,54 @@ export type AgentLogReport =
       final_pass?: boolean;
       failed: string[];
       unverified: true;
+      /** Bytes stored per visit of a step (`node:attempt`), as the engine counted them. */
+      visits?: Record<string, number>;
+      /** The steps of the agent that were still going when the run ended. */
+      ended_in_step?: string[];
+      /**
+       * The run had a fork: steps of the agent were open at the same time and wrote to one log, so the
+       * share of each visit (and which step the run ended in) cannot be told apart reliably.
+       */
+      visits_unverified_in_fork?: true;
     };
+
+/** One attempt on the longest chain of a fork, with the seconds it took. */
+export interface PathAttempt {
+  node: string;
+  attempt: number;
+  seconds: number;
+}
+
+/**
+ * The chain of attempts of one fork instance, from the fork to the join, with the longest sum of
+ * attempt times: the branch that bounded how soon the join could start. A gate counts as its waiting
+ * time; a rework attempt counts in its own branch; ties go to the branch first in trail order.
+ */
+export interface CriticalPath {
+  fork: string;
+  branch: string;
+  seconds: number;
+  attempts: PathAttempt[];
+}
+
+/** One time a fork fired, as the report sees it. */
+export interface ForkReport {
+  fork: string;
+  from: string;
+  label: string;
+  join: string;
+  branches: string[];
+  /** The branches that have settled, failed ones included. */
+  arrived: string[];
+  /** The branches that settled by a failure label (or died). */
+  failed: string[];
+  /** The branches still going (an open fork), in branch order. */
+  unfinished: string[];
+  /** How many times the join was entered for this instance. */
+  joined: number;
+  /** Pairs of branches whose attempts ran at the same time, with the seconds they overlapped. */
+  overlaps: { branches: [string, string]; seconds: number }[];
+}
 
 export interface NodeReport {
   node: string;
@@ -118,11 +165,25 @@ export interface RunReport {
   status: string;
   /** Seconds from the start to the end (to the last record, for a run still going). */
   total_s: number;
-  /** Seconds the engine and the agent spent on nodes that are not gates. */
+  /** Seconds the engine and the agent spent on nodes that are not gates, summed over the attempts. */
   work_s: number;
-  /** Seconds spent waiting for a person at gates. */
+  /**
+   * Seconds in which some node that is not a gate was active (wall clock): with a fork two branches
+   * that ran together count once here and twice in `work_s`; without one the two are equal.
+   */
+  busy_wall_s: number;
+  /** Seconds spent waiting for a person at gates (wall clock: two gates open at once count once). */
   waiting_s: number;
   nodes: NodeReport[];
+  /** Every time a fork fired, in order; empty for a run without forks. */
+  forks: ForkReport[];
+  /** The longest chain of attempts of each fork instance, in order; empty for a run without forks. */
+  critical_path: CriticalPath[];
+  /**
+   * A join was entered on branches that had failed and were not redone: the run (or its end) stands on
+   * failed branches. A branch `restart_failed` ran again and that passed clears it.
+   */
+  failed_branches: boolean;
   /** Where the run works, when not in the repository root; added by a host that knows. */
   workdir?: string;
   /** The task the run was started for, and whether that task had been done before (a restart). */
@@ -211,6 +272,12 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
   const agentDecisions: AgentDecisionReport[] = [];
   const attemptOf = (name: string, attempt: number) =>
     nodes.get(name)?.attempts.find((a) => a.attempt === attempt);
+  /** Every attempt as an interval, with the branch it ran in; `to` is filled when it ends. */
+  const spans: Span[] = [];
+  const spanOf = (name: string, attempt: number) =>
+    spans.find((s) => s.node === name && s.attempt === attempt);
+  const forks = new Map<string, ForkReport>();
+  let failedBranches = false;
 
   for (const record of journal) {
     const name = typeof record.node === "string" ? record.node : undefined;
@@ -225,8 +292,51 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
             seconds: 0,
             ...(definition ? { definition } : {}),
           });
+          spans.push({
+            node: name,
+            attempt,
+            from: record.ts,
+            ...(typeof record.fork === "string" && typeof record.branch === "string"
+              ? { fork: record.fork, branch: record.branch }
+              : {}),
+          });
         }
         break;
+      case "fork_started":
+        if (typeof record.fork === "string") {
+          const branches = Array.isArray(record.branches)
+            ? record.branches.filter((b): b is string => typeof b === "string")
+            : [];
+          forks.set(record.fork, {
+            fork: record.fork,
+            from: name ?? "?",
+            label: typeof record.label === "string" ? record.label : "?",
+            join: typeof record.join === "string" ? record.join : "?",
+            branches,
+            arrived: [],
+            failed: [],
+            unfinished: [...branches],
+            joined: 0,
+            overlaps: [],
+          });
+        }
+        break;
+      case "branch_settled": {
+        const fork = typeof record.fork === "string" ? forks.get(record.fork) : undefined;
+        if (fork && typeof record.branch === "string") {
+          const branch = record.branch;
+          if (!fork.arrived.includes(branch)) fork.arrived.push(branch);
+          if (record.failed === true && !fork.failed.includes(branch)) fork.failed.push(branch);
+          fork.unfinished = fork.unfinished.filter((b) => b !== branch);
+        }
+        break;
+      }
+      case "join_reached": {
+        const fork = typeof record.fork === "string" ? forks.get(record.fork) : undefined;
+        if (fork) fork.joined += 1;
+        if (Array.isArray(record.failed) && record.failed.length > 0) failedBranches = true;
+        break;
+      }
       case "node_superseded":
         // closed without a verdict because the pipeline changed under it
         if (name && attempt !== undefined) {
@@ -236,6 +346,8 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
             found.seconds = seconds(from, record.ts);
             found.outcome = "superseded";
           }
+          const span = spanOf(name, attempt);
+          if (span) span.to = record.ts;
         }
         break;
       case "pipeline_accepted":
@@ -288,6 +400,8 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
               };
             }
           }
+          const span = spanOf(name, attempt);
+          if (span) span.to = record.ts;
         }
         break;
       case "agent_completed": {
@@ -405,6 +519,25 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
   const all = [...nodes.values()];
   const sum = (items: NodeReport[]) =>
     Math.round(items.reduce((total, n) => total + n.seconds, 0) * 10) / 10;
+  // An attempt still going runs until the last thing the journal knows of, as above.
+  const withEnd = (span: Span): EndedSpan => ({ ...span, to: span.to ?? last });
+  const interval = (span: Span): Interval => ({ from: span.from, to: span.to ?? last });
+  const forkList = [...forks.values()];
+  for (const fork of forkList) {
+    // The state knows which branches are still going (a `restart_failed` sends settled ones back),
+    // and which arrivals a join stands on now; the journal is the fallback for a state without them.
+    const kept = state.forks?.[fork.fork];
+    if (kept) {
+      fork.arrived = fork.branches.filter((b) => kept.arrived[b] !== undefined);
+      fork.failed = fork.branches.filter((b) => kept.arrived[b]?.failure !== undefined);
+      fork.unfinished = fork.branches.filter((b) => kept.arrived[b] === undefined);
+      fork.joined = kept.joined;
+    }
+    fork.overlaps = branchOverlaps(fork, spans.filter((s) => s.fork === fork.fork).map(withEnd));
+  }
+  if (state.forks !== undefined) {
+    failedBranches = forkList.some((fork) => fork.joined > 0 && fork.failed.length > 0);
+  }
   return {
     runId: state.runId,
     task: state.task,
@@ -415,8 +548,14 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
     status: state.status,
     total_s: seconds(first, state.finishedAt ?? last),
     work_s: sum(all.filter((n) => !n.gate)),
-    waiting_s: sum(all.filter((n) => n.gate)),
+    busy_wall_s: unionSeconds(spans.filter((s) => !gates.has(s.node)).map(interval)),
+    waiting_s: unionSeconds(spans.filter((s) => gates.has(s.node)).map(interval)),
     nodes: all,
+    forks: forkList,
+    critical_path: forkList.map((fork) =>
+      criticalPath(fork, spans.filter((s) => s.fork === fork.fork).map(withEnd)),
+    ),
+    failed_branches: failedBranches,
     restarts,
     pauses,
     feedback,
@@ -458,5 +597,98 @@ function agentLogReport(state: RunState, lastAgentStep: string | undefined): Age
       : {}),
     failed: [...log.failed],
     unverified: true,
+    ...(log.visits === undefined ? {} : { visits: { ...log.visits } }),
+    ...(log.endedInStep === undefined ? {} : { ended_in_step: [...log.endedInStep] }),
+    // Steps open at the same time share the log: the per-visit account cannot tell them apart, and
+    // the run may have ended in several of them.
+    ...(Object.keys(state.forks ?? {}).length > 0
+      ? { visits_unverified_in_fork: true as const }
+      : {}),
   };
+}
+
+/** One attempt as a time interval, with the branch it ran in when it was inside a fork. */
+interface Span {
+  node: string;
+  attempt: number;
+  from: number;
+  to?: number;
+  fork?: string;
+  branch?: string;
+}
+
+type EndedSpan = Span & { to: number };
+
+interface Interval {
+  from: number;
+  to: number;
+}
+
+/** The seconds covered by the union of the intervals: time two of them share counts once. */
+function unionSeconds(intervals: Interval[]): number {
+  const sorted = [...intervals].sort((a, b) => a.from - b.from);
+  let total = 0;
+  let open: Interval | undefined;
+  for (const next of sorted) {
+    if (open === undefined || next.from > open.to) {
+      if (open) total += open.to - open.from;
+      open = { from: next.from, to: Math.max(next.from, next.to) };
+    } else {
+      open.to = Math.max(open.to, next.to);
+    }
+  }
+  if (open) total += open.to - open.from;
+  return Math.max(0, Math.round(total / 100) / 10);
+}
+
+/** The milliseconds two lists of intervals share. Attempts of one branch never overlap each other. */
+function sharedMs(a: Interval[], b: Interval[]): number {
+  let total = 0;
+  for (const x of a) {
+    for (const y of b) total += Math.max(0, Math.min(x.to, y.to) - Math.max(x.from, y.from));
+  }
+  return Math.max(0, total);
+}
+
+/** The pairs of branches that ran at the same time at all; a short overlap reads as 0 seconds. */
+function branchOverlaps(fork: ForkReport, spans: EndedSpan[]): ForkReport["overlaps"] {
+  const out: ForkReport["overlaps"] = [];
+  const of = (branch: string) => spans.filter((s) => s.branch === branch);
+  for (const [i, a] of fork.branches.entries()) {
+    for (const b of fork.branches.slice(i + 1)) {
+      const shared = sharedMs(of(a), of(b));
+      if (shared > 0) out.push({ branches: [a, b], seconds: Math.round(shared / 100) / 10 });
+    }
+  }
+  return out;
+}
+
+/**
+ * The branch whose attempts sum to the most time, its attempts in the order they were entered. The
+ * branches are tried in the order of the fork's edges (trail order), and a later one has to be
+ * strictly longer to replace an earlier one.
+ */
+function criticalPath(fork: ForkReport, spans: EndedSpan[]): CriticalPath {
+  let best: CriticalPath = {
+    fork: fork.fork,
+    branch: fork.branches[0] ?? "?",
+    seconds: 0,
+    attempts: [],
+  };
+  let first = true;
+  for (const branch of fork.branches) {
+    const attempts = spans
+      .filter((s) => s.branch === branch)
+      .map((s) => ({
+        node: s.node,
+        attempt: s.attempt,
+        seconds: Math.max(0, Math.round((s.to - s.from) / 100) / 10),
+      }));
+    const total = Math.round(attempts.reduce((sum, a) => sum + a.seconds, 0) * 10) / 10;
+    if (first || total > best.seconds) {
+      best = { fork: fork.fork, branch, seconds: total, attempts };
+      first = false;
+    }
+  }
+  return best;
 }

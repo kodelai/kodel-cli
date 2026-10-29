@@ -72,6 +72,47 @@ edges:
   - { from: result-approval, to: impl, when: rejected }
 ```
 
+## fork: verify and test at the same time
+
+Two command steps start together after the change and meet at a join that sees which of them failed.
+The join is an agent step: it fixes what failed and finishes with `restart_failed` to run only the failed
+branches again, or with `passed` when both passed. The commands here are valid in a POSIX shell and in
+`cmd.exe` alike (`node -e`).
+
+```yaml
+version: 1
+name: fork
+description: Make a change, then verify and test it at the same time; fix what failed.
+nodes:
+  - slug: impl
+    kind: agent
+    prompt: |
+      Task: {{task}}
+      Make the change. Add or update tests for the changed behavior.
+  - slug: verify
+    kind: command
+    command: node -e "process.exit(0)"
+    timeout: 600
+  - slug: test
+    kind: command
+    command: node -e "process.exit(0)"
+    timeout: 900
+  - slug: fix
+    kind: agent
+    join: all
+    prompt: |
+      Verify and test ran at the same time on your change. If a branch failed, the feedback names it
+      and says why: fix the cause, then finish with the outcome restart_failed so that only the failed
+      steps run again. If both passed, finish normally.
+edges:
+  - { from: impl, to: verify }
+  - { from: impl, to: test }
+  - { from: verify, to: fix }
+  - { from: verify, to: fix, when: failed }
+  - { from: test, to: fix }
+  - { from: test, to: fix, when: failed }
+```
+
 ## standard: a plan and a result a person approves
 
 ```yaml

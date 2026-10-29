@@ -15,6 +15,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { checkForkRun } from "./check-artifact-fork.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const artifact = join(root, "packages/cli/dist/kodel.js");
@@ -324,5 +325,12 @@ const withoutChanges = await runChanges(false);
 if (withoutChanges.after.length > 0) {
   fail(`history.changes.enabled false still wrote: ${withoutChanges.after.join()}`);
 }
+
+// A run with a fork on plain Node (T-40): two command branches at the same time, one failing once, a
+// join that restarts it; `status` and `report` open the run and show the fork.
+const fork = await checkForkRun(artifact, { Client, StdioClientTransport, fail });
+console.log(
+  `fork run ${fork.runId}: ${fork.events.length} journal records, critical path ${fork.report.critical_path[0].branch} ${fork.report.critical_path[0].seconds} s`,
+);
 
 console.log(`artifact ok under node ${process.version}: ${size} bytes, version ${version}`);

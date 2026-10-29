@@ -259,11 +259,25 @@ export function createElicitor(
   ): Promise<ToolResult> {
     if (kind === "ack") return { ...result, dialog } as ToolResult;
     const runId = runIdOf(call);
-    // If the state cannot be read now, the agent still hears what the person did.
+    // If the state cannot be read now, the agent still hears what the person did. The question is
+    // asked as the caller asked it: with `node_slug` the answer is about that step, and the agent's
+    // declaration of itself (`subagents`) decides the mode as before.
+    const nodeSlug = call.args["node_slug"];
+    const declared = call.args["subagents"];
     const fresh =
       runId === undefined
         ? undefined
-        : await service.nextStep({ run_id: runId }).catch(() => undefined);
+        : await service
+            .nextStep({
+              run_id: runId,
+              ...(call.tool === "pipeline_next_step" && typeof nodeSlug === "string"
+                ? { node_slug: nodeSlug }
+                : {}),
+              ...(isRecord(declared) && typeof declared["can"] === "boolean"
+                ? { subagents: { can: declared["can"] } }
+                : {}),
+            })
+            .catch(() => undefined);
     if (!fresh?.ok) return { ...result, dialog } as ToolResult;
     const { ok: _ok, ...step } = fresh;
     if (call.tool === "pipeline_next_step") return { ok: true, ...step, dialog };
@@ -289,7 +303,7 @@ export function createElicitor(
           text(what.waiting["prompt"], 1000),
         );
       case "paused":
-        return pausedQuestion(runId, run);
+        return pausedQuestion(runId, run, text(what.waiting["node_slug"], 200));
       case "change":
         return changeQuestion(runId, run);
       case "ack":
@@ -503,7 +517,13 @@ async function gateQuestion(
         return stale("a change of the pipeline is waiting for you; decide on it first");
       }
       // What is decided is what was shown: files that moved while the dialog was open are new facts.
-      if (changesFingerprint(await run.changesSinceGate(node)) !== changesFingerprint(found)) {
+      // Unless another branch of a fork is active: it writes to the same tree, so its work would
+      // make every gate of the fork undecidable here (the tree is one; a limit recorded in T-40).
+      const othersActive = again.active.some((v) => v.node !== node);
+      if (
+        !othersActive &&
+        changesFingerprint(await run.changesSinceGate(node)) !== changesFingerprint(found)
+      ) {
         return stale("the files changed while the dialog was open");
       }
       const done = await run.decideHuman(
@@ -520,12 +540,22 @@ async function gateQuestion(
   };
 }
 
-async function pausedQuestion(runId: string, run: HumanRun): Promise<Question | undefined> {
+/**
+ * `node`: the paused step the answer named. A pause of one branch of a fork leaves the run `running`,
+ * so the pause, not the run's status, is what is looked for; and that very branch is what is resumed.
+ */
+async function pausedQuestion(
+  runId: string,
+  run: HumanRun,
+  node: string,
+): Promise<Question | undefined> {
   const state = await run.state();
-  if (state.status !== "paused") return undefined;
-  const pause = state.pauses[0];
+  if (state.status !== "running" && state.status !== "paused") return undefined;
+  const pause = state.pauses.find((p) => p.node === node) ?? state.pauses[0];
   if (!pause) return undefined;
   const why = `${plain(pause.reason)} at ${plain(pause.node)}`;
+  const branch =
+    pause.fork === undefined ? "" : ` (branch "${plain(pause.fork.branch)}" of a fork)`;
   return {
     key: `${runId}|paused|${why}`,
     notDecided: NOT_DECIDED,
@@ -534,13 +564,25 @@ async function pausedQuestion(runId: string, run: HumanRun): Promise<Question | 
       properties: {
         confirm: {
           type: "boolean",
-          title: "Carry the run on, with more attempts for the step that stopped it",
+          title: `Carry the run on at "${plain(pause.node)}", with more attempts for the step that stopped it`,
           default: false,
         },
       },
       required: ["confirm"],
     },
-    message: (note) => header(runId, `the run is paused (${why}).\n\n${NOT_THE_AGENT}`, note),
+    message: (note) =>
+      header(
+        runId,
+        `the run is paused (${why})${branch}.${
+          state.pauses.length > 1
+            ? ` It is also paused at: ${state.pauses
+                .filter((p) => p !== pause)
+                .map((p) => `"${plain(p.node)}"`)
+                .join(", ")}; each is resumed on its own.`
+            : ""
+        }\n\n${NOT_THE_AGENT}`,
+        note,
+      ),
     async apply(content) {
       if (content["confirm"] !== true) return none("declined", NOT_DECIDED);
       const again = await run.state();

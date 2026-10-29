@@ -135,15 +135,35 @@ function unreadableStatus(unreadable: { format?: number } | undefined): string {
   return unreadable?.format === undefined ? "unreadable" : `format ${unreadable.format}`;
 }
 
+/** A join was entered after branches of a fork had failed: the run's end stands on failed branches. */
+function failedBranches(state: RunState): boolean {
+  return Object.values(state.forks ?? {}).some(
+    (fork) => fork.joined > 0 && Object.values(fork.arrived).some((a) => a.failure !== undefined),
+  );
+}
+
+/** The pauses of a run, each as "reason at node". */
+const describePauses = (state: RunState): string[] =>
+  state.pauses.map((p) => `${plain(p.reason)} at ${plain(p.node)}`);
+
+/** Every visit of a run, as "node#attempt (phase)"; a run with a fork has several. */
+const describeVisits = (state: RunState): string[] =>
+  state.active.map(
+    (v) =>
+      `${plain(v.node)}#${v.attempt}${v.fork === undefined ? "" : ` [${plain(v.fork.branch)}]`}`,
+  );
+
 function describeRun(
   state: RunState | undefined,
   unreadable?: { code: string; format?: number },
 ): string {
   if (!state) return unreadableStatus(unreadable);
   const status = plain(String(state.status));
-  const paused = state.pauses.map((p) => `${plain(p.reason)} at ${plain(p.node)}`).join("; ");
+  const paused = describePauses(state).join("; ");
   if (state.status === "paused") return `paused (${paused || "?"})`;
-  const at = state.active.map((v) => `${plain(v.node)}#${v.attempt}`).join(", ");
+  if (state.status === "completed" && failedBranches(state))
+    return "completed with failed branches";
+  const at = describeVisits(state).join(", ");
   const held = paused ? ` (paused: ${paused})` : "";
   return at ? `${status} at ${at}${held}` : `${status}${held}`;
 }
@@ -151,6 +171,12 @@ function describeRun(
 /** The run's slug: the one it was started with, or the name its task text would have given an older run. */
 function slugOf(meta: { slug?: string; task: string }, state: RunState | undefined): string {
   return meta.slug ?? state?.slug ?? runSlug(undefined, meta.task);
+}
+
+/** The nodes a decision about `node` led the run into: active now, and not before the decision. */
+function nodesEnteredAfter(before: RunState, after: RunState, node: string): string[] {
+  const was = new Set(before.active.map((v) => v.node));
+  return after.active.map((v) => v.node).filter((slug) => slug !== node && !was.has(slug));
 }
 
 function failIfRefused(decision: Decision): void {
@@ -253,9 +279,14 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     );
   }
 
-  /** Engine work started by a command runs in this process, so the command stays until it is done. */
-  async function afterDecision(run: Awaited<ReturnType<typeof openRun>>) {
-    await run.waitForRest(WORK_WAIT_MS);
+  /**
+   * Engine work started by a command runs in this process, so the command stays until it is done:
+   * the work of the nodes the decision touched, not a sibling branch's command that may go on for an
+   * hour (that one is started again by whoever asks next, if this process has to leave it).
+   */
+  async function afterDecision(run: Awaited<ReturnType<typeof openRun>>, nodes: string[]) {
+    const until = Date.now() + WORK_WAIT_MS;
+    for (const node of nodes) await run.waitForRest(until - Date.now(), node);
     const state = await run.state();
     env.out(`${run.runId}: ${describeRun(state)}\n`);
   }
@@ -413,6 +444,19 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
             slug: slugOf(meta, state),
             task: meta.task,
             ...(state?.workdir === undefined ? {} : { workdir: state.workdir }),
+            // Every visit and every pause: a run with a fork has several of each.
+            active: (state?.active ?? []).map((v) => ({
+              node: v.node,
+              attempt: v.attempt,
+              phase: v.phase,
+              ...(v.fork === undefined ? {} : { branch: v.fork.branch }),
+            })),
+            pauses: (state?.pauses ?? []).map((p) => ({
+              reason: p.reason,
+              node: p.node,
+              ...(p.fork === undefined ? {} : { branch: p.fork.branch }),
+            })),
+            ...(state !== undefined && failedBranches(state) ? { failed_branches: true } : {}),
           }));
           env.out(`${JSON.stringify(list, null, 2)}\n`);
           return;
@@ -457,6 +501,11 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       env.out(`integrity: ${await run.integrityStatus()}\n`);
       env.out(`seal:      ${await run.sealStatusSettled()}\n`);
       env.out(`trail:     ${state.trail.map(plain).join(" > ")}\n`);
+      for (const visit of describeVisits(state)) env.out(`active:    ${visit}\n`);
+      for (const pause of describePauses(state)) env.out(`paused:    ${pause}\n`);
+      if (failedBranches(state)) {
+        env.out("branches:  a join was entered after branches of a fork had failed\n");
+      }
       const pending = await pendingLine(run);
       if (pending) env.out(`pipeline:  ${pending}\n`);
       // A decision the agent made on the person's instruction is not one the person made: say so here.
@@ -474,6 +523,18 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         const next = await run.inspect();
         if ("waiting" in next) {
           env.out(`waiting:   ${plain(next.waiting.node_slug)} (${next.waiting.reason})\n`);
+        }
+        // The other decisions a person has to make: every gate and pause of a fork is named.
+        const also =
+          "waiting" in next
+            ? next.waiting.also_waiting
+            : "node" in next
+              ? next.node.also_waiting
+              : "running" in next
+                ? next.running.also_waiting
+                : undefined;
+        for (const other of also ?? []) {
+          env.out(`waiting:   ${plain(other.node_slug)} (${other.reason})\n`);
         }
       } catch {
         env.out("next:      cannot be worked out from this state (it is not readable as a run)\n");
@@ -498,17 +559,50 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         (await run.journal()).reduce((last, r) => Math.max(last, r.seq), 0);
       // The journal first: a decision between the reads below is then still after `seen`.
       const seen = await lastSeq();
+      /**
+       * Every decision a person has to make, as one key: the answer's own, and the others it names
+       * (`also_waiting`: the gates and pauses of the other branches of a fork). Any decision changes
+       * the key, so a decision about any branch ends the wait; a new wait at the same step (a gate
+       * reached again after a rejection) counts as an end too, by the attempt.
+       */
       const look = async () => {
         const step = await run.inspect();
         const state = await run.state();
-        if (!("waiting" in step)) return { step, state, key: undefined };
-        const { reason, behind, node_slug } = step.waiting;
-        // Where it waits, so a new wait (a gate reached again after a rejection) counts as an end.
-        const attempt = state.active.find((v) => v.phase === "human")?.attempt;
-        return { step, state, key: [reason, behind, node_slug, attempt].join("|") };
+        const attemptOf = (node: string) => state.active.find((v) => v.node === node)?.attempt;
+        const parts: string[] = [];
+        if ("waiting" in step) {
+          const { reason, behind, node_slug } = step.waiting;
+          parts.push([reason, behind, node_slug, attemptOf(node_slug)].join("|"));
+        }
+        const also =
+          "waiting" in step
+            ? step.waiting.also_waiting
+            : "node" in step
+              ? step.node.also_waiting
+              : "running" in step
+                ? step.running.also_waiting
+                : undefined;
+        for (const other of also ?? []) {
+          parts.push([other.reason, other.node_slug, attemptOf(other.node_slug)].join("|"));
+        }
+        return { step, state, key: parts.length === 0 ? undefined : parts.sort().join(";") };
       };
+      /** The step a `waiting` answer is about, or the first other decision an answer names. */
+      const where = (now: Awaited<ReturnType<typeof look>>) =>
+        "waiting" in now.step
+          ? { node: now.step.waiting.node_slug, reason: now.step.waiting.reason }
+          : (() => {
+              const also =
+                "node" in now.step
+                  ? now.step.node.also_waiting
+                  : "running" in now.step
+                    ? now.step.running.also_waiting
+                    : undefined;
+              const first = also?.[0];
+              return first ? { node: first.node_slug, reason: first.reason } : undefined;
+            })();
       const first = await look();
-      if (!("waiting" in first.step)) {
+      if (first.key === undefined) {
         say(`not waiting for a person (${describeRun(first.state)}). Call pipeline_next_step.`);
         return;
       }
@@ -522,9 +616,9 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         now = await look();
         if (now.key !== first.key) break;
         if (limitS > 0 && Date.now() - started >= limitS * 1000) {
-          const where = first.step.waiting;
+          const at = where(first);
           say(
-            `still waiting at "${plain(where.node_slug)}" (${where.reason}), nothing was decided in ${describeDuration(limitS)}. Not watching any more.`,
+            `still waiting at "${plain(at?.node ?? "?")}" (${at?.reason ?? "?"}), nothing was decided in ${describeDuration(limitS)}. Not watching any more.`,
           );
           exitCode = WAIT_GAVE_UP;
           return;
@@ -540,10 +634,10 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         done = (await run.journal()).find((r) => r.seq > seen && decisive.includes(r.event));
       }
       const node = plain(String(done?.node ?? ""));
-      const where =
-        "waiting" in now.step
-          ? ` now waits at "${plain(now.step.waiting.node_slug)}" (${now.step.waiting.reason})`
-          : ` is now ${describeRun(now.state)}`;
+      const at = where(now);
+      const where_ = at
+        ? ` now waits at "${plain(at.node)}" (${at.reason})`
+        : ` is now ${describeRun(now.state)}`;
       const what =
         done?.event === "gate_decided"
           ? `${done.decision === "approved" ? "approved" : "rejected"} at "${node}"`
@@ -553,7 +647,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
               ? "change accepted"
               : done?.event === "run_finished"
                 ? `the run ended: ${plain(String(done.status))}`
-                : `no decision, but the run${where}`;
+                : `no decision, but the run${where_}`;
       say(`${what}. Call pipeline_next_step.`);
     });
 
@@ -583,6 +677,13 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         await refuseWhilePending(run, opts.ignorePendingChange);
         const state = await run.state();
         const waiting = state.active.filter((v) => v.phase === "human");
+        if (opts.node === undefined && waiting.length > 1) {
+          throw new UserError(
+            `run ${runId} waits for a decision at ${waiting.length} steps: ${waiting
+              .map((v) => `"${plain(v.node)}"`)
+              .join(", ")}. Say which with --node <slug>`,
+          );
+        }
         const node = opts.node ?? waiting[0]?.node;
         if (!node || !waiting.some((v) => v.node === node)) {
           throw new UserError(
@@ -620,18 +721,23 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
             opts.reason,
           ),
         );
-        await afterDecision(run);
+        // The decided node's own work, and the node the decision led into (a rejection sends the
+        // branch back to the node the edge names): a sibling branch's work is not waited for.
+        await afterDecision(run, [node, ...nodesEnteredAfter(state, await run.state(), node)]);
       },
     );
 
   program
     .command("resume <run>")
-    .description("Carry on a paused run, with more attempts for the step that stopped it")
+    .description(
+      "Carry on a paused run (or a paused branch of a fork), with more attempts for the step that stopped it",
+    )
+    .option("--node <slug>", "the paused step, if more than one branch is paused")
     .option(
       "--ignore-pending-change",
       "resume although a change of the pipeline is waiting for you",
     )
-    .action(async (runId: string, opts: { ignorePendingChange?: boolean }) => {
+    .action(async (runId: string, opts: { node?: string; ignorePendingChange?: boolean }) => {
       requireHuman();
       const run = await openRun(await host(), runId);
       await refuseWhilePending(run, opts.ignorePendingChange);
@@ -639,9 +745,23 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       if (state.pauses.length === 0 || (state.status !== "running" && state.status !== "paused")) {
         throw new UserError(`run ${runId} is not paused`);
       }
-      await mustConfirm(`Resume run ${runId} with more attempts?`);
-      failIfRefused(await run.resume());
-      await afterDecision(run);
+      if (opts.node === undefined && state.pauses.length > 1) {
+        throw new UserError(
+          `run ${runId} is paused at ${state.pauses.length} steps: ${state.pauses
+            .map((p) => `"${plain(p.node)}"`)
+            .join(", ")}. Say which with --node <slug>`,
+        );
+      }
+      const pause =
+        opts.node === undefined ? state.pauses[0] : state.pauses.find((p) => p.node === opts.node);
+      if (!pause) {
+        throw new UserError(`run ${runId} is not paused at "${plain(opts.node ?? "")}"`);
+      }
+      await mustConfirm(
+        `Resume run ${runId}${state.pauses.length > 1 ? ` at "${plain(pause.node)}"` : ""} with more attempts?`,
+      );
+      failIfRefused(await run.resume(opts.node));
+      await afterDecision(run, [pause.node, pause.blocked?.to ?? pause.node]);
     });
 
   program
@@ -720,7 +840,11 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           ...(opts.reason === undefined ? {} : { reason: opts.reason }),
         }),
       );
-      await afterDecision(run);
+      // Only the steps the change redid: the branches it left alone go on without this command.
+      await afterDecision(
+        run,
+        found.info.effects.map((effect) => effect.node),
+      );
       if ((await run.state()).pauses.length > 0) {
         env.out(`The run is still paused; carry it on with: kodel resume ${runId}\n`);
       }

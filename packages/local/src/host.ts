@@ -197,6 +197,15 @@ export interface HostOptions {
    * that a command a person runs (`status`, `report`, `wait`, `gate`) never starts one.
    */
   agentLogTickers?: AgentLogTickers;
+  /**
+   * Told when the run's lock is taken and let go by this host (tests watch what happens under it:
+   * engine work never runs there, and a decision's snapshots stay within their bound).
+   */
+  lockHooks?: { entered?(runId: string): void; left?(runId: string): void };
+  /** How long one snapshot taken under the lock may take; `SNAPSHOT_DEADLINE_MS` by default. */
+  snapshotDeadlineMs?: number;
+  /** How long all the snapshots of one decision may take together; `DISPATCH_DEADLINE_MS` by default. */
+  dispatchDeadlineMs?: number;
 }
 
 /**
@@ -282,6 +291,19 @@ export const END_DEADLINE_MS = 120_000;
 /** After this many hand-ins in a row that ran out of time, the next ones are not tried. */
 const DEADLINE_BACKOFF = 2;
 
+/**
+ * The snapshots a decision asks for (the baseline of a `diff` check, the tree at a gate) are taken
+ * under the run's lock, so another process waits for them: each gets this long, and all of one
+ * decision together get `DISPATCH_DEADLINE_MS`, both far below the time after which a lock counts as
+ * abandoned (60 s). A snapshot that does not fit is recorded as missing, never waited for.
+ */
+export const SNAPSHOT_DEADLINE_MS = 10_000;
+export const DISPATCH_DEADLINE_MS = 20_000;
+
+/** What the record says when other branches of a fork wrote to the same tree. */
+export const SHARED_TREE_NOTE =
+  "other branches of the fork were active meanwhile: the files are one tree, so this may include their writes";
+
 /** The text fields an event carries from outside; the rest is structure and is left alone. */
 const FREE_TEXT_FIELDS = [
   "reason",
@@ -290,6 +312,7 @@ const FREE_TEXT_FIELDS = [
   "suggestion",
   "note",
   "changesError",
+  "changesNote",
 ] as const;
 
 function redactEvent(event: RunEvent, rules: RedactRule[]): RunEvent {
@@ -335,7 +358,12 @@ const lastChars = (text: string, n: number) => (text.length > n ? `...${text.sli
  * different from "nothing changed" and has to be said so.
  */
 export type ChangeReport =
-  | { kind: "changes"; files: ChangeSet }
+  | {
+      kind: "changes";
+      files: ChangeSet;
+      /** Other branches of a fork were active since the step was reached: the list may hold their writes. */
+      note?: string;
+    }
   | { kind: "unavailable"; reason: string }
   | { kind: "no_repo" };
 
@@ -707,7 +735,8 @@ export class LocalRun {
     string,
     { controller: AbortController; node: string; attempt: number }
   >();
-  private readonly pending = new Set<Promise<void>>();
+  /** The jobs of this process, each with the node whose work it is (none for a job of the whole run). */
+  private readonly pending = new Map<Promise<void>, string | undefined>();
   /** The jobs that record the patch of the run after it ended (also in `pending`). */
   private readonly endJobs = new Set<Promise<void>>();
   /** The job that records the patch of the run gave up (the files changed, the state could not be read). */
@@ -1270,7 +1299,7 @@ export class LocalRun {
     // A state a person accepted after editing may have no `changes`: not a reason to fail the call.
     if (decision.state.history?.changes?.enabled !== true) return;
     const job = this.recordRunPatch().catch(() => undefined);
-    this.pending.add(job);
+    this.pending.set(job, undefined);
     this.endJobs.add(job);
     void job.finally(() => {
       this.pending.delete(job);
@@ -1352,17 +1381,24 @@ export class LocalRun {
   private async recordHandIn(
     node: string,
     attempt: number,
-  ): Promise<{ changes?: ChangesRef; changesError?: string; tree?: string }> {
+  ): Promise<{ changes?: ChangesRef; changesError?: string; tree?: string; changesNote?: string }> {
     const settings = await this.changesSettings();
     if (!settings) return {};
+    // Whether another branch of a fork is active: the tree is shared, so the patch of this hand-in may
+    // hold a sibling's work, and a hand-in slowed down by a sibling's snapshot must not switch the
+    // patches off for the rest of the run.
+    let shared = false;
     try {
       // Only a step that is waiting for this hand-in; anything else is left to `apply` to refuse.
       const state = await this.state();
       const visit = state.active.find((v) => v.node === node && v.attempt === attempt);
       if (visit?.phase !== "agent") return {};
+      shared = state.active.some((v) => v.node !== node);
     } catch {
       return {};
     }
+    const noted = <T extends object>(out: T): T & { changesNote?: string } =>
+      shared ? { ...out, changesNote: SHARED_TREE_NOTE } : out;
     const { store } = this.host;
     try {
       const earlier = (await store.readJournal(this.runId)).filter(
@@ -1372,7 +1408,11 @@ export class LocalRun {
       const timedOut = (r: JournalRecord) =>
         typeof r.changes_error === "string" &&
         (r.changes_error.startsWith("deadline:") || r.changes_error.startsWith("skipped:"));
-      if (earlier.length >= DEADLINE_BACKOFF && earlier.slice(-DEADLINE_BACKOFF).every(timedOut)) {
+      if (
+        !shared &&
+        earlier.length >= DEADLINE_BACKOFF &&
+        earlier.slice(-DEADLINE_BACKOFF).every(timedOut)
+      ) {
         return { changesError: "skipped: earlier hand-ins ran out of time recording the changes" };
       }
       // The base is the tree of the hand-in just before this one, whatever node it was; the start of
@@ -1391,7 +1431,7 @@ export class LocalRun {
       const deadline = deadlineIn(HAND_IN_DEADLINE_MS);
       // Checked here: core would drop a bad one without a word, and the chain would break unexplained.
       const tree = checkTreeId(await snapshotter.snapshot(deadline), "the snapshot");
-      if (base === undefined) return { tree, changesError: "no recorded start" };
+      if (base === undefined) return noted({ tree, changesError: "no recorded start" });
       try {
         const out = await patchBetween(snapshotter.root, base, tree, {
           exclude: settings.exclude,
@@ -1404,13 +1444,13 @@ export class LocalRun {
           out.patch,
           { cutByGit: out.cut, maxKb: settings.maxKb },
         );
-        return { changes, tree };
+        return noted({ changes, tree });
       } catch (error) {
         // The tree was taken: the next hand-in can start from it whatever happened to the patch.
-        return { tree, changesError: this.changesErrorText(error) };
+        return noted({ tree, changesError: this.changesErrorText(error) });
       }
     } catch (error) {
-      return { changesError: this.changesErrorText(error) };
+      return noted({ changesError: this.changesErrorText(error) });
     }
   }
 
@@ -1438,7 +1478,7 @@ export class LocalRun {
     const { store, engine, clock, integrity, rules } = this.host;
     // Whatever text came with the event (a reason, a message) reaches state and journal redacted.
     const event = redactEvent(incoming, rules);
-    return store.withLock(this.runId, async () => {
+    return this.locked(async () => {
       let state: RunState | undefined;
       if (event.type !== "start") {
         let raw: Awaited<ReturnType<typeof store.readStateRaw>>;
@@ -1519,8 +1559,21 @@ export class LocalRun {
           await integrity.set(`${this.runId}.seal`, sealHash);
         }
       }
-      for (const effect of decision.effects) await this.dispatch(effect);
+      await this.dispatchAll(decision.effects);
       return decision;
+    });
+  }
+
+  /** The run's lock, with the hooks a test watches it through. */
+  private locked<T>(fn: () => Promise<T>): Promise<T> {
+    const hooks = this.host.options.lockHooks;
+    return this.host.store.withLock(this.runId, async () => {
+      hooks?.entered?.(this.runId);
+      try {
+        return await fn();
+      } finally {
+        hooks?.left?.(this.runId);
+      }
     });
   }
 
@@ -1627,7 +1680,8 @@ export class LocalRun {
    * fail must not get an approval that looks clean.
    */
   async changesSinceGate(node: string): Promise<ChangeReport> {
-    const visit = (await this.state()).active.find((v) => v.node === node && v.phase === "human");
+    const state = await this.state();
+    const visit = state.active.find((v) => v.node === node && v.phase === "human");
     if (!visit) return { kind: "unavailable", reason: `the run is not waiting at "${node}"` };
     const snapshots = await this.host.store.readSnapshots(this.runId);
     const tree = snapshots[`gate:${node}:${visit.attempt}`];
@@ -1641,10 +1695,40 @@ export class LocalRun {
       };
     }
     try {
-      return { kind: "changes", files: await (await this.snapshotter()).changesSince(tree) };
+      const files = await (await this.snapshotter()).changesSince(tree);
+      const shared = await this.otherBranchesActiveSince(state, node, visit.attempt);
+      return { kind: "changes", files, ...(shared ? { note: SHARED_TREE_NOTE } : {}) };
     } catch (error) {
       return { kind: "unavailable", reason: describeError(error) };
     }
+  }
+
+  /**
+   * Whether another node was active while this gate waited, or is now: then what changed since the
+   * gate was reached is not only what this branch's agent did after its checks, and the person is
+   * told so. The tree is one, so no more than that can be said (a limit recorded in T-40).
+   */
+  private async otherBranchesActiveSince(
+    state: RunState,
+    node: string,
+    attempt: number,
+  ): Promise<boolean> {
+    if (state.active.some((v) => v.node !== node)) return true;
+    const journal = await this.host.store.readJournal(this.runId).catch(() => []);
+    const reached = journal.find(
+      (r) => r.event === "gate_waiting" && r.node === node && r.attempt === attempt,
+    );
+    if (!reached) return false;
+    const moving = new Set([
+      "node_entered",
+      "node_finished",
+      "agent_completed",
+      "command_finished",
+      "check_finished",
+    ]);
+    return journal.some(
+      (r) => r.seq > reached.seq && moving.has(r.event) && r.node !== undefined && r.node !== node,
+    );
   }
 
   /** Accept the files of this finished run after a deliberate change, and seal them again. */
@@ -1660,41 +1744,57 @@ export class LocalRun {
     );
   }
 
-  private async dispatch(effect: Effect): Promise<void> {
-    switch (effect.type) {
-      case "take_snapshot": {
-        const tree = await (await this.snapshotter()).snapshot();
-        await this.host.store.writeSnapshot(this.runId, effect.key, tree);
-        return;
+  /**
+   * The effects of one decision. Engine work is started and not waited for. The snapshots (a `diff`
+   * baseline per branch, the tree at a gate) are taken here, under the lock, so a `diff` check that
+   * starts right after compares against the tree as it was at this very decision: one snapshot of
+   * the tree serves every key the decision asks for (a fork asks once per branch), each snapshot has a
+   * deadline and the whole set a bound, and a snapshot that fails or does not fit is recorded as
+   * missing under its key instead of failing the decision (a `diff` check against a missing baseline
+   * fails its branch and says so; a gate says it cannot tell what changed).
+   */
+  private async dispatchAll(effects: Effect[]): Promise<void> {
+    const { options, store } = this.host;
+    const total = deadlineIn(options.dispatchDeadlineMs ?? DISPATCH_DEADLINE_MS);
+    const each = options.snapshotDeadlineMs ?? SNAPSHOT_DEADLINE_MS;
+    const keys: { key: string; gate: boolean }[] = [];
+    for (const effect of effects) {
+      switch (effect.type) {
+        case "take_snapshot":
+          keys.push({ key: effect.key, gate: false });
+          break;
+        case "await_human":
+          keys.push({ key: `gate:${effect.node}:${effect.attempt}`, gate: true });
+          break;
+        case "run_command":
+        case "run_check":
+          this.spawn(effect);
+          break;
+        default:
+          break; // need_agent waits for the agent
       }
-      case "run_command":
-      case "run_check":
-        this.spawn(effect);
-        return;
-      case "await_human": {
-        // Where the files stood when the person was asked, so approving can show what changed since.
-        // If that cannot be taken, the run still waits for the person (the state is already saved,
-        // and a failure here must not turn into an error for the agent that completed the step);
-        // what is missing is recorded, so the gate says it cannot tell instead of showing nothing.
-        const key = `gate:${effect.node}:${effect.attempt}`;
-        try {
-          const snapshotter = await this.snapshotter();
-          if (await snapshotter.isRepo()) {
-            await this.host.store.writeSnapshot(this.runId, key, await snapshotter.snapshot());
-          }
-        } catch (error) {
-          await this.host.store
-            .writeSnapshot(
-              this.runId,
-              `${key}!`,
-              error instanceof Error ? error.message : String(error),
-            )
-            .catch(() => undefined);
-        }
-        return;
+    }
+    if (keys.length === 0) return;
+    let tree: string | undefined;
+    let failure: string | undefined;
+    try {
+      const snapshotter = await this.snapshotter();
+      // Where the files stood when the person was asked, or where a check starts from: a gate in a
+      // directory without git has nothing to record and nothing to say, a check has.
+      if (keys.some((k) => !k.gate) || (await snapshotter.isRepo())) {
+        const left = total.remainingMs();
+        if (left <= 0) throw new Error("the time for recording the files of this decision ran out");
+        tree = await snapshotter.snapshot(deadlineIn(Math.min(each, left)));
       }
-      default:
-        return; // need_agent waits for the agent
+    } catch (error) {
+      failure = error instanceof Error ? error.message : String(error);
+    }
+    for (const { key } of keys) {
+      if (tree !== undefined) {
+        await store.writeSnapshot(this.runId, key, tree).catch(() => undefined);
+      } else if (failure !== undefined) {
+        await store.writeSnapshot(this.runId, `${key}!`, failure).catch(() => undefined);
+      }
     }
   }
 
@@ -1765,7 +1865,7 @@ export class LocalRun {
         this.tasks.delete(key);
       }
     })();
-    this.pending.add(job);
+    this.pending.set(job, effect.node);
     void job.finally(() => this.pending.delete(job));
   }
 
@@ -1913,7 +2013,17 @@ export class LocalRun {
    * Wait until the work running in this process has finished and its results are applied.
    * `parked` says how many tasks are known to be stuck on purpose (tests), so they are not waited for.
    */
-  async settle(parked: () => number = () => 0, deadline = Number.POSITIVE_INFINITY): Promise<void> {
+  async settle(
+    parked: () => number = () => 0,
+    deadline = Number.POSITIVE_INFINITY,
+    node?: string,
+  ): Promise<void> {
+    // Only the jobs of one node, when one is named: a decision about one branch waits for that
+    // branch's work, not for a sibling's command that may run for an hour.
+    const mine = () =>
+      node === undefined
+        ? [...this.pending.keys()]
+        : [...this.pending].filter(([, of]) => of === node).map(([job]) => job);
     // The queue too is waited for no longer than the deadline: it may stand behind another process's lock.
     const queued = async () => {
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1929,9 +2039,9 @@ export class LocalRun {
     };
     for (;;) {
       await queued();
-      if (this.pending.size <= parked()) {
+      if (mine().length <= parked()) {
         await queued();
-        if (this.pending.size <= parked()) return;
+        if (mine().length <= parked()) return;
       }
       const left = deadline - Date.now();
       if (left <= 0) return;
@@ -1942,7 +2052,7 @@ export class LocalRun {
         timer = Number.isFinite(left) ? setTimeout(resolve, left) : undefined;
       });
       try {
-        await Promise.race([...this.pending, wake]);
+        await Promise.race([...mine(), wake]);
       } finally {
         clearTimeout(timer);
       }
@@ -1952,33 +2062,36 @@ export class LocalRun {
   /**
    * Wait for the engine's work on this run to come to rest, but no longer than `ms`: the work this
    * process runs, and also work another process owns (a session still going), which is watched in
-   * the state on disk.
+   * the state on disk. With `node`, only that node's work: the rest of a fork goes on without the
+   * caller, who decided or completed that one node.
    */
-  async waitForRest(ms: number): Promise<void> {
+  async waitForRest(ms: number, node?: string): Promise<void> {
     if (ms <= 0) return;
     const deadline = Date.now() + ms;
-    await this.settle(() => 0, deadline);
+    await this.settle(() => 0, deadline, node);
     // What is left is work another process owns. It is watched in the state on disk, and looked at
     // with a tick now and then, so work that has gone silent or lost its owner is started again
     // during the wait instead of after it.
     let rounds = 0;
-    while (Date.now() < deadline && (await this.engineBusy())) {
+    while (Date.now() < deadline && (await this.engineBusy(node))) {
       await new Promise((resolve) => setTimeout(resolve, Math.min(300, deadline - Date.now())));
       if (++rounds % 4 === 0) await this.tick().catch(() => undefined);
-      await this.settle(() => 0, deadline); // a tick may have started work in this process
+      await this.settle(() => 0, deadline, node); // a tick may have started work in this process
     }
   }
 
   /**
    * Engine work is going, or every open agent step is in a worker's hands: either way the caller
-   * that waits has nothing to do until something hands in.
+   * that waits has nothing to do until something hands in. With `node`, only that node's engine work
+   * counts; a claimed sibling's step is not the caller's to wait for.
    */
-  private async engineBusy(): Promise<boolean> {
+  private async engineBusy(node?: string): Promise<boolean> {
     const state = await this.state().catch(() => undefined);
     if (!state) return false;
+    const own = state.active.filter((v) => node === undefined || v.node === node);
     return (
-      state.active.some((v) => v.phase === "engine" || v.phase === "checks") ||
-      claimedStepsOpen(state, this.host.clock())
+      own.some((v) => v.phase === "engine" || v.phase === "checks") ||
+      (node === undefined && claimedStepsOpen(state, this.host.clock()))
     );
   }
 
@@ -2046,6 +2159,15 @@ export class LocalRun {
         const { shown, omitted } = capChanges(found.files);
         step.waiting.changes = shown;
         if (omitted > 0) step.waiting.changes_omitted = omitted;
+      }
+      if (
+        await this.otherBranchesActiveSince(
+          state,
+          step.waiting.node_slug,
+          step.waiting.attempt ?? 0,
+        )
+      ) {
+        step.waiting.changes_note = SHARED_TREE_NOTE;
       }
     }
     if (options.serve !== undefined && "node" in step) {
@@ -2293,6 +2415,7 @@ export class LocalRun {
         ...(recorded.changes === undefined ? {} : { changes: recorded.changes }),
         ...(recorded.changesError === undefined ? {} : { changesError: recorded.changesError }),
         ...(recorded.tree === undefined ? {} : { tree: recorded.tree }),
+        ...(recorded.changesNote === undefined ? {} : { changesNote: recorded.changesNote }),
       });
     } catch (error) {
       // A file no event points to is of no use to anyone.

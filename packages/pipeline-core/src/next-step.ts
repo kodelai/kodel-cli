@@ -183,6 +183,11 @@ export type NextStep =
         changes_omitted?: number;
         /** Why the engine could not tell what changed; say so to the person, never "nothing changed". */
         changes_unavailable?: string;
+        /**
+         * Other branches of a fork were active while this step was reached or since: the files are one
+         * tree, so `changes` may hold their writes too. Say so to the person; added by the host.
+         */
+        changes_note?: string;
         /** The other decisions that wait: name each of them to the person too. */
         also_waiting?: AlsoWaiting[];
       };

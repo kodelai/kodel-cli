@@ -1,0 +1,13 @@
+# kodel-patch v1
+diff --git a/src/greeting.js b/src/greeting.js
+new file mode 100644
+--- /dev/null
++++ b/src/greeting.js
+@@ -0,0 +1 @@
++module.exports = (name) => `hello ${name}`;
+diff --git a/src/greeting.test.js b/src/greeting.test.js
+new file mode 100644
+--- /dev/null
++++ b/src/greeting.test.js
+@@ -0,0 +1 @@
++require('./greeting');

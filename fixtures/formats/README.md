@@ -51,6 +51,15 @@ begins.
 - `r_0mvtewgdn_zfhl`: a change made in the run's pipeline file (the `review` prompt, a step the run
   never reached: `effects: []`), accepted; a note from the agent; `plan` ending with
   `nothing_to_change` and its gate rejected once, then approved.
+- `r_0mvthh4vp_9gqe`: a run of the `fork` example pipeline (`examples/pipelines/fork.yaml` with the
+  `test` command failing once): `impl`, then `verify` and `test` at the same time (two overlapping
+  command branches, `fork_started`, two `branch_settled`, one of them failed), the join `fix` entered
+  with the failed branch's feedback (`join_reached.failed`), `restart_failed` running `test` again,
+  and the run completing on the join's second visit. Its `state.json` carries `forks`, its `active`
+  visits carried the fork attribution while they went, and its journal has the overlap.
+
+**Do not open a fork run with the beta** (`@kodel-ai/kodel@0.1.0-beta.0` or earlier): it refuses
+format 2 as written by a newer kodel, which is the right answer, and must not be made to read it.
 
 They were made by a script in place of the agent, in a scratch repository with the pipeline's commands
 answered by a stub (as `packages/local/test/changes-dev-yaml.test.ts` does), each run in a worktree

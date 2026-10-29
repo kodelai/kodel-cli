@@ -30,5 +30,17 @@
   "r_0mvtewgdn_zfhl/snapshots.json": "e002548f87e9ca4946a71411e5c29e35fe52e92ee112238d864eb18b9bc7e9ee",
   "r_0mvtewgdn_zfhl/specs/5f57f14c8785d2fc.yaml": "5f57f14c8785d2fcd454bee67990d36a3c97b6bfd8261d605446c5031bf6f7f4",
   "r_0mvtewgdn_zfhl/specs/61b9c0e2e90efcad.yaml": "61b9c0e2e90efcadb0618a4891397586020516c1e9ade17b2bcd6968a381c7c3",
-  "r_0mvtewgdn_zfhl/state.json": "b56f5403671d797d58e143a9bdfe3d08525cbdfa6f6ff96819dc7e24bdf809ea"
+  "r_0mvtewgdn_zfhl/state.json": "b56f5403671d797d58e143a9bdfe3d08525cbdfa6f6ff96819dc7e24bdf809ea",
+  "r_0mvthh4vp_9gqe/artifacts/test-1-command.txt": "6047fc558962be06cc960478982d7707b0bcf0a00ab6887019cbe8d5f0a3c647",
+  "r_0mvthh4vp_9gqe/artifacts/test-2-command.txt": "e0336ec5117948a0d59de5ef8da8324ef52cccc1ce150c2ca56e1208c89bbb8f",
+  "r_0mvthh4vp_9gqe/artifacts/verify-1-command.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "r_0mvthh4vp_9gqe/changes/fix-1.patch": "40e88b8ea35a104ddc86fc057606c1a447df8446c178658328830c253e11774e",
+  "r_0mvthh4vp_9gqe/changes/fix-2.patch": "40e88b8ea35a104ddc86fc057606c1a447df8446c178658328830c253e11774e",
+  "r_0mvthh4vp_9gqe/changes/impl-1.patch": "72e793414779649a0bc169fd73ccbe6651ce8e63dc70941aa9c18b8dd2543ac6",
+  "r_0mvthh4vp_9gqe/changes/run.patch": "72e793414779649a0bc169fd73ccbe6651ce8e63dc70941aa9c18b8dd2543ac6",
+  "r_0mvthh4vp_9gqe/journal.jsonl": "ca64a54fba593b28afeea4a3e37e40107396c04b1a7fda5c3d1387635483cd8c",
+  "r_0mvthh4vp_9gqe/meta.json": "8c1aebab825b3c927107fe62ed998b6a8365afe58fc68f133e4b43c43f171505",
+  "r_0mvthh4vp_9gqe/snapshots.json": "6f3cbc5069808fe08de9537ad305394bfca90c5a55349b5e169d4592b57c47f3",
+  "r_0mvthh4vp_9gqe/specs/c389cfc3f6a75bef.yaml": "c389cfc3f6a75befc3815f34a61f827fe2b04057191ba09e34ca36c4e08f10d4",
+  "r_0mvthh4vp_9gqe/state.json": "1d820b812e90b43f9d2bc9bfad8685e3d55edc62cfb0bd54b3e4c7b53194973f"
 }
