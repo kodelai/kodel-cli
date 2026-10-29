@@ -49,8 +49,9 @@ a node with `join: all`, which starts once every branch has arrived. Rules the p
 - Agent steps of several branches are open at once: `pipeline_next_step` lists them in `steps` and says
   in `execution.mode` whether this project works them in parallel (one worker per step, each taking its
   step with `pipeline_take_step` and completing it with the `claim_token`; a claim lapses after
-  `agents.claim_ttl_s`, 900 s by default, and `agents.max_parallel`, 8 by default, caps what is handed
-  out) or one by one; the `agents.subagents` setting of the project config decides (`auto`, `yes`, `no`).
+  `agents.claim_ttl_s`, 900 s by default, and `agents.max_parallel`, 8 by default, caps the steps in
+  flight: with that many held, `pipeline_next_step` hands nothing out and a take, by slug too, answers
+  `queued` until a step is handed in) or one by one; the `agents.subagents` setting of the project config decides (`auto`, `yes`, `no`).
   A claim keeps two workers off one step; the engine never refuses a completion for a missing one.
 - The branches share one working tree. A `diff` check in a branch is not a check of that branch alone:
   it sees what the other branches wrote, and a baseline that could not be recorded fails the check. Put

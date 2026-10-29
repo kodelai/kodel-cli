@@ -146,7 +146,9 @@ export class LocalScenarioEngine implements ScenarioEngine {
             ...(typeof args.claim_token === "string" ? { token: args.claim_token } : {}),
           });
           if (outcome.status === "none") return { ok: true, status: "none" };
-          if (outcome.status === "taken") return { ok: true, ...outcome };
+          if (outcome.status === "taken" || outcome.status === "queued") {
+            return { ok: true, ...outcome };
+          }
           return {
             ok: true,
             status: outcome.status,

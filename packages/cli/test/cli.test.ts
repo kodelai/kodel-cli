@@ -1459,15 +1459,30 @@ describe("a store made from the golden runs of the stored formats", () => {
     // the real runs of this engine beside the refused ones: `status`, `report` and the history of
     // the pipeline read them, and the accepted change is shown with what it redid
     const V2 = join(V1, "..", "v2");
-    const ids = ["r_0mvtkvb70_62cd", "r_0mvtkvfi4_mn8q"];
-    for (const id of ids) {
+    const ids = ["r_0mvu1vxry_4ggv", "r_0mvu1w1ng_dk6c"];
+    const forks = ["r_0mvu1w2tp_ssyf", "r_0mvu1w4w6_w0iy"];
+    for (const id of [...ids, ...forks]) {
       await cp(join(V2, id), join(dir, ".kodel", "runs", id), { recursive: true });
     }
     const list = await cli("status");
     expect(list.code).toBe(0);
-    for (const id of ids) expect(list.out).toContain(id);
-    expect(list.out.match(/completed/g)?.length).toBe(2);
+    for (const id of [...ids, ...forks]) expect(list.out).toContain(id);
+    expect(list.out.match(/completed/g)?.length).toBe(4);
     expect(list.out.match(/format 1/g)?.length).toBe(2);
+    // the fork runs: the trail of the fork, and the pause of the branch that was resumed
+    const [fork, paused] = forks as [string, string];
+    expect((await cli("status", fork)).out).toContain(
+      "trail:     impl > verify > test > fix > test > fix",
+    );
+    expect((await cli("report", fork)).out).toContain("0 pause(s)");
+    expect((await cli("status", paused)).out).toContain(
+      "trail:     impl > verify > test > fix-test > test > fix",
+    );
+    const pausedReport = await cli("report", paused);
+    expect(pausedReport.code).toBe(0);
+    expect(pausedReport.out).toContain("1 pause(s)");
+    expect(pausedReport.out).toContain("fork f1 at impl (verify, test) -> fix");
+    expect(pausedReport.out).toContain("prompts: 3 served");
     for (const id of ids) {
       expect((await cli("status", id)).code).toBe(0);
       const report = await cli("report", id);

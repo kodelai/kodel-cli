@@ -102,6 +102,8 @@ export type TakeOutcome =
     }
   /** Another worker holds the step; `taken_by` is the mark of that hold, not a name. */
   | { status: "taken"; node_slug: string; attempt: number; taken_by: string }
+  /** Nobody holds the step, but `agents.max_parallel` steps are held already: it waits its turn. */
+  | { status: "queued"; node_slug: string; attempt: number; held: number; max_parallel: number }
   /** No open agent step is free (or open at all). */
   | { status: "none"; next: NextStep };
 
@@ -642,6 +644,19 @@ export class PipelineService {
             attempt: outcome.attempt,
             taken_by: outcome.taken_by,
             note: "Another worker holds this step; leave it to them. If you are a worker, report back; otherwise call pipeline_next_step to see what is open.",
+          };
+        case "queued":
+          return {
+            ok: true,
+            status: "queued",
+            node_slug: outcome.node_slug,
+            attempt: outcome.attempt,
+            held: outcome.held,
+            max_parallel: outcome.max_parallel,
+            note:
+              `Nobody holds this step, but this project lets ${outcome.max_parallel} step(s) be worked at once ` +
+              `(agents.max_parallel) and ${outcome.held} are held: it is not yours until one is handed in. ` +
+              "Wait for that (pipeline_next_step with wait_s), or report back if you are a worker.",
           };
         case "none":
           return {

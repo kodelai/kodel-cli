@@ -209,6 +209,8 @@ export type NextStep =
         hint: string;
         /** Agent steps that are open but held by workers (or, after a completion, open besides). */
         open_steps?: OpenStep[];
+        /** Open steps not handed out because `agents.max_parallel` steps are held already. */
+        queued?: number;
         also_waiting?: AlsoWaiting[];
         note?: string;
       };
@@ -643,7 +645,19 @@ function baseStep(
       );
     }
     const maxParallel = Math.max(1, options.agents?.maxParallel ?? DEFAULT_AGENTS.max_parallel);
-    const handed = free.slice(0, Math.max(1, maxParallel - taken.length));
+    if (taken.length >= maxParallel) {
+      // The cap is on the steps in flight, not on the size of the answer: nothing is handed out
+      // (and `pipeline_take_step` refuses a take by slug the same way) until a step is handed in.
+      const capped = summary(
+        `Every step this project lets be worked at once is held by a worker (agents.max_parallel is ${maxParallel}; ` +
+          `${taken.length} held, ${free.length} more open and queued). Call pipeline_next_step again with wait_s (up to ${MAX_WAIT_S}) ` +
+          "to wait for a hand-in, or wait for your workers to report. A step you hold yourself is handed to you " +
+          "again when you ask for it with node_slug.",
+      );
+      if ("running" in capped) capped.running.queued = free.length;
+      return capped;
+    }
+    const handed = free.slice(0, maxParallel - taken.length);
     const first = handed[0] as Visit;
     const out = stepOf(first);
     if (visible.length > 1) {

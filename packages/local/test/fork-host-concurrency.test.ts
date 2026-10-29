@@ -6,10 +6,15 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { lstat, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defaultHistory, parsePipeline } from "@kodel-ai/pipeline-core";
+import {
+  defaultHistory,
+  type PipelineHost,
+  PipelineService,
+  parsePipeline,
+} from "@kodel-ai/pipeline-core";
 import { createLatchRunner, type LatchRunner } from "../../testkit/src/latch-runner";
 import {
   DISPATCH_DEADLINE_MS,
@@ -529,6 +534,46 @@ describe("t40 the host runs the branches of a fork at the same time", () => {
     expect(free.status === "claimed" && free.step.slug).toBe("b");
   });
 
+  test("t40_take_by_slug_under_the_cap_answers_queued", async () => {
+    // `agents.max_parallel: 1`: with one step held, a take of another step by its slug gets `queued`
+    // (no claim is written), not `taken` (nobody holds it); the holder renews its own all the same
+    await mkdir(join(dir, ".kodel"), { recursive: true });
+    await writeFile(
+      join(dir, ".kodel", "config.yaml"),
+      "worktree:\n  mode: off\nagents:\n  max_parallel: 1\n",
+    );
+    const h = new LocalHost(AGENT_FORK, { root: dir, heartbeatMs: 0 });
+    const { run } = await h.start("split the work");
+    await run.completeStep("plan", 1);
+    const took = await run.takeStep({ node: "a" });
+    if (took.status !== "claimed") throw new Error(`expected claimed, got ${took.status}`);
+    const queued = await run.takeStep({ node: "b" });
+    expect(queued).toEqual({
+      status: "queued",
+      node_slug: "b",
+      attempt: 1,
+      held: 1,
+      max_parallel: 1,
+    });
+    expect((await run.state()).nodes.b?.claim).toBeUndefined();
+    const any = await run.takeStep({});
+    expect(any.status).toBe("none");
+    expect(any.status === "none" && "running" in any.next && any.next.running.queued).toBe(1);
+    expect((await run.takeStep({ node: "a", token: took.claim_token })).status).toBe("renewed");
+    // through the service, as the tool answers
+    const service = new PipelineService(h as unknown as PipelineHost);
+    const answer = (await service.takeStep({ run_id: run.runId, node_slug: "b" })) as Record<
+      string,
+      unknown
+    >;
+    expect(answer.ok).toBe(true);
+    expect(answer.status).toBe("queued");
+    expect(String(answer.note)).toContain("max_parallel");
+    // handed in: b is free to take
+    await run.completeStep("a", 1, undefined, undefined, undefined, took.claim_token);
+    expect((await run.takeStep({ node: "b" })).status).toBe("claimed");
+  });
+
   test("t40_agent_log_prefers_agent_visit", async () => {
     const { run, latch } = await forkWith(CHECKED);
     await latch.started("b#1");
@@ -824,6 +869,27 @@ describe("t40 the shared tree at a gate and at a hand-in", () => {
     expect(await run.changesSinceGate("a-gate")).toMatchObject({ note: SHARED_TREE_NOTE });
     const again = await run.nextStep();
     expect("waiting" in again && again.waiting.changes_note).toBe(SHARED_TREE_NOTE);
+  });
+
+  test("t40_gate_note_uses_the_gate_visits_real_attempt", async () => {
+    // the gate is on its second attempt (rejected once) and the other branch has arrived meanwhile:
+    // the note on the answer and the one of `changesSinceGate` are both there, from the same attempt
+    const { run, latch } = await latched(GATED);
+    await run.completeStep("plan", 1);
+    await latch.started("b#1");
+    await run.completeStep("a", 1);
+    await run.waitForRest(5_000, "a");
+    await run.decideHuman("a-gate", "rejected", "again");
+    await run.completeStep("a", 2);
+    await run.waitForRest(5_000, "a");
+    latch.release("b#1");
+    await run.waitForRest(5_000, "b");
+    const state = await run.state();
+    expect(state.active.map((v) => [v.node, v.attempt])).toEqual([["a-gate", 2]]);
+    const step = await run.nextStep();
+    expect("waiting" in step && step.waiting.attempt).toBe(2);
+    expect("waiting" in step && step.waiting.changes_note).toBe(SHARED_TREE_NOTE);
+    expect(await run.changesSinceGate("a-gate")).toMatchObject({ note: SHARED_TREE_NOTE });
   });
 
   test("t40_no_gate_note_when_alone", async () => {

@@ -133,6 +133,12 @@ export interface NodeRun {
   lastFailures?: Feedback[];
   /** The branch the node was last entered in, when it was entered inside a fork. */
   fork?: ForkRef;
+  /**
+   * The outcome the agent declared for the current or last attempt (`Visit.declared`), kept on the
+   * node so that an attempt opened again to be rechecked after its check failed still ends with it.
+   * Dropped when the node is entered again or the attempt passes.
+   */
+  declared?: string;
   /** The node is no longer in the pipeline; its attempts stay in the history. */
   removed?: boolean;
   /**
@@ -241,6 +247,24 @@ export interface BlockedRoute {
  */
 export function routeEntersBranch(state: RunState, route: BlockedRoute): boolean {
   return route.fork !== undefined && state.nodes[route.from]?.fork?.id !== route.fork.id;
+}
+
+/** The branch a node stands in: its attempt in progress, else the one it was last entered in. */
+export function branchOf(state: RunState, node: string): ForkRef | undefined {
+  return state.active.find((v) => v.node === node)?.fork ?? state.nodes[node]?.fork;
+}
+
+/**
+ * Whether the work of `node` is for whoever decided or completed `decided` to wait for: the work of
+ * the same branch, and work outside every branch (the join and what follows it, which the decided
+ * branch's own arrival may have started). Only another branch of a fork is somebody else's.
+ */
+export function inOwnBranch(state: RunState, decided: string, node: string): boolean {
+  const own = branchOf(state, decided);
+  const other = branchOf(state, node);
+  return (
+    own === undefined || other === undefined || (own.id === other.id && own.branch === other.branch)
+  );
 }
 
 export interface Pause {
@@ -579,7 +603,10 @@ export type RunEvent =
       node?: string;
       token: string;
       ttlMs: number;
-      /** `agents.max_parallel`: a take without a node is refused while that many steps are held. */
+      /**
+       * `agents.max_parallel`: while that many steps are held, a take is refused (`noop`), by slug
+       * too; only the holder of a step renews it under the cap.
+       */
       maxParallel?: number;
     }
   /**
@@ -921,6 +948,8 @@ class Machine {
     } else if (!rework) {
       delete run.lastFailures;
     }
+    // A new attempt: what the agent declared for the last one is not what this one ends with.
+    delete run.declared;
     if (!rework) {
       run.visitId = this.s.nextVisitId++;
       this.s.trail.push(slug);
@@ -1051,6 +1080,7 @@ class Machine {
       run.status = "passed";
       run.consecutiveFailures = 0;
       delete run.lastFailure;
+      delete run.declared;
     } else {
       run.status = "failed";
       if (this.handler(node).automaticFailures) run.consecutiveFailures += 1;
@@ -1309,7 +1339,10 @@ class Machine {
     };
   }
 
-  /** The arrival that came last, by the order of the arrivals (ties by branch order). */
+  /**
+   * The arrival that came last, by the order of the arrivals (`seq`); arrivals without one (a state
+   * written before it was recorded) tie, and the later branch in branch order wins.
+   */
   private lastArrival(fork: ForkState): Arrival {
     let last: Arrival | undefined;
     for (const branch of fork.branches) {
@@ -1586,6 +1619,9 @@ class Machine {
             }
           }
           visit.declared = event.outcome;
+          this.run(event.node).declared = event.outcome;
+        } else {
+          delete this.run(event.node).declared;
         }
         this.log("agent_completed", {
           node: event.node,
@@ -1795,15 +1831,11 @@ class Machine {
     const open = this.s.active.filter((v) => v.phase === "agent");
     const held = open.filter((v) => liveClaim(this.s.nodes[v.node], this.now) !== undefined);
     const own = held.find((v) => liveClaim(this.s.nodes[v.node], this.now)?.token === event.token);
-    // The cap `pipeline_next_step` hands steps out under holds for a take of "the next free step"
-    // too; a step named by its slug was handed out, and is taken whatever the count, and a worker
-    // renews the step it holds.
-    if (
-      event.node === undefined &&
-      own === undefined &&
-      event.maxParallel !== undefined &&
-      held.length >= event.maxParallel
-    ) {
+    // The cap `pipeline_next_step` hands steps out under caps the steps in flight: a take meets it
+    // whether it names a step or asks for the next free one, so a worker that knows a slug cannot
+    // get past it; only the holder of a step renews it under the cap.
+    const renewing = own !== undefined && (event.node === undefined || own.node === event.node);
+    if (!renewing && event.maxParallel !== undefined && held.length >= event.maxParallel) {
       throw new Repeat();
     }
     const slug = event.node ?? own?.node ?? open.find((v) => !held.includes(v))?.node;
@@ -2094,7 +2126,8 @@ class Machine {
         this.emitCheck(visit, true);
         return;
       }
-      // The attempt failed a check and the run was held back: it is opened again to be checked.
+      // The attempt failed a check and the run was held back: it is opened again to be checked. It
+      // is the same attempt, so it ends with the outcome the agent declared for it, not "passed".
       const run = this.run(effect.node);
       run.status = "running";
       run.consecutiveFailures = Math.max(0, run.consecutiveFailures - 1);
@@ -2104,6 +2137,7 @@ class Machine {
         visitId: run.visitId,
         phase: "checks",
         ...(run.fork === undefined ? {} : { fork: run.fork }),
+        ...(run.declared === undefined ? {} : { declared: run.declared }),
         checkIndex: 0,
         restarts: 0,
         heartbeatAt: this.now,

@@ -1,0 +1,38 @@
+{
+  "v": 1,
+  "node": "plan-critique",
+  "attempt": 3,
+  "n": 1,
+  "prompt_hash": "2e2c6ad6ea4ba9512f862e9fc2c027a4b975993cb07e28f0c24772a5a0302ec6",
+  "answer": {
+    "slug": "plan-critique",
+    "kind": "agent",
+    "attempt": 3,
+    "prompt": "Critique the plan in docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md against the task and AGENTS.md. Do not edit\nthe plan or any other file.\n\nRun one subagent per role below, in parallel, each on the model named for it if you can choose\nit. Give each one only: the task (Add a --json flag to kodel status so that scripts can read the list of runs), the path of the plan, AGENTS.md and its own role\ntext, not the other roles and not your own opinion of the plan.\n\n- invariants (opus): check the plan against the Principles and the rules of \"Stored data and\n  compatibility\" in AGENTS.md. What does it break or leave open?\n- tests (sonnet): for every step and every acceptance criterion there must be a named test, with\n  the decision id where one applies, and a way to show the decision wrong. What cannot be\n  shown by a test?\n- gaps (fable): suppose the plan was approved and the change failed in use or in a neighbouring\n  package (local, cli, the server contract, Windows and Node). What was not considered?\n- scope (sonnet): what in the plan is not needed for the task, what is missing for it, and\n  should the task be split?\n\nCheck every question in \"Decisions needed\" too: the person reads them first.\nTake what the subagents find as it is; do not soften it, merge it away or drop a finding that\nyou disagree with. Send one row per finding, and start its description with the role in\nbrackets, for example `[gaps]`. A finding is a real problem or a question the plan does not\nanswer. If a role finds nothing, send no row for it. Blockers and critical findings are for\nwhat makes the plan wrong or unsafe to implement, not for taste.\n\n\nWhen you are done, send your findings with pipeline_report_result as a complete list for this attempt: one row per finding with the columns severity (one of blocker, critical, major, minor, info), location (location), description (text). If you found nothing, send an empty list.",
+    "result_spec": {
+      "columns": {
+        "severity": {
+          "enum": [
+            "blocker",
+            "critical",
+            "major",
+            "minor",
+            "info"
+          ]
+        },
+        "location": "location",
+        "description": "text"
+      },
+      "fail_when": {
+        "severity": [
+          "blocker",
+          "critical"
+        ]
+      }
+    },
+    "execution": {
+      "instruction": "Do this step in a fresh context: give it to a subagent (or a new session) that sees only this step's prompt and the repository, not your earlier reasoning, so it is an independent look. Take what it finds as it is and send that; do not change it to agree with your own work."
+    },
+    "workdir": "[REDACTED:high-entropy].kodel/worktrees/r_0mvu1vxry_4ggv"
+  }
+}

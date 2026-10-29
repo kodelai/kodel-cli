@@ -173,12 +173,6 @@ function slugOf(meta: { slug?: string; task: string }, state: RunState | undefin
   return meta.slug ?? state?.slug ?? runSlug(undefined, meta.task);
 }
 
-/** The nodes a decision about `node` led the run into: active now, and not before the decision. */
-function nodesEnteredAfter(before: RunState, after: RunState, node: string): string[] {
-  const was = new Set(before.active.map((v) => v.node));
-  return after.active.map((v) => v.node).filter((slug) => slug !== node && !was.has(slug));
-}
-
 function failIfRefused(decision: Decision): void {
   if (!decision.ok) {
     throw new UserError(`${decision.error.code}: ${plain(decision.error.message)}`);
@@ -281,14 +275,23 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
 
   /**
    * Engine work started by a command runs in this process, so the command stays until it is done:
-   * the work of the nodes the decision touched, not a sibling branch's command that may go on for an
-   * hour (that one is started again by whoever asks next, if this process has to leave it).
+   * the work the decision led into, the whole chain of it (the host follows the decided node's
+   * branch and what comes after the fork), not a sibling branch's command that may go on for an
+   * hour (that one is started again by whoever asks next, if this process has to leave it). The
+   * process exits right after, so work left running here would be lost and run a second time.
    */
   async function afterDecision(run: Awaited<ReturnType<typeof openRun>>, nodes: string[]) {
     const until = Date.now() + WORK_WAIT_MS;
     for (const node of nodes) await run.waitForRest(until - Date.now(), node);
     const state = await run.state();
     env.out(`${run.runId}: ${describeRun(state)}\n`);
+  }
+
+  /** How to carry on a run that is still paused: with `--node` when more than one step is paused. */
+  function resumeHint(runId: string, state: RunState): string {
+    if (state.pauses.length <= 1) return `kodel resume ${runId}`;
+    const nodes = state.pauses.map((p) => `"${plain(p.node)}"`).join(", ");
+    return `kodel resume ${runId} --node <slug> (paused at ${nodes})`;
   }
 
   program
@@ -714,9 +717,6 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
             "Approve although what changed since the run stopped here could not be checked?",
           );
         }
-        // Read again right before the decision: what a sibling branch entered while the person read
-        // the question is not what this decision led into.
-        const before = await run.state();
         failIfRefused(
           await run.decideHuman(
             node,
@@ -724,9 +724,10 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
             opts.reason,
           ),
         );
-        // The decided node's own work, and the node the decision led into (a rejection sends the
-        // branch back to the node the edge names): a sibling branch's work is not waited for.
-        await afterDecision(run, [node, ...nodesEnteredAfter(before, await run.state(), node)]);
+        // What the decision led into is in the decided node's branch (a rejection sends the branch
+        // back, an approval goes on in it or into the join): a sibling branch is not waited for,
+        // whatever it entered while the person read the question.
+        await afterDecision(run, [node]);
       },
     );
 
@@ -764,10 +765,9 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         `Resume run ${runId}${state.pauses.length > 1 ? ` at "${plain(pause.node)}"` : ""} with more attempts?`,
       );
       failIfRefused(await run.resume(opts.node));
-      await afterDecision(run, [
-        pause.node,
-        ...(pause.blocked?.heads ?? [pause.blocked?.to ?? pause.node]),
-      ]);
+      // The paused node's branch: a fork held back before it fired, or the join, stands outside
+      // every branch, so the resume waits for every head it entered.
+      await afterDecision(run, [pause.node]);
     });
 
   program
@@ -851,8 +851,9 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         run,
         found.info.effects.map((effect) => effect.node),
       );
-      if ((await run.state()).pauses.length > 0) {
-        env.out(`The run is still paused; carry it on with: kodel resume ${runId}\n`);
+      const after = await run.state();
+      if (after.pauses.length > 0) {
+        env.out(`The run is still paused; carry it on with: ${resumeHint(runId, after)}\n`);
       }
     });
 

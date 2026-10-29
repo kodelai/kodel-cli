@@ -1,0 +1,10 @@
+{
+  "completeness": "complete",
+  "rows": [
+    {
+      "severity": "info",
+      "location": "packages/status/json.js:1",
+      "description": "the function could take the indent as an argument"
+    }
+  ]
+}

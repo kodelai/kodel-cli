@@ -34,15 +34,18 @@ const FORMATS = resolve(
 const V1_RUNS = ["r_0mviewgvl_i1ig", "r_0mvimyn54_tc9o"];
 
 /**
- * The two format-2 runs of the `dev` pipeline, written by this engine: `r_0mvtkvb70_62cd` (the
- * agent's proposal accepted mid-run and the critique step restarted on it, a note from the agent,
- * three gate decisions, the whole path to `publish`) and `r_0mvtkvfi4_mn8q` (a change made in the
- * pipeline file accepted with nothing redone, a note, `nothing_to_change` with its gate rejected once).
+ * The two format-2 runs of the `dev` pipeline, written by this engine through the real local host
+ * (`scripts/take-v2-fixtures.mjs`): `r_0mvu1vxry_4ggv` (the agent's proposal accepted mid-run and the
+ * critique step restarted on it, a note from the agent, three gate decisions, the whole path to
+ * `publish`) and `r_0mvu1w1ng_dk6c` (a change made in the pipeline file accepted with nothing redone,
+ * a note, `nothing_to_change` with its gate rejected once).
  */
-const DEV_RUNS = ["r_0mvtkvb70_62cd", "r_0mvtkvfi4_mn8q"];
+const DEV_RUNS = ["r_0mvu1vxry_4ggv", "r_0mvu1w1ng_dk6c"];
 /** The format-2 fork run: `verify` and `test` at once, `test` failing once, the join `fix` restarting it. */
-const FORK_RUN = "r_0mvtkvgi5_esig";
-const V2_RUNS = [...DEV_RUNS, FORK_RUN];
+const FORK_RUN = "r_0mvu1w2tp_ssyf";
+/** The format-2 fork run whose `test` branch paused while `verify` went on, resumed by a person. */
+const PAUSED_FORK_RUN = "r_0mvu1w4w6_w0iy";
+const V2_RUNS = [...DEV_RUNS, FORK_RUN, PAUSED_FORK_RUN];
 /** The format-2 run that stands in for "a finished run of this engine" in the tests of how a run that is read behaves. */
 const V2_RUN = DEV_RUNS[1] as string;
 
@@ -309,7 +312,73 @@ describe("every stored format against the current engine", () => {
     expect(await hashTree(runsDir())).toEqual(before);
   });
 
-  test("t40_fork_run_fixture_in_v2_shows_forks_and_pauses", async () => {
+  test("t40_v2_fixtures_are_real_runs", async () => {
+    // the runs were made through the real host, not a stand-in: every agent step that was completed
+    // had been handed out (a `step_served` record and a served file each), the engine stamped its
+    // version, the commands wrote their output, and the agent's commits in the worktree made the
+    // hand-ins' `head` and `tree` move and the run's `commits` non-empty
+    await copyRuns("v2");
+    const store = storeFor();
+    for (const id of V2_RUNS) {
+      const state = await (await hostFor().open(id))?.state();
+      expect(state?.engineVersion, id).toBe("0.1.0");
+      const journal = await store.readJournal(id);
+      const started = journal.find((r) => r.event === "run_started");
+      expect(started?.engine, id).toMatchObject({ version: "0.1.0", commit: "fixture" });
+      expect(started?.executor, id).toEqual({
+        client: { value: { name: "take-v2-fixtures", version: "0.1.0" }, source: "observed" },
+      });
+      const served = journal.filter((r) => r.event === "step_served");
+      expect(served.length, id).toBeGreaterThan(0);
+      const handIns = journal.filter((r) => r.event === "agent_completed");
+      for (const handIn of handIns) {
+        expect(
+          served.some((r) => r.node === handIn.node && r.attempt === handIn.attempt),
+          `${id}: ${handIn.node} #${handIn.attempt} was served`,
+        ).toBe(true);
+        expect(typeof handIn.head, id).toBe("string");
+        expect(typeof handIn.tree, id).toBe("string");
+      }
+      expect(Object.keys(state?.served ?? {}).length, id).toBe(served.length);
+      const servedFiles = await readdir(join(runsDir(), id, "served"));
+      expect(servedFiles.length, id).toBe(served.length);
+      const finished = journal.find((r) => r.event === "run_finished");
+      const commits = (finished?.commits ?? []) as string[];
+      expect(commits.length, id).toBeGreaterThan(0);
+      expect(finished?.head, id).toBe(commits[0]);
+    }
+    // the dev run to `publish`: the commands really ran, and the agent committed between hand-ins
+    const dev = DEV_RUNS[0] as string;
+    const devJournal = await store.readJournal(dev);
+    const heads = new Set(
+      devJournal.filter((r) => r.event === "agent_completed").map((r) => r.head as string),
+    );
+    const trees = new Set(
+      devJournal.filter((r) => r.event === "agent_completed").map((r) => r.tree as string),
+    );
+    expect(heads.size).toBeGreaterThan(3);
+    expect(trees.size).toBe(heads.size);
+    expect(devJournal.find((r) => r.event === "run_finished")?.commits).toHaveLength(5);
+    const commands = devJournal.filter((r) => r.event === "command_finished");
+    expect(commands.map((r) => [r.node, r.passed])).toEqual([
+      ["verify", true],
+      ["test", true],
+      ["build", true],
+      ["sync", true],
+    ]);
+    for (const record of commands) {
+      expect((record.output as { ref: string }).ref).toMatch(/^artifacts\//);
+    }
+    expect(
+      await readFile(join(runsDir(), dev, "artifacts", "sync-1-command.txt"), "utf8"),
+    ).toContain("no conflicts with origin/main");
+    // the publish checks that need GitHub were left out of the scratch copy of the pipeline: four ran
+    expect(
+      devJournal.filter((r) => r.event === "check_finished" && r.node === "publish"),
+    ).toHaveLength(4);
+  });
+
+  test("t40_fork_run_fixture_in_v2_shows_forks", async () => {
     // a real fork run of this engine: the state carries the fork instance, every branch visit was
     // attributed to its branch, the journal shows the overlap and the join entered after a failure,
     // and the run (no pause left, none ever taken) reads with `status`, `report` and the fork summary
@@ -381,6 +450,93 @@ describe("every stored format against the current engine", () => {
     expect(report.busy_wall_s).toBeGreaterThan(0);
     expect(report.busy_wall_s).toBeLessThanOrEqual(report.work_s);
     expect(report.pauses).toBe(0);
+    expect(await run.integrityStatus()).toBe("unknown");
+    expect(await hashTree(runsDir())).toEqual(before);
+  });
+
+  test("t40_paused_fork_run_fixture_pins_pauses", async () => {
+    // a real fork run whose `test` branch ran out of its one attempt while `verify` went on: the
+    // branch paused with its fork attribution, a person resumed that node, the branch's fix step ran
+    // and `test` passed. `end()` clears `pauses` on the final state, so what the fixture pins is the
+    // journal's `run_paused` (with `fork` and `branch`) and `run_resumed` (with the node), the
+    // report's count of pauses, and the `forks` of the state; the run opens with `status` and `report`
+    await copyRuns("v2", PAUSED_FORK_RUN);
+    const before = await hashTree(runsDir());
+    const host = hostFor();
+    const run = await host.open(PAUSED_FORK_RUN);
+    expect(run).toBeDefined();
+    if (!run) return;
+    const state = await run.state();
+    expect(state.v).toBe(RECORD_VERSION);
+    expect(state.status).toBe("completed");
+    expect(state.pauses).toEqual([]);
+    expect(state.active).toEqual([]);
+    expect(state.trail).toEqual(["impl", "verify", "test", "fix-test", "test", "fix"]);
+    expect(state.forks).toEqual({
+      f1: {
+        id: "f1",
+        from: "impl",
+        label: "passed",
+        join: "fix",
+        branches: ["verify", "test"],
+        arrived: {
+          verify: { node: "verify", label: "passed", seq: expect.any(Number) },
+          test: { node: "test", label: "passed", seq: expect.any(Number) },
+        },
+        joined: 1,
+      },
+    });
+    const journal = await storeFor().readJournal(PAUSED_FORK_RUN);
+    expect(journal.every((r) => r.v === RECORD_VERSION)).toBe(true);
+    const paused = journal.filter((r) => r.event === "run_paused");
+    expect(paused).toHaveLength(1);
+    expect(paused[0]).toMatchObject({
+      reason: "consecutive",
+      node: "test",
+      fork: "f1",
+      branch: "test",
+    });
+    const resumed = journal.filter((r) => r.event === "run_resumed");
+    expect(resumed).toHaveLength(1);
+    expect(resumed[0]).toMatchObject({
+      reason: "consecutive",
+      node: "test",
+      fork: "f1",
+      branch: "test",
+    });
+    // the sibling went on and arrived while the branch was paused; the join was entered once, after
+    // the resumed branch passed
+    const seqOf = (match: (r: (typeof journal)[number]) => boolean) =>
+      journal.find(match)?.seq as number;
+    const verifyArrived = seqOf((r) => r.event === "branch_settled" && r.branch === "verify");
+    expect(seqOf((r) => r.event === "run_paused")).toBeLessThan(verifyArrived);
+    expect(verifyArrived).toBeLessThan(seqOf((r) => r.event === "run_resumed"));
+    expect(journal.filter((r) => r.event === "join_reached")).toEqual([
+      expect.objectContaining({ fork: "f1", join: "fix", failed: [] }),
+    ]);
+    expect(
+      journal.filter((r) => r.event === "node_entered").map((r) => [r.node, r.attempt, r.branch]),
+    ).toEqual([
+      ["impl", 1, undefined],
+      ["verify", 1, "verify"],
+      ["test", 1, "test"],
+      ["fix-test", 1, "test"],
+      ["test", 2, "test"],
+      ["fix", 1, undefined],
+    ]);
+    const report = await run.report();
+    expect(report.status).toBe("completed");
+    expect(report.pauses).toBe(1);
+    expect(report.failed_branches).toBe(false);
+    expect(report.forks).toHaveLength(1);
+    expect(report.forks[0]).toMatchObject({
+      fork: "f1",
+      branches: ["verify", "test"],
+      failed: [],
+      unfinished: [],
+      joined: 1,
+    });
+    expect(report.nodes.find((n) => n.node === "test")?.attempts).toHaveLength(2);
     expect(await run.integrityStatus()).toBe("unknown");
     expect(await hashTree(runsDir())).toEqual(before);
   });

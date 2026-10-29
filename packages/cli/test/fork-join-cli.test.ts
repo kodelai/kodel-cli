@@ -78,6 +78,86 @@ const GATE_AND_MOVING = [
   "",
 ].join("\n");
 
+/** A gate in one branch that leads into two commands in a row; a command that takes a while in the other. */
+const GATE_CHAIN_AND_SLOW = [
+  "name: chain-slow",
+  "nodes:",
+  "  - { slug: plan, kind: agent, prompt: plan }",
+  "  - { slug: a, kind: agent, prompt: a }",
+  "  - { slug: a-gate, kind: human, prompt: a looks fine? }",
+  `  - { slug: a-build, kind: command, command: "node -e \\"setTimeout(() => {}, 600)\\"" }`,
+  `  - { slug: a-test, kind: command, command: "node -e \\"setTimeout(() => {}, 600)\\"" }`,
+  `  - { slug: b, kind: command, command: "node -e \\"setTimeout(() => {}, 4000)\\"" }`,
+  "  - { slug: merge, kind: agent, prompt: merge, join: all }",
+  "edges:",
+  "  - { from: plan, to: a }",
+  "  - { from: plan, to: b }",
+  "  - { from: a, to: a-gate }",
+  "  - { from: a-gate, to: a-build, when: approved }",
+  "  - { from: a-gate, to: a, when: rejected }",
+  "  - { from: a-build, to: a-test }",
+  "  - { from: a-build, to: merge, when: failed }",
+  "  - { from: a-test, to: merge }",
+  "  - { from: a-test, to: merge, when: failed }",
+  "  - { from: b, to: merge }",
+  "  - { from: b, to: merge, when: failed }",
+  "",
+].join("\n");
+
+/** No fork: a gate whose approval leads into two commands in a row. */
+const LINEAR = [
+  "name: linear",
+  "nodes:",
+  "  - { slug: write, kind: agent, prompt: write }",
+  "  - { slug: approve, kind: human, prompt: fine? }",
+  `  - { slug: build, kind: command, command: "node -e \\"setTimeout(() => {}, 600)\\"" }`,
+  `  - { slug: test, kind: command, command: "node -e \\"setTimeout(() => {}, 600)\\"" }`,
+  "edges:",
+  "  - { from: write, to: approve }",
+  "  - { from: approve, to: build, when: approved }",
+  "  - { from: approve, to: write, when: rejected }",
+  "  - { from: build, to: test }",
+  "  - { from: build, to: write, when: failed }",
+  "  - { from: test, to: write, when: failed }",
+  "",
+].join("\n");
+
+/** No fork: a command that fails pauses the run; the resume leads into two commands in a row. */
+const RESUME_CHAIN = [
+  "name: resume-chain",
+  "nodes:",
+  "  - { slug: write, kind: agent, prompt: write }",
+  `  - { slug: check, kind: command, command: "node -e \\"process.exit(1)\\"", max_consecutive_failures: 1 }`,
+  `  - { slug: fix, kind: command, command: "node -e \\"setTimeout(() => {}, 600)\\"" }`,
+  `  - { slug: test, kind: command, command: "node -e \\"setTimeout(() => {}, 600)\\"" }`,
+  "edges:",
+  "  - { from: write, to: check }",
+  "  - { from: check, to: fix, when: failed }",
+  "  - { from: fix, to: test }",
+  "  - { from: fix, to: write, when: failed }",
+  "  - { from: test, to: write, when: failed }",
+  "",
+].join("\n");
+
+/** No fork: a step whose check fails pauses the run; the accepted repair leads into two commands in a row. */
+const APPLY_CHAIN = [
+  "name: apply-chain",
+  "nodes:",
+  "  - slug: write",
+  "    kind: agent",
+  "    prompt: write",
+  "    max_consecutive_failures: 1",
+  `    checks: [{ kind: command, command: "node -e \\"process.exit(1)\\"" }]`,
+  `  - { slug: build, kind: command, command: "node -e \\"setTimeout(() => {}, 600)\\"" }`,
+  `  - { slug: test, kind: command, command: "node -e \\"setTimeout(() => {}, 600)\\"" }`,
+  "edges:",
+  "  - { from: write, to: build }",
+  "  - { from: build, to: test }",
+  "  - { from: build, to: write, when: failed }",
+  "  - { from: test, to: write, when: failed }",
+  "",
+].join("\n");
+
 /** Two command branches that fail at once and pause their branches; an agent branch beside them. */
 const PAUSES = [
   "name: pauses",
@@ -174,6 +254,10 @@ beforeEach(async () => {
     ["gates", GATES],
     ["slow", GATE_AND_SLOW],
     ["moving", GATE_AND_MOVING],
+    ["chain-slow", GATE_CHAIN_AND_SLOW],
+    ["linear", LINEAR],
+    ["resume-chain", RESUME_CHAIN],
+    ["apply-chain", APPLY_CHAIN],
     ["pauses", PAUSES],
     ["failed-branch", FAILED_BRANCH],
     ["ends", ENDS],
@@ -383,19 +467,42 @@ describe("t40 several gates at once", () => {
     expect(refused.err).toContain('"c"');
     expect(refused.err).toContain("--node <slug>");
     expect(refused.asked).toEqual([]);
-    // with --node, that branch goes on while the agent's step stays open and the other pause stays
+    // with --node, that branch goes on while the agent's step stays open and the other pause stays;
+    // the command waits for the branch's chain (b-fix fails, b runs once more and fails again), so
+    // when it returns the branch stands paused again
     const resumed = await cli("resume", run.runId, "--node", "b");
     expect(resumed.code).toBe(0);
     expect(resumed.asked[0]).toContain("Resume run");
     expect(resumed.asked[0]).toContain('"b"');
     const state = await run.state();
     expect(state.status).toBe("running");
-    expect(state.active.map((v) => v.node)).toContain("a");
-    expect(state.pauses.map((p) => p.node)).toEqual(["c"]);
+    expect(state.active.map((v) => v.node)).toEqual(["a"]);
+    expect(state.pauses.map((p) => p.node)).toEqual(["c", "b"]);
+    expect([state.nodes["b-fix"]?.attempt, state.nodes.b?.attempt]).toEqual([1, 2]);
+    expect(resumed.out).toContain("paused:");
     // a node that is not paused is refused
     const wrong = await cli("resume", run.runId, "--node", "a");
     expect(wrong.code).not.toBe(0);
     expect(wrong.err).toContain('not paused at "a"');
+  });
+
+  test("t40_changes_apply_names_node_when_several_pauses_stay", async () => {
+    // a change of the agent's prompt restarts its step; the two paused branches stay paused, and
+    // the hint to carry on says which ones, with --node, as `kodel resume` without it is refused
+    const { run } = await atTwoPauses();
+    await writeFile(
+      join(dir, ".kodel", "pipelines", "pauses.yaml"),
+      PAUSES.replace("prompt: a }", "prompt: a again }"),
+    );
+    const applied = await cli("pipeline", "changes", "apply", run.runId);
+    expect(applied.code).toBe(0);
+    expect(applied.out).toContain(`kodel resume ${run.runId} --node <slug>`);
+    expect(applied.out).toContain('"b"');
+    expect(applied.out).toContain('"c"');
+    expect(applied.out).not.toContain(`kodel resume ${run.runId}\n`);
+    const state = await run.state();
+    expect(state.pauses.map((p) => p.node).sort()).toEqual(["b", "c"]);
+    expect(state.nodes.a?.attempt).toBe(2);
   });
 
   test("t40_after_decision_waits_only_for_own_node", async () => {
@@ -452,6 +559,105 @@ describe("t40 several gates at once", () => {
     expect(decided.asked).toHaveLength(1);
     expect(Date.now() - begun).toBeLessThan(2_500);
     expect(decided.out).toContain("running at b-slow#1 [b]");
+    await run.waitForRest(10_000);
+    expect((await run.state()).active.map((v) => v.node)).toEqual(["merge"]);
+  });
+});
+
+describe("t40 a decision waits for the chain it leads into", () => {
+  /** The journal of a run, as records. */
+  const journalOf = async (runId: string) =>
+    (await readFile(join(dir, ".kodel", "runs", runId, "journal.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { event: string; node?: string });
+  /** The commands that finished, in order; and that none was started again by a tick. */
+  const commandsFinished = async (runId: string) => {
+    const journal = await journalOf(runId);
+    expect(journal.filter((r) => r.event === "node_restarted")).toEqual([]);
+    return journal.filter((r) => r.event === "command_finished").map((r) => r.node);
+  };
+
+  // The command exits as soon as it returns, and work it leaves running in this process is lost:
+  // its result is never applied and the next tick runs it again. So it waits for the work the
+  // decision led into, the whole chain of it, not only the first node the decision entered.
+  test("t40_gate_waits_for_the_chain_its_decision_leads_into", async () => {
+    const run = (await host().start({ pipeline: "linear", task: "t", restart: false }))
+      .run as LocalRun;
+    await run.completeStep("write", 1);
+    await run.waitForRest(5_000);
+    expect((await run.state()).active.map((v) => v.node)).toEqual(["approve"]);
+    const decided = await cli("gate", "approve", run.runId);
+    expect(decided.code).toBe(0);
+    expect(decided.out).toContain(`${run.runId}: completed`);
+    // both commands ran and their results were applied before the command returned
+    const state = await run.state();
+    expect(state.status).toBe("completed");
+    expect(state.active).toEqual([]);
+    expect([state.nodes.build?.status, state.nodes.test?.status]).toEqual(["passed", "passed"]);
+    expect(await commandsFinished(run.runId)).toEqual(["build", "test"]);
+  });
+
+  test("t40_resume_waits_for_the_chain_it_leads_into", async () => {
+    const run = (await host().start({ pipeline: "resume-chain", task: "t", restart: false }))
+      .run as LocalRun;
+    await run.completeStep("write", 1);
+    await run.waitForRest(5_000);
+    expect((await run.state()).pauses.map((p) => [p.reason, p.node])).toEqual([
+      ["consecutive", "check"],
+    ]);
+    const resumed = await cli("resume", run.runId);
+    expect(resumed.code).toBe(0);
+    expect(resumed.out).toContain(`${run.runId}: completed`);
+    const state = await run.state();
+    expect(state.status).toBe("completed");
+    expect([state.nodes.fix?.status, state.nodes.test?.status]).toEqual(["passed", "passed"]);
+    expect(await commandsFinished(run.runId)).toEqual(["check", "fix", "test"]);
+  });
+
+  test("t40_changes_apply_waits_for_the_chain_its_effect_leads_into", async () => {
+    const run = (await host().start({ pipeline: "apply-chain", task: "t", restart: false }))
+      .run as LocalRun;
+    await run.completeStep("write", 1);
+    await run.waitForRest(5_000);
+    expect((await run.state()).pauses.map((p) => [p.reason, p.node])).toEqual([
+      ["consecutive", "write"],
+    ]);
+    await writeFile(
+      join(dir, ".kodel", "pipelines", "apply-chain.yaml"),
+      APPLY_CHAIN.replace("process.exit(1)", "process.exit(0)"),
+    );
+    const applied = await cli("pipeline", "changes", "apply", run.runId);
+    expect(applied.code).toBe(0);
+    expect(applied.out).toContain(`${run.runId}: completed`);
+    const state = await run.state();
+    expect(state.status).toBe("completed");
+    expect([state.nodes.build?.status, state.nodes.test?.status]).toEqual(["passed", "passed"]);
+    expect(await commandsFinished(run.runId)).toEqual(["build", "test"]);
+  });
+
+  test("t40_after_decision_follows_its_own_branch_chain_not_the_sibling", async () => {
+    const run = (await host().start({ pipeline: "chain-slow", task: "t", restart: false }))
+      .run as LocalRun;
+    await run.completeStep("plan", 1);
+    await run.completeStep("a", 1);
+    await run.waitForRest(5_000, "a");
+    expect((await run.state()).active.map((v) => [v.node, v.phase]).sort()).toEqual([
+      ["a-gate", "human"],
+      ["b", "engine"],
+    ]);
+    // a-build and a-test (about 1.2 s together) are waited for; b (4 s) is not
+    const begun = Date.now();
+    const decided = await cli("gate", "approve", run.runId, "--node", "a-gate");
+    expect(decided.code).toBe(0);
+    const took = Date.now() - begun;
+    expect(took).toBeGreaterThanOrEqual(1_000);
+    expect(took).toBeLessThan(3_500);
+    expect(decided.out).toContain("running at b#1 [b]");
+    const state = await run.state();
+    expect(state.forks?.f1?.arrived.a).toMatchObject({ node: "a-test", label: "passed" });
+    expect(state.active.map((v) => [v.node, v.phase])).toEqual([["b", "engine"]]);
+    expect(await commandsFinished(run.runId)).toEqual(["a-build", "a-test"]);
     await run.waitForRest(10_000);
     expect((await run.state()).active.map((v) => v.node)).toEqual(["merge"]);
   });

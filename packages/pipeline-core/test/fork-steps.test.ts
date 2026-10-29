@@ -373,6 +373,45 @@ describe("t40 steps: what is handed out", () => {
     expect(DEFAULT_AGENTS.max_parallel).toBe(8);
   });
 
+  test("t40_max_parallel_caps_steps_in_flight", () => {
+    // cap 1 and `a` held: nothing is handed out (a `running` summary names the open steps and how
+    // many wait), and a take by slug of a free step is held back too, so no second step is in flight
+    const h = openFork(THREE);
+    const capped = { agents: { mode: "parallel" as const, maxParallel: 1 } };
+    const take = (token: string, node: string): RunEvent => ({
+      type: "step_claimed",
+      node,
+      token,
+      ttlMs: 60_000,
+      maxParallel: 1,
+    });
+    expect(nodeOf(h.next(capped)).steps?.map((s) => s.slug)).toEqual(["a"]);
+    must(h.send(take("w1", "a")));
+    const running = runningOf(h.next(capped));
+    expect(running.open_steps?.map((s) => [s.node_slug, s.taken_by])).toEqual([
+      ["a", "w-w1"],
+      ["b", undefined],
+      ["c", undefined],
+    ]);
+    expect(running.queued).toBe(2);
+    expect(running.hint).toContain("max_parallel");
+    expect(running.hint).toContain("wait_s");
+    const held = must(h.send(take("w2", "b")));
+    expect(held.noop).toBe(true);
+    expect(h.state.nodes.b?.claim).toBeUndefined();
+    // the holder gets its own step back and renews it under the cap
+    expect(nodeOf(h.next({ ...capped, nodeSlug: "a" })).slug).toBe("a");
+    h.advance(1_000);
+    expect(must(h.send(take("w1", "a"))).noop).toBeUndefined();
+    expect(h.state.nodes.a?.claim?.at).toBe(h.now);
+    // once `a` is handed in, `b` is handed out and can be taken by slug
+    must(h.send(complete("a", 1, "w1")));
+    expect(nodeOf(h.next(capped)).slug).toBe("b");
+    must(h.send(take("w2", "b")));
+    expect(h.state.nodes.b?.claim?.token).toBe("w2");
+    expect(runningOf(h.next(capped)).queued).toBe(1);
+  });
+
   test("t40_result_recorded_per_step", () => {
     const h = openFork();
     must(h.send({ type: "agent_completed", node: "b", attempt: 1, summary: "did b" }));

@@ -465,9 +465,11 @@ export function validatePipeline(text: string, options: ParseOptions = {}): Pars
   });
 
   const edges = validateEdges(c, rawEdges, declared, nodes, registry);
-  if (nodes.length === rawNodes.length && edges.length === rawEdges.length) {
+  if (nodes.length === rawNodes.length) {
+    // Over the valid edges, so one pass reports a bad edge and what the graph lacks besides. The
+    // fork rules read the whole shape and would blame it for an edge that was dropped: they wait.
     validateGraph(c, nodes, edges, registry);
-    validateParallel(c, nodes, edges, registry);
+    if (edges.length === rawEdges.length) validateParallel(c, nodes, edges, registry);
   }
 
   if (c.issues.length > 0) return failure(c);

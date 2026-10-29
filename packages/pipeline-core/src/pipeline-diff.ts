@@ -91,15 +91,25 @@ export function standingOf(state: RunState): string {
 }
 
 /**
- * A fork instance whose branches have not all met at the join yet, or whose join is being worked
- * or is held back at its attempt limit with the branches arrived (that pause is the join's, it
- * carries no branch, so it is known by the route it holds).
+ * Whether a fork instance is still what the run is doing. It is left only when nothing of it stands
+ * any more: every branch has arrived, no attempt or pause stands in a branch, and none stands at the
+ * join. The join's attempt counts until it has been routed on: held back at a limit (a `total` pause
+ * of the join, which carries the route into it; a `consecutive` pause of its own rework or of its way
+ * out), a repair can still open it again and judge it anew, and `restart_failed` would then enter
+ * the branches as the instance names them. The join is shared by every instance of a fork in a loop,
+ * so what stands at it belongs to the latest instance.
  */
 function isOpen(fork: ForkState, state: RunState): boolean {
+  if (fork.branches.some((branch) => fork.arrived[branch] === undefined)) return true;
+  if (state.active.some((v) => v.fork?.id === fork.id)) return true;
+  if (state.pauses.some((p) => p.fork?.id === fork.id || p.blocked?.join === fork.id)) return true;
+  const instances = Object.values(state.forks ?? {}).filter((f) => f.join === fork.join);
+  if (instances.at(-1)?.id !== fork.id) return false;
   return (
-    state.active.some((v) => v.node === fork.join || v.fork?.id === fork.id) ||
-    state.pauses.some((p) => p.fork?.id === fork.id || p.blocked?.join === fork.id) ||
-    fork.branches.some((branch) => fork.arrived[branch] === undefined)
+    state.active.some((v) => v.node === fork.join) ||
+    state.pauses.some(
+      (p) => p.node === fork.join || p.blocked?.from === fork.join || p.blocked?.to === fork.join,
+    )
   );
 }
 

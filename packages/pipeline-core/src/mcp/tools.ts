@@ -286,7 +286,8 @@ export const TOOLS: ToolDescriptor[] = [
       "Take one of the open steps of a run for yourself, when several are open at once (a fork) and workers " +
       "work them: with node_slug that step, without it the next free one. The answer carries a `claim_token`: " +
       "keep it, and pass it to pipeline_complete_step when the step is done. `taken` means another worker " +
-      "holds the step: leave it. Calling again with your claim_token renews the hold, and after the step was " +
+      "holds the step: leave it. `queued` means nobody holds it but the project's cap on steps worked at once " +
+      "(agents.max_parallel) is reached: wait for a hand-in. Calling again with your claim_token renews the hold, and after the step was " +
       "restarted it gives you the new attempt. The hold is advice to the workers, not a verdict on the step: " +
       "the engine's checks decide whether the step is done, and a person is never asked anything here.",
     shape: {

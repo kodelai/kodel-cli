@@ -37,6 +37,7 @@ import {
   evaluateDiff,
   evaluateResult,
   type HistoryConfig,
+  inOwnBranch,
   isRunEnd,
   isTreeId,
   type JournalRecord,
@@ -2029,16 +2030,17 @@ export class LocalRun {
     deadline = Number.POSITIVE_INFINITY,
     node?: string,
   ): Promise<void> {
-    // Only the jobs of one node, when one is named: a decision about one branch waits for that
-    // branch's work, not for a sibling's command that may run for an hour. The jobs that record the
-    // end of the run are everyone's: a decision that ended the run waits for its patch, or a command
-    // that exits right after would lose it.
-    const mine = () =>
-      node === undefined
-        ? [...this.pending.keys()]
-        : [...this.pending]
-            .filter(([job, of]) => of === node || this.endJobs.has(job))
-            .map(([job]) => job);
+    // With a node, only the jobs of its branch (`ownWork`): what a decision about one branch led
+    // into, the whole chain of it, but not a sibling's command that may run for an hour. The jobs
+    // that record the end of the run are everyone's: a decision that ended the run waits for its
+    // patch, or a command that exits right after would lose it.
+    const mine = async () => {
+      if (node === undefined) return [...this.pending.keys()];
+      const own = await this.ownWork(node);
+      return [...this.pending]
+        .filter(([job, of]) => (of !== undefined && own(of)) || this.endJobs.has(job))
+        .map(([job]) => job);
+    };
     // The queue too is waited for no longer than the deadline: it may stand behind another process's lock.
     const queued = async () => {
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -2054,9 +2056,11 @@ export class LocalRun {
     };
     for (;;) {
       await queued();
-      if (mine().length <= parked()) {
+      let jobs = await mine();
+      if (jobs.length <= parked()) {
         await queued();
-        if (mine().length <= parked()) return;
+        jobs = await mine();
+        if (jobs.length <= parked()) return;
       }
       const left = deadline - Date.now();
       if (left <= 0) return;
@@ -2067,7 +2071,7 @@ export class LocalRun {
         timer = Number.isFinite(left) ? setTimeout(resolve, left) : undefined;
       });
       try {
-        await Promise.race([...mine(), wake]);
+        await Promise.race([...jobs, wake]);
       } finally {
         clearTimeout(timer);
       }
@@ -2075,10 +2079,22 @@ export class LocalRun {
   }
 
   /**
+   * Which nodes' work is the caller's to wait for, having decided or completed `node`: the nodes of
+   * its branch and the nodes outside every branch (`inOwnBranch`), read from the state as it stands,
+   * since the chain the decision led into grows while it is waited for. Only another branch of an
+   * open fork is left to whoever asks next.
+   */
+  private async ownWork(node: string): Promise<(of: string) => boolean> {
+    const state = await this.state().catch(() => undefined);
+    if (!state) return (of) => of === node;
+    return (of) => inOwnBranch(state, node, of);
+  }
+
+  /**
    * Wait for the engine's work on this run to come to rest, but no longer than `ms`: the work this
    * process runs, and also work another process owns (a session still going), which is watched in
-   * the state on disk. With `node`, only that node's work: the rest of a fork goes on without the
-   * caller, who decided or completed that one node.
+   * the state on disk. With `node`, only the work of that node's branch and of what comes after the
+   * fork: a sibling branch goes on without the caller, who decided or completed that one node.
    */
   async waitForRest(ms: number, node?: string): Promise<void> {
     if (ms <= 0) return;
@@ -2097,13 +2113,14 @@ export class LocalRun {
 
   /**
    * Engine work is going, or every open agent step is in a worker's hands: either way the caller
-   * that waits has nothing to do until something hands in. With `node`, only that node's engine work
-   * counts; a claimed sibling's step is not the caller's to wait for.
+   * that waits has nothing to do until something hands in. With `node`, only the engine work of
+   * that node's branch counts (`inOwnBranch`); a sibling branch, and a claimed sibling's step, are
+   * not the caller's to wait for.
    */
   private async engineBusy(node?: string): Promise<boolean> {
     const state = await this.state().catch(() => undefined);
     if (!state) return false;
-    const own = state.active.filter((v) => node === undefined || v.node === node);
+    const own = state.active.filter((v) => node === undefined || inOwnBranch(state, node, v.node));
     return (
       own.some((v) => v.phase === "engine" || v.phase === "checks") ||
       (node === undefined && claimedStepsOpen(state, this.host.clock()))
@@ -2175,11 +2192,15 @@ export class LocalRun {
         step.waiting.changes = shown;
         if (omitted > 0) step.waiting.changes_omitted = omitted;
       }
+      // The attempt of the gate's own visit, as `changesSinceGate` reads it, so the two agree.
+      const gate = state.active.find(
+        (v) => v.node === step.waiting.node_slug && v.phase === "human",
+      );
       if (
         await this.otherBranchesActiveSince(
           state,
           step.waiting.node_slug,
-          step.waiting.attempt ?? 0,
+          gate?.attempt ?? step.waiting.attempt ?? 0,
         )
       ) {
         step.waiting.changes_note = SHARED_TREE_NOTE;
@@ -2237,11 +2258,25 @@ export class LocalRun {
           `node "${input.node}" is not an open agent step; call pipeline_next_step to see what is open`,
         );
       }
+      const live = liveClaim(after.nodes[input.node], now);
+      if (live === undefined) {
+        // Held back by the cap, not by a holder: the machine left the step as it was.
+        const held = after.active.filter(
+          (v) => v.phase === "agent" && liveClaim(after.nodes[v.node], now) !== undefined,
+        ).length;
+        return {
+          status: "queued",
+          node_slug: input.node,
+          attempt: visit.attempt,
+          held,
+          max_parallel: hints.agents.max_parallel,
+        };
+      }
       return {
         status: "taken",
         node_slug: input.node,
         attempt: visit.attempt,
-        taken_by: liveClaim(after.nodes[input.node], now)?.by ?? "another worker",
+        taken_by: live.by,
       };
     }
     const answer = await this.nextStep({ nodeSlug: mine.slug, serve });

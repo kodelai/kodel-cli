@@ -112,9 +112,14 @@ test("t40_v2_fixtures_open", () => {
   // real runs of the `dev` pipeline written by this engine: the state and every record carry
   // format 2, the summary reads them, and the accepted change carries its `effects` list
   const ids = runIds(FORMATS, "v2");
-  expect(ids).toEqual(["r_0mvtkvb70_62cd", "r_0mvtkvfi4_mn8q", "r_0mvtkvgi5_esig"]);
+  expect(ids).toEqual([
+    "r_0mvu1vxry_4ggv",
+    "r_0mvu1w1ng_dk6c",
+    "r_0mvu1w2tp_ssyf",
+    "r_0mvu1w4w6_w0iy",
+  ]);
   const effects: unknown[] = [];
-  // the two runs of the `dev` pipeline; the fork run is looked at by its own test below
+  // the two runs of the `dev` pipeline; the fork runs are looked at by their own tests below
   for (const id of ids.slice(0, 2)) {
     const { state, journal } = load(FORMATS, "v2", id);
     expect(state.v).toBe(RECORD_VERSION);
@@ -134,12 +139,21 @@ test("t40_v2_fixtures_open", () => {
     expect(Array.isArray(accepted?.effects)).toBe(true);
   }
   expect(effects).toEqual([[{ kind: "restart", node: "plan-critique" }], []]);
+  // made through the real host: the engine stamped its version and every step was served
+  for (const id of ids) {
+    const { state, journal } = load(FORMATS, "v2", id);
+    expect(state.engineVersion, id).toBe("0.1.0");
+    expect(journal.filter((r) => r.event === "step_served").length, id).toBeGreaterThan(0);
+    expect(summarizeRun(state, journal).prompts, id).toMatchObject({
+      served: journal.filter((r) => r.event === "step_served").length,
+    });
+  }
 });
 
-test("t40_fork_run_fixture_in_v2_shows_forks_and_pauses", () => {
+test("t40_fork_run_fixture_in_v2_shows_forks", () => {
   // the real fork run: the summary reads the fork instance, the overlap, the critical path and the
   // flag that the join was entered after a failed branch, from the state and journal alone
-  const { state, journal } = load(FORMATS, "v2", "r_0mvtkvgi5_esig");
+  const { state, journal } = load(FORMATS, "v2", "r_0mvu1w2tp_ssyf");
   expect(state.v).toBe(RECORD_VERSION);
   expect(state.status).toBe("completed");
   expect(state.pauses).toEqual([]);
@@ -172,6 +186,52 @@ test("t40_fork_run_fixture_in_v2_shows_forks_and_pauses", () => {
   expect(spans.map((r) => r.attempt)).toEqual([1, 2]);
   expect(report.busy_wall_s).toBeLessThanOrEqual(report.work_s);
   expect(report.nodes.find((n) => n.node === "test")?.attempts).toHaveLength(2);
+  expect(report.pauses).toBe(0);
+  expect(journal.filter((r) => r.event === "run_paused")).toHaveLength(0);
+});
+
+test("t40_paused_fork_run_fixture_pins_pauses", () => {
+  // the real fork run whose `test` branch paused: `end()` clears `pauses` on the final state, so the
+  // records of the journal (`run_paused` with the fork and branch, `run_resumed` with the node) and
+  // the count the summary makes of them are what is pinned, with the `forks` of the state
+  const { state, journal } = load(FORMATS, "v2", "r_0mvu1w4w6_w0iy");
+  expect(state.v).toBe(RECORD_VERSION);
+  expect(state.status).toBe("completed");
+  expect(state.pauses).toEqual([]);
+  expect(state.trail).toEqual(["impl", "verify", "test", "fix-test", "test", "fix"]);
+  expect(state.forks?.f1).toMatchObject({
+    from: "impl",
+    join: "fix",
+    branches: ["verify", "test"],
+    joined: 1,
+  });
+  expect(Object.keys(state.forks?.f1?.arrived ?? {}).sort()).toEqual(["test", "verify"]);
+  expect(state.nodes.test).toMatchObject({ attempt: 2, status: "passed", extraAttempts: 1 });
+  expect(journal.filter((r) => r.event === "run_paused")).toEqual([
+    expect.objectContaining({ reason: "consecutive", node: "test", fork: "f1", branch: "test" }),
+  ]);
+  expect(journal.filter((r) => r.event === "run_resumed")).toEqual([
+    expect.objectContaining({ reason: "consecutive", node: "test", fork: "f1", branch: "test" }),
+  ]);
+  // the branch that paused did not arrive before the resume; its sibling did
+  const settled = journal.filter((r) => r.event === "branch_settled");
+  expect(settled.map((r) => [r.branch, r.label])).toEqual([
+    ["verify", "passed"],
+    ["test", "passed"],
+  ]);
+  const seq = (event: string) => journal.find((r) => r.event === event)?.seq as number;
+  expect(seq("run_paused")).toBeLessThan(settled[0]?.seq as number);
+  expect(settled[0]?.seq as number).toBeLessThan(seq("run_resumed"));
+  expect(journal.filter((r) => r.event === "join_reached")).toHaveLength(1);
+  const report = summarizeRun(state, journal);
+  expect(report.status).toBe("completed");
+  expect(report.pauses).toBe(1);
+  expect(report.failed_branches).toBe(false);
+  expect(report.forks.map((f) => [f.fork, f.join, f.joined, f.failed])).toEqual([
+    ["f1", "fix", 1, []],
+  ]);
+  expect(report.nodes.find((n) => n.node === "test")?.attempts).toHaveLength(2);
+  expect(report.nodes.find((n) => n.node === "fix-test")?.attempts).toHaveLength(1);
 });
 
 test("t40_formats_loop_passes_with_empty_v2_dir", () => {

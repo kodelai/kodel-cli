@@ -1,0 +1,18 @@
+{
+  "v": 1,
+  "node": "fix",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "0f0c570068352d934df141ba44bcc355a1960a87c4e2691babf52dd9c377ee9e",
+  "answer": {
+    "slug": "fix",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "Verify and test ran at the same time on your change. If a branch failed, the feedback names it\nand says why: fix the cause, then finish with the outcome restart_failed so that only the failed\nsteps run again. If both passed, finish normally.\n",
+    "reentry_feedback": "Branches of the fork failed: \"test\" failed (command): the command exited with 1, expected 0",
+    "outcomes": [
+      "restart_failed"
+    ],
+    "workdir": "[REDACTED:high-entropy].kodel/worktrees/r_0mvu1w2tp_ssyf"
+  }
+}
