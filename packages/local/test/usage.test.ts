@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   type AgentHistoryCollector,
   buildDelta,
@@ -48,7 +48,10 @@ const PIPELINE = [
 
 let dir: string;
 let claude: string;
+/** Links to `dir` made by a test, removed with it. */
+let links: string[] = [];
 beforeEach(async () => {
+  links = [];
   dir = await realpath(await mkdtemp(join(tmpdir(), "kodel-usage-run-")));
   claude = join(dir, "..", `claude-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
@@ -61,6 +64,7 @@ beforeEach(async () => {
   await writeFile(join(dir, ".kodel", "config.yaml"), "worktree:\n  mode: off\n");
 });
 afterEach(async () => {
+  for (const link of links) await rm(link, { force: true });
   await rm(dir, { recursive: true, force: true });
   await rm(claude, { recursive: true, force: true });
 });
@@ -73,6 +77,8 @@ interface RigOptions {
   usage?: Partial<UsageConfig> | null;
   collector?: (configDir: string) => AgentHistoryCollector;
   agentLog?: boolean;
+  /** Reach the project through a link to it (`/var` against `/private/var` on macOS): the agent's folder is the real one's. */
+  viaLink?: boolean;
   session?: string | null;
   budgetMs?: number;
   now?: () => number;
@@ -96,24 +102,30 @@ const historyOf = (options: RigOptions): HistoryConfig => ({
 
 async function rig(options: RigOptions = {}): Promise<Rig> {
   const env: NodeJS.ProcessEnv = { CLAUDE_CONFIG_DIR: claude };
+  let root = dir;
+  if (options.viaLink === true) {
+    root = join(dirname(dir), `${basename(dir)}-link`);
+    await symlink(dir, root);
+    links.push(root);
+  }
   if (options.session !== null) env["CLAUDE_CODE_SESSION_ID"] = options.session ?? SESSION;
   const writer = new UsageWriter({
-    root: dir,
+    root,
     rules: options.rules ?? [],
     env: () => env,
     ...(options.collector === undefined ? {} : { collector: options.collector }),
     ...(options.budgetMs === undefined ? {} : { budgetMs: options.budgetMs }),
     ...(options.now === undefined ? {} : { now: options.now }),
   });
-  const store = new FileStore({ root: join(dir, ".kodel") });
+  const store = new FileStore({ root: join(root, ".kodel") });
   const agentLog = new AgentLogWriter({
     store,
-    root: dir,
+    root,
     rules: options.rules ?? [],
     env: () => env,
   });
   const host = new LocalPipelineHost({
-    root: dir,
+    root,
     heartbeatMs: 0,
     environment: env,
     history: historyOf(options),
@@ -245,6 +257,53 @@ describe("usage pass", () => {
     const events = (await journalOf(r)).map((rec) => rec.event);
     expect(events).not.toContain("agent_log_saved");
     expect(events).toContain("usage_recorded");
+  });
+
+  test("t9jrs_root_through_a_symlink_finds_the_session_for_agent_log_and_usage", async () => {
+    // The agent's folder is named after the real directory; the project is reached through a link to it.
+    const r = await rig({ viaLink: true });
+    await install(sessionLog(r.runId));
+    await r.run.completeStep("a", 1);
+    const events = (await journalOf(r)).map((rec) => rec.event);
+    expect(events).toContain("agent_log_saved");
+    expect(events).toContain("usage_recorded");
+    expect(events).not.toContain("agent_log_failed");
+    expect(events).not.toContain("usage_failed");
+    expect((await stateOf(r)).usage?.attempts["a:1"]).toBeDefined();
+  });
+
+  /** A log of the run's session id, as another directory's agent folder would hold it. */
+  const logOfOtherDirectory = (runId: string, cwd: string): ClaudeLogBuilder =>
+    new ClaudeLogBuilder({ sessionId: SESSION, cwd })
+      .user("go")
+      .say("msg_0", "starting it")
+      .call(
+        "msg_0",
+        { id: "toolu_start", name: "mcp__kodel__pipeline_start", input: { task: "t" } },
+        { input: 100, output: 10 },
+      )
+      .result("toolu_start", [{ type: "text", text: JSON.stringify({ ok: true, run_id: runId }) }]);
+
+  test("t9jrs_root_through_a_symlink_still_does_not_find_another_projects_log", async () => {
+    const r = await rig({ viaLink: true });
+    await install(logOfOtherDirectory(r.runId, join(dirname(dir), `elsewhere-${basename(dir)}`)));
+    await r.run.completeStep("a", 1);
+    const state = await stateOf(r);
+    expect(state.usage?.failed).toContain("log_missing");
+    expect(state.usage?.attempts["a:1"]).toBeUndefined();
+    expect((await journalOf(r)).map((rec) => rec.event)).not.toContain("usage_recorded");
+  });
+
+  test("t9jrs_root_through_a_symlink_refuses_a_sibling_whose_name_only_begins_with_the_projects", async () => {
+    const r = await rig({ viaLink: true });
+    // the agent's folder of `<project>-sibling` shares the project's name as a prefix: it is found by name, then
+    // refused because its own `cwd` is not in the project; nothing is read from it
+    await install(logOfOtherDirectory(r.runId, `${dir}-sibling`));
+    await r.run.completeStep("a", 1);
+    const state = await stateOf(r);
+    expect(state.usage?.failed).toContain("refused");
+    expect(state.usage?.attempts["a:1"]).toBeUndefined();
+    expect((await journalOf(r)).map((rec) => rec.event)).not.toContain("usage_recorded");
   });
 
   test("t9jrs_old_run_without_usage_section_is_not_captured", async () => {

@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { claudeConfigDir, projectFolderName } from "../../packages/local/src/history";
 import { runTotals, tokensOf } from "../../packages/pipeline-core/src";
@@ -139,7 +139,14 @@ describe("Claude Code, tokens and cost of a run", () => {
         | undefined;
       const session = started?.session?.value as string;
       const raw = readFileSync(
-        join(claudeConfigDir(), "projects", projectFolderName(sandbox.dir), `${session}.jsonl`),
+        // the agent's folder is named after the real directory: on macOS the temporary directory is reached through
+        // /var, a link to /private/var, and the sandbox is deliberately left as it is (the run finds the log all the same)
+        join(
+          claudeConfigDir(),
+          "projects",
+          projectFolderName(realpathSync(sandbox.dir)),
+          `${session}.jsonl`,
+        ),
         "utf8",
       );
       // the log has the fields usage is read from; if a new Claude Code renames them, this says so before a zero does
