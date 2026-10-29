@@ -2196,14 +2196,17 @@ export class LocalRun {
         step: { node, attempt },
         also: async (lock) => {
           counted = true;
-          await this.host.usage.capture(run, { node, attempt }, lock);
+          // The count is told by itself: a failure of it is not a failure of the copy it runs after.
+          await this.host.usage.capture(run, { node, attempt }, lock).catch(async () => {
+            await this.apply({ type: "usage_failed", reason: "unreadable" }).catch(() => undefined);
+          });
         },
       })
       .catch(() => undefined);
     if (!counted) {
       // Said once: what the pass would have read is read by the next one, the cursor did not move. A step the copy
       // had nothing to do with (the run is over, or it is not at an agent step) has nothing to say either.
-      // The copy threw, or the lock was busy or lost, before the count could run: nothing was read, so it is `busy`.
+      // The lock was busy or lost before the count could run: nothing was read, so it is `busy`. A copy that throws no longer stops the count (it runs after the copy under the same lock, and the copy tells its own failure).
       // With the copy switched off (`disabled`) the count still runs under the lock, so not running it means the lock
       // was lost: that is `busy` too. Only a run that is over or not at an agent step has nothing to say.
       const reason =

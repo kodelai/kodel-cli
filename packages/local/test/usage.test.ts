@@ -1826,3 +1826,44 @@ describe("usage pass: the wait for the call that hands the step in", () => {
     expect(await hasStepCall(path, runId, "a", 2)).toBe(false);
   });
 });
+
+describe("usage pass: the copy of the agent's log fails", () => {
+  test("t9jrs_a_copy_that_throws_does_not_stop_the_count_and_is_told_once", async () => {
+    // On Windows the copy failed at a write it was not allowed (ftruncate on an append handle): the count that runs
+    // after it under the same lock must still be made, and the copy's failure is told as before.
+    const r = await rig();
+    await install(sessionLog(r.runId));
+    r.store.appendAgentLog = async () => {
+      throw new Error("the disk is full");
+    };
+    const decision = await r.run.completeStep("a", 1);
+    expect(decision.ok).toBe(true);
+    const state = await stateOf(r);
+    expect(tokensOf(state.usage?.attempts["a:1"] ?? emptyUsage().unattributed).input).toBe(300);
+    const failed = (await journalOf(r)).filter(
+      (rec) => rec.event === "agent_log_failed" || rec.event === "usage_failed",
+    );
+    expect(failed.map((rec) => `${rec.event}:${String(rec.reason)}`)).toEqual([
+      "agent_log_failed:unreadable",
+    ]);
+  });
+
+  test("t9jrs_a_copy_that_fails_every_step_leaves_the_count_whole", async () => {
+    const r = await rig();
+    const log = sessionLog(r.runId);
+    const path = await install(log);
+    r.store.appendAgentLog = async () => {
+      throw new Error("not permitted");
+    };
+    await r.run.completeStep("a", 1);
+    log.say("msg_2", "step b", { input: 10, output: 5 });
+    await writeFile(path, log.text());
+    await r.run.completeStep("b", 1);
+    const total = tokensOf(runTotals((await stateOf(r)).usage ?? emptyUsage()));
+    expect(total.input).toBe(100 + 200 + 10);
+    expect(total.api_calls).toBe(3);
+    // said once per reason, not once per step
+    const told = (await journalOf(r)).filter((rec) => rec.event === "agent_log_failed");
+    expect(told).toHaveLength(1);
+  }, 20_000);
+});

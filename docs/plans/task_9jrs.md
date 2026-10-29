@@ -200,7 +200,7 @@ Written after the review of the build. What was done differently or not done, pl
 - **Other fixes:** the JSON import attribute (above); `money()` prints `< $0.0001` for a known cost below that, never `$0.0000`
   (`t9jrs_report_small_known_cost_never_reads_as_zero_dollars`); an override without `long_context_tokens` keeps the shipped threshold of
   its model and one with its own wins (`t9jrs_override_keeps_the_shipped_long_context_threshold_unless_it_gives_its_own`); a pass that
-  could not run because the copy threw, or the lock was lost, says `busy` (nothing was read), not `unreadable`; a log found unreadable is
+  could not run because the lock was lost says `busy` (nothing was read), not `unreadable`; a log found unreadable is
   not read again until it grows (`t9jrs_an_unreadable_log_is_not_read_again_until_it_grows`); the wording of the `kodel-prices` skill and
   of the override example in `docs/history.md`; a line in the docs that a redaction rule matching a model id removes its cost.
 - **Not changed, known:** the `session` of `usage_recorded` is written as it is into the state and goes through `redactDeep` into the
@@ -422,3 +422,20 @@ fourth, `t9jrs_real_run_tokens_agree_with_agent`, failed, and the cause is the r
 - **What this does not show.** The hypothesis is only confirmed if real runs now agree repeatedly: the main session runs the real-agent
   tests several times and the result goes in the PR. If a real run still misses by more than the tolerance, the cause is something
   else and the decision is reopened, not the test bent.
+
+### After the CI of the pull request (Windows)
+
+- **Evidence.** On Windows the copy of the agent's log (3BK2, already on `main`) failed with `EPERM: operation not permitted,
+  ftruncate`: `appendAgentLog` opened the stream with `a+` and cut it to the vouched length with `handle.truncate`, and a handle in
+  append mode has no right to do that there. The copy returned `errored`, and the count of usage, which ran only after a copy that
+  had not thrown, never ran, so no usage was recorded on Windows. (Two other causes were found before this one and fixed earlier:
+  test paths built with `.pathname`, and a Windows path put into a fixture's JSON without escaping.)
+- **Changed.** The stream is opened with `r+` (or made with `wx+` when it is not there yet, one retry on the race), never in append
+  mode (`agentLogOpenFlags`, `t3bk2_open_flags_allow_truncating_and_never_append`); POSIX behaviour is the same, the file is only
+  ever extended past the length the journal vouches for. The count of usage no longer depends on the copy: a copy that throws is
+  told as before (`agent_log_failed: unreadable`, once), and the count runs after it under the same lock
+  (`t9jrs_a_copy_that_throws_does_not_stop_the_count_and_is_told_once`, `t9jrs_a_copy_that_fails_every_step_leaves_the_count_whole`);
+  a failure of the count itself is told as `usage_failed: unreadable` and is not mixed up with the copy's.
+- **Not verified.** There is no Windows machine here: the next CI run is the check. `rename` over a file that another process holds
+  open (`integrity.ts:113`, `store.ts:369`, `tasks/local-adapter.ts:765`) and `unlink` of a lock file that is open
+  (`tasks/local-adapter.ts:665,680`) are the same class on Windows; they were not changed because nothing showed them failing.

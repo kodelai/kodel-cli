@@ -174,6 +174,28 @@ const SERVED_REF = /^served\/[a-z0-9][a-z0-9-]{0,62}-\d{1,6}-\d{1,6}\.json$/;
 
 const isMissing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
 
+/**
+ * How the stored stream of a session is opened for writing: for reading and writing and not in append mode, because a
+ * handle that appends has no right to truncate on Windows (`EPERM: ftruncate`), and the stream is cut to the length the
+ * journal vouches for before anything is added. A file that is not there yet is made, never replaced (`wx+`).
+ */
+export const agentLogOpenFlags = (exists: boolean): "r+" | "wx+" => (exists ? "r+" : "wx+");
+
+/** Opens the stored stream for writing at any position; a race with another maker of the file is settled by one retry. */
+async function openAgentLogForWrite(path: string): Promise<Awaited<ReturnType<typeof open>>> {
+  try {
+    return await open(path, agentLogOpenFlags(true));
+  } catch (error) {
+    if (!isMissing(error)) throw error;
+  }
+  try {
+    return await open(path, agentLogOpenFlags(false));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    return open(path, agentLogOpenFlags(true));
+  }
+}
+
 /** The code of an error of the operating system (`EACCES`, `ENOSPC`), not of Node itself (`ERR_...`). */
 const SYSTEM_ERROR = /^E(?!RR_)[A-Z0-9]+$/;
 
@@ -1178,7 +1200,7 @@ export class FileStore {
       if (tail === undefined || tail !== expect.tail_hash) return { ok: false };
     }
     await mkdir(dirname(path), { recursive: true });
-    const handle = await open(path, "a+");
+    const handle = await openAgentLogForWrite(path);
     try {
       await handle.truncate(expect.length);
       const bytes = Buffer.from(text, "utf8");
