@@ -76,7 +76,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   for (const link of links) await rm(link, { force: true });
-  await rm(dir, { recursive: true, force: true });
+  await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   await rm(claude, { recursive: true, force: true });
 });
 

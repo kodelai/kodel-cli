@@ -40,7 +40,7 @@ beforeEach(async () => {
   await writeFile(join(dir, ".kodel", "pipelines", "plain.yaml"), PIPELINE);
 });
 afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
+  await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 const initGit = () => {
