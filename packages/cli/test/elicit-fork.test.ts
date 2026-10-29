@@ -269,6 +269,33 @@ describe("t40 the dialog on a run with a fork", () => {
     await s.close();
   });
 
+  test("t40_dialog_after_completion_keeps_completion_arguments", async () => {
+    const s = await connect(() => ({ action: "accept", content: { decision: "apply" } }));
+    const runId = await start(s, "forksteps");
+    await complete(s, runId, "plan");
+    await s.call("pipeline_propose_change", {
+      run_id: runId,
+      pipeline: FORK_STEPS.replace("prompt: merge,", "prompt: merge with care,"),
+      summary: "merge with care",
+    });
+    const servedOf = async (step: string) =>
+      (await s.host.open(runId).then((run) => run?.state()))?.served?.[step]?.length ?? 0;
+    const servedB = await servedOf("b:1");
+    expect(servedB).toBeGreaterThan(0); // handed out with a when plan was completed
+    // a's completion meets the change and the dialog opens; the person accepts, and the answer
+    // after it is still a's completion: a's own step (it was not judged while the change waited),
+    // never b's beside it, and b is not recorded as served again to this caller
+    const done = await complete(s, runId, "a");
+    expect(s.forms).toHaveLength(1);
+    expect(done.body.dialog).toMatchObject({ answer: "decided" });
+    expect(done.body.next.node.slug).toBe("a");
+    expect(done.body.next.node.steps).toBeUndefined();
+    expect(JSON.stringify(done.body.next)).not.toContain("do b");
+    expect(await servedOf("b:1")).toBe(servedB);
+    // (a worker's completion never meets a dialog: `t40_dialog_never_holds_a_worker`)
+    await s.close();
+  });
+
   test("t40_dialog_skips_changed_files_refusal_when_other_branches_active", async () => {
     // while the dialog is open a sibling branch writes to the tree; the decision stands all the same
     const s = await connect(async () => {

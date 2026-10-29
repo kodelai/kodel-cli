@@ -1,0 +1,10 @@
+{
+  "completeness": "complete",
+  "rows": [
+    {
+      "severity": "info",
+      "location": "packages/cli/src/status-json.ts",
+      "description": "Fine."
+    }
+  ]
+}

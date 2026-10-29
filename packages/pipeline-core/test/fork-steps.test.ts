@@ -742,6 +742,49 @@ describe("t40 claims", () => {
     const held = refusal(h.send(complete("a", 7, "mine")));
     expect(held.message).toContain('node "a" is on attempt 1, not 7');
     expect(held.message).toContain("call pipeline_take_step with your token to continue");
+    // another token, or none, while the claim is live: the step is not theirs to retake
+    for (const other of ["theirs", undefined]) {
+      const stranger = refusal(h.send(complete("a", 7, other)));
+      expect(stranger.code).toBe("ATTEMPT_MISMATCH");
+      expect(stranger.message).not.toContain("pipeline_take_step");
+    }
+  });
+
+  test("t40_take_any_honours_max_parallel", () => {
+    // Two steps may be held at once; a take without a slug meets the cap like `pipeline_next_step`
+    // does (the third step is `queued` there), and a take by slug is of a step that was handed out
+    const h = openFork(THREE);
+    const take = (token: string, node?: string): RunEvent => ({
+      type: "step_claimed",
+      ...(node === undefined ? {} : { node }),
+      token,
+      ttlMs: 60_000,
+      maxParallel: 2,
+    });
+    must(h.send(take("w1")));
+    expect(h.state.nodes.a?.claim?.token).toBe("w1");
+    const shown = nodeOf(h.next({ agents: { mode: "parallel", maxParallel: 2 } }));
+    expect(shown.steps?.map((s) => s.slug)).toEqual(["b", "a"]);
+    expect(shown.queued).toBe(1);
+    must(h.send(take("w2")));
+    expect(h.state.nodes.b?.claim?.token).toBe("w2");
+    const third = must(h.send(take("w3")));
+    expect(third.noop).toBe(true);
+    expect(h.state.nodes.c?.claim).toBeUndefined();
+    // the holder of a step renews it under the cap all the same
+    h.advance(1_000);
+    expect(must(h.send(take("w1"))).noop).toBeUndefined();
+    expect(h.state.nodes.a?.claim?.at).toBe(h.now);
+    // once a step is handed in, the next free one can be taken
+    must(h.send(complete("a", 1, "w1")));
+    must(h.send(take("w3")));
+    expect(h.state.nodes.c?.claim?.token).toBe("w3");
+    // without the cap (an engine without the config) a take is never held back
+    const g = openFork(THREE);
+    for (const token of ["w1", "w2", "w3"]) {
+      must(g.send({ type: "step_claimed", token, ttlMs: 60_000 }));
+    }
+    expect(g.state.nodes.c?.claim?.token).toBe("w3");
   });
 
   test("t40_claim_cleared_on_a_new_visit_of_the_node", () => {
@@ -813,6 +856,49 @@ describe("t40 what a completion answers", () => {
     must(fresh.send(complete("a", 1)));
     must(fresh.send(complete("b", 1)));
     expect(nodeOf(fresh.next({ ...PARALLEL, completionOf: "b" })).slug).toBe("merge");
+  });
+
+  test("t40_worker_completion_that_opens_steps_gets_a_summary", () => {
+    // A worker's completion forks: the branches are the starting agent's to hand out, so the worker
+    // is told to report back, not handed `steps` to act on. The same for a successor and the join.
+    const h = host(FORK);
+    h.send(START);
+    must(h.send(claim("plan", "w0")));
+    must(h.send(complete("plan", 1, "w0")));
+    const forked = runningOf(h.next({ ...PARALLEL, completionOf: "plan", worker: true }));
+    expect(forked.open_steps?.map((s) => s.node_slug)).toEqual(["a", "b"]);
+    expect(forked.hint).toContain("Report this answer");
+    expect(forked.hint).not.toContain("start one subagent");
+    expect(JSON.stringify(forked)).not.toContain("do a");
+    // the starting agent is handed them
+    expect(nodeOf(h.next({ ...PARALLEL, completionOf: "plan" })).steps?.map((s) => s.slug)).toEqual(
+      ["a", "b"],
+    );
+    must(h.send(claim("a", "wa")));
+    must(h.send(claim("b", "wb")));
+    must(h.send(complete("a", 1, "wa")));
+    must(h.send(complete("b", 1, "wb")));
+    // the join opened by the last branch's worker: a summary for the worker, the step for the agent
+    const joined = runningOf(h.next({ ...PARALLEL, completionOf: "b", worker: true }));
+    expect(joined.open_steps).toEqual([{ node_slug: "merge", attempt: 1 }]);
+    expect(nodeOf(h.next({ ...PARALLEL, completionOf: "b" })).slug).toBe("merge");
+    // a worker's own rework stays a `node` answer (`t40_complete_next_shows_own_rework_and_what_the_completion_opened`)
+    const g = host(FORK, (e) =>
+      e.type === "run_check" && e.node === "a"
+        ? {
+            ...(answer(e) as Extract<RunEvent, { type: "check_finished" }>),
+            passed: false,
+            reason: "no",
+          }
+        : answer(e),
+    );
+    g.send(START);
+    g.send(complete("plan", 1));
+    must(g.send(claim("a", "wa")));
+    must(g.send(complete("a", 1, "wa")));
+    const own = nodeOf(g.next({ ...PARALLEL, completionOf: "a", worker: true }));
+    expect(own).toMatchObject({ slug: "a", attempt: 2 });
+    expect(own.steps).toBeUndefined();
   });
 
   test("t40_worker_calls_get_no_wait_offer_and_no_dialog_text", () => {

@@ -517,11 +517,14 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
   }
 
   const all = [...nodes.values()];
-  const sum = (items: NodeReport[]) =>
-    Math.round(items.reduce((total, n) => total + n.seconds, 0) * 10) / 10;
   // An attempt still going runs until the last thing the journal knows of, as above.
   const withEnd = (span: Span): EndedSpan => ({ ...span, to: span.to ?? last });
   const interval = (span: Span): Interval => ({ from: span.from, to: span.to ?? last });
+  // Summed in milliseconds and rounded once, like the union below: rounding each attempt first
+  // could leave the sum below the union of the very same spans.
+  const sumSeconds = (intervals: Interval[]) =>
+    Math.max(0, Math.round(intervals.reduce((total, i) => total + (i.to - i.from), 0) / 100) / 10);
+  const working = spans.filter((s) => !gates.has(s.node)).map(interval);
   const forkList = [...forks.values()];
   for (const fork of forkList) {
     // The state knows which branches are still going (a `restart_failed` sends settled ones back),
@@ -547,8 +550,8 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
       : { tracker_task: { key: state.taskKey, restarted: taskRestarted } }),
     status: state.status,
     total_s: seconds(first, state.finishedAt ?? last),
-    work_s: sum(all.filter((n) => !n.gate)),
-    busy_wall_s: unionSeconds(spans.filter((s) => !gates.has(s.node)).map(interval)),
+    work_s: sumSeconds(working),
+    busy_wall_s: unionSeconds(working),
     waiting_s: unionSeconds(spans.filter((s) => gates.has(s.node)).map(interval)),
     nodes: all,
     forks: forkList,

@@ -331,6 +331,102 @@ describe("t40 parse and validate", () => {
     );
   });
 
+  test("t40_validate_branch_cycle_without_exit_refused", () => {
+    // every node of branch a has an edge for "passed", and still the branch can never arrive
+    refused(
+      yaml([
+        "name: cycle",
+        "nodes:",
+        "  - { slug: start, kind: agent, prompt: s }",
+        "  - { slug: a, kind: agent, prompt: a }",
+        "  - { slug: b, kind: agent, prompt: b }",
+        "  - { slug: c, kind: agent, prompt: c }",
+        "  - { slug: j, kind: agent, prompt: j, join: all }",
+        "edges:",
+        "  - { from: start, to: a }",
+        "  - { from: start, to: c }",
+        "  - { from: a, to: b }",
+        "  - { from: b, to: a }",
+        "  - { from: c, to: j }",
+      ]),
+      'node "a" is in the branch "a" of the fork at "start" ("passed") and none of its ways on leads to the join "j"',
+      'node "b" is in the branch "a"',
+    );
+  });
+
+  test("t40_validate_branch_cycle_with_exit_accepted", () => {
+    // a loop inside a branch is fine as long as one way out of it leads to the join
+    expect(
+      problems(
+        yaml([
+          "name: loop",
+          "nodes:",
+          "  - { slug: start, kind: agent, prompt: s }",
+          "  - { slug: a, kind: agent, prompt: a }",
+          "  - { slug: b, kind: command, command: b }",
+          "  - { slug: c, kind: agent, prompt: c }",
+          "  - { slug: j, kind: agent, prompt: j, join: all }",
+          "edges:",
+          "  - { from: start, to: a }",
+          "  - { from: start, to: c }",
+          "  - { from: a, to: b }",
+          "  - { from: b, to: a, when: failed }",
+          "  - { from: b, to: j }",
+          "  - { from: c, to: j }",
+        ]),
+      ),
+    ).toEqual([]);
+  });
+
+  test("t40_validate_failure_fork_zero_length_branch_refused", () => {
+    // a fork on a failure label whose branch is the join itself would arrive failed at once, and
+    // `restart_failed` would then run the join as a branch
+    refused(
+      yaml([
+        "name: zero-failed",
+        "nodes:",
+        "  - { slug: start, kind: command, command: s }",
+        "  - { slug: a, kind: agent, prompt: a }",
+        "  - { slug: j, kind: agent, prompt: j, join: all }",
+        "  - { slug: z, kind: agent, prompt: z }",
+        "edges:",
+        "  - { from: start, to: z }",
+        "  - { from: start, to: a, when: failed }",
+        "  - { from: start, to: j, when: failed }",
+        "  - { from: a, to: j }",
+        "  - { from: j, to: z }",
+      ]),
+      'edge from "start" to "j" when "failed" is a branch with no step of its own',
+      "needs a step before the join",
+    );
+    // on a success label such a branch is allowed (`t40_zero_length_branch_arrives_at_fork`)
+    expect(
+      problems(
+        yaml([
+          "name: zero",
+          "nodes:",
+          "  - { slug: plan, kind: agent, prompt: p }",
+          "  - { slug: a, kind: agent, prompt: a }",
+          "  - { slug: merge, kind: agent, prompt: m, join: all }",
+          "edges:",
+          "  - { from: plan, to: a }",
+          "  - { from: plan, to: merge }",
+          "  - { from: a, to: merge }",
+        ]),
+      ),
+    ).toEqual([]);
+  });
+
+  test("t40_validate_restart_failed_edge_refused", () => {
+    refused(
+      FORK.replace(
+        "  - { from: merge, to: ship }\n",
+        `  - { from: merge, to: ship }\n  - { from: merge, to: plan, when: ${RESTART_FAILED} }\n`,
+      ),
+      `edge from "merge" when "${RESTART_FAILED}" is never taken`,
+    );
+  });
+
   test("t40_validate_dangling_branch", () => {
     refused(
       yaml([
@@ -1353,6 +1449,123 @@ describe("t40 failed branches", () => {
     expect(h.state.nodes.merge?.attempt).toBe(3);
     expect(h.state.nodes.merge?.lastFailures).toHaveLength(1);
   });
+
+  test("t40_restart_failed_never_reenters_the_join", () => {
+    // The validator refuses a fork on a failure label with a branch that is the join itself; a
+    // state that has one all the same (a kept pipeline from before the rule) must not run the join
+    // as a branch: only branches with a step of their own are restarted.
+    const valid = parsePipeline(
+      yaml([
+        "name: zero-failed",
+        "nodes:",
+        "  - { slug: start, kind: command, command: s }",
+        "  - { slug: a, kind: command, command: a }",
+        "  - { slug: b, kind: command, command: b }",
+        "  - { slug: j, kind: agent, prompt: j, join: all }",
+        "  - { slug: z, kind: agent, prompt: z }",
+        "edges:",
+        "  - { from: start, to: z }",
+        "  - { from: start, to: a, when: failed }",
+        "  - { from: start, to: b, when: failed }",
+        "  - { from: a, to: j }",
+        "  - { from: a, to: j, when: failed }",
+        "  - { from: b, to: j }",
+        "  - { from: b, to: j, when: failed }",
+        "  - { from: j, to: z }",
+      ]),
+    );
+    const spec: PipelineSpec = {
+      ...valid,
+      nodes: valid.nodes.filter((n) => n.slug !== "b"),
+      edges: valid.edges
+        .filter((e) => e.from !== "b")
+        .map((e) => (e.to === "b" ? { ...e, to: "j" } : e)),
+    };
+    const h = host(spec, (effect) =>
+      effect.type === "run_command" && (effect.node === "start" || effect.node === "a")
+        ? fails(effect.node, `${effect.node} broke`)(effect)
+        : answer(effect),
+    );
+    h.hold("j");
+    h.send(START);
+    // the branch with no step arrived failed as the fork started; a failed on its own
+    expect(h.state.forks?.f1?.arrived).toMatchObject({
+      j: { node: "start", label: "failed" },
+      a: { node: "a", label: "failed" },
+    });
+    expect(h.state.active.map((v) => v.node)).toEqual(["j"]);
+    must(h.send(complete("j", 1, RESTART_FAILED)));
+    expect(h.state.status).toBe("running");
+    expect(h.state.active.map((v) => v.node)).toEqual(["j"]);
+    expect(h.state.nodes.a?.attempt).toBe(2);
+    expect(h.state.nodes.j?.attempt).toBe(2);
+    expect(
+      h.journal.filter((r) => r.event === "node_entered" && r.node === "j" && r.branch),
+    ).toEqual([]);
+    // with the join as the only failed "branch", there is nothing to run again
+    const only: PipelineSpec = {
+      ...spec,
+      edges: spec.edges.filter((e) => !(e.from === "a" && e.when === "failed")),
+    };
+    const g = host(only, fails("start", "start broke"));
+    g.hold("j");
+    g.send(START);
+    expect(g.state.active.map((v) => v.node)).toEqual(["j"]);
+    const refusedCompletion = refusal(g.send(complete("j", 1, RESTART_FAILED)));
+    expect(refusedCompletion.code).toBe("INVALID_ARGUMENTS");
+    expect(g.state.status).toBe("running");
+  });
+
+  test("t40_join_reached_only_when_join_entered", () => {
+    // The join may be entered once; the fork fires twice (ship fails and the run loops), and in the
+    // second instance a branch fails. The second join is held back at the attempt limit: it was not
+    // reached, so neither the journal nor the report says it was.
+    const once = parsePipeline(
+      FORK.replace(
+        "    join: all\n",
+        "    join: all\n    max_attempts: 1\n    max_consecutive_failures: 1\n",
+      ),
+    );
+    const h = host(once, (effect, state) =>
+      effect.type === "run_command" && effect.node === "ship"
+        ? fails("ship")(effect)
+        : effect.type === "run_command" && effect.node === "b-test" && state.forks?.f2
+          ? fails("b-test", "red")(effect)
+          : answer(effect),
+    );
+    h.hold("plan", "merge");
+    h.send(START);
+    h.send(complete("plan", 1));
+    expect(h.state.forks?.f1?.joined).toBe(1);
+    must(h.send(complete("merge", 1)));
+    // ship failed, plan ran again and forked again; b-test failed, a arrived: the join is full
+    must(h.send(complete("plan", 2)));
+    expect(Object.keys(h.state.forks?.f2?.arrived ?? {}).sort()).toEqual(["a", "b"]);
+    expect(h.state.pauses).toEqual([
+      expect.objectContaining({
+        reason: "total",
+        node: "merge",
+        blocked: expect.objectContaining({ to: "merge", join: "f2" }),
+      }),
+    ]);
+    expect(h.state.status).toBe("paused");
+    expect(h.state.forks?.f2?.joined).toBe(0);
+    expect(h.events().filter((e) => e === "join_reached")).toHaveLength(1);
+    expect(summarizeRun(h.state, h.journal).failed_branches).toBe(false);
+    expect(summarizeRun(h.state, h.journal).forks.map((f) => f.joined)).toEqual([1, 0]);
+    // resumed, the join is entered and counted, with the failed branch named
+    h.send({ type: "resume" });
+    expect(h.state.active.map((v) => v.node)).toEqual(["merge"]);
+    expect(h.state.forks?.f2?.joined).toBe(1);
+    const reached = h.journal.filter((r) => r.event === "join_reached");
+    expect(reached).toHaveLength(2);
+    expect(reached[1]).toMatchObject({ fork: "f2", join: "merge", failed: ["b"] });
+    expect(h.state.nodes.merge?.lastFailures?.map((f) => f.from)).toEqual(["b-test"]);
+    expect(summarizeRun(h.state, h.journal).failed_branches).toBe(true);
+    // the journal says it in the usual order: the join is reached, then entered
+    const events = h.events();
+    expect(events[events.lastIndexOf("join_reached") + 1]).toBe("node_entered");
+  });
 });
 
 // ── pauses and status ───────────────────────────────────────────────────────
@@ -2295,6 +2508,52 @@ describe("t40 repair in a fork", () => {
     expect(h.state.pauses).toEqual([]);
     expect(h.state.forks?.f1?.arrived.a).toMatchObject({ node: "a-test", label: "passed" });
     expect(h.state.active.map((v) => v.node)).toEqual(["b"]);
+  });
+
+  test("t40_reroute_of_join_pause_reenters_join_without_rearriving", () => {
+    // The join is held back at its attempt limit (`t40_join_reached_only_when_join_entered`); the
+    // person raises the limit. The way into the join is taken again: the last branch does not
+    // arrive a second time, and its failure count is not touched.
+    const text = FORK.replace(
+      "    join: all\n",
+      "    join: all\n    max_attempts: 1\n    max_consecutive_failures: 1\n",
+    );
+    const before = parsePipeline(text);
+    const h = host(before, (effect, state) =>
+      effect.type === "run_command" && effect.node === "ship"
+        ? failed(effect, "ship is red")
+        : effect.type === "run_command" && effect.node === "b-test" && state.forks?.f2
+          ? failed(effect, "b-test is red")
+          : answer(effect),
+    );
+    h.hold("plan", "merge");
+    h.send(START);
+    h.send(complete("plan", 1));
+    must(h.send(complete("merge", 1)));
+    must(h.send(complete("plan", 2)));
+    expect(h.state.pauses.map((p) => [p.reason, p.node])).toEqual([["total", "merge"]]);
+    const settledBefore = h.events().filter((e) => e === "branch_settled").length;
+    const failures = h.state.nodes["b-test"]?.consecutiveFailures;
+    expect(failures).toBe(1);
+    const after = parsePipeline(text.replace("    max_attempts: 1\n", "    max_attempts: 2\n"));
+    const diff = diffPipelines(before, after, h.state);
+    expect(diff.refused).toBeUndefined();
+    // a-test arrived last (a has a check to pass first): the effect names it, and it passed
+    expect(diff.effects).toEqual([{ kind: "reroute", node: "a-test" }]);
+    expect(h.state.nodes["a-test"]?.status).toBe("passed");
+    h.use(after);
+    must(h.send(accepted(before)));
+    expect(h.state.pauses).toEqual([]);
+    expect(h.state.active.map((v) => v.node)).toEqual(["merge"]);
+    expect(h.state.nodes.merge?.attempt).toBe(2);
+    expect(h.state.forks?.f2?.joined).toBe(1);
+    expect(h.state.forks?.f2?.arrived.a).toMatchObject({ node: "a-test", label: "passed" });
+    expect(h.state.forks?.f2?.arrived.b).toMatchObject({ node: "b-test", label: "failed" });
+    expect(h.events().filter((e) => e === "branch_settled")).toHaveLength(settledBefore);
+    expect(h.events().filter((e) => e === "join_reached")).toHaveLength(2);
+    expect(h.state.nodes["b-test"]?.consecutiveFailures).toBe(failures);
+    expect(h.state.nodes["a-test"]?.status).toBe("passed");
+    expect(h.state.nodes.merge?.lastFailures?.map((f) => f.from)).toEqual(["b-test"]);
   });
 
   test("t40_repair_loop_works_in_open_fork", () => {

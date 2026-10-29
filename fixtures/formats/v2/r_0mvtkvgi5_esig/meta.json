@@ -1,0 +1,11 @@
+{
+  "v": 2,
+  "runId": "r_0mvtkvgi5_esig",
+  "pipeline": "fork",
+  "task": "add a greeting function and its test",
+  "slug": "greeting-with-fork",
+  "specHash": "a0c1e1d355e331e9",
+  "createdAt": 1793280441677,
+  "workdir": "/kodel-fixture/workdir/r_0mvtkvgi5_esig",
+  "branch": "kodel/r_0mvtkvgi5_esig"
+}

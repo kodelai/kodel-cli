@@ -1,0 +1,116 @@
+{
+  "v": 2,
+  "runId": "r_0mvtkvgi5_esig",
+  "task": "add a greeting function and its test",
+  "specHash": "a0c1e1d355e331e9",
+  "status": "completed",
+  "startedAt": 1793280441732,
+  "nodes": {
+    "impl": {
+      "slug": "impl",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 1
+    },
+    "verify": {
+      "slug": "verify",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 2,
+      "fork": {
+        "id": "f1",
+        "branch": "verify"
+      }
+    },
+    "test": {
+      "slug": "test",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 2,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 5,
+      "fork": {
+        "id": "f1",
+        "branch": "test"
+      }
+    },
+    "fix": {
+      "slug": "fix",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 2,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 6,
+      "lastFailures": []
+    }
+  },
+  "active": [],
+  "trail": [
+    "impl",
+    "verify",
+    "test",
+    "fix",
+    "test",
+    "fix"
+  ],
+  "pauses": [],
+  "nextVisitId": 7,
+  "seq": 27,
+  "slug": "greeting-with-fork",
+  "workdir": "/kodel-fixture/workdir/r_0mvtkvgi5_esig",
+  "pipelineFile": ".kodel/pipelines/fork.yaml",
+  "history": {
+    "changes": {
+      "enabled": true,
+      "exclude": [],
+      "max_kb": 512
+    },
+    "output": {
+      "enabled": true,
+      "max_kb": 64
+    },
+    "prompts": {
+      "enabled": true
+    },
+    "executor": {
+      "enabled": true
+    },
+    "tool_log": {
+      "enabled": true
+    }
+  },
+  "engineVersion": "unknown",
+  "served": {},
+  "forks": {
+    "f1": {
+      "id": "f1",
+      "from": "impl",
+      "label": "passed",
+      "join": "fix",
+      "branches": [
+        "verify",
+        "test"
+      ],
+      "arrived": {
+        "verify": {
+          "node": "verify",
+          "label": "passed"
+        },
+        "test": {
+          "node": "test",
+          "label": "passed"
+        }
+      },
+      "joined": 2
+    }
+  },
+  "finishedAt": 1793280444084
+}

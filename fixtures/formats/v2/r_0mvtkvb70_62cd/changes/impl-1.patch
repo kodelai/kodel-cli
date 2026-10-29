@@ -1,0 +1,7 @@
+# kodel-patch v1
+diff --git a/packages/cli/src/status-json.ts b/packages/cli/src/status-json.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/cli/src/status-json.ts
+@@ -0,0 +1 @@
++export const statusJson = (runs: unknown[]) => JSON.stringify(runs);

@@ -112,7 +112,7 @@ test("t40_v2_fixtures_open", () => {
   // real runs of the `dev` pipeline written by this engine: the state and every record carry
   // format 2, the summary reads them, and the accepted change carries its `effects` list
   const ids = runIds(FORMATS, "v2");
-  expect(ids).toEqual(["r_0mvtewczh_4i2w", "r_0mvtewgdn_zfhl", "r_0mvthh4vp_9gqe"]);
+  expect(ids).toEqual(["r_0mvtkvb70_62cd", "r_0mvtkvfi4_mn8q", "r_0mvtkvgi5_esig"]);
   const effects: unknown[] = [];
   // the two runs of the `dev` pipeline; the fork run is looked at by its own test below
   for (const id of ids.slice(0, 2)) {
@@ -139,7 +139,7 @@ test("t40_v2_fixtures_open", () => {
 test("t40_fork_run_fixture_in_v2_shows_forks_and_pauses", () => {
   // the real fork run: the summary reads the fork instance, the overlap, the critical path and the
   // flag that the join was entered after a failed branch, from the state and journal alone
-  const { state, journal } = load(FORMATS, "v2", "r_0mvthh4vp_9gqe");
+  const { state, journal } = load(FORMATS, "v2", "r_0mvtkvgi5_esig");
   expect(state.v).toBe(RECORD_VERSION);
   expect(state.status).toBe("completed");
   expect(state.pauses).toEqual([]);

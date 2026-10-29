@@ -571,13 +571,27 @@ export class PipelineService {
     wait_s?: number;
     node_slug?: string;
     subagents?: SubagentsDeclaration;
+    /**
+     * Not a tool argument: the host asks again on behalf of a `pipeline_complete_step` call (after
+     * a dialog), and the answer stays that completion's: its own step again or a summary, never a
+     * sibling's step; `worker` when the call carried a claim token.
+     */
+    after_completion?: { node_slug: string; worker: boolean };
   }): Promise<ToolResult> {
     return guarded(async () => {
       const run = await this.run(input.run_id);
+      const completion = input.after_completion;
       const request: NextStepRequest = {
         serve: this.who(),
         ...(input.node_slug === undefined ? {} : { nodeSlug: input.node_slug }),
         ...(input.subagents === undefined ? {} : { subagents: input.subagents }),
+        ...(completion === undefined
+          ? {}
+          : {
+              atCompletion: true,
+              completionOf: completion.node_slug,
+              ...(completion.worker ? { worker: true } : {}),
+            }),
       };
       let step = await run.nextStep(request);
       if (input.wait_s !== undefined && input.wait_s > 0 && "running" in step) {

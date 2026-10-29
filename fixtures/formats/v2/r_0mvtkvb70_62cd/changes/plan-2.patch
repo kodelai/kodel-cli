@@ -1,0 +1,20 @@
+# kodel-patch v1
+diff --git a/docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md b/docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md
+--- a/docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md
++++ b/docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md
+@@ -24,3 +24,15 @@ revised line 7
+ revised line 8
+ revised line 9
+ revised line 10
++formats line 1
++formats line 2
++formats line 3
++formats line 4
++formats line 5
++formats line 6
++formats line 7
++formats line 8
++formats line 9
++formats line 10
++formats line 11
++formats line 12

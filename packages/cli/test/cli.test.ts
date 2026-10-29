@@ -1459,7 +1459,7 @@ describe("a store made from the golden runs of the stored formats", () => {
     // the real runs of this engine beside the refused ones: `status`, `report` and the history of
     // the pipeline read them, and the accepted change is shown with what it redid
     const V2 = join(V1, "..", "v2");
-    const ids = ["r_0mvtewczh_4i2w", "r_0mvtewgdn_zfhl"];
+    const ids = ["r_0mvtkvb70_62cd", "r_0mvtkvfi4_mn8q"];
     for (const id of ids) {
       await cp(join(V2, id), join(dir, ".kodel", "runs", id), { recursive: true });
     }

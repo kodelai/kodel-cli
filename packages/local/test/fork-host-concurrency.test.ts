@@ -6,7 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultHistory, parsePipeline } from "@kodel-ai/pipeline-core";
@@ -20,6 +20,7 @@ import {
   SHARED_TREE_NOTE,
   SNAPSHOT_DEADLINE_MS,
 } from "../src";
+import type { CommandResult } from "../src/command";
 
 let dir: string;
 beforeEach(async () => {
@@ -189,6 +190,28 @@ const DIFFS = parsePipeline(
   ]),
 );
 
+/** A command branch with a `diff` check of its own (a snapshot at its entry) beside a plain one. */
+const SNAPPED = parsePipeline(
+  yaml([
+    "name: snapped",
+    "nodes:",
+    "  - { slug: plan, kind: agent, prompt: plan }",
+    "  - slug: a",
+    "    kind: command",
+    "    command: a",
+    '    checks: [{ kind: diff, paths: ["x.txt"], mode: changed }]',
+    "  - { slug: b, kind: command, command: b }",
+    "  - { slug: merge, kind: agent, prompt: merge, join: all }",
+    "edges:",
+    "  - { from: plan, to: a }",
+    "  - { from: plan, to: b }",
+    "  - { from: a, to: merge }",
+    "  - { from: a, to: merge, when: failed }",
+    "  - { from: b, to: merge }",
+    "  - { from: b, to: merge, when: failed }",
+  ]),
+);
+
 /** Resolves when `check` holds, or fails the test after `ms`: a regression fails instead of hanging. */
 async function until(check: () => Promise<boolean> | boolean, ms = 5_000): Promise<void> {
   const end = Date.now() + ms;
@@ -304,14 +327,65 @@ describe("t40 the host runs the branches of a fork at the same time", () => {
   });
 
   test("t40_host_no_command_effect_under_lock", async () => {
-    const { run, latch, spy } = await forkWith();
+    // without a snapshot in the decision, and with one (a `diff` check in a branch): the snapshot
+    // is taken under the lock, the commands never start under it
+    for (const spec of [LATCHED, SNAPPED]) {
+      const { run, latch, spy } = await forkWith(spec);
+      await latch.started("a#1");
+      await latch.started("b#1");
+      latch.release("a#1");
+      latch.release("b#1");
+      await run.waitForRest(5_000);
+      // the lock was taken for every decision, and no command started while it was held
+      expect(spy.held.length).toBeGreaterThan(3);
+      expect(spy.underLock).toEqual([]);
+      expect(spy.depth()).toBe(0);
+      expect((await run.state()).active.map((v) => v.node)).toEqual(["merge"]);
+    }
+  });
+
+  test("t40_host_snapshot_taken_before_commands_of_the_decision_start", async () => {
+    // The baseline of a `diff` check is the tree at the decision that entered the node: the command
+    // of that very decision must not run before the snapshot is taken, or its own writes would be in
+    // the baseline and a `changed` check would see nothing changed.
+    const order: string[] = [];
+    class Watched extends GitSnapshotter {
+      override async snapshot(...args: Parameters<GitSnapshotter["snapshot"]>): Promise<string> {
+        order.push("snapshot:begin");
+        const tree = await super.snapshot(...args);
+        order.push("snapshot:end");
+        return tree;
+      }
+    }
+    const latch = createLatchRunner();
+    const spy = lockSpy();
+    const h = new LocalHost(SNAPPED, {
+      root: dir,
+      heartbeatMs: 0,
+      snapshotter: new Watched(dir),
+      lockHooks: spy.hooks,
+      runCommand: async (command, options, context) => {
+        if (spy.depth() > 0) spy.underLock.push(context.node);
+        order.push(`command:${context.node}`);
+        if (context.node === "a") await writeFile(join(dir, "x.txt"), "written by a\n");
+        return latch.runner(command, options, context);
+      },
+    });
+    const { run } = await h.start("split the work");
+    await run.completeStep("plan", 1);
     await latch.started("a#1");
     await latch.started("b#1");
+    const firstCommand = order.findIndex((e) => e.startsWith("command:"));
+    expect(order.slice(0, firstCommand)).toContain("snapshot:end");
+    expect(order.slice(firstCommand)).not.toContain("snapshot:begin");
+    expect(spy.underLock).toEqual([]);
     latch.release("a#1");
     latch.release("b#1");
     await run.waitForRest(5_000);
-    // the lock was taken for every decision, and no command started while it was held
-    expect(spy.held.length).toBeGreaterThan(3);
+    // the check compared against the tree before a's write: x.txt counts as changed
+    const state = await run.state();
+    expect(state.forks?.f1?.arrived.a).toMatchObject({ node: "a", label: "passed" });
+    expect(state.active.map((v) => v.node)).toEqual(["merge"]);
     expect(spy.underLock).toEqual([]);
     expect(spy.depth()).toBe(0);
   });
@@ -823,5 +897,151 @@ describe("t40 the shared tree at a gate and at a hand-in", () => {
     )) {
       expect(await readFile(join(runDir(run.runId), file), "utf8"), file).not.toContain(SECRET);
     }
+  });
+
+  test("t40_every_written_string_is_clean", async () => {
+    // A secret is planted in every text a fork run composes new fields from: the task (rendered
+    // into the prompts the answers carry), a note, a summary, a command's output (the failed
+    // branch's reason: `branch_settled`, the join's feedbacks), a person's rejection (the restarted
+    // branch's feedback), a completion by a stranger (`step_claim_conflict`), and the reason of a
+    // run that fails on a dead branch. No file of the run and no answer carries it.
+    const clean = parsePipeline(
+      yaml([
+        "name: clean",
+        "nodes:",
+        "  - { slug: plan, kind: agent, prompt: 'plan {{task}}' }",
+        "  - { slug: a, kind: agent, prompt: 'a {{task}}' }",
+        "  - { slug: a-gate, kind: human, prompt: 'a done for {{task}}?' }",
+        "  - { slug: b, kind: command, command: b }",
+        "  - { slug: merge, kind: agent, prompt: 'merge {{task}}', join: all }",
+        "edges:",
+        "  - { from: plan, to: a }",
+        "  - { from: plan, to: b }",
+        "  - { from: a, to: a-gate }",
+        "  - { from: a-gate, to: merge, when: approved }",
+        "  - { from: a-gate, to: a, when: rejected }",
+        "  - { from: b, to: merge }",
+        "  - { from: b, to: merge, when: failed }",
+      ]),
+    );
+    // the validator refuses a command branch with no way on for its failure; the state can still
+    // get there (a kept pipeline), so the spec is built from a valid one with that edge taken out
+    const routed = parsePipeline(
+      yaml([
+        "name: doomed",
+        "nodes:",
+        "  - { slug: plan, kind: agent, prompt: plan }",
+        "  - { slug: a, kind: agent, prompt: a }",
+        "  - { slug: c, kind: command, command: c }",
+        "  - { slug: merge, kind: agent, prompt: merge, join: all }",
+        "edges:",
+        "  - { from: plan, to: a }",
+        "  - { from: plan, to: c }",
+        "  - { from: a, to: merge }",
+        "  - { from: c, to: merge }",
+        "  - { from: c, to: merge, when: failed }",
+      ]),
+    );
+    const doomed = {
+      ...routed,
+      edges: routed.edges.filter((e) => !(e.from === "c" && e.when === "failed")),
+    };
+    const calls = new Map<string, number>();
+    const runCommand = async (
+      _command: string,
+      _options: unknown,
+      context: { node: string },
+    ): Promise<CommandResult> => {
+      const n = (calls.get(context.node) ?? 0) + 1;
+      calls.set(context.node, n);
+      // b fails once and passes when `restart_failed` runs it again; c (no way on) fails for good
+      const fails = context.node === "c" || n === 1;
+      return {
+        exit: fails ? 1 : 0,
+        timedOut: false,
+        aborted: false,
+        tail: fails ? `${context.node} said: key ${SECRET} rejected\n` : "",
+        truncated: false,
+        durationMs: 1,
+      };
+    };
+    const answers: unknown[] = [];
+    const say = <T>(value: T): T => {
+      answers.push(value);
+      return value;
+    };
+    const h = new LocalHost(clean, { root: dir, heartbeatMs: 0, runCommand });
+    const { run } = await h.start(`split the work (key ${SECRET})`, { history: defaultHistory() });
+    say(await run.nextStep());
+    say(await run.feedback({ category: "other", message: `note ${SECRET}`, node: "plan" }));
+    say(await run.completeStep("plan", 1, `planned with ${SECRET}`));
+    await run.waitForRest(10_000, "b");
+    expect((await run.state()).forks?.f1?.arrived.b).toMatchObject({ label: "failed" });
+    const token = say(await run.takeStep({ node: "a" }));
+    if (token.status !== "claimed") throw new Error("expected the claim");
+    say(await run.nextStep());
+    // a stranger completes a's step: the conflict is journaled, the completion counts
+    say(await run.completeStep("a", 1, `did a ${SECRET}`, undefined, undefined, "not-the-token"));
+    await run.waitForRest(10_000, "a");
+    say(await run.nextStep());
+    say(await run.decideHuman("a-gate", "rejected", `no: ${SECRET} is in the diff`));
+    const again = say(await run.nextStep());
+    expect("node" in again && again.node.reentry_feedback).toContain("[REDACTED");
+    say(await run.completeStep("a", 2, "took it out"));
+    await run.waitForRest(10_000, "a");
+    say(await run.decideHuman("a-gate", "approved"));
+    const atJoin = say(await run.nextStep());
+    expect("node" in atJoin && atJoin.node.slug).toBe("merge");
+    expect("node" in atJoin && atJoin.node.reentry_feedback).toContain("[REDACTED");
+    say(await run.completeStep("merge", 1, `fixed ${SECRET}`, "restart_failed"));
+    await run.waitForRest(10_000);
+    say(await run.completeStep("merge", 2, "all green"));
+    await run.waitForRest(10_000);
+    const state = await run.state();
+    expect(state.status).toBe("completed");
+    say(await run.nextStep());
+    say(state);
+    say(await run.report());
+
+    // a run that ends failed on a dead branch, with the branch's reason in the run's reason
+    const g = new LocalHost(doomed, { root: dir, heartbeatMs: 0, runCommand });
+    const dead = await g.start(`doomed work (key ${SECRET})`);
+    say(await dead.run.completeStep("plan", 1, `planned ${SECRET}`));
+    await dead.run.waitForRest(10_000, "c");
+    say(await dead.run.completeStep("a", 1));
+    await dead.run.waitForRest(10_000);
+    const ended = await dead.run.state();
+    expect(ended.status).toBe("failed");
+    say(await dead.run.nextStep());
+    say(ended);
+    say(await dead.run.report());
+
+    const text = JSON.stringify(answers);
+    expect(text).not.toContain(SECRET);
+    expect(text).toContain("[REDACTED");
+    for (const id of [run.runId, dead.run.runId]) {
+      const files = await readdir(runDir(id), { recursive: true });
+      expect(files.length).toBeGreaterThan(3);
+      for (const file of files) {
+        const path = join(runDir(id), file);
+        if (!(await lstat(path)).isFile()) continue;
+        expect(await readFile(path, "utf8"), `${id}/${file}`).not.toContain(SECRET);
+      }
+    }
+    // the fields were really written from the planted texts
+    const journal = await h.store.readJournal(run.runId);
+    const of = (event: string) => journal.filter((r) => r.event === event);
+    expect(JSON.stringify(of("feedback_reported"))).toContain("[REDACTED");
+    expect(JSON.stringify(of("branch_settled"))).toContain("[REDACTED");
+    expect(JSON.stringify(of("gate_decided"))).toContain("[REDACTED");
+    expect(JSON.stringify(of("join_reached")[0])).toContain("[REDACTED");
+    expect(of("step_claim_conflict")).toHaveLength(1);
+    expect(JSON.stringify(state.forks?.f1?.arrived)).not.toContain("[REDACTED"); // b passed in the end
+    expect(JSON.stringify(of("agent_completed").map((r) => r.summary))).toContain("[REDACTED");
+    const finished = (await g.store.readJournal(dead.run.runId)).find(
+      (r) => r.event === "run_finished",
+    );
+    expect(String(finished?.reason)).toContain('branch "c" failed at "c"');
+    expect(String(finished?.reason)).toContain("[REDACTED");
   });
 });

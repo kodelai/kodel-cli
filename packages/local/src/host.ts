@@ -1745,19 +1745,21 @@ export class LocalRun {
   }
 
   /**
-   * The effects of one decision. Engine work is started and not waited for. The snapshots (a `diff`
-   * baseline per branch, the tree at a gate) are taken here, under the lock, so a `diff` check that
-   * starts right after compares against the tree as it was at this very decision: one snapshot of
-   * the tree serves every key the decision asks for (a fork asks once per branch), each snapshot has a
-   * deadline and the whole set a bound, and a snapshot that fails or does not fit is recorded as
-   * missing under its key instead of failing the decision (a `diff` check against a missing baseline
-   * fails its branch and says so; a gate says it cannot tell what changed).
+   * The effects of one decision. The snapshots (a `diff` baseline per branch, the tree at a gate)
+   * are taken first, under the lock, and only then is the engine work started (and not waited for):
+   * a command of this very decision must not write into the baseline its own `diff` check is judged
+   * against. One snapshot of the tree serves every key the decision asks for (a fork asks once per
+   * branch), each snapshot has a deadline and the whole set a bound, and a snapshot that fails or
+   * does not fit is recorded as missing under its key instead of failing the decision (a `diff`
+   * check against a missing baseline fails its branch and says so; a gate says it cannot tell what
+   * changed).
    */
   private async dispatchAll(effects: Effect[]): Promise<void> {
     const { options, store } = this.host;
     const total = deadlineIn(options.dispatchDeadlineMs ?? DISPATCH_DEADLINE_MS);
     const each = options.snapshotDeadlineMs ?? SNAPSHOT_DEADLINE_MS;
     const keys: { key: string; gate: boolean }[] = [];
+    const work: Extract<Effect, { type: "run_command" | "run_check" }>[] = [];
     for (const effect of effects) {
       switch (effect.type) {
         case "take_snapshot":
@@ -1768,34 +1770,37 @@ export class LocalRun {
           break;
         case "run_command":
         case "run_check":
-          this.spawn(effect);
+          work.push(effect);
           break;
         default:
           break; // need_agent waits for the agent
       }
     }
-    if (keys.length === 0) return;
-    let tree: string | undefined;
-    let failure: string | undefined;
-    try {
-      const snapshotter = await this.snapshotter();
-      // Where the files stood when the person was asked, or where a check starts from: a gate in a
-      // directory without git has nothing to record and nothing to say, a check has.
-      if (keys.some((k) => !k.gate) || (await snapshotter.isRepo())) {
-        const left = total.remainingMs();
-        if (left <= 0) throw new Error("the time for recording the files of this decision ran out");
-        tree = await snapshotter.snapshot(deadlineIn(Math.min(each, left)));
+    if (keys.length > 0) {
+      let tree: string | undefined;
+      let failure: string | undefined;
+      try {
+        const snapshotter = await this.snapshotter();
+        // Where the files stood when the person was asked, or where a check starts from: a gate in a
+        // directory without git has nothing to record and nothing to say, a check has.
+        if (keys.some((k) => !k.gate) || (await snapshotter.isRepo())) {
+          const left = total.remainingMs();
+          if (left <= 0)
+            throw new Error("the time for recording the files of this decision ran out");
+          tree = await snapshotter.snapshot(deadlineIn(Math.min(each, left)));
+        }
+      } catch (error) {
+        failure = error instanceof Error ? error.message : String(error);
       }
-    } catch (error) {
-      failure = error instanceof Error ? error.message : String(error);
-    }
-    for (const { key } of keys) {
-      if (tree !== undefined) {
-        await store.writeSnapshot(this.runId, key, tree).catch(() => undefined);
-      } else if (failure !== undefined) {
-        await store.writeSnapshot(this.runId, `${key}!`, failure).catch(() => undefined);
+      for (const { key } of keys) {
+        if (tree !== undefined) {
+          await store.writeSnapshot(this.runId, key, tree).catch(() => undefined);
+        } else if (failure !== undefined) {
+          await store.writeSnapshot(this.runId, `${key}!`, failure).catch(() => undefined);
+        }
       }
     }
+    for (const effect of work) this.spawn(effect);
   }
 
   // engine work
@@ -2204,6 +2209,7 @@ export class LocalRun {
       ...(input.node === undefined ? {} : { node: input.node }),
       token: hash,
       ttlMs: hints.agents.claim_ttl_s * 1000,
+      maxParallel: hints.agents.max_parallel,
     });
     if (!decision.ok) {
       await this.recordRefusal("take_step", input.node, undefined, decision.error);

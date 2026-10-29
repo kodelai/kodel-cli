@@ -529,6 +529,15 @@ function validateEdges(
         return;
       }
     }
+    if (when === RESTART_FAILED) {
+      // The engine itself runs the failed branches again on that outcome; `route` never follows an
+      // edge for it, so one would be dead.
+      c.add(
+        [...base, "when"],
+        `edge from "${from}" when "${RESTART_FAILED}" is never taken: the engine runs the failed branches again on that outcome itself; leave the edge out`,
+      );
+      return;
+    }
     const key = JSON.stringify([from, to, when]);
     if (seen.has(key)) {
       c.add(base, `edge from "${from}" to "${to}" when "${when}" is listed twice`);
@@ -658,8 +667,18 @@ function validateParallel(c: Collector, nodes: NodeSpec[], edges: EdgeSpec[], re
     );
     const inside = (slug: string) => branches.some((b) => b.has(slug));
     const region = new Set(branches.flatMap((b) => [...b]));
+    const forkNode = nodes[index.get(from) ?? -1];
+    const onFailure = forkNode ? labelsOf(registry, forkNode)?.failure.includes(when) : false;
 
     for (const [i, head] of heads.entries()) {
+      if (head === join && onFailure === true) {
+        // Such a branch arrives failed the moment the fork starts, and `restart_failed` would run
+        // the join itself again as a branch.
+        c.add(
+          ["edges", fork.at[i] as number],
+          `edge from "${from}" to "${join}" when "${when}" is a branch with no step of its own; on a failure label every branch of ${where} needs a step before the join`,
+        );
+      }
       if (head !== join && (after.has(head) || head === from)) {
         c.add(
           ["edges", fork.at[i] as number],
@@ -678,6 +697,19 @@ function validateParallel(c: Collector, nodes: NodeSpec[], edges: EdgeSpec[], re
         }
       }
     }
+    // The nodes of each branch from which the join can still be reached along the branch's own
+    // edges: a step that has edges but only loops (a -> b -> a) would hold the fork open for good.
+    const reaching = new Set<string>();
+    for (const edge of edges)
+      if (edge.to === join && region.has(edge.from)) reaching.add(edge.from);
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const edge of edges) {
+        if (!reaching.has(edge.to) || !region.has(edge.from) || reaching.has(edge.from)) continue;
+        reaching.add(edge.from);
+        grew = true;
+      }
+    }
     for (const slug of region) {
       const node = nodes[index.get(slug) ?? -1];
       const success = node ? labelsOf(registry, node)?.success[0] : undefined;
@@ -686,6 +718,12 @@ function validateParallel(c: Collector, nodes: NodeSpec[], edges: EdgeSpec[], re
         c.add(
           atNode(slug),
           `node "${slug}" is in a branch of ${where} and has no edge for "${success}"; every branch must reach the join "${join}"`,
+        );
+      } else if (!reaching.has(slug)) {
+        const head = heads[branches.findIndex((b) => b.has(slug))];
+        c.add(
+          atNode(slug),
+          `node "${slug}" is in the branch "${head}" of ${where} and none of its ways on leads to the join "${join}"; the branch could never arrive`,
         );
       }
       for (const edge of outs) {

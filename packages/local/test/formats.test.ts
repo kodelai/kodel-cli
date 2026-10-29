@@ -34,14 +34,14 @@ const FORMATS = resolve(
 const V1_RUNS = ["r_0mviewgvl_i1ig", "r_0mvimyn54_tc9o"];
 
 /**
- * The two format-2 runs of the `dev` pipeline, written by this engine: `r_0mvtewczh_4i2w` (the
+ * The two format-2 runs of the `dev` pipeline, written by this engine: `r_0mvtkvb70_62cd` (the
  * agent's proposal accepted mid-run and the critique step restarted on it, a note from the agent,
- * three gate decisions, the whole path to `publish`) and `r_0mvtewgdn_zfhl` (a change made in the
+ * three gate decisions, the whole path to `publish`) and `r_0mvtkvfi4_mn8q` (a change made in the
  * pipeline file accepted with nothing redone, a note, `nothing_to_change` with its gate rejected once).
  */
-const DEV_RUNS = ["r_0mvtewczh_4i2w", "r_0mvtewgdn_zfhl"];
+const DEV_RUNS = ["r_0mvtkvb70_62cd", "r_0mvtkvfi4_mn8q"];
 /** The format-2 fork run: `verify` and `test` at once, `test` failing once, the join `fix` restarting it. */
-const FORK_RUN = "r_0mvthh4vp_9gqe";
+const FORK_RUN = "r_0mvtkvgi5_esig";
 const V2_RUNS = [...DEV_RUNS, FORK_RUN];
 /** The format-2 run that stands in for "a finished run of this engine" in the tests of how a run that is read behaves. */
 const V2_RUN = DEV_RUNS[1] as string;
@@ -184,6 +184,10 @@ describe("the golden runs of the stored formats", () => {
         expect(name.endsWith("seal.json")).toBe(false);
         const text = await readFile(join(FORMATS, format, name), "utf8");
         expect(text).not.toMatch(PERSONAL_PATH);
+        // a run taken on a person's machine must not carry their agent session either: the runs are
+        // made with no `CLAUDE_CODE_SESSION_ID` in the environment, and nothing is observed from it
+        expect(text, name).not.toContain("observed-env");
+        expect(text, name).not.toMatch(/"session"\s*:\s*\{\s*"value"/);
       }
     }
   });
@@ -409,6 +413,28 @@ describe("every stored format against the current engine", () => {
         if (!decision.ok) expectRefusedClearly(decision.error);
       }
     }
+  });
+
+  test("t40_v1_refusal_names_the_agents_block_the_older_kodel_refuses", async () => {
+    // the person is sent back to the kodel that started the run; that one refuses a project config
+    // with an `agents:` block, so the refusal says so when the config has one, and only then
+    await copyRuns("v1");
+    const id = V1_RUNS[0] as string;
+    await writeFile(join(root, ".kodel", "config.yaml"), "worktree:\n  mode: off\n");
+    const plain = await refusal(storeFor().readState(id));
+    expectRefusedClearly(plain);
+    expect(plain?.message).not.toContain("agents");
+    await writeFile(
+      join(root, ".kodel", "config.yaml"),
+      "worktree:\n  mode: off\nagents:\n  max_parallel: 2\n",
+    );
+    const noted = await refusal(storeFor().readState(id));
+    expectRefusedClearly(noted);
+    expect(noted?.message).toContain("`agents:` block");
+    expect(noted?.message).toContain("config.yaml");
+    // the same through the host, where the commands read it
+    expectRefusedClearly(await refusal(hostFor().open(id)));
+    expect((await refusal(hostFor().open(id)))?.message).toContain("`agents:` block");
   });
 
   test("t40_v1_state_with_matching_hash_is_not_modified", async () => {

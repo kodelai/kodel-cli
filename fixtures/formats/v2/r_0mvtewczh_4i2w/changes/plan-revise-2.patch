@@ -1,9 +1,0 @@
-# kodel-patch v1
-diff --git a/docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md b/docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md
---- a/docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md
-+++ b/docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md
-@@ -40,3 +40,4 @@ tests: line 3 of the plan text.
- tests: line 4 of the plan text.
- tests: line 5 of the plan text.
- tests: line 6 of the plan text.
-+tests: line 7 of the plan text.

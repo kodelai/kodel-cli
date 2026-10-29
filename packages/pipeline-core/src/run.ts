@@ -555,7 +555,14 @@ export type RunEvent =
    * free step, leaves the state as it is and says so (`noop`): the host reads who holds what from
    * the state it gets back. The same hash renews the claim. `ttlMs` is the project's `claim_ttl_s`.
    */
-  | { type: "step_claimed"; node?: string; token: string; ttlMs: number }
+  | {
+      type: "step_claimed";
+      node?: string;
+      token: string;
+      ttlMs: number;
+      /** `agents.max_parallel`: a take without a node is refused while that many steps are held. */
+      maxParallel?: number;
+    }
   /**
    * Events of the agent's log were appended to the run's `agent_log/<session>.jsonl`. The stream was
    * `stream_from` bytes long before and is `stream_to` now; `first_seq`..`last_seq` are the events appended.
@@ -780,12 +787,15 @@ class Machine {
     return seen;
   }
 
-  /** The branches of a fork that `restart_failed` runs again: failed, and not by a person's rejection. */
+  /**
+   * The branches of a fork that `restart_failed` runs again: failed, not by a person's rejection, and
+   * with a step of their own (a branch that is the join itself has nothing to run again).
+   */
   private restartable(fork: ForkState | undefined): string[] {
     if (!fork) return [];
     return fork.branches.filter((branch) => {
       const failure = fork.arrived[branch]?.failure;
-      return failure !== undefined && failure.source !== "human";
+      return branch !== fork.join && failure !== undefined && failure.source !== "human";
     });
   }
 
@@ -1101,6 +1111,20 @@ class Machine {
       this.pause({ reason: "total", node: route.to, blocked: route, ...pauseFields });
       return;
     }
+    if (route.join !== undefined) {
+      // Said only when the join is really entered: a route held back at the join's attempt limit
+      // enters it later, by `resume` or a change, and is counted then.
+      const fork = this.forkState({ id: route.join, branch: route.to });
+      fork.joined += 1;
+      this.log("join_reached", {
+        fork: fork.id,
+        join: fork.join,
+        failed: fork.branches.filter((branch) => fork.arrived[branch]?.failure !== undefined),
+        ...(route.feedbacks === undefined || route.feedbacks.length === 0
+          ? {}
+          : { feedbacks: route.feedbacks }),
+      });
+    }
     this.enter(route.to, route.rework, route.feedback, route.fork, route.feedbacks);
   }
 
@@ -1209,13 +1233,6 @@ class Machine {
     const failed = fork.branches.filter((branch) => fork.arrived[branch]?.failure !== undefined);
     const feedbacks = failed.map((branch) => fork.arrived[branch]?.failure as Feedback);
     const last = Object.values(fork.arrived).at(-1) as Arrival;
-    fork.joined += 1;
-    this.log("join_reached", {
-      fork: fork.id,
-      join: fork.join,
-      failed,
-      ...(feedbacks.length === 0 ? {} : { feedbacks }),
-    });
     this.proceed({
       from: last.node,
       label: last.label,
@@ -1432,7 +1449,8 @@ class Machine {
           if (
             error instanceof KodelError &&
             error.code === "ATTEMPT_MISMATCH" &&
-            liveClaim(this.s.nodes[event.node], this.now) !== undefined
+            event.claimToken !== undefined &&
+            liveClaim(this.s.nodes[event.node], this.now)?.token === event.claimToken
           ) {
             throw fail(
               "ATTEMPT_MISMATCH",
@@ -1680,11 +1698,21 @@ class Machine {
    */
   private claim(event: Extract<RunEvent, { type: "step_claimed" }>) {
     if (this.s.status !== "running") throw fail("NODE_NOT_RUNNING", `the run is ${this.s.status}`);
-    const slug =
-      event.node ??
-      this.s.active.find(
-        (v) => v.phase === "agent" && liveClaim(this.s.nodes[v.node], this.now) === undefined,
-      )?.node;
+    const open = this.s.active.filter((v) => v.phase === "agent");
+    const held = open.filter((v) => liveClaim(this.s.nodes[v.node], this.now) !== undefined);
+    const own = held.find((v) => liveClaim(this.s.nodes[v.node], this.now)?.token === event.token);
+    // The cap `pipeline_next_step` hands steps out under holds for a take of "the next free step"
+    // too; a step named by its slug was handed out, and is taken whatever the count, and a worker
+    // renews the step it holds.
+    if (
+      event.node === undefined &&
+      own === undefined &&
+      event.maxParallel !== undefined &&
+      held.length >= event.maxParallel
+    ) {
+      throw new Repeat();
+    }
+    const slug = event.node ?? own?.node ?? open.find((v) => !held.includes(v))?.node;
     if (slug === undefined) throw new Repeat();
     const visit = this.visitFor(slug, undefined, ["agent"]);
     const run = this.run(slug);
@@ -1995,6 +2023,12 @@ class Machine {
       const pause = this.takePause((p) => p.blocked?.from === effect.node);
       const blocked = pause?.blocked;
       if (!blocked) return;
+      if (blocked.join !== undefined) {
+        // The join was held back at its attempt limit; the branches have arrived and stay arrived,
+        // so the way into the join is taken again, not the last branch's way out.
+        this.proceed(blocked);
+        return;
+      }
       // The person accepted a repair of this very failure: like `resume`, that starts the failure
       // count over, or a branch held back for failing in a row would pause again before the new
       // definition got its turn. The attempt limit is not touched: a raised one is in the pipeline.

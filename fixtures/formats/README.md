@@ -44,14 +44,14 @@ one of them (`status`, `report`, the history of the pipeline) and check that rea
 A reader was not shipped for the break from 1 to 2 (see above), so `v2/` is where the frozen history
 begins.
 
-- `r_0mvtewczh_4i2w`: the agent's proposal to change the `plan-critique` prompt, accepted while that
+- `r_0mvtkvb70_62cd`: the agent's proposal to change the `plan-critique` prompt, accepted while that
   step was being worked (`effects: [{ kind: "restart", node: "plan-critique" }]`, a superseded
   attempt); a note from the agent (`feedback_reported`); three gate decisions (the plan rejected once,
   then approved; the result approved); the whole path to `publish`, with result reports.
-- `r_0mvtewgdn_zfhl`: a change made in the run's pipeline file (the `review` prompt, a step the run
+- `r_0mvtkvfi4_mn8q`: a change made in the run's pipeline file (the `review` prompt, a step the run
   never reached: `effects: []`), accepted; a note from the agent; `plan` ending with
   `nothing_to_change` and its gate rejected once, then approved.
-- `r_0mvthh4vp_9gqe`: a run of the `fork` example pipeline (`examples/pipelines/fork.yaml` with the
+- `r_0mvtkvgi5_esig`: a run of the `fork` example pipeline (`examples/pipelines/fork.yaml` with the
   `test` command failing once): `impl`, then `verify` and `test` at the same time (two overlapping
   command branches, `fork_started`, two `branch_settled`, one of them failed), the join `fix` entered
   with the failed branch's feedback (`join_reached.failed`), `restart_failed` running `test` again,
@@ -65,7 +65,12 @@ They were made by a script in place of the agent, in a scratch repository with t
 answered by a stub (as `packages/local/test/changes-dev-yaml.test.ts` does), each run in a worktree
 of its own, so `meta.json` carries the placeholder workdir and branch. The run directories hold what
 the engine writes for such a run: `changes/` (the patch of every handed-in attempt and of the run),
-`artifacts/` (the output of the stubbed commands), `reports/`, `snapshots.json` and `specs/`.
+`artifacts/` (the output of the stubbed commands), `reports/`, `snapshots.json` and `specs/`. The
+script ran with no `CLAUDE_CODE_SESSION_ID` (or any other `CLAUDE*` variable) in its environment and
+no agent hook index in the scratch repository, so the `executor` records carry no session: a fixture
+must hold no identifier of the person who took it, and the guard test
+(`formats_no_fixture_holds_a_path_of_a_person_or_a_seal`) refuses an observed session as it refuses
+a path of a home directory.
 
 ## Later formats
 

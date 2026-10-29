@@ -396,7 +396,7 @@ export function nextStep(
   options: NextStepOptions = {},
 ): NextStep {
   const step = nextStepBase(spec, state, now, registry, options);
-  if (options.worker === true) return forWorker(step, options.waitHint !== false);
+  if (options.worker === true) return forWorker(step, spec, state, now, options);
   const may = options.agentDecisions;
   if (!may || !("waiting" in step)) return step;
   const { waiting } = step;
@@ -411,12 +411,48 @@ export function nextStep(
     : { waiting: { ...waiting, tell_the_person: waiting.tell_the_person + add } };
 }
 
-/** A worker is told to report, whatever the answer; it is never offered the person's decisions. */
-function forWorker(step: NextStep, waitHint: boolean): NextStep {
-  const tell = tellWorker(waitHint);
+/**
+ * A worker is told to report, whatever the answer; it is never offered the person's decisions, and
+ * it is handed no step but its own again (what its completion opened, a fork or a successor, is the
+ * starting agent's to hand out: the worker has no claim on it).
+ */
+function forWorker(
+  step: NextStep,
+  spec: PipelineSpec,
+  state: RunState,
+  now: number,
+  options: NextStepOptions,
+): NextStep {
+  const tell = tellWorker(options.waitHint !== false);
   if ("waiting" in step) return { waiting: { ...step.waiting, tell_the_person: tell } };
   if ("done" in step) return { ...step, tell_the_person: tell };
-  return step;
+  if (!("node" in step)) return step;
+  const { slug, steps, pipeline_change, also_waiting, note } = step.node;
+  if (slug === options.completionOf && steps === undefined) return step;
+  return {
+    running: {
+      ...(pipeline_change === undefined ? {} : { pipeline_change }),
+      ...runningBody(spec, state, now),
+      hint: `Your step is handed in and other steps are open (\`open_steps\`); they are not yours. ${tell}`,
+      open_steps: openStepsOf(state, now),
+      ...(also_waiting === undefined ? {} : { also_waiting }),
+      ...(note === undefined ? {} : { note }),
+    },
+  };
+}
+
+/** Every open agent step with the mark of the worker that holds it, for a `running` summary. */
+function openStepsOf(state: RunState, now: number): OpenStep[] {
+  return state.active
+    .filter((v) => v.phase === "agent")
+    .map((v) => {
+      const claim = liveClaim(state.nodes[v.node], now);
+      return {
+        node_slug: v.node,
+        attempt: v.attempt,
+        ...(claim === undefined ? {} : { taken_by: claim.by }),
+      };
+    });
 }
 
 /** A change the agent can name and the engine can take: it has a hash and was not refused. */
@@ -571,20 +607,11 @@ function baseStep(
   if (open.length > 0) {
     const also = alsoWaiting();
     const note = noteOf(also);
-    const openSteps = (): OpenStep[] =>
-      open.map((v) => {
-        const claim = liveClaim(state.nodes[v.node], now);
-        return {
-          node_slug: v.node,
-          attempt: v.attempt,
-          ...(claim === undefined ? {} : { taken_by: claim.by }),
-        };
-      });
     const summary = (hint: string): NextStep => ({
       running: {
         ...runningBody(spec, state, now),
         hint,
-        open_steps: openSteps(),
+        open_steps: openStepsOf(state, now),
         ...(also === undefined ? {} : { also_waiting: also }),
         ...(note === undefined ? {} : { note }),
       },

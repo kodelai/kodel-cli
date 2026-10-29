@@ -1,0 +1,13 @@
+# kodel-patch v1
+diff --git a/greeting.js b/greeting.js
+new file mode 100644
+--- /dev/null
++++ b/greeting.js
+@@ -0,0 +1 @@
++exports.greet = (name) => `hello, ${name}`;
+diff --git a/greeting.test.js b/greeting.test.js
+new file mode 100644
+--- /dev/null
++++ b/greeting.test.js
+@@ -0,0 +1 @@
++require('assert').equal(require('./greeting').greet('x'), 'hello, x');

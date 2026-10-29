@@ -1,0 +1,29 @@
+# kodel-patch v1
+diff --git a/docs/plans/document_the_kodel_wait_command_in_the_readme.md b/docs/plans/document_the_kodel_wait_command_in_the_readme.md
+--- a/docs/plans/document_the_kodel_wait_command_in_the_readme.md
++++ b/docs/plans/document_the_kodel_wait_command_in_the_readme.md
+@@ -2,7 +2,7 @@
+ 
+ ## TL;DR
+ 
+-The README already documents kodel wait.
++The README already documents kodel wait and --timeout.
+ 
+ ## Evidence
+ 
+@@ -16,3 +16,15 @@ evidence line 7
+ evidence line 8
+ evidence line 9
+ evidence line 10
++timeout line 1
++timeout line 2
++timeout line 3
++timeout line 4
++timeout line 5
++timeout line 6
++timeout line 7
++timeout line 8
++timeout line 9
++timeout line 10
++timeout line 11
++timeout line 12

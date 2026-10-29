@@ -359,8 +359,10 @@ export const TOOLS: ToolDescriptor[] = [
       "your word is not the verdict. The answer says whether the run advanced, the outcome, and what to do " +
       "next. If a check failed you get the reason and the same node again to fix. If the step lists other " +
       "`outcomes`, you may pass `outcome` to finish with one of them (the step's prompt says when); the checks " +
-      "still apply, and anything else is refused. `next` is about this step: its own rework, or a summary of " +
-      "what the run does; it never hands you another worker's step.",
+      "still apply, and anything else is refused. `next` is what this completion leaves you: this step again " +
+      "when a check failed, the step after it or the steps it forked, or a summary of what the run does; a " +
+      "step of another branch that was open already is only named in `open_steps`, never handed to you. A " +
+      "call with a `claim_token` (a worker) gets its own step again or a summary, and reports back.",
     shape: {
       run_id: runId,
       node_slug: nodeSlug,

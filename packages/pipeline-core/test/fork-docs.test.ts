@@ -109,7 +109,7 @@ describe("t40 the docs of forks", () => {
   test("t40_fixtures_readme_says_not_to_open_a_fork_run_with_the_beta", () => {
     const readme = read("fixtures", "formats", "README.md");
     expect(readme).toContain("Do not open a fork run with the beta");
-    expect(readme).toContain("r_0mvthh4vp_9gqe");
+    expect(readme).toContain("r_0mvtkvgi5_esig");
     expect(readme).toContain("restart_failed");
   });
 

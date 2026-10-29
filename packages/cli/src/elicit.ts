@@ -260,10 +260,12 @@ export function createElicitor(
     if (kind === "ack") return { ...result, dialog } as ToolResult;
     const runId = runIdOf(call);
     // If the state cannot be read now, the agent still hears what the person did. The question is
-    // asked as the caller asked it: with `node_slug` the answer is about that step, and the agent's
-    // declaration of itself (`subagents`) decides the mode as before.
+    // asked as the caller asked it: with `node_slug` the answer is about that step, the agent's
+    // declaration of itself (`subagents`) decides the mode as before, and after a completion the
+    // answer stays that completion's (its own step again or a summary, never a sibling's step).
     const nodeSlug = call.args["node_slug"];
     const declared = call.args["subagents"];
+    const completing = call.tool === "pipeline_complete_step" && typeof nodeSlug === "string";
     const fresh =
       runId === undefined
         ? undefined
@@ -275,6 +277,14 @@ export function createElicitor(
                 : {}),
               ...(isRecord(declared) && typeof declared["can"] === "boolean"
                 ? { subagents: { can: declared["can"] } }
+                : {}),
+              ...(completing
+                ? {
+                    after_completion: {
+                      node_slug: nodeSlug,
+                      worker: typeof call.args["claim_token"] === "string",
+                    },
+                  }
                 : {}),
             })
             .catch(() => undefined);

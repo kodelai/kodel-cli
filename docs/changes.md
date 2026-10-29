@@ -90,6 +90,18 @@ Each line is a limit and names the test that pins it (`policy`: it cannot be tes
 worktree that changed only text and had nothing to redact (`t36tw_run_patch_applies_on_clean_base_checkout`).
 Whether it is the case for a real run of the pipeline is checked by a person at the final gate.
 
+## A result and the pipeline version it was made under
+
+Since forks (T-40) every attempt in progress (`Visit` in `state.json`) carries `spec`: the hash of the
+pipeline version its engine work (the command, or the current check) was issued under, set again each
+time work is issued. A `command_finished`/`check_finished` result names the version it ran against
+(`specHash`); the engine keeps it when it matches the version the visit was issued under, and drops it
+only when it does not. Before, a result was dropped as soon as the run's current version differed from
+the one it named, which lost the result of a sibling branch's command in flight when a person accepted a
+change that did not touch that branch. An accepted change that leaves a node as it is does not re-issue
+its work, so that work finishes on the version it started on. `Visit.spec` is optional: a state without
+it (an attempt entered before the field) is judged against the run's current version, as before.
+
 ## Where a patch is looked for
 
 `kodel report` reads `changes/run.patch` by its name, not through the journal; it refuses a link in place of the

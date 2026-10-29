@@ -45,6 +45,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { sha256 } from "./integrity";
 import { MAX_PATCH_KB, preparePatch } from "./patch-text";
+import { CONFIG_FILE } from "./project-locate";
 
 /** The most of a patch the report reads: patches are cut at `max_kb`, so a larger file is not ours. */
 const MAX_READ_PATCH_BYTES = (MAX_PATCH_KB + 64) * 1024;
@@ -576,10 +577,27 @@ export class FileStore {
     if (v < RECORD_VERSION) {
       throw new KodelError(
         "UNSUPPORTED_FORMAT",
-        `run ${runId} was written in run-state format ${v} by an older kodel (this kodel reads ${RECORD_VERSION}); finish or cancel it with the kodel that started it`,
+        `run ${runId} was written in run-state format ${v} by an older kodel (this kodel reads ${RECORD_VERSION}); finish or cancel it with the kodel that started it${await this.olderKodelNote()}`,
       );
     }
     return { state, hash: sha256(text) };
+  }
+
+  /**
+   * What stands in the way of the older kodel the person is sent back to: it refuses a project config
+   * with an `agents:` block (forks), so the person is told to set it aside while they finish the run.
+   * Read from the file's text, not parsed: this is a note on a refusal, never a reason for one.
+   */
+  private async olderKodelNote(): Promise<string> {
+    let text: string;
+    try {
+      text = await readFile(join(this.options.root, CONFIG_FILE), "utf8");
+    } catch {
+      return "";
+    }
+    return /^agents:/m.test(text)
+      ? ` (that kodel refuses the project config while it has an \`agents:\` block: take the block out of ${CONFIG_FILE} while you do)`
+      : "";
   }
 
   /**
