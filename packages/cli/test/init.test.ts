@@ -257,7 +257,7 @@ describe("kodel init", () => {
       "--agent",
       "codex,opencode",
       "--server-command",
-      "bun run kodel mcp",
+      "bun run kodel",
     );
     expect(await read(".codex/config.toml")).toContain('args = ["run","kodel","mcp"]');
     expect((await json("opencode.json")).mcp.kodel).toEqual({
@@ -605,18 +605,33 @@ describe("kodel init hooks", () => {
     }
   });
 
-  test("the_hook_command_is_the_server_command_with_hook_for_mcp", async () => {
-    await init(
-      {},
-      "--agent",
-      "claude-code",
-      "--server-command",
-      "bun packages/cli/src/main.ts mcp",
-    );
+  test("the_server_command_has_no_subcommand_init_adds_mcp_to_the_server_and_hook_to_the_hooks", async () => {
+    await init({}, "--agent", "claude-code", "--server-command", "bun packages/cli/src/main.ts");
+    expect((await json(".mcp.json")).mcpServers.kodel).toEqual({
+      command: "bun",
+      args: ["packages/cli/src/main.ts", "mcp"],
+    });
     const hooks = await claudeHooks();
     expect(commandsOf(hooks.SessionStart ?? [])).toEqual([
       "bun packages/cli/src/main.ts hook claude-code",
     ]);
+  });
+
+  test("a_server_command_that_ends_in_mcp_or_hook_is_refused_and_nothing_is_written", async () => {
+    for (const command of ["kodel mcp", "bun packages/cli/src/main.ts hook"]) {
+      const refused = await init({}, "--agent", "claude-code", "--server-command", command);
+      expect(refused.code).not.toBe(0);
+      expect(refused.err).toContain("without");
+      await expect(read(".mcp.json")).rejects.toThrow();
+    }
+  });
+
+  test("the_default_server_command_is_kodel_and_gets_mcp", async () => {
+    await init({}, "--agent", "claude-code");
+    expect((await json(".mcp.json")).mcpServers.kodel).toEqual({
+      command: "kodel",
+      args: ["mcp"],
+    });
   });
 
   test("codex_is_told_to_trust_the_hook_every_time_also_on_a_rerun_and_a_dry_run", async () => {

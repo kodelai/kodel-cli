@@ -57,7 +57,17 @@ function tempDir(label: string): string {
 function init(dir: string, agent: AgentName) {
   execFileSync(
     process.execPath,
-    [MAIN_TS, "init", "--agent", agent, "--yes", "--server-command", `bun ${MAIN_TS} mcp`],
+    [
+      MAIN_TS,
+      "init",
+      "--agent",
+      agent,
+      "--yes",
+      "--storage",
+      "project",
+      "--server-command",
+      `bun ${MAIN_TS}`,
+    ],
     { cwd: dir, stdio: "pipe" },
   );
 }

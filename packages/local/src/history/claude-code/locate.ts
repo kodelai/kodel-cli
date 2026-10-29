@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { type LocateOptions, type SessionRef, toTs } from "@kodel-ai/pipeline-core";
 import { SESSIONS_INDEX } from "../../hooks/session-registrar";
+import { placeOfRoot } from "../../storage-paths";
 import { streamJsonl } from "../jsonl";
 import { isFile, isInside, isKodelProject, projectWorkdirs, realOrSelf } from "../scope";
 import { AGENT_ID } from "./normalize";
@@ -73,14 +74,48 @@ async function subagentRefs(ref: SessionRef): Promise<SessionRef[]> {
     }));
 }
 
+/**
+ * Where the hook index of a project is: in the project, or with `storage: home` in its folder under
+ * `~/.kodel`. A config that names a place that cannot be used leaves the project's own index.
+ */
+async function indexOf(root: string): Promise<{ path: string; shared: boolean }> {
+  try {
+    const place = await placeOfRoot(root);
+    // In `home` mode the index may hold the sessions of another clone of the project.
+    return { path: place.sessionsPath, shared: place.mode === "home" };
+  } catch {
+    return { path: join(root, SESSIONS_INDEX), shared: false };
+  }
+}
+
+/**
+ * Where the index of a project is, when whoever builds the collector knows (the host does: it
+ * resolved the place from the config); `shared` says it may hold the sessions of other checkouts.
+ */
+export type IndexLocator = (root: string) => Promise<{ path: string; shared: boolean }>;
+
 /** The sessions the index names for this agent, or `undefined` when it has no line of it. */
-async function fromIndex(root: string, store: string): Promise<SessionRef[] | undefined> {
-  if (!(await isFile(join(root, SESSIONS_INDEX)))) return undefined;
+async function fromIndex(
+  root: string,
+  store: string,
+  locate: IndexLocator,
+): Promise<SessionRef[] | undefined> {
+  const index = await locate(root);
+  if (!(await isFile(index.path))) return undefined;
+  // A shared index lists the sessions of every clone: only the ones in this checkout and its
+  // worktrees are this project's here, and the others neither name a session nor stop the scan.
+  const workdirs = index.shared ? await projectWorkdirs(root) : undefined;
   let named = false;
   const latest = new Map<string, { path: string }>();
-  for await (const line of streamJsonl(join(root, SESSIONS_INDEX))) {
+  for await (const line of streamJsonl(index.path)) {
     const record = line as Record<string, unknown> | null;
     if (record?.["agent"] !== AGENT_ID || typeof record["session_id"] !== "string") continue;
+    if (workdirs !== undefined) {
+      const cwd = record["cwd"];
+      if (typeof cwd !== "string") continue;
+      const real = await realOrSelf(cwd);
+      if (!workdirs.some((dir) => isInside(dir, real))) continue;
+    }
     named = true;
     const path = record["transcript_path"];
     if (typeof path !== "string") continue;
@@ -134,9 +169,11 @@ export async function locateClaudeSessions(
   root: string,
   store: string,
   options: LocateOptions = {},
+  indexLocator: IndexLocator = indexOf,
 ): Promise<SessionRef[]> {
   if (!(await isKodelProject(root))) return [];
-  const parents = (await fromIndex(root, store)) ?? (await fromScan(root, store, options.signal));
+  const parents =
+    (await fromIndex(root, store, indexLocator)) ?? (await fromScan(root, store, options.signal));
   const refs: SessionRef[] = [];
   for (const parent of parents) {
     refs.push(parent, ...(await subagentRefs(parent)));

@@ -65,12 +65,21 @@ async function stableRealpath(path: string): Promise<string> {
 export class FileIntegrity implements IntegrityStore {
   private key: Promise<string>;
 
+  /**
+   * `key` replaces the one made from the path: in `home` mode the history is named by the project's
+   * id and not by where it stands, so the hashes follow it when the project moves (clones of one
+   * project, which share a history, then share its hashes too).
+   */
   constructor(
     private readonly dir: string,
     storeRoot: string,
+    key?: string,
   ) {
     // The key names the repository, so two repositories never share a hash.
-    this.key = stableRealpath(storeRoot).then((path) => sha256(path).slice(0, 16));
+    this.key =
+      key === undefined
+        ? stableRealpath(storeRoot).then((path) => sha256(path).slice(0, 16))
+        : Promise.resolve(key);
   }
 
   private async path(name: string): Promise<string> {

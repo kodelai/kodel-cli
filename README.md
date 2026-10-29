@@ -94,7 +94,9 @@ The engine knows nothing about transport or I/O, and node and check kinds are re
 That is what lets a server backend implement the same adapter interfaces later. The principles
 behind this (untrusted agent input, fail-closed, redaction on every write, humans decide trust) are in
 [AGENTS.md](https://github.com/kodelai/kodel-cli/blob/main/AGENTS.md). How Kodel reads the logs of your agent sessions is in
-[docs/history.md](https://github.com/kodelai/kodel-cli/blob/main/docs/history.md).
+[docs/history.md](https://github.com/kodelai/kodel-cli/blob/main/docs/history.md). `kodel init` keeps the history of the
+runs under `~/.kodel/projects/<id>` (`storage: home` in the config; `kodel init --storage project` keeps it in
+`.kodel/runs`, which is also what a config without the key means) ([where the history is kept](https://github.com/kodelai/kodel-cli/blob/main/docs/history.md#where-the-history-is-kept)).
 
 ## Something went wrong?
 
