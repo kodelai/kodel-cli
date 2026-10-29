@@ -69,6 +69,10 @@ describe("the artifact check", () => {
     expect(problems).toEqual([]);
     expect(seen.events).toContain("fork_started");
     expect(seen.events.filter((e) => e === "join_reached")).toHaveLength(2);
+    // both failed branches named to the join by the host, which read the state back from disk
+    expect(seen.joinFeedback).toMatch(
+      /^Branches of the fork failed: "verify" failed \(command\): .*; "test" failed \(command\): /,
+    );
     expect(seen.report.failed_branches).toBe(false);
     expect(seen.report.critical_path[0]?.fork).toBe("f1");
     expect(seen.status).toContain("status:    completed\n");

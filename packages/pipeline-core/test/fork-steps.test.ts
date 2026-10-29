@@ -431,6 +431,23 @@ describe("t40 modes", () => {
     expect(nodeOf(openFork().next()).execution?.mode).toBe("sequential");
   });
 
+  test("t40_sequential_rules_do_not_send_the_agent_to_take_its_steps", () => {
+    // An agent that took its steps one by one would, at the last one, be told that every open step
+    // is held and to wait for itself: the rules say to hand the steps in without a claim, and the
+    // held summary says how a holder gets its own step back.
+    const h = openFork();
+    const rules = nodeOf(h.next(SEQUENTIAL)).execution?.instruction ?? "";
+    expect(rules).toContain("Do not take the steps with pipeline_take_step");
+    expect(rules).toContain("pipeline_complete_step (node_slug and attempt)");
+    expect(rules).not.toContain("take it with pipeline_take_step first");
+    must(h.send(claim("a", "mine")));
+    must(h.send(claim("b", "mine")));
+    const running = runningOf(h.next(SEQUENTIAL));
+    expect(running.hint).toContain("A step you hold yourself is handed to you again");
+    expect(running.hint).toContain("node_slug");
+    expect(nodeOf(h.next({ ...SEQUENTIAL, nodeSlug: "a" })).slug).toBe("a");
+  });
+
   test("t40_mode_auto_declaration_else_sequential", () => {
     expect(resolveMode({ subagents: "auto" }, undefined)).toBe("sequential");
     expect(resolveMode({ subagents: "auto" }, { can: false })).toBe("sequential");
@@ -695,7 +712,8 @@ describe("t40 claims", () => {
     const node = nodeOf(h.next(PARALLEL));
     expect(node.steps?.find((s) => s.slug === "a")?.taken_by).toBe("w-deadbeef");
     expect(JSON.stringify(h.next(PARALLEL))).not.toContain(hash);
-    const running = runningOf((must(h.send(claim("b", "x"))), h.next(PARALLEL)));
+    must(h.send(claim("b", "x")));
+    const running = runningOf(h.next(PARALLEL));
     expect(JSON.stringify(running)).not.toContain(hash);
   });
 

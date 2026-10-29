@@ -1,8 +1,9 @@
-// A run with a fork on a built kodel (T-40): two command branches that run at the same time, one of
-// them failing once, a join that restarts the failed branch, and the commands `status` and `report`
-// opening the run afterwards. Used by check-artifact.mjs against the artifact and by the e2e test
-// against the build it makes; the commands of the pipeline are valid in a POSIX shell and in cmd.exe
-// alike (`node -e` with double quotes, no shell operators).
+// A run with a fork on a built kodel (T-40): two command branches that run at the same time, both
+// failing once, a join told of both failures (the state is written and read back between the entry
+// of the join and the answer) that restarts the failed branches, and the commands `status` and
+// `report` opening the run afterwards. Used by check-artifact.mjs against the artifact and by the e2e
+// test against the build it makes; the commands of the pipeline are valid in a POSIX shell and in
+// cmd.exe alike (`node -e` with double quotes, no shell operators).
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,10 +17,11 @@ export const FORK_PIPELINE = [
   "    prompt: make the change",
   "  - slug: verify",
   "    kind: command",
-  `    command: node -e "setTimeout(() => {}, 600)"`,
+  // the long branch: fails the first time and leaves a marker, passes the second time
+  `    command: node -e "const fs=require('fs');const first=!fs.existsSync('.verify-ran');if(first)fs.writeFileSync('.verify-ran','');setTimeout(() => process.exit(Number(first)), 600)"`,
   "  - slug: test",
   "    kind: command",
-  // fails the first time and leaves a marker, passes the second time
+  // the short branch: fails the first time and leaves a marker, passes the second time
   `    command: node -e "const fs=require('fs');if(!fs.existsSync('.test-ran')){fs.writeFileSync('.test-ran','');process.exit(1)}"`,
   "  - slug: fix",
   "    kind: agent",
@@ -103,8 +105,16 @@ export async function checkForkRun(artifact, { Client, StdioClientTransport, fai
     await untilStep("impl", 1);
     await complete("impl", 1);
     const joined = await untilStep("fix", 1);
-    if (!String(joined.node.reentry_feedback ?? "").includes('"test" failed')) {
-      fail(`the join was not told which branch failed: ${JSON.stringify(joined.node)}`);
+    // Both failures, through the real host: the state was written and read back since the join was
+    // entered, so the text must not depend on what was one object in memory.
+    const joinFeedback = String(joined.node.reentry_feedback ?? "");
+    if (!joinFeedback.startsWith("Branches of the fork failed:")) {
+      fail(`the join was not told that branches failed: ${JSON.stringify(joined.node)}`);
+    }
+    for (const branch of ["verify", "test"]) {
+      if (!joinFeedback.includes(`"${branch}" failed`)) {
+        fail(`the join was not told that "${branch}" failed: ${joinFeedback}`);
+      }
     }
     if (!(joined.node.outcomes ?? []).includes("restart_failed")) {
       fail(`the join does not offer restart_failed: ${JSON.stringify(joined.node.outcomes)}`);
@@ -131,8 +141,8 @@ export async function checkForkRun(artifact, { Client, StdioClientTransport, fai
       fail("the branches of the fork did not run at the same time");
     }
     const reached = journal.find((r) => r.event === "join_reached");
-    if (JSON.stringify(reached?.failed) !== JSON.stringify(["test"])) {
-      fail(`the first join_reached does not name the failed branch: ${JSON.stringify(reached)}`);
+    if (JSON.stringify(reached?.failed) !== JSON.stringify(["verify", "test"])) {
+      fail(`the first join_reached does not name the failed branches: ${JSON.stringify(reached)}`);
     }
     if (journal.filter((r) => r.event === "join_reached").length !== 2) {
       fail("restart_failed did not bring the join a second time");
@@ -145,19 +155,21 @@ export async function checkForkRun(artifact, { Client, StdioClientTransport, fai
         env,
       });
     const status = cli("status", runId);
-    // the failed branch was run again and passed: the run does not stand on a failed branch
+    // the failed branches were run again and passed: the run does not stand on a failed branch
     if (!status.includes("status:    completed\n") || status.includes("failed branches")) {
-      fail(`status does not show a run completed after its failed branch was redone: ${status}`);
+      fail(`status does not show a run completed after its failed branches were redone: ${status}`);
     }
-    if (!status.includes("trail:     impl > verify > test > fix > test > fix")) {
+    if (!status.includes("trail:     impl > verify > test > fix > verify > test > fix")) {
       fail(`status does not show the trail of the fork: ${status}`);
     }
     const report = JSON.parse(cli("report", runId, "--json"));
     if (report.failed_branches !== false || report.forks?.[0]?.failed?.length !== 0) {
       fail(`the report flags a failed branch that was redone: ${JSON.stringify(report.forks)}`);
     }
-    if (report.nodes?.find((n) => n.node === "test")?.attempts?.length !== 2) {
-      fail("the report does not show the two attempts of the redone branch");
+    for (const branch of ["verify", "test"]) {
+      if (report.nodes?.find((n) => n.node === branch)?.attempts?.length !== 2) {
+        fail(`the report does not show the two attempts of the redone branch "${branch}"`);
+      }
     }
     if (report.critical_path?.length !== 1 || report.critical_path[0].fork !== "f1") {
       fail(`the report has no critical path for the fork: ${JSON.stringify(report.critical_path)}`);
@@ -169,7 +181,7 @@ export async function checkForkRun(artifact, { Client, StdioClientTransport, fai
     if (report.forks?.[0]?.overlaps?.length !== 1) {
       fail(`the report does not see the overlap: ${JSON.stringify(report.forks)}`);
     }
-    return { runId, events, journal, report, status };
+    return { runId, events, journal, report, status, joinFeedback };
   } finally {
     await client.close().catch(() => {});
     rmSync(dir, { recursive: true, force: true });

@@ -707,6 +707,47 @@ describe("t40 snapshots under the lock", () => {
     expect(found.kind === "unavailable" && found.reason).toContain("ran out");
   });
 
+  test("t40_gate_is_repo_question_bounded_by_dispatch_deadline", async () => {
+    // A gate alone asks git only whether the directory is a repository. That question is asked
+    // under the lock, so a hung git there is held to the bound of the decision like a snapshot is.
+    class Hanging extends GitSnapshotter {
+      armed = false;
+      asked: (number | undefined)[] = [];
+      override async isRepo(timeoutMs?: number): Promise<boolean> {
+        if (!this.armed) return super.isRepo(timeoutMs);
+        this.asked.push(timeoutMs);
+        await new Promise((resolve) => setTimeout(resolve, Math.min(timeoutMs ?? 5_000, 5_000)));
+        throw new Error("deadline: git took longer than the time allowed");
+      }
+    }
+    const snapshotter = new Hanging(dir);
+    const spy = lockSpy();
+    const history = defaultHistory();
+    history.changes.enabled = false;
+    history.executor.enabled = false;
+    const h = new LocalHost(GATED, {
+      root: dir,
+      heartbeatMs: 0,
+      snapshotter,
+      dispatchDeadlineMs: 250,
+      lockHooks: spy.hooks,
+      runCommand: createLatchRunner().runner,
+    });
+    const { run } = await h.start("a gate under the bound", { history });
+    await run.completeStep("plan", 1);
+    snapshotter.armed = true;
+    const begun = Date.now();
+    expect((await run.completeStep("a", 1)).ok).toBe(true);
+    expect(Date.now() - begun).toBeLessThan(2_000);
+    expect(Math.max(...spy.held)).toBeLessThan(1_000);
+    expect(snapshotter.asked.length).toBeGreaterThan(0);
+    for (const timeout of snapshotter.asked) expect(timeout).toBeLessThanOrEqual(250);
+    expect((await run.state()).active.map((v) => v.node)).toEqual(["b", "a-gate"]);
+    const found = await run.changesSinceGate("a-gate");
+    expect(found.kind).toBe("unavailable");
+    expect(found.kind === "unavailable" && found.reason).toContain("deadline");
+  });
+
   test("t40_diff_check_after_failed_snapshot_fails_branch", async () => {
     const h = new LocalHost(DIFFS, {
       root: dir,

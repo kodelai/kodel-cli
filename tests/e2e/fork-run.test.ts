@@ -1,8 +1,8 @@
 /**
  * A fork run on the built binary (T-40). CI runs `bun test` before `bun run build`, so this test
  * builds `packages/cli/dist/kodel.js` itself, then drives the fork of `scripts/check-artifact-fork.mjs`
- * on it under plain Node: two command branches at the same time, one failing once, the join
- * restarting it, and `status`/`report` opening the run. The commands are valid in cmd.exe too.
+ * on it under plain Node: two command branches at the same time, both failing once, the join told of
+ * both and restarting them, and `status`/`report` opening the run. The commands are valid in cmd.exe too.
  */
 import { beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
@@ -51,8 +51,11 @@ describe("t40 a fork run on the built binary", () => {
     expect(problems).toEqual([]);
     // the journal of the real run shows the fork, the overlap and the join entered after a failure
     expect(seen.events).toContain("fork_started");
-    expect(seen.events.filter((e) => e === "branch_settled")).toHaveLength(3);
+    expect(seen.events.filter((e) => e === "branch_settled")).toHaveLength(4);
     expect(seen.events.filter((e) => e === "join_reached")).toHaveLength(2);
+    // the join was told of both failures by a host that read the state back from disk
+    expect(seen.joinFeedback).toContain('"verify" failed');
+    expect(seen.joinFeedback).toContain('"test" failed');
     const entered = seen.journal
       .filter((r) => r.event === "node_entered")
       .map((r) => [r.node, r.branch]);
@@ -61,11 +64,12 @@ describe("t40 a fork run on the built binary", () => {
       ["verify", "verify"],
       ["test", "test"],
       ["fix", undefined],
+      ["verify", "verify"],
       ["test", "test"],
       ["fix", undefined],
     ]);
     // the report of the run, from the binary's own `report --json`
-    // the failed branch was redone and passed: the run does not stand on it
+    // the failed branches were redone and passed: the run does not stand on them
     expect(seen.report.failed_branches).toBe(false);
     expect(seen.report.forks[0]?.failed).toEqual([]);
     expect(seen.report.critical_path).toEqual([

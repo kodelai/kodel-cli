@@ -907,26 +907,43 @@ describe("t40 fork machine", () => {
     expect(h.state.nodes.a?.fork).toEqual({ id: "f1", branch: "a" });
   });
 
-  test("t40_check_or_work_follow_up_refused_is_not_dropped", () => {
-    // A result of a branch's own work is never refused while the run goes: the branch cannot stall
-    // on a refusal that nobody sees.
+  test("t40_refused_follow_up_leaves_branch_open_for_a_valid_result", () => {
+    // A result of a branch's work that the engine cannot take (made under another pipeline version,
+    // or for an attempt that is not the open one) changes nothing: the branch stays open, as it was,
+    // and the result the open work really gives settles it.
     const h = openFork();
     h.release("a");
-    const b = h.state.active.find((v) => v.node === "b");
-    expect(b).toBeDefined();
     h.hold("b-test");
     must(h.send(complete("b", 1)));
     const bTest = h.state.active.find((v) => v.node === "b-test");
     expect(bTest?.phase).toBe("engine");
-    must(
+    const attempt = bTest?.attempt ?? 0;
+    const before = JSON.stringify(h.state);
+    // made under a pipeline version that is neither the run's nor the one the work was issued under
+    const stale = h.send({
+      type: "work_finished",
+      node: "b-test",
+      attempt,
+      passed: false,
+      reason: "red",
+      specHash: "another-version",
+    });
+    expect(stale.ok && stale.noop).toBe(true);
+    // for an attempt that is not open
+    const wrong = refusal(
       h.send({
         type: "work_finished",
         node: "b-test",
-        attempt: bTest?.attempt ?? 0,
-        passed: false,
-        reason: "red",
+        attempt: attempt + 1,
+        passed: true,
+        reason: "",
       }),
     );
+    expect(wrong.code).toBe("ATTEMPT_MISMATCH");
+    expect(JSON.stringify(h.state)).toBe(before);
+    expect(h.state.active.find((v) => v.node === "b-test")?.phase).toBe("engine");
+    // the real result of the open work settles the branch
+    must(h.send({ type: "work_finished", node: "b-test", attempt, passed: false, reason: "red" }));
     expect(h.state.forks?.f1?.arrived.b).toMatchObject({ node: "b-test", label: "failed" });
     expect(h.state.active.map((v) => v.node)).toEqual(["merge"]);
   });
@@ -2554,6 +2571,53 @@ describe("t40 repair in a fork", () => {
     expect(h.state.nodes["b-test"]?.consecutiveFailures).toBe(failures);
     expect(h.state.nodes["a-test"]?.status).toBe("passed");
     expect(h.state.nodes.merge?.lastFailures?.map((f) => f.from)).toEqual(["b-test"]);
+  });
+
+  test("t40_resume_at_join_tops_up_join_and_nodes_outside_its_branches_only", () => {
+    // The join is held back at its attempt limit after the loop (`ship` failed) brought the fork a
+    // second time; `plan` (outside the fork) and `b-test` (inside branch b) have used up their
+    // attempts too. The person's `resume` is the join's: it and the nodes outside the fork's branches
+    // get a fresh budget, the branches that arrived at the join asked for nothing.
+    const text = FORK.replace(
+      "    join: all\n",
+      "    join: all\n    max_attempts: 1\n    max_consecutive_failures: 1\n",
+    )
+      .replace(
+        "  - { slug: plan, kind: agent, prompt: plan }",
+        "  - { slug: plan, kind: agent, prompt: plan, max_attempts: 2, max_consecutive_failures: 2 }",
+      )
+      .replace(
+        "  - { slug: b-test, kind: command, command: b-test }",
+        "  - { slug: b-test, kind: command, command: b-test, max_attempts: 2, max_consecutive_failures: 2 }",
+      );
+    const h = host(parsePipeline(text), (effect, state) =>
+      effect.type === "run_command" && effect.node === "ship"
+        ? failed(effect, "ship is red")
+        : effect.type === "run_command" && effect.node === "b-test" && state.forks?.f2
+          ? failed(effect, "b-test is red")
+          : answer(effect),
+    );
+    h.hold("plan", "merge");
+    h.send(START);
+    h.send(complete("plan", 1));
+    must(h.send(complete("merge", 1)));
+    must(h.send(complete("plan", 2)));
+    expect(h.state.pauses).toEqual([
+      expect.objectContaining({ reason: "total", node: "merge", blocked: expect.anything() }),
+    ]);
+    expect(h.state.pauses[0]?.fork).toBeUndefined();
+    const exhausted = (slug: string, max: number) =>
+      (h.state.nodes[slug]?.attempt ?? 0) >= max + (h.state.nodes[slug]?.extraAttempts ?? 0);
+    expect(exhausted("plan", 2)).toBe(true);
+    expect(exhausted("b-test", 2)).toBe(true);
+    expect(exhausted("merge", 1)).toBe(true);
+    must(h.send({ type: "resume" }));
+    expect(h.state.pauses).toEqual([]);
+    expect(h.state.active.map((v) => v.node)).toEqual(["merge"]);
+    expect(h.state.nodes.merge?.extraAttempts).toBe(1);
+    expect(h.state.nodes.plan?.extraAttempts).toBe(2);
+    expect(h.state.nodes["b-test"]?.extraAttempts).toBe(0);
+    expect(h.state.nodes["a-test"]?.extraAttempts).toBe(0);
   });
 
   test("t40_repair_loop_works_in_open_fork", () => {

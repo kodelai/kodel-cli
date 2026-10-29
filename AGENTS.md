@@ -38,7 +38,8 @@ This repository adds these rules:
   `pipeline proposals apply|discard`: they refuse to run without a terminal and ask for a confirmation, so
   trying them only fails.
 - `kodel wait <run>` is yours: it only watches and prints one line when the person has decided, so start it
-  in the background (Claude Code: the Bash tool with `run_in_background`) when a `waiting` answer offers it,
+  in the background (Claude Code: the Bash tool with `run_in_background`) when an answer offers it (a
+  `waiting` answer, or a `node` or `running` answer whose text names it because a decision waits besides),
   end your turn, and call `pipeline_next_step` when it reports. Never poll `pipeline_next_step` in a loop to
   wait for a person. If it says `still waiting` it gave up (`--timeout`, 8 hours by default): do not start it
   again, tell the person you stopped watching. A project can turn the offer off with
@@ -49,11 +50,11 @@ This repository adds these rules:
   and give it these rules: call `pipeline_take_step` with the run id and its step's slug and keep the
   `claim_token`; if the answer is `taken`, stop; do the step where its `workdir` says; call
   `pipeline_complete_step` with `node_slug`, `attempt` and that `claim_token`; report the answer back to the
-  agent that started you as it is (`node`, `waiting`, `running`, `done` or `also_waiting`), never write to
-  the person, and never start `kodel wait` as a worker. In `sequential` mode do the steps one by one. When
-  the workers are back, call `pipeline_next_step` yourself; what waits for a person (`also_waiting` names
-  every gate and pause) is for you to tell them, with the command of each (`--node <slug>` when several
-  wait).
+  agent that started you as it is (one of `node`, `waiting`, `running` or `done`, with the `also_waiting` list
+  it may carry), never write to the person, and never start `kodel wait` as a worker. In `sequential` mode
+  do the steps one by one, without taking them. When the workers are back, call `pipeline_next_step`
+  yourself; what waits for a person (`also_waiting` names every gate and pause) is for you to tell them,
+  with the command of each (`--node <slug>` when several wait).
 
 Tasks (`docs/tasks.md`) are off unless `.kodel/config.yaml` has `tasks: { enabled: true }`; when they are on the
 server also offers the `task_*` tools. When the user asks you to "create a task" for something you should not

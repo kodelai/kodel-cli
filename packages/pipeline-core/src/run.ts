@@ -788,6 +788,22 @@ class Machine {
   }
 
   /**
+   * The nodes that are not in a branch of a fork that joins at `join`; every node when no fork that
+   * fired joins there (the node is not a join, or its fork has not fired yet).
+   */
+  private outsideBranchesOf(join: string): Set<string> | undefined {
+    const forks = Object.values(this.s.forks ?? {}).filter((f) => f.join === join);
+    if (forks.length === 0) return undefined;
+    const inside = new Set<string>();
+    for (const fork of forks) {
+      for (const branch of fork.branches) {
+        for (const slug of this.branchNodes({ id: fork.id, branch })) inside.add(slug);
+      }
+    }
+    return new Set(this.spec.nodes.map((n) => n.slug).filter((slug) => !inside.has(slug)));
+  }
+
+  /**
    * The branches of a fork that `restart_failed` runs again: failed, not by a person's rejection, and
    * with a step of their own (a branch that is the join itself has nothing to run again).
    */
@@ -2078,9 +2094,11 @@ class Machine {
     // A human saying "go on" gives a fresh budget: the node that caused the pause starts its failure
     // count over, and every node that has used up its attempts gets another `max_attempts` (a loop
     // runs through several nodes, so topping up only one would just pause again at the next). In a
-    // fork only the paused branch is meant: its sibling did not ask for anything.
+    // fork only the paused branch is meant: its sibling did not ask for anything; and a pause at the
+    // join is the join's, not the branches' that arrived at it.
     this.run(pause.node).consecutiveFailures = 0;
-    const scope = pause.fork === undefined ? undefined : this.branchNodes(pause.fork);
+    const scope =
+      pause.fork === undefined ? this.outsideBranchesOf(pause.node) : this.branchNodes(pause.fork);
     for (const spec of this.spec.nodes) {
       if (scope !== undefined && !scope.has(spec.slug) && spec.slug !== pause.node) continue;
       const run = this.run(spec.slug);

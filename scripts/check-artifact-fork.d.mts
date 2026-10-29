@@ -13,6 +13,8 @@ export interface ForkRunSeen {
     nodes: { node: string; attempts: unknown[] }[];
   };
   status: string;
+  /** The `reentry_feedback` the join was handed on its first entry, as the host answered it. */
+  joinFeedback: string;
 }
 export function checkForkRun(
   artifact: string,

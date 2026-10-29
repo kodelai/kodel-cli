@@ -296,9 +296,10 @@ const parallelRules = (waitHint: boolean) =>
 /** The rules of working several open steps one by one. */
 const SEQUENTIAL_RULES =
   "Several steps of this run are open at once (`steps`) and this project works them one by one: " +
-  "do the step in `node` (take it with pipeline_take_step first if other agents may be working this " +
-  "run, and complete it with the claim_token you get), then call pipeline_next_step for the next " +
-  "open step. Do not start subagents for the other steps.";
+  "do the step in `node` and hand it in with pipeline_complete_step (node_slug and attempt), then " +
+  "call pipeline_next_step for the next open step. Do not take the steps with pipeline_take_step: a " +
+  "claim is a worker's mark, and a step you held would not be handed to you again without its " +
+  "node_slug. Do not start subagents for the other steps.";
 
 export interface NextStepOptions {
   /** Whether a waiting answer offers the agent `kodel wait`; on unless the project turned it off. */
@@ -637,7 +638,8 @@ function baseStep(
       return summary(
         `Every open step is held by a worker (${taken.length}); there is nothing for you to do until ` +
           `one hands in. Call pipeline_next_step again with wait_s (up to ${MAX_WAIT_S}) to wait for ` +
-          "that, or wait for your workers to report.",
+          "that, or wait for your workers to report. A step you hold yourself is handed to you " +
+          "again when you ask for it with node_slug.",
       );
     }
     const maxParallel = Math.max(1, options.agents?.maxParallel ?? DEFAULT_AGENTS.max_parallel);
@@ -773,9 +775,11 @@ function agentStep(
   };
   if (spec_.name !== undefined) out.name = spec_.name;
   // A join that was reached after failures names every failed branch; its own rework (a check of
-  // the join failed) is said as for any node.
+  // the join failed) is said as for any node. Compared by value: the state is written and read back
+  // between the entry and this answer, so two objects say nothing about being the same failure.
   const branches = run?.lastFailures ?? [];
-  if (spec_.join !== undefined && branches.length > 0 && failure === branches[0]) {
+  const first = branches[0];
+  if (spec_.join !== undefined && first && failure && sameFeedback(failure, first)) {
     out.reentry_feedback = `Branches of the fork failed: ${branches.map(describeFailure).join("; ")}`;
   } else if (failure) {
     out.reentry_feedback =
@@ -850,6 +854,9 @@ const describeAlso = (also: AlsoWaiting[]) =>
     .join("; ");
 
 const checkOf = (failure: Feedback) => (failure.check_id ? ` (${failure.check_id})` : "");
+
+const sameFeedback = (a: Feedback, b: Feedback) =>
+  a.source === b.source && a.reason === b.reason && a.from === b.from && a.check_id === b.check_id;
 
 /** A failure handed on from another node, as the agent reads it. */
 const describeFailure = (failure: Feedback) =>

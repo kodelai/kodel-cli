@@ -38,9 +38,10 @@ removed or added: do not fix such a failure by regenerating the list, add a new 
 
 ## `v2/`
 
-The current run-state format (forks; `pauses[]`, `forks`, `effects[]` on `pipeline_accepted`). Two
-runs of the `dev` pipeline written by this engine, taken with the script above; the tests open every
-one of them (`status`, `report`, the history of the pipeline) and check that reading changes no byte.
+The current run-state format (forks; `pauses[]`, `forks`, `effects[]` on `pipeline_accepted`). Three
+runs written by this engine, two of the `dev` pipeline and one of the `fork` example, taken with the
+script above; the tests open every one of them (`status`, `report`, the history of the pipeline) and
+check that reading changes no byte.
 A reader was not shipped for the break from 1 to 2 (see above), so `v2/` is where the frozen history
 begins.
 

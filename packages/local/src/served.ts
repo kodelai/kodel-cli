@@ -45,9 +45,12 @@ export function servedKeyOf(
 
 const size = (file: ServedFile) => Buffer.byteLength(JSON.stringify(file, null, 2));
 
-/** The long texts that are shortened, and the objects that can only be left out. */
+/**
+ * The long texts that are shortened, and the objects that can only be left out. What a step's siblings
+ * do (`steps`, `taken_by`, the mode) is not part of a served record (`servedPart`), so it is not here.
+ */
 const TEXTS: readonly string[][] = [["prompt"], ["reentry_feedback"], ["execution", "instruction"]];
-const OBJECTS = ["result_spec", "pipeline_change", "steps"] as const;
+const OBJECTS = ["result_spec", "pipeline_change"] as const;
 
 /** The object that holds the field and the field's name, when the answer has it. */
 function at(answer: Record<string, unknown>, path: readonly string[]) {

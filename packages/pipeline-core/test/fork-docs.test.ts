@@ -88,7 +88,8 @@ describe("t40 the docs of forks", () => {
     const start = text.indexOf("## Running a pipeline on this repository");
     const end = text.indexOf("## Language");
     expect(start).toBeGreaterThan(0);
-    const driver = text.slice(start, end);
+    // the prose is wrapped by hand: a phrase is looked for across line breaks
+    const driver = text.slice(start, end).replace(/\s+/g, " ");
     for (const phrase of [
       "`steps`",
       "`execution.mode`",
@@ -96,7 +97,7 @@ describe("t40 the docs of forks", () => {
       "`claim_token`",
       "`pipeline_complete_step`",
       "report the answer back",
-      "never write to\n  the person",
+      "never write to the person",
       "never start `kodel wait` as a worker",
       "`sequential` mode",
       "`also_waiting`",

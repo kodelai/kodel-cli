@@ -133,4 +133,67 @@ describe("t40 several decisions wait at once", () => {
     const plain = nextStep(COMMANDS, clean, 5_000);
     expect("node" in plain && plain.node.reentry_feedback).toBeUndefined();
   });
+
+  test("t40_reentry_feedback_lists_all_failures_after_the_state_was_stored", () => {
+    // The host writes the state and reads it back between the entry of the join and the answer, so
+    // what the join is told must not hang on two fields being one object in memory.
+    const fails = (node: string): RunEvent => ({
+      type: "work_finished",
+      node,
+      attempt: 1,
+      passed: false,
+      reason: `${node} is red`,
+    });
+    const events: RunEvent[] = [
+      START,
+      { type: "agent_completed", node: "plan", attempt: 1 },
+      fails("a"),
+      fails("b"),
+    ];
+    const stored = JSON.parse(JSON.stringify(play(COMMANDS, events))) as RunState;
+    const step = nextStep(COMMANDS, stored, 5_000);
+    if (!("node" in step)) throw new Error("expected the join's step");
+    expect(step.node.reentry_feedback).toBe(
+      'Branches of the fork failed: "a" failed (command): a is red; "b" failed (command): b is red',
+    );
+    // the join's own rework (its check failed) is said as for any node, stored or not
+    const checked = parsePipeline(
+      yaml([
+        "name: fork",
+        "nodes:",
+        "  - { slug: plan, kind: agent, prompt: plan }",
+        "  - { slug: a, kind: command, command: a }",
+        "  - { slug: b, kind: command, command: b }",
+        "  - slug: merge",
+        "    kind: agent",
+        "    prompt: merge",
+        "    join: all",
+        "    checks: [{ kind: command, command: merge-check }]",
+        "edges:",
+        "  - { from: plan, to: a }",
+        "  - { from: plan, to: b }",
+        "  - { from: a, to: merge }",
+        "  - { from: a, to: merge, when: failed }",
+        "  - { from: b, to: merge }",
+        "  - { from: b, to: merge, when: failed }",
+      ]),
+    );
+    const reworked = play(checked, [
+      ...events,
+      { type: "agent_completed", node: "merge", attempt: 1 },
+      {
+        type: "check_finished",
+        node: "merge",
+        attempt: 1,
+        index: 0,
+        passed: false,
+        reason: "merge-check is red",
+      },
+    ]);
+    const again = nextStep(checked, JSON.parse(JSON.stringify(reworked)) as RunState, 5_000);
+    if (!("node" in again)) throw new Error("expected the join's rework step");
+    expect(again.node).toMatchObject({ slug: "merge", attempt: 2 });
+    expect(again.node.reentry_feedback).toContain("merge-check is red");
+    expect(again.node.reentry_feedback).not.toContain("Branches of the fork failed");
+  });
 });

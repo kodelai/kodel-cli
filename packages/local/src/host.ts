@@ -1782,11 +1782,16 @@ export class LocalRun {
       try {
         const snapshotter = await this.snapshotter();
         // Where the files stood when the person was asked, or where a check starts from: a gate in a
-        // directory without git has nothing to record and nothing to say, a check has.
-        if (keys.some((k) => !k.gate) || (await snapshotter.isRepo())) {
+        // directory without git has nothing to record and nothing to say, a check has. The question
+        // itself is under the bound: a hung git must not hold the lock past it.
+        const ranOut = () => new Error("the time for recording the files of this decision ran out");
+        if (total.remainingMs() <= 0) throw ranOut();
+        if (
+          keys.some((k) => !k.gate) ||
+          (await snapshotter.isRepo(Math.max(total.remainingMs(), 1)))
+        ) {
           const left = total.remainingMs();
-          if (left <= 0)
-            throw new Error("the time for recording the files of this decision ran out");
+          if (left <= 0) throw ranOut();
           tree = await snapshotter.snapshot(deadlineIn(Math.min(each, left)));
         }
       } catch (error) {
