@@ -95,17 +95,26 @@ const sameNumber = (a, b) => Math.abs(a - b) < 1e-9;
  * entry is not among the dollar amounts that follow the name, else `ok`.
  */
 export function checkEntryAgainstPage(model, entry, text) {
-  const match = modelNamePattern(model).exec(text);
-  if (match === null) return { status: "missing" };
-  const after = text.slice(match.index + match[0].length, match.index + REGION_CHARS);
-  // The row of the next model is not this model's prices.
-  const next = after.search(/\bclaude\b/i);
-  const region = next === -1 ? after : after.slice(0, next);
-  const amounts = [...region.matchAll(/\$\s?(\d+(?:\.\d+)?)/g)].map((m) => Number(m[1]));
-  const absent = PRICE_KEYS.filter(
-    (key) => typeof entry[key] === "number" && !amounts.some((a) => sameNumber(a, entry[key])),
-  );
-  return absent.length === 0 ? { status: "ok" } : { status: "changed", absent };
+  // Every place the name stands: a page names a model in its menu and in prose as well as in its price table, and the
+  // first mention is often the menu. The entry is as the page has it when one of the places holds all its prices.
+  const pattern = modelNamePattern(model);
+  const matches = [...text.matchAll(new RegExp(pattern.source, "gi"))];
+  if (matches.length === 0) return { status: "missing" };
+  let best;
+  for (const match of matches) {
+    const after = text.slice(match.index + match[0].length, match.index + REGION_CHARS);
+    // The row of the next model is not this model's prices.
+    const next = after.search(/\bclaude\b/i);
+    const region = next === -1 ? after : after.slice(0, next);
+    const amounts = [...region.matchAll(/\$\s?(\d+(?:\.\d+)?)/g)].map((m) => Number(m[1]));
+    const absent = PRICE_KEYS.filter(
+      (key) => typeof entry[key] === "number" && !amounts.some((a) => sameNumber(a, entry[key])),
+    );
+    if (absent.length === 0) return { status: "ok" };
+    // The place with the most of the prices is the one a change is reported against.
+    if (best === undefined || absent.length < best.length) best = absent;
+  }
+  return { status: "changed", absent: best };
 }
 
 async function fetchPage(url, timeoutMs) {

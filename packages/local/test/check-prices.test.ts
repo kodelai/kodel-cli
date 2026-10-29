@@ -139,10 +139,103 @@ describe("t9jrs check-prices network mode (saved pages)", () => {
     expect(run(["--nope"]).code).toBe(2);
   });
 
+  /** The shipped table with `edit` applied, as a file the script reads with `--table`. */
+  function tableWith(edit: (models: Record<string, Record<string, unknown>[]>) => void): string {
+    const table = JSON.parse(
+      readFileSync(join(root, "packages", "pipeline-core", "src", "price-table.json"), "utf8"),
+    );
+    edit(table.models);
+    const file = join(scratch, `table-${Math.random().toString(36).slice(2)}.json`);
+    writeFileSync(file, JSON.stringify(table));
+    return file;
+  }
+
   test("t9jrs_check_prices_reports_unchecked_entries (checkedAt null)", () => {
+    const table = tableWith((models) => {
+      const list = models["claude-opus-5-5"];
+      if (list?.[0] !== undefined) list[0].checkedAt = null;
+    });
+    const { out } = run(["--pages", pagesDir, "--table", table]);
+    expect(out).toContain("not yet checked (checkedAt null): claude-opus-5-5");
+    expect(out).not.toContain("claude-sonnet-5-5,");
+  });
+
+  test("t9jrs_check_prices_shipped_rows_are_all_checked", () => {
+    // every shipped row was compared with the live page; the line is for a row someone adds and does not compare
     const { out } = run(["--pages", pagesDir]);
-    expect(out).toContain("not yet checked (checkedAt null)");
-    expect(out).toContain("claude-opus-5-5");
+    expect(out).not.toContain("not yet checked");
+    for (const list of Object.values(SHIPPED_PRICES.models)) {
+      for (const entry of list) expect(entry.checkedAt).not.toBeNull();
+    }
+  });
+
+  /**
+   * A page as the live one lays it out: the menu names the models first (names only, no prices), the table row of a
+   * model is `<name> <description> $input $output $5m write $1h write $cache read`, and the 4.x tables put the amounts
+   * in another order. The amounts are compared as a set, so the order is not a part of the check.
+   */
+  function livePage(menuFirst: boolean): string {
+    const table = JSON.parse(
+      readFileSync(join(root, "packages", "pipeline-core", "src", "price-table.json"), "utf8"),
+    ) as { models: Record<string, { [key: string]: number }[]> };
+    // claude-opus-4-5 -> Claude Opus 4.5, claude-fable-5 -> Claude Fable 5
+    const display = (model: string) =>
+      model
+        .split("-")
+        .map((part) => (/^\d+$/.test(part) ? part : part.charAt(0).toUpperCase() + part.slice(1)))
+        .join(" ")
+        .replace(/(\d) (\d)/g, "$1.$2");
+    const models = Object.keys(table.models);
+    const menu = `<nav>${models.map((m) => display(m)).join(" ")} Specialized models Legacy models</nav>`;
+    const rows = models
+      .map((model) => {
+        const e = table.models[model]?.[0] as { [key: string]: number };
+        const money = (n: number | undefined) => `$${n} / MTok`;
+        return `<p>${display(model)} For long-running work ${money(e["input"])} ${money(e["output"])} ${money(e["cache_write"])} ${money(e["cache_write_1h"])} ${money(e["cache_read"])}</p>`;
+      })
+      .join("\n");
+    const dir = mkdtempSync(join(scratch, "live-"));
+    writeFileSync(join(dir, PAGE_FILE), menuFirst ? `${menu}\n${rows}` : `${rows}\n${menu}`);
+    return dir;
+  }
+
+  test("t9jrs_check_prices_every_mention_of_the_name_counts_menu_first", () => {
+    const { code, out } = run(["--pages", livePage(true)]);
+    expect(out).toContain("claude-opus-5-5: ok");
+    expect(out).toContain("claude-fable-5-1: ok");
+    expect(out).not.toContain("differs");
+    expect(code).toBe(0);
+  });
+
+  test("t9jrs_check_prices_every_mention_of_the_name_counts_menu_last", () => {
+    const { code, out } = run(["--pages", livePage(false)]);
+    expect(out).not.toContain("differs");
+    expect(code).toBe(0);
+  });
+
+  test("t9jrs_check_prices_an_earlier_mention_with_other_prices_does_not_hide_the_row", () => {
+    const dir = pagesWith(
+      (html) => `<p>Claude Opus 5.5 was once $9 / MTok and $90 / MTok</p>\n${html}`,
+    );
+    const { code, out } = run(["--pages", dir]);
+    expect(out).toContain("claude-opus-5-5: ok");
+    expect(code).toBe(0);
+  });
+
+  test("t9jrs_check_prices_a_changed_price_is_still_reported_when_the_menu_comes_first", () => {
+    const dir = livePage(true);
+    const file = join(dir, PAGE_FILE);
+    // the Sonnet 5.5 row now says $4 for its input: no mention of the name holds all of its prices
+    writeFileSync(
+      file,
+      readFileSync(file, "utf8").replace(
+        /(Claude Sonnet 5\.5 For long-running work )\$2 \/ MTok/,
+        "$1$$4 / MTok",
+      ),
+    );
+    const { code, out } = run(["--pages", dir]);
+    expect(out).toContain("claude-sonnet-5-5: differs");
+    expect(code).toBe(1);
   });
 });
 
