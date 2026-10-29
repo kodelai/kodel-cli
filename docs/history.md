@@ -131,7 +131,8 @@ is cut and followed by a hash, which is not reproduced: such a folder is found b
 The agent names the folder after the directory it really works in. A project reached through a link (on macOS the
 temporary directory is `/var/...`, a link to `/private/var/...`, and a linked home is the same) is therefore looked for
 under both names, the one as given and the real one, for the copy of the agent's log and for usage alike; what counts as the
-project's is still decided by the log's own `cwd`, so a folder of another project is refused, never read.
+project's is still decided by the log's own `cwd`, so a folder of another project is never credited (its lines are scanned for the
+run's id only, and it is refused when its own `cwd` is not in the project).
 
 The transcript does not contain every request the agent makes (titles, summaries and the like), so the totals of
 the events are a little below the agent's own. On a clean one-turn session the test accepts a difference of 10%, and
@@ -140,7 +141,11 @@ design, because it holds the requests before the run (a tool search, listing the
 after it (the final answer, the background watch). In the first real run the run held 4 / 319 / 57 612 / 534 tokens (input /
 output / cache read / cache write) and the whole turn 14 / 1 133 / 186 722 / 17 448. The real-agent test therefore builds
 its reference from the agent's own stream: the responses from the one that issued `pipeline_start` to the one that issued
-the last `pipeline_complete_step`, both included, which is what the pass credits to a run.
+the last `pipeline_complete_step`, both included, which is what the pass credits to a run. **Output is not compared:** in
+Claude Code's stream the per-message `output_tokens` is a streamed placeholder (66 in the stream against 513 in the transcript
+in the real run, while input, cache read and cache write were exactly equal), the transcript holds the final value, so the
+stream is no independent reference for it and output is only printed. The sum of input, cache read and cache write is held to
+10%, and each of them when the agent's own figure for it is at least 100 tokens.
 The transcript also undercounts uncached input and cache reads for a session with forks and subagents (a fork does not log the
 prompt it inherited, and a cache written again after it went idle is not in it): in a measured session they were 23-51% below
 Claude Code's own `/usage`, while output agreed within 1%. The 10% holds for a clean one-turn session only, and the cost of a model
@@ -389,9 +394,14 @@ carries it, so the events the other readers get and the golden fixtures are unch
 `usage_failed`, `state.usage` and `run_started.history.usage`. An engine without this change reads the journal and the state as
 plain JSON and ignores what it does not know. Every shipped price row carries `checkedAt: 2026-10-28`: that day all fourteen rows
 were compared with the live price page (the page of `https://docs.claude.com/en/docs/about-claude/pricing`, which redirects to
-`platform.claude.com`) and they match. Some of them had first been taken from the model table of the `claude-api` skill (cached
-2026-10-06), whose Sonnet 5.5 cache read price was wrong (0.20 against the 0.10 of the page; found from Claude Code's own
-`/usage`). `scripts/check-prices.mjs` is the check, and `skills/kodel-prices/` is how a maintainer runs it again; the check
-compares the dollar amounts that follow a model's name and cannot tell the columns apart. A request
+`platform.claude.com`) and they match. How they were compared differs by row: the eleven rows that had first been taken from the
+model table of the `claude-api` skill (cached 2026-10-06) were also read column by hand (that table's Sonnet 5.5 cache read price
+was wrong, 0.20 against the 0.10 of the page; found from Claude Code's own `/usage`); the three 4.5 rows were verified by the set
+comparison of the script only. The copy of the page used was fetched with `curl` on 2026-10-28 and is **not committed**, so the
+repository's fixture page (`fixtures/price-pages/`) stays hand-made and the repository itself cannot show that the live page
+parses. `scripts/check-prices.mjs` is the check, and `skills/kodel-prices/` is how a maintainer runs it again. The check compares
+the SET of dollar amounts that follow a model's name and cannot tell the columns apart; it looks at every place that names the
+model, and reports a page whose places disagree on one price of a row (a stale mention that still quotes the old set does not hide
+a changed row), but a change of several prices at once while an old mention remains is not caught. A request
 over a model's own `long_context_tokens` (200 000 unless the table says otherwise, 100 000 for `claude-haiku-5-5`) is flagged, and
 the higher price of such requests is not modelled.

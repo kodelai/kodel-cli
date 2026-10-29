@@ -133,10 +133,12 @@ Written after the review of the build. What was done differently or not done, pl
   `fixtures/price-pages/` (the saved price page) were written by hand with invented numbers; their READMEs say so. A real,
   scrubbed recording of a session with 1-hour writes was not committed. `t9jrs_saved_session_agrees_offline` therefore sums the raw
   file by an independent route and shows that nothing is lost or added; it does not show that a real agent agrees. That is the
-  env-gated `tests/agents/claude-code-usage.test.ts`, which was not run. The golden run `fixtures/usage-run/` was made by the pass of
+  env-gated `tests/agents/claude-code-usage.test.ts`, which was not run (superseded: it was run outside the sandbox, all four pass, see
+  "After the real run"). The golden run `fixtures/usage-run/` was made by the pass of
   this build over a hand-made log, outside `fixtures/formats/v1/` so that `hashes.json` is untouched; it moves under the frozen
   formats at the first release.
-- **The price table is unverified against the live page.** Every entry has `checkedAt: null`. The 4.5 rows are from the vendor's
+- **The price table is unverified against the live page.** (Superseded: all fourteen rows were compared with the live page on
+  2026-10-28 and carry that `checkedAt`; see "After the second gate rejection".) Every entry has `checkedAt: null`. The 4.5 rows are from the vendor's
   price page; every other row (Opus 4.6, 4.7, 4.8, 5 and 5.5; Sonnet 4.6, 5 and 5.5; Haiku 5.5; Fable 5 and 5.1) is from the model
   table of the `claude-api` skill, cached 2026-10-06, after the second review found that the first version of the 5.5 rows (assumed
   to be the 4.5 prices) was wrong and the third that the whole generation between them was missing. That table gives the cache read
@@ -251,8 +253,9 @@ The main stream had 126 requests in `/usage` and 125 in the transcript.
   2/10/0.2/2.5: two price tables under one revision. That is allowed only because the formats are free until the first release; after
   it, a stored cost and its revision must belong together.
 - **Real-agent tests** (`KODEL_AGENT_TESTS=1`) were run once by the builder and all four failed with a 401 (`OAuth access token is
-  invalid`) from the sandboxed test environment, before any request reached the model. They are still not run; the person runs them
-  in a logged-in terminal and puts the figures in the pull request.
+  invalid`) from the sandboxed test environment, before any request reached the model. They are still not run (superseded: run
+  outside the sandbox later, see "After the real run"); the person runs them in a logged-in terminal and puts the figures in the
+  pull request.
 
 ### After the fifth review
 
@@ -317,7 +320,8 @@ state.usage: {"sessions":{},"attempts":{},"unattributed":{"models":{},"passes":0
   is widened: the folder is only found by name, the collector still refuses a log whose own `cwd` is not in the project, and a log in
   the store that is a link to a file elsewhere is still refused. Tests (`usage.test.ts`): the session is found through a link for both
   the copy and usage (it fails without the fix), a log of an unrelated directory is still `log_missing`, and a sibling whose folder
-  name only begins with the project's name is found by name and then `refused`, with nothing read.
+  name only begins with the project's name is found by name and then `refused`; it is never credited (its lines are scanned for the
+  run's id only, before the collector's `cwd` check refuses it).
 - **The real-agent tests** built the path of the agent's own log with `projectFolderName(sandbox.dir)`, the `/var` name, so the canary
   test could not open the log even when the run was fine; they now use `realpathSync(sandbox.dir)`. The sandbox itself stays at the
   `/var` path on purpose, so that the real-agent runs exercise the link case.
@@ -335,11 +339,12 @@ state.usage: {"sessions":{},"attempts":{},"unattributed":{"models":{},"passes":0
   cache read made from `/usage` is the page's own price, and `claude-sonnet-5` is 0.20 on the page (not changed). `checkedAt` is
   `2026-10-28` on all fourteen rows and the table's `note` says how they were checked and that the check compares the amounts after a
   name, not the columns.
-- **Still not done by the builder:** the real-agent tests were not run after this fix (the main session runs them); fixtures are
+- **Still not done by the builder:** the real-agent tests were not run after this fix (the main session ran them afterwards, see
+  "After the real run"); fixtures are
   hand-made; the 1-hour share of cache writes in a real run is only what the log says; `docs/history.md` is updated for the link case
   and for `checkedAt`.
 
-## After the real run
+### After the real run
 
 The real-agent tests were run outside the sandbox after the link fix (Claude Code 2.1.312). Three of four passed: a run records usage
 for its node, the cost is reported (0.0111 against 0.0998 for the whole turn, partial false), and the canary reads the real log. The
@@ -352,9 +357,38 @@ fourth, `t9jrs_real_run_tokens_agree_with_agent`, failed, and the cause is the r
 - **Fix of the reference, not of the tolerance (Decision 5).** `tests/agents/harness.ts` now folds the agent's own `stream-json` output
   to one response per message id (`responsesOf`) and sums the window from the response that issued `pipeline_start` to the one that issued
   the last `pipeline_complete_step`, both included (`windowUsage`): the same window the pass credits, from a source apart from the
-  transcript file. The test holds the sum of the four counts to 10% and each field too when the agent's own figure for it is at least
-  100 tokens; the whole-turn figures are printed for information. Unit tests of the parsing are in `tests/agents/harness.test.ts`.
-- **What stays open.** The last response of the run is counted as it stood at the step end, so its output may be a little low; the
-  window figure is the agent's own, so a real miss beyond 10% still reopens the decision on how usage is read. The cost is compared with
-  the whole turn's `total_cost_usd`, so it is only reported and `COST_TOLERANCE` stays unset. These tests were not run again by the
-  builder after this change.
+  transcript file. Unit tests of the parsing are in `tests/agents/harness.test.ts`.
+- **Output is not compared (found by the eighth review).** The stream's per-message `output_tokens` is a streamed **placeholder**;
+  the transcript holds the final value. So the test holds only the sum of input + cache read + cache write to 10% (and each of the three
+  when the agent's own figure for it is at least 100 tokens, `comparableSum` in the harness), prints output (ours against the stream's)
+  and the whole-turn figures for information, and never asserts on output. Output is therefore **not independently checked** by
+  these tests.
+- **The final figures of the run the person ran outside the sandbox (Claude Code 2.1.312, all four tests pass):**
+  window, ours against the agent's stream: input 6 / 6, cache read 86 841 / 86 841, cache write 810 / 810 (exactly equal, so the sum of
+  these three is 87 657 on both sides); output 513 against 66, the stream's placeholder, not compared. With output counted, as the
+  test did before the eighth review, the sum was 88 170 against 87 723 (ratio 1.005), which says little because cache read dominates it.
+  The cost of the run window 0.0171 against the whole turn's `total_cost_usd` 0.1004, information only (the earlier 0.0111 against
+  0.0998 was the first run). The tolerance stayed 10%.
+- **What stays open.** The reference for output is the weak point, and the output of the last response is counted as it stood at the
+  step end (the transcript's value, which is the higher one here, not a low one: in the real run ours was 513 against the stream's 66,
+  so the stream is the low side). A real miss beyond 10% on input, cache read or cache write still reopens the decision on how usage
+  is read. The cost is compared with the whole turn's `total_cost_usd`, so it is only reported and `COST_TOLERANCE` stays unset. The
+  eighth-review change of the comparison (output left out) was made after that run and the real-agent tests were not run again by the
+  builder; the main session runs them.
+- **The window of the reference** starts at the first response that called `pipeline_start`; the pass starts at the call that carries
+  the run's id, so a first failed `pipeline_start` would make the reference wider than the pass's (fine for the one-run scenario).
+
+### After the eighth review
+
+- **`scripts/check-prices.mjs` can no longer hide a changed row behind a stale mention.** A place that looks like the model's row (three
+  amounts or more, all of the entry's prices but one) next to another place that holds all of them is reported as `differs` (exit 1,
+  with a note that another place holds all the prices). Other tables that name the model (the live page has a batch table and a worked
+  example) share few of its prices and are not a disagreement: on the saved live page all fourteen rows are still `ok`. A change of
+  several prices at once while an old mention remains is not caught; it is stated in the table `note`, `docs/history.md` and the
+  skill. Tests: a stale mention plus a one-price-changed row is `differs`, a batch table and a worked example are not.
+- **`--local` uses `realpath`** like the finder: the folders of both names (as given and real) are looked at and a log's `cwd` is
+  compared by real path; a test reaches the project through a symlink (the test's own logs are now stored under the real path, as the
+  agent does).
+- **Docs:** a folder of another project is "never credited (its lines are scanned for the run's id only)", not "never read"; the
+  `checkedAt` paragraph says the three 4.5 rows were verified by the set comparison only and that the live page copy (fetched with
+  `curl` on 2026-10-28) is not committed, so the repository's fixture page stays hand-made.
