@@ -287,3 +287,54 @@ The main stream had 126 requests in `/usage` and 125 in the transcript.
 - **Known, not changed here (3BK2 scope):** the copy of the agent's log (`agent-log.ts`) has its own `MEMO_CAP = 16`, below the 21
   candidates of a project with a full hook index, so its pass proves its sessions again at every step end; it shares the step-end
   lock with the usage pass and adds to the time before a step is judged.
+
+### After the second gate rejection
+
+The person ran the real-agent test of usage outside the sandbox (Claude Code 2.1.312, macOS) and rejected the final gate with what it
+showed. All four tests failed; a diagnostic run of the same scenario printed the journal of the run:
+
+```
+sandbox: /var/folders/n5/.../T/kodel-agent-daZ4Js
+run_started.history keys: changes, output, prompts, executor, tool_log, agent_log, usage    usage: {"enabled":true,"prices":{}}
+executor session: {"value":"9b0d7f3c-...","source":"observed-env"}
+step_served   node write attempt 1
+agent_log_failed  {"reason":"log_missing"}
+usage_failed      {"reason":"log_missing"}
+agent_completed   node write attempt 1
+state.usage: {"sessions":{},"attempts":{},"unattributed":{"models":{},"passes":0},"events":0,"failed":["log_missing"],"revisions":[]}
+```
+
+- **The cause was a link in the project's path.** The test sandbox is in `os.tmpdir()`, which on macOS is `/var/folders/...`, a link to
+  `/private/var/folders/...`, and the server was started with `--root` of that path. Claude Code names its folder after the directory it
+  really works in (`~/.claude/projects/-private-var-folders-...-kodel-agent-XXXX/<session>.jsonl`), but `findSessionLog` built the
+  folder name from the directory as given. The session was known (`observed-env`) and its log held the run's `pipeline_start` (checked
+  on the saved log: `findRunStart` found the run at offset 299 690), only the file was looked for in the wrong folder. The copy of the
+  agent's log (3BK2) has the same finder and failed the same way (`agent_log_failed: log_missing`), which was unseen until a real
+  agent ran with a root under a link. A project at `/Users/.../Code/...` has no link, which is why the session of this branch itself
+  was counted correctly.
+- **Fix:** `findSessionLog` now tries the folder of each directory as given and of its real path (`withRealNames`, in `locate.ts`),
+  for the copy of the agent's log and for usage, since both go through `SessionFinder`. Nothing about what counts as the project's
+  is widened: the folder is only found by name, the collector still refuses a log whose own `cwd` is not in the project, and a log in
+  the store that is a link to a file elsewhere is still refused. Tests (`usage.test.ts`): the session is found through a link for both
+  the copy and usage (it fails without the fix), a log of an unrelated directory is still `log_missing`, and a sibling whose folder
+  name only begins with the project's name is found by name and then `refused`, with nothing read.
+- **The real-agent tests** built the path of the agent's own log with `projectFolderName(sandbox.dir)`, the `/var` name, so the canary
+  test could not open the log even when the run was fine; they now use `realpathSync(sandbox.dir)`. The sandbox itself stays at the
+  `/var` path on purpose, so that the real-agent runs exercise the link case.
+- **`scripts/check-prices.mjs` took the first mention of a model's name.** On the live page the first mention of `Claude Opus 5.5`,
+  `Claude Sonnet 5.5`, `Claude Haiku 5.5` and `Claude Fable 5.1` is the menu, which has names and no prices, so the four rows were
+  reported as `differs` in every field although the page matches the table. The check now looks at every mention and says `ok` when
+  one of them holds all of the entry's prices (`changed`, with the mention that holds the most of them, when none does). Tests: a page
+  with the menu first, the menu last, an earlier prose mention with other prices, and a changed price that is still reported.
+- **The live page matches the table.** A saved copy of the live page (fetched with `curl`, since Node's `fetch` does not use the proxy of
+  the sandbox) was run through the fixed script: all fourteen rows are `ok`, and the columns of the 5.x rows and of Opus 5, Sonnet 5,
+  Fable 5, Sonnet 4.6 and Opus 4.6 to 4.8 were also read by hand (`$input / $output / $5-minute write / $1-hour write / $cache read`):
+  Opus 5.5 4/20/5/8/0.20, Sonnet 5.5 2/10/2.50/4/**0.10** (the page also says "0.05x on Claude Opus 5.5 and Claude Sonnet 5.5"),
+  Haiku 5.5 0.10/0.50/0.125/0.20/0.01 (and 100K tokens as the step), Fable 5.1 10/50/12.50/20/0.25, Opus 5 and the Opus 4.x rows
+  5/25/6.25/10/0.50, Sonnet 5 2/10/2.50/4/0.20, Fable 5 10/50/12.50/20/1, Sonnet 4.6 3/15/3.75/6/0.30. So the correction of the Sonnet 5.5
+  cache read made from `/usage` is the page's own price, and `claude-sonnet-5` is 0.20 on the page (not changed). `checkedAt` is
+  `2026-10-28` on all fourteen rows and the table's `note` says how they were checked and that the check compares the amounts after a
+  name, not the columns.
+- **Still not done by the builder:** the real-agent tests were not run after this fix (the main session runs them); fixtures are
+  hand-made; the 1-hour share of cache writes in a real run is only what the log says; `docs/history.md` is updated for the link case
+  and for `checkedAt`.

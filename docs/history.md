@@ -128,6 +128,10 @@ Only the sessions of Kodel projects: a directory tree with the Kodel marker (`.k
 Logs are in `$CLAUDE_CONFIG_DIR/projects/<folder>/<session>.jsonl` (`~/.claude` by default). The folder name is the
 working directory with every character that is not a letter or digit replaced by `-`; a name over 200 characters
 is cut and followed by a hash, which is not reproduced: such a folder is found by its first 200 characters.
+The agent names the folder after the directory it really works in. A project reached through a link (on macOS the
+temporary directory is `/var/...`, a link to `/private/var/...`, and a linked home is the same) is therefore looked for
+under both names, the one as given and the real one, for the copy of the agent's log and for usage alike; what counts as the
+project's is still decided by the log's own `cwd`, so a folder of another project is refused, never read.
 
 The transcript does not contain every request the agent makes (titles, summaries and the like), so the totals of
 the events are a little below the agent's own. On a clean one-turn session the test accepts a difference of 10%.
@@ -377,9 +381,11 @@ another machine than the agent's (a devcontainer) may be windowed wrongly.
 **Format.** Additive, so no release waits for it: the optional `cache_write_1h` on the `usage` event (only a read made for usage
 carries it, so the events the other readers get and the golden fixtures are unchanged), the events `usage_recorded` and
 `usage_failed`, `state.usage` and `run_started.history.usage`. An engine without this change reads the journal and the state as
-plain JSON and ignores what it does not know. The shipped prices carry `checkedAt: null`: the 4.5 rows come from the vendor's price
-page and every other row (4.6, 4.7, 4.8 and the 5.x ones) from the model table of the `claude-api` skill (cached 2026-10-06), not
-from the live page, and nobody has compared them since, except the Sonnet 5.5 cache read, which was corrected from Claude Code's own
-`/usage`. `scripts/check-prices.mjs` is the check that does, and `skills/kodel-prices/` is how a maintainer runs it. A request
+plain JSON and ignores what it does not know. Every shipped price row carries `checkedAt: 2026-10-28`: that day all fourteen rows
+were compared with the live price page (the page of `https://docs.claude.com/en/docs/about-claude/pricing`, which redirects to
+`platform.claude.com`) and they match. Some of them had first been taken from the model table of the `claude-api` skill (cached
+2026-10-06), whose Sonnet 5.5 cache read price was wrong (0.20 against the 0.10 of the page; found from Claude Code's own
+`/usage`). `scripts/check-prices.mjs` is the check, and `skills/kodel-prices/` is how a maintainer runs it again; the check
+compares the dollar amounts that follow a model's name and cannot tell the columns apart. A request
 over a model's own `long_context_tokens` (200 000 unless the table says otherwise, 100 000 for `claude-haiku-5-5`) is flagged, and
 the higher price of such requests is not modelled.
