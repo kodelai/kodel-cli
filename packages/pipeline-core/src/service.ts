@@ -91,6 +91,15 @@ export interface NextStepRequest {
 }
 
 /** What came of a worker taking a step. */
+/**
+ * What a wait with a node covers. `chain`: the node's branch and what comes after the fork, as it
+ * grows while it is waited for; a command that exits right after would lose work it left running, so
+ * a person's decision waits for all of it. `step`: the node's own engine work only; a completion
+ * through the server waits for that, the server lives on, and the agent is handed what the
+ * completion opened at once instead of after the commands of the branches it forked.
+ */
+export type WaitScope = "step" | "chain";
+
 export type TakeOutcome =
   | {
       /** `claimed`: the step is the caller's now. `renewed`: it was already, and the hold is fresh. */
@@ -152,7 +161,12 @@ export interface RunHandle {
    */
   proposeChange(input: { yaml: string; summary: string }): Promise<ProposeOutcome>;
   /** Wait until the engine's work has come to rest, but no longer than `ms`; with `node`, only that node's work. */
-  waitForRest(ms: number, node?: string): Promise<void>;
+  /**
+   * Wait for the engine's work to come to rest, no longer than `ms`. With `node`, only the work that
+   * is the caller's: the node's own (`step`), or the chain its branch leads into (`chain`, the
+   * default; see `WaitScope`).
+   */
+  waitForRest(ms: number, node?: string, scope?: WaitScope): Promise<void>;
 }
 
 /** Where a run's commands and checks run, when that is not the directory the agent started in. */
@@ -709,8 +723,9 @@ export class PipelineService {
       );
       if (!decision.ok)
         return failure(decision.error.code, decision.error.message, decision.error.issues);
-      // Only the completed node's own checks: a sibling branch's command is not this caller's wait.
-      await run.waitForRest(this.budget, input.node_slug);
+      // Only the completed node's own checks: the commands this completion led into run on while the
+      // agent is handed what it opened, and a sibling branch's command is not this caller's wait.
+      await run.waitForRest(this.budget, input.node_slug, "step");
       const node = (await run.state()).nodes[input.node_slug];
       const failed = node?.lastFailure;
       const checkFailed =

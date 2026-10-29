@@ -74,6 +74,7 @@ import {
   summarizeRun,
   type TakeOutcome,
   validateReport,
+  type WaitScope,
 } from "@kodel-ai/pipeline-core";
 import { type AgentLogRun, AgentLogWriter } from "./agent-log";
 import type { AgentLogTickers } from "./agent-log-ticker";
@@ -2029,14 +2030,15 @@ export class LocalRun {
     parked: () => number = () => 0,
     deadline = Number.POSITIVE_INFINITY,
     node?: string,
+    scope: WaitScope = "chain",
   ): Promise<void> {
-    // With a node, only the jobs of its branch (`ownWork`): what a decision about one branch led
-    // into, the whole chain of it, but not a sibling's command that may run for an hour. The jobs
-    // that record the end of the run are everyone's: a decision that ended the run waits for its
-    // patch, or a command that exits right after would lose it.
+    // With a node, only the jobs that are the caller's (`ownWork`): the node's own, or the chain its
+    // branch leads into, but never a sibling's command that may run for an hour. The jobs that record
+    // the end of the run are everyone's: a decision that ended the run waits for its patch, or a
+    // command that exits right after would lose it.
     const mine = async () => {
       if (node === undefined) return [...this.pending.keys()];
-      const own = await this.ownWork(node);
+      const own = await this.ownWork(node, scope);
       return [...this.pending]
         .filter(([job, of]) => (of !== undefined && own(of)) || this.endJobs.has(job))
         .map(([job]) => job);
@@ -2079,13 +2081,13 @@ export class LocalRun {
   }
 
   /**
-   * Which nodes' work is the caller's to wait for, having decided or completed `node`: the nodes of
-   * its branch and the nodes outside every branch (`inOwnBranch`), read from the state as it stands,
-   * since the chain the decision led into grows while it is waited for. Only another branch of an
-   * open fork is left to whoever asks next.
+   * Which nodes' work is the caller's to wait for, having decided or completed `node`. `step`: the
+   * node's own. `chain`: the nodes of its branch and the nodes outside every branch (`inOwnBranch`),
+   * read from the state as it stands, since the chain the decision led into grows while it is waited
+   * for; only another branch of an open fork is left to whoever asks next.
    */
-  private async ownWork(node: string): Promise<(of: string) => boolean> {
-    const state = await this.state().catch(() => undefined);
+  private async ownWork(node: string, scope: WaitScope): Promise<(of: string) => boolean> {
+    const state = scope === "chain" ? await this.state().catch(() => undefined) : undefined;
     if (!state) return (of) => of === node;
     return (of) => inOwnBranch(state, node, of);
   }
@@ -2093,34 +2095,40 @@ export class LocalRun {
   /**
    * Wait for the engine's work on this run to come to rest, but no longer than `ms`: the work this
    * process runs, and also work another process owns (a session still going), which is watched in
-   * the state on disk. With `node`, only the work of that node's branch and of what comes after the
-   * fork: a sibling branch goes on without the caller, who decided or completed that one node.
+   * the state on disk. With `node`, only the work that is the caller's (`WaitScope`): the node's
+   * own, or the chain its branch leads into; a sibling branch goes on without the caller, who
+   * decided or completed that one node.
    */
-  async waitForRest(ms: number, node?: string): Promise<void> {
+  async waitForRest(ms: number, node?: string, scope: WaitScope = "chain"): Promise<void> {
     if (ms <= 0) return;
     const deadline = Date.now() + ms;
-    await this.settle(() => 0, deadline, node);
+    await this.settle(() => 0, deadline, node, scope);
     // What is left is work another process owns. It is watched in the state on disk, and looked at
     // with a tick now and then, so work that has gone silent or lost its owner is started again
     // during the wait instead of after it.
     let rounds = 0;
-    while (Date.now() < deadline && (await this.engineBusy(node))) {
+    while (Date.now() < deadline && (await this.engineBusy(node, scope))) {
       await new Promise((resolve) => setTimeout(resolve, Math.min(300, deadline - Date.now())));
       if (++rounds % 4 === 0) await this.tick().catch(() => undefined);
-      await this.settle(() => 0, deadline, node); // a tick may have started work in this process
+      // a tick may have started work in this process
+      await this.settle(() => 0, deadline, node, scope);
     }
   }
 
   /**
    * Engine work is going, or every open agent step is in a worker's hands: either way the caller
-   * that waits has nothing to do until something hands in. With `node`, only the engine work of
-   * that node's branch counts (`inOwnBranch`); a sibling branch, and a claimed sibling's step, are
-   * not the caller's to wait for.
+   * that waits has nothing to do until something hands in. With `node`, only the engine work that
+   * is the caller's counts (`WaitScope`: the node's own, or its branch's chain by `inOwnBranch`); a
+   * sibling branch, and a claimed sibling's step, are not the caller's to wait for.
    */
-  private async engineBusy(node?: string): Promise<boolean> {
+  private async engineBusy(node?: string, scope: WaitScope = "chain"): Promise<boolean> {
     const state = await this.state().catch(() => undefined);
     if (!state) return false;
-    const own = state.active.filter((v) => node === undefined || inOwnBranch(state, node, v.node));
+    const own = state.active.filter(
+      (v) =>
+        node === undefined ||
+        (scope === "chain" ? inOwnBranch(state, node, v.node) : v.node === node),
+    );
     return (
       own.some((v) => v.phase === "engine" || v.phase === "checks") ||
       (node === undefined && claimedStepsOpen(state, this.host.clock()))
