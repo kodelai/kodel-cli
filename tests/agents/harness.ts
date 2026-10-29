@@ -58,6 +58,13 @@ export interface TokenCounts {
 }
 
 /**
+ * The part of a sum of the stream's counts that is a measurement: input, cache read and cache write. The stream's
+ * `output` is a streamed placeholder (see `responsesOf`), so it is left out of every comparison.
+ */
+export const comparableSum = (counts: TokenCounts): number =>
+  counts.input + counts.cacheRead + counts.cacheWrite;
+
+/**
  * One response of the agent as the `assistant` events of the stream show it: the last `usage` of its message id
  * (the stream writes one event per content block and the usage grows while it streams) and the tools it called.
  */
@@ -307,7 +314,10 @@ export function agentUsageOf(
 /**
  * The responses of a turn, from the `assistant` events of its `stream-json` output: one per message id, in the order
  * they began, with the last `usage` seen for the id and the names of the tools it called. This is the agent's own
- * account, a different source from the transcript file that the usage pass reads.
+ * account, a different source from the transcript file that the usage pass reads. **Its `output` is not a
+ * measurement:** the stream's per-message `output_tokens` is a streamed placeholder (a real run: 66 in the stream
+ * against 513 in the transcript, which holds the final value), so only input, cache read and cache write are an
+ * independent reference.
  */
 export function responsesOf(stdout: string): AgentResponse[] {
   const byId = new Map<string, AgentResponse>();
@@ -351,7 +361,10 @@ export function responsesOf(stdout: string): AgentResponse[] {
  * `pipeline_start` (the pass reads from the log line of that call, and a response is one usage) and ends at the one
  * that issued the last `pipeline_complete_step` (the step-end pass counts that response as it stands, still open).
  * Everything before (the preamble, such as a tool search) and after (the final answer, a background watch) is the
- * agent's own use of the turn, but not the run's. `undefined` when the stream has no such window.
+ * agent's own use of the turn, but not the run's. The window starts at the FIRST response that called `from`; the
+ * pass starts at the call that carries the run's id, so a first failed `pipeline_start` (a wrong pipeline name)
+ * would make this window wider than the pass's. Fine for the one-run scenario here. The `output` of the sum is the
+ * stream's placeholder (see `responsesOf`). `undefined` when the stream has no such window.
  */
 export function windowUsage(
   responses: readonly AgentResponse[],

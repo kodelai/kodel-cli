@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { agentEnv, agentUsageOf, responsesOf, windowUsage } from "./harness";
+import { agentEnv, agentUsageOf, comparableSum, responsesOf, windowUsage } from "./harness";
 
 describe("the environment the agent under test gets", () => {
   test("carries nothing that could start these scenarios again inside the sandbox", () => {
@@ -108,6 +108,14 @@ describe("the agent's own account of the responses of a turn", () => {
     const total = windowUsage(responsesOf(SAMPLE), "pipeline_start", "pipeline_complete_step");
     // m3 + m4 + m5; not the tool search and the list before, not the watch and the answer after
     expect(total).toEqual({ input: 4, output: 90, cacheRead: 27600, cacheWrite: 180 });
+  });
+
+  test("t9jrs_harness_compares_input_cache_read_and_cache_write_only_never_output", () => {
+    // the stream's output_tokens is a streamed placeholder: the sum that is held to a tolerance leaves it out
+    expect(comparableSum({ input: 4, output: 90, cacheRead: 27600, cacheWrite: 180 })).toBe(27784);
+    expect(comparableSum({ input: 4, output: 9_000_000, cacheRead: 27600, cacheWrite: 180 })).toBe(
+      27784,
+    );
   });
 
   test("t9jrs_harness_has_no_window_without_a_start_or_with_the_end_before_it", () => {

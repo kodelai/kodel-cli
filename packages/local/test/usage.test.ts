@@ -297,7 +297,7 @@ describe("usage pass", () => {
   test("t9jrs_root_through_a_symlink_refuses_a_sibling_whose_name_only_begins_with_the_projects", async () => {
     const r = await rig({ viaLink: true });
     // the agent's folder of `<project>-sibling` shares the project's name as a prefix: it is found by name, then
-    // refused because its own `cwd` is not in the project; nothing is read from it
+    // refused because its own `cwd` is not in the project, never credited (its lines are scanned for the run's id only)
     await install(logOfOtherDirectory(r.runId, `${dir}-sibling`));
     await r.run.completeStep("a", 1);
     const state = await stateOf(r);

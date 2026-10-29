@@ -5,6 +5,7 @@ import { claudeConfigDir, projectFolderName } from "../../packages/local/src/his
 import { runTotals, tokensOf } from "../../packages/pipeline-core/src";
 import {
   type AgentTurn,
+  comparableSum,
   describeCalls,
   ENABLED,
   humanHost,
@@ -12,7 +13,6 @@ import {
   makeSandbox,
   runAgentTurn,
   type Sandbox,
-  type TokenCounts,
   windowUsage,
 } from "./harness";
 
@@ -33,10 +33,13 @@ import {
  *    for the run against 14 / 1 133 / 186 722 / 17 448 for the turn. So the reference is built from the agent's own
  *    stream (`--output-format stream-json`, a source apart from the transcript file the pass reads): the sum of the
  *    responses from the one that issued `pipeline_start` to the one that issued the last `pipeline_complete_step`,
- *    both included, which is what the pass credits to the run. The sum of the four counts is held to the tolerance;
- *    a field is held to it too when the agent's own figure for it is at least MIN_FIELD (a handful of input tokens
- *    is no measure). The step-end pass counts the last response as it stood, so its output may be a little low. A
- *    miss beyond the tolerance reopens the decision on how usage is read, it is not a reason to widen the number;
+ *    both included, which is what the pass credits to the run. **Output is not compared.** In Claude Code's
+ *    stream-json the per-message `output_tokens` is a streamed placeholder (a real run: 513 in the transcript
+ *    against 66 in the stream, while input, cache read and cache write were exactly equal); the transcript holds the
+ *    final value, so the stream is no independent reference for it and it is only printed. The sum of input, cache
+ *    read and cache write is held to the tolerance; a field is held to it too when the agent's own figure for it is
+ *    at least MIN_FIELD (a handful of input tokens is no measure). A miss beyond the tolerance reopens the decision
+ *    on how usage is read, it is not a reason to widen the number;
  *  - the cost is set against `total_cost_usd` (the whole turn, so it is only reported) and its tolerance is set from
  *    the first runs.
  *
@@ -112,8 +115,8 @@ describe("Claude Code, tokens and cost of a run", () => {
         cache_read: [ours.cache_read, window.cacheRead],
         cache_write: [ours.cache_write, window.cacheWrite],
       } as const;
-      const sum = (counts: TokenCounts) =>
-        counts.input + counts.output + counts.cacheRead + counts.cacheWrite;
+      // output is left out: the stream's per-message output_tokens is a streamed placeholder (see the header)
+      const sum = comparableSum;
       const mine = sum({
         input: ours.input,
         output: ours.output,
@@ -123,8 +126,9 @@ describe("Claude Code, tokens and cost of a run", () => {
       const ratio = (a: number, b: number) => (b === 0 ? "n/a" : (a / b).toFixed(3));
       console.log(
         `t9jrs tokens, window (ours, agent's stream): ${JSON.stringify(figures)}; ` +
-          `sum ${mine} against ${sum(window)} (ratio ${ratio(mine, sum(window))}); ` +
-          `ratios ${JSON.stringify(Object.fromEntries(Object.entries(figures).map(([k, [a, b]]) => [k, ratio(a, b)])))}`,
+          `sum of input + cache read + cache write ${mine} against ${sum(window)} (ratio ${ratio(mine, sum(window))}); ` +
+          `ratios ${JSON.stringify(Object.fromEntries(Object.entries(figures).map(([k, [a, b]]) => [k, ratio(a, b)])))}; ` +
+          `output (ours ${ours.output}, the stream's placeholder ${window.output}) is information only`,
       );
       console.log(
         `t9jrs tokens, whole turn (the agent's result, information only): ${JSON.stringify(whole)}`,
@@ -135,7 +139,7 @@ describe("Claude Code, tokens and cost of a run", () => {
         `sum: ${mine} against the agent's ${sum(window)} in the same window${why}`,
       ).toBeLessThanOrEqual(TOKEN_TOLERANCE);
       for (const [name, [a, b]] of Object.entries(figures)) {
-        if (b < MIN_FIELD) continue;
+        if (name === "output" || b < MIN_FIELD) continue;
         expect(
           Math.abs(1 - a / b),
           `${name}: ${a} against the agent's ${b} in the same window${why}`,
