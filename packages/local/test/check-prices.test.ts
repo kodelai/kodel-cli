@@ -405,7 +405,8 @@ describe("t9jrs check-prices --local", () => {
     // Claude Code names the folder after the physical directory; the project is reached through a link.
     const { proj, configDir } = project([state(2 / 1.099)]);
     const link = join(scratch, `link-${Date.now()}`);
-    symlinkSync(proj, link);
+    // a directory link: on Windows a junction, which needs no privilege (a symbolic link does)
+    symlinkSync(proj, link, process.platform === "win32" ? "junction" : undefined);
     // the log of the project lies under the folder of the REAL path, the folder of the link's name does not exist
     const { code, out } = run(["--local", "--root", link, "--config-dir", configDir]);
     expect(out).toContain("compared 1 session(s)");
@@ -455,7 +456,9 @@ describe("t9jrs check-prices --local", () => {
     const { proj, configDir, folder } = project([state(0.01)]);
     const other = mkdtempSync(join(scratch, "other-"));
     const log = join(folder, "s1.jsonl");
-    writeFileSync(log, readFileSync(log, "utf8").replaceAll(proj, other));
+    // the path stands in the log as JSON text: on Windows its backslashes are doubled there
+    const asJson = (path: string) => JSON.stringify(path).slice(1, -1);
+    writeFileSync(log, readFileSync(log, "utf8").replaceAll(asJson(proj), asJson(other)));
     const { code, out } = run(["--local", "--root", proj, "--config-dir", configDir]);
     expect(code).toBe(0);
     expect(out).toContain("compared 0 session(s)");

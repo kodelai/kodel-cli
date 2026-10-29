@@ -123,7 +123,8 @@ async function rig(options: RigOptions = {}): Promise<Rig> {
   let root = dir;
   if (options.viaLink === true) {
     root = join(dirname(dir), `${basename(dir)}-link`);
-    await symlink(dir, root);
+    // a directory link: on Windows a junction, which needs no privilege (a symbolic link does)
+    await symlink(dir, root, process.platform === "win32" ? "junction" : undefined);
     links.push(root);
   }
   if (options.session !== null) env["CLAUDE_CODE_SESSION_ID"] = options.session ?? SESSION;
@@ -184,6 +185,14 @@ const install = (log: ClaudeLogBuilder) => log.install(claude);
 const stateOf = (r: Rig): Promise<RunState> => r.run.state();
 const journalOf = (r: Rig): Promise<JournalRecord[]> => r.store.readJournal(r.runId);
 
+/** The reasons the copy and the usage pass gave for not recording, for the message of a failed expectation. */
+const failuresOf = async (r: Rig): Promise<string> =>
+  JSON.stringify(
+    (await journalOf(r))
+      .filter((rec) => rec.event === "agent_log_failed" || rec.event === "usage_failed")
+      .map((rec) => `${rec.event}:${String(rec.reason)}`),
+  );
+
 describe("usage pass", () => {
   test("t9jrs_pass_counts_an_attempt_and_marks_the_open_response", async () => {
     const r = await rig();
@@ -191,7 +200,7 @@ describe("usage pass", () => {
     await r.run.completeStep("a", 1);
     const state = await stateOf(r);
     const a = state.usage?.attempts["a:1"];
-    expect(a).toBeDefined();
+    expect(a, `nothing recorded: ${await failuresOf(r)}`).toBeDefined();
     if (a === undefined) return;
     // msg_0 closed, msg_1 still open at the end of the log: counted as it stands and marked
     expect(a.last_open).toBe(true);
@@ -285,7 +294,7 @@ describe("usage pass", () => {
     await install(sessionLog(r.runId));
     await r.run.completeStep("a", 1);
     const events = (await journalOf(r)).map((rec) => rec.event);
-    expect(events).toContain("agent_log_saved");
+    expect(events, `not saved: ${await failuresOf(r)}`).toContain("agent_log_saved");
     expect(events).toContain("usage_recorded");
     expect(events).not.toContain("agent_log_failed");
     expect(events).not.toContain("usage_failed");
@@ -1361,7 +1370,7 @@ describe("usage pass: the second review", () => {
     await r.run.completeStep("a", 1);
     // both the copy and the usage pass ran...
     const events = (await journalOf(r)).map((rec) => rec.event);
-    expect(events).toContain("agent_log_saved");
+    expect(events, `not saved: ${await failuresOf(r)}`).toContain("agent_log_saved");
     expect(events).toContain("usage_recorded");
     // ...under one acquisition of the lock
     expect(taken).toBe(1);
