@@ -215,7 +215,7 @@ describe("vh9g history: the Claude Code reading of a session", () => {
         // test runs (its length, the characters of mkdtemp); the golden holds the redacted form.
         .map((e) =>
           JSON.stringify(e)
-            .replaceAll(root, "__CWD__")
+            .replaceAll(JSON.stringify(root).slice(1, -1), "__CWD__")
             .replace('"cwd":"__CWD__"', '"cwd":"[REDACTED:high-entropy]"'),
         )
         .join("\n");

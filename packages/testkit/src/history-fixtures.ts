@@ -38,7 +38,9 @@ export async function installClaudeSession(options: InstallOptions): Promise<str
     options.folder ?? claudeFolderName(options.cwd),
   );
   const rewrite = (text: string): string => {
-    let out = text.replaceAll("__CWD__", options.cwd).replaceAll(CLAUDE_FIXTURE_SESSION, sessionId);
+    let out = text
+      .replaceAll("__CWD__", JSON.stringify(options.cwd).slice(1, -1))
+      .replaceAll(CLAUDE_FIXTURE_SESSION, sessionId);
     if (options.version !== undefined)
       out = out.replaceAll('"version":"2.1.306"', `"version":"${options.version}"`);
     return out;

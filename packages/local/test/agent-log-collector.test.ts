@@ -99,7 +99,7 @@ describe("t3bk2 collector options: defaults stay as they were", () => {
     const text = (await read(collector, ref))
       .map((e) =>
         JSON.stringify(e)
-          .replaceAll(root, "__CWD__")
+          .replaceAll(JSON.stringify(root).slice(1, -1), "__CWD__")
           .replace('"cwd":"__CWD__"', '"cwd":"[REDACTED:high-entropy]"'),
       )
       .join("\n");

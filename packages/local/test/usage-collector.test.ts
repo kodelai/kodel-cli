@@ -56,7 +56,10 @@ async function tiers() {
   const root = await project();
   const folder = join(configDir, "projects", claudeFolderName(root));
   await mkdir(folder, { recursive: true });
-  const text = (await readFile(join(TIERS, "session.jsonl"), "utf8")).replaceAll("__CWD__", root);
+  const text = (await readFile(join(TIERS, "session.jsonl"), "utf8")).replaceAll(
+    "__CWD__",
+    JSON.stringify(root).slice(1, -1),
+  );
   await writeFile(join(folder, `${TIERS_SESSION}.jsonl`), text);
   const collector = claudeCodeCollector({ configDir });
   const ref = (await collector.locate(root)).find((r) => r.session_id === TIERS_SESSION);
@@ -82,7 +85,7 @@ describe("t9jrs the usage events of the collector", () => {
       const text = (await read(collector, ref))
         .map((e) =>
           JSON.stringify(e)
-            .replaceAll(root, "__CWD__")
+            .replaceAll(JSON.stringify(root).slice(1, -1), "__CWD__")
             .replace('"cwd":"__CWD__"', '"cwd":"[REDACTED:high-entropy]"'),
         )
         .join("\n");
