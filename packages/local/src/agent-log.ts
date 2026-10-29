@@ -240,8 +240,25 @@ export class AgentLogWriter {
       if (skipped !== undefined && !extra) return { ...result, skipped };
       try {
         return await this.options.store.withAgentLogLock(run.runId, input.waitMs, async (lock) => {
-          const made = skipped === undefined ? await this.pass(run, input, lock, result) : result;
-          if (extra && input.also !== undefined && (await lock.stillHeld())) await input.also(lock);
+          // The extra work does not depend on the copy: a copy that fails (a disk that is full, a file system that
+          // refuses a write) is told as before, after the extra work has had its turn under the same lock.
+          let made = result;
+          let failure: { error: unknown } | undefined;
+          if (skipped === undefined) {
+            try {
+              made = await this.pass(run, input, lock, result);
+            } catch (error) {
+              failure = { error };
+            }
+          }
+          if (extra && input.also !== undefined && (await lock.stillHeld())) {
+            try {
+              await input.also(lock);
+            } catch (error) {
+              failure ??= { error };
+            }
+          }
+          if (failure !== undefined) throw failure.error;
           return skipped === undefined ? made : { ...result, skipped };
         });
       } catch (error) {

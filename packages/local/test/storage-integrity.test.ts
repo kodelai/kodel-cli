@@ -28,7 +28,8 @@ beforeEach(async () => {
   for (const root of [dir, clone]) await project(root, `storage: home\nproject_id: ${ID}\n`);
 });
 afterEach(async () => {
-  for (const path of [dir, clone, base, hashes]) await rm(path, { recursive: true, force: true });
+  for (const path of [dir, clone, base, hashes])
+    await rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 const DEMO = [

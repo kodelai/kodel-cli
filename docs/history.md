@@ -497,7 +497,7 @@ and is never shown as a run's cost.
 calls and the estimated cost with the table revisions, and the flags `complete`, `partial`, `unattributed`, `last_open`,
 `long_context`, `incomplete`, `includes subagents`; or `not_collected` with a reason: `not_captured` (the run did not ask for it),
 `disabled`, `session_unknown`, `log_missing`, `refused`, `unreadable`, `busy` (the lock was taken by another pass; said once, and
-nothing is lost because the cursor did not move; also said when the copy that carries the pass failed, or the lock was lost, before the pass could run: nothing was read), `agent_unsupported` (the
+nothing is lost because the cursor did not move; also said when the lock was lost before the pass could run: nothing was read; a copy that fails does not stop the pass, which runs after it under the same lock and tells its own failures itself), `agent_unsupported` (the
 run's agent has no collector), and, next to a report that has numbers, `cap` (the run journaled as many records as it may) and
 `record_refused` (the run's account refused a record, so the pass stopped; said once). A subagent log with no time on any entry cannot be
 told from one that began before the run: it is not guessed at and reads `unreadable`. A record written in a

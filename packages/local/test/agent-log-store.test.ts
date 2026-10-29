@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, stat, truncate, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { KodelError } from "@kodel-ai/pipeline-core";
-import { AGENT_LOG_STALE_MS, FileStore, type RunMeta } from "../src";
+import { AGENT_LOG_STALE_MS, agentLogOpenFlags, FileStore, type RunMeta } from "../src";
 
 const RUN = "r_000000001_aaaa";
 
@@ -291,5 +291,43 @@ describe("t3bk2 the lock on copying the agent's log", () => {
     expect(await store.readAgentLog(RUN, "s1", 10_000)).toBe(line(1));
     // the lock that is somebody else's now is left alone
     expect(await readFile(lockFile(store), "utf8")).toContain("other");
+  });
+});
+
+describe("t3bk2 how the stored stream is opened", () => {
+  test("t3bk2_open_flags_allow_truncating_and_never_append", () => {
+    // A handle in append mode has no right to truncate on Windows (EPERM at ftruncate), and the stream is cut to the
+    // vouched length before it is extended: neither flag may be an append flag.
+    for (const exists of [true, false]) {
+      const flags = agentLogOpenFlags(exists);
+      expect(flags.startsWith("a")).toBe(false);
+      expect(flags.endsWith("+")).toBe(true);
+    }
+    expect(agentLogOpenFlags(true)).toBe("r+");
+    // a file that is not there is made, never replaced
+    expect(agentLogOpenFlags(false)).toBe("wx+");
+  });
+
+  test("t3bk2_append_to_a_new_and_to_an_existing_stream_cuts_what_was_not_vouched_for", async () => {
+    const store = await newStore();
+    const first = await store.appendAgentLog(RUN, "s9", { length: 0 }, line(1));
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    // a pass that died before it was journaled left bytes past the vouched length: they are cut off, not kept
+    const longer = await store.appendAgentLog(
+      RUN,
+      "s9",
+      { length: first.length, tail_hash: first.tail_hash },
+      line(2) + line(3),
+    );
+    expect(longer.ok).toBe(true);
+    const again = await store.appendAgentLog(
+      RUN,
+      "s9",
+      { length: first.length, tail_hash: first.tail_hash },
+      line(4),
+    );
+    expect(again.ok).toBe(true);
+    expect(await store.readAgentLog(RUN, "s9", 10_000)).toBe(line(1) + line(4));
   });
 });
