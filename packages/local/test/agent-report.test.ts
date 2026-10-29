@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claudeFolderName, installClaudeSession } from "../../testkit/src/history-fixtures";
-import { agentUsage, lastAgentReport } from "../src/history";
+import { agentLog, agentUsage, lastAgentReport } from "../src/history";
 
 let base: string;
 let root: string;
@@ -141,5 +141,34 @@ describe("the tokens of a run", () => {
 
   test("no session, no numbers", async () => {
     expect(await agentUsage({ root, workdir, configDir, from: 0, to: Date.now() })).toBeUndefined();
+  });
+});
+
+describe("the agent's log", () => {
+  test("what it said and the tools it called, in the order it happened, each result joined to its call", async () => {
+    await installClaudeSession({ configDir, cwd: workdir });
+    const log = await agentLog({ root, workdir, configDir, from: 0, to: Date.now() });
+    expect(log?.length).toBeGreaterThan(0);
+    const entries = log ?? [];
+    const kinds = new Set(entries.map((e) => e.kind));
+    expect(kinds.has("text")).toBe(true);
+    expect(kinds.has("call")).toBe(true);
+    expect(entries.map((e) => e.ts)).toEqual([...entries.map((e) => e.ts)].sort((a, b) => a - b));
+    const answered = entries.filter((e) => e.kind === "call" && e.result !== undefined);
+    expect(answered.length).toBeGreaterThan(0);
+    expect(answered.every((e) => e.tool !== undefined && e.tool !== "")).toBe(true);
+  });
+
+  test("a run asks only for its own time, and for the last entries if there are too many", async () => {
+    await installClaudeSession({ configDir, cwd: workdir });
+    const all = (await agentLog({ root, workdir, configDir, from: 0, to: Date.now() })) ?? [];
+    const last =
+      (await agentLog({ root, workdir, configDir, from: 0, to: Date.now(), limit: 3 })) ?? [];
+    expect(last).toEqual(all.slice(-3));
+    expect(await agentLog({ root, workdir, configDir, from: 0, to: 1 })).toEqual([]);
+  });
+
+  test("no session, no log", async () => {
+    expect(await agentLog({ root, workdir, configDir, from: 0, to: Date.now() })).toBeUndefined();
   });
 });

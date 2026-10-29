@@ -164,6 +164,7 @@ interface Fake {
   reports?: Record<string, ResultReport>;
   said?: { text: string; ts: number } | undefined;
   tokens?: { tokens: number; cost?: number; approx: boolean } | undefined;
+  log?: { ts: number; kind: "text" | "you" | "call" | "subagent"; text: string }[] | undefined;
   /** Every call to `reportResult`, in order. */
   written?: { node: string; attempt: number; raw: unknown; replace: boolean }[];
   refuse?: Written;
@@ -180,6 +181,7 @@ const run = (fake: Fake = {}): GateRun => ({
   resultsOf: async (n, a) => fake.reports?.[`${n}:${a}`],
   agentReport: async () => fake.said,
   agentTokens: async () => fake.tokens,
+  agentLog: async () => fake.log,
   diffOf: async (path) =>
     path === "a.ts" ? { text: "@@ -1 +1 @@\n-x\n+y", truncated: false } : undefined,
   reportResult: async (node, attempt, raw, options) => {
@@ -385,6 +387,32 @@ describe("tui gate detail", () => {
       kind: "none",
     });
     expect((await load({ since: { kind: "no_repo" } }))?.changes).toEqual({ kind: "no_repo" });
+  });
+
+  test("the agent's log is kept as it is, and left out when it is empty or cannot be read", async () => {
+    const log = [
+      { ts: NOW - 30 * MIN, kind: "text" as const, text: "Starting." },
+      { ts: NOW - 29 * MIN, kind: "call" as const, text: "ls", tool: "Bash" },
+    ];
+    expect((await load({ log }))?.agentLog).toEqual(log);
+    expect((await load({ log: [] }))?.agentLog).toBeUndefined();
+    expect((await load())?.agentLog).toBeUndefined();
+    const broken = {
+      open: async (): Promise<GateRun> => ({
+        ...run(),
+        agentLog: async () => {
+          throw new Error("unreadable");
+        },
+      }),
+    };
+    expect((await loadGateDetail(broken, "r_1", NOW))?.agentLog).toBeUndefined();
+  });
+
+  test("each try knows when it began and when it ended, so the log can be cut to it", async () => {
+    const d = await load();
+    expect(d?.visits[3]?.attempt).toMatchObject({ from: NOW - 49 * MIN, to: NOW - 45 * MIN });
+    expect(d?.visits[7]?.attempt.from).toBe(NOW - 37 * MIN);
+    expect(d?.visits[7]?.attempt.to).toBeUndefined();
   });
 
   test("the journal is all of it, oldest first", async () => {

@@ -12,6 +12,7 @@ import {
   wrapText,
   yellow,
 } from "./ansi";
+import { firstCode, moveCode, moveHunk, type Prepared, placeOf, prepare } from "./diffview";
 import type { InputEvent } from "./input";
 import type { Loaded } from "./load";
 import {
@@ -76,6 +77,8 @@ export interface Model {
   zoom: boolean;
   /** Which part of an opened step is shown. */
   sub: number;
+  /** The row of the opened file's diff the cursor is on; -1 until it has been read. */
+  line: number;
   /** A comment being typed, or nothing. */
   input: Input | null;
   /** The diffs read so far, by `diffKey`. */
@@ -155,6 +158,7 @@ export function initialModel(
     open: false,
     zoom: false,
     sub: 0,
+    line: -1,
     input: null,
     diffs: {},
     effects: [],
@@ -313,6 +317,11 @@ function cardKey(m: Model, key: string, size: Size): Model | undefined {
   if (!found) return up || down ? scrollCard(m, size, up ? -1 : 1) : undefined;
   const onList = isListTab(m.tab) && !m.open;
   const inStep = m.open && m.tab === STEPS;
+  const reading = openDiff(m, found);
+  if (reading) {
+    const moved = readingKey(m, key, reading);
+    if (moved) return moved;
+  }
   switch (key) {
     case "tab":
       return inStep ? toSub(m, (m.sub + 1) % SUBTABS.length) : toTab(m, (m.tab + 1) % TABS.length);
@@ -326,7 +335,8 @@ function cardKey(m: Model, key: string, size: Size): Model | undefined {
         : toTab(m, Math.min(TABS.length - 1, m.tab + 1));
     case "left":
       if (inStep) return toSub(m, Math.max(0, m.sub - 1));
-      return m.tab > 0 ? toTab(m, m.tab - 1) : m;
+      // Left of the first tab is the list.
+      return m.tab > 0 ? toTab(m, m.tab - 1) : { ...m, focus: "list", zoom: false };
     case "up":
     case "k":
     case "down":
@@ -342,10 +352,12 @@ function cardKey(m: Model, key: string, size: Size): Model | undefined {
       return onList ? moveCursor(m, found.d, PAGE) : scrollCard(m, size, PAGE);
     case "enter":
       if (!onList || m.tab === COMMENTS || itemCount(found.d, m.tab) === 0) return m;
-      return wantDiff({ ...m, open: true, sub: 0, cardScroll: 0 }, found);
+      return wantDiff({ ...m, open: true, sub: 0, cardScroll: 0, line: -1 }, found);
     case "n":
     case "p":
-      return m.open ? wantDiff(moveCursor(m, found.d, key === "n" ? 1 : -1), found) : m;
+      return m.open
+        ? wantDiff({ ...moveCursor(m, found.d, key === "n" ? 1 : -1), line: -1 }, found)
+        : m;
     case "escape":
       return m.open ? { ...m, open: false, cardScroll: 0 } : { ...m, focus: "list", zoom: false };
     case "c": {
@@ -356,6 +368,60 @@ function cardKey(m: Model, key: string, size: Size): Model | undefined {
       return m.tab === COMMENTS && onList && found.d.comments.length > 0
         ? { ...m, confirm: "d", notice: "" }
         : undefined;
+    default:
+      return undefined;
+  }
+}
+
+/** The diff of the file that is open in the Code tab, once it has been read. */
+function openDiff(
+  m: Model,
+  found: { s: Session; d: GateDetail },
+): { p: Prepared; path: string } | undefined {
+  if (m.tab !== CODE || !m.open) return undefined;
+  const path = fileAt(found.d, m.cursor);
+  const diff = path === undefined ? undefined : m.diffs[diffKey(found.s.id, path)];
+  return path !== undefined && diff?.kind === "text"
+    ? { p: prepare(diff, diff.text, path), path }
+    : undefined;
+}
+
+/** The keys of a diff that is being read: a cursor over its lines. */
+function readingKey(
+  m: Model,
+  key: string,
+  reading: { p: Prepared; path: string },
+): Model | undefined {
+  const { p, path } = reading;
+  const at = m.line >= 0 ? m.line : firstCode(p);
+  const go = (line: number): Model => ({ ...m, line });
+  switch (key) {
+    case "up":
+    case "k":
+      return go(moveCode(p, at, -1));
+    case "down":
+    case "j":
+      return go(moveCode(p, at, 1));
+    case "pageup":
+    case "b":
+      return go(moveCode(p, at, -PAGE));
+    case "pagedown":
+    case " ":
+      return go(moveCode(p, at, PAGE));
+    case "[":
+      return go(moveHunk(p, at, -1));
+    case "]":
+      return go(moveHunk(p, at, 1));
+    case "g":
+      return go(firstCode(p));
+    case "G":
+      return go(moveCode(p, p.rows.length, 0));
+    case "c": {
+      const row = p.rows[at];
+      return row
+        ? { ...m, input: { text: "", severity: "major", place: placeOf(path, row) }, notice: "" }
+        : undefined;
+    }
     default:
       return undefined;
   }
@@ -458,6 +524,7 @@ function tabState(m: Model, d: GateDetail): TabState {
     cursor: Math.min(m.cursor, Math.max(0, count - 1)),
     open: m.open,
     sub: m.sub,
+    line: m.line,
   };
 }
 
@@ -475,6 +542,7 @@ function panel(m: Model, width: number, height: number): Panel {
     focused,
     diffs: m.diffs,
     runId: s.id,
+    project: m.source === "project",
   });
   const band = headerBand(s, found.d, width, glyph(s, m.frame), m.now, height < 22);
   return {
@@ -488,7 +556,7 @@ function panel(m: Model, width: number, height: number): Panel {
 /** The panel as `height` lines: the head, then the part of the body that fits. */
 function panelLines(m: Model, p: Panel, width: number, height: number): string[] {
   const room = Math.max(1, height - p.head.length);
-  const follow = p.anchor !== undefined && isListTab(m.tab) && !m.open;
+  const follow = p.anchor !== undefined;
   const scroll = follow ? (p.anchor ?? 0) - Math.floor(room / 2) : m.cardScroll;
   return [...p.head, ...cardWindow(p.body, scroll, room, width)];
 }
@@ -740,6 +808,8 @@ function hints(m: Model): string {
     if (!found) nav = `${bold("↑↓")} scroll   ${bold("Esc")} list`;
     else if (m.open && m.tab === STEPS) {
       nav = `${bold("←→")} result/changes/log   ${bold("n/p")} next/prev   ${bold("c")} comment   ${bold("Esc")} back`;
+    } else if (m.open && m.tab === CODE) {
+      nav = `${bold("↑↓")} line   ${bold("[ ]")} hunk   ${bold("n/p")} file   ${bold("c")} comment   ${bold("Esc")} back`;
     } else if (m.open) {
       nav = `${bold("↑↓")} scroll   ${bold("n/p")} next/prev   ${bold("c")} comment   ${bold("Esc")} back`;
     } else if (m.tab === COMMENTS) {

@@ -6,17 +6,20 @@ import {
   fit,
   green,
   inverse,
+  magenta,
   red,
   stripAnsi,
   visibleLength,
   wrapText,
   yellow,
 } from "./ansi";
+import { firstCode, prepare, viewDiff } from "./diffview";
 import {
   type Attempt,
   type DiffState,
   formatAge,
   type GateDetail,
+  type LogEntry,
   type Session,
   type Visit,
 } from "./session";
@@ -39,6 +42,8 @@ export interface TabState {
   open: boolean;
   /** Which part of an opened step. */
   sub: number;
+  /** The row of the diff the cursor is on; -1 until the diff has been read. */
+  line: number;
 }
 
 /** The tabs that are a list of things to select. */
@@ -61,6 +66,8 @@ export interface Context {
   /** The diffs read so far, by `diffKey`. */
   diffs: Record<string, DiffState>;
   runId: string;
+  /** Deciding is not done from here yet, so a and r only show the command. */
+  project: boolean;
 }
 
 export interface Content {
@@ -272,7 +279,7 @@ function tabText(d: GateDetail, i: number): { text: string; styled: string } {
     );
   }
   if (i === COMMENTS) return both(`${name} ${d.comments.length}`);
-  if (i === LOG) return both(`${name} ${d.journal.length}`);
+  if (i === LOG) return both(`${name} ${d.agentLog?.length ?? d.journal.length}`);
   return both(name);
 }
 
@@ -323,6 +330,9 @@ function report(d: GateDetail, ctx: Context): Content {
   out.push(...wrapText(d.prompt, width));
   for (const l of wrapText(d.instructions ?? "", width)) out.push(dim(l));
   out.push("");
+  out.push(`${bold("a")} approve   ${bold("r")} reject   ${bold("c")} add a comment`);
+  if (ctx.project) out.push(dim("(a and r show the command to run, for now)"));
+  out.push("");
   if (d.report === undefined) {
     out.push(dim("THE AGENT'S REPORT"));
     out.push(
@@ -346,15 +356,6 @@ function commentCount(d: GateDetail, path: string): number {
   return d.comments.filter((c) => c.location === path || c.location.startsWith(`${path}:`)).length;
 }
 
-function diffLine(l: string, width: number): string {
-  if (l.startsWith("+++") || l.startsWith("---")) return bold(fit(l, width));
-  if (l.startsWith("+")) return green(fit(l, width));
-  if (l.startsWith("-")) return red(fit(l, width));
-  if (l.startsWith("@@")) return cyan(fit(l, width));
-  if (l.startsWith("diff ") || l.startsWith("index ")) return dim(fit(l, width));
-  return fit(l, width);
-}
-
 function code(d: GateDetail, st: TabState, ctx: Context): Content {
   const { width } = ctx;
   const c = d.changes;
@@ -369,7 +370,7 @@ function code(d: GateDetail, st: TabState, ctx: Context): Content {
     const n = commentCount(d, file);
     out.push(
       dim(
-        `${lines} lines changed since the run began${n > 0 ? ` · ${n} comment${n === 1 ? "" : "s"}` : ""} · n/p other files · c comment`,
+        `${lines} lines changed since the run began${n > 0 ? ` · ${n} comment${n === 1 ? "" : "s"}` : ""}`,
       ),
     );
     out.push("");
@@ -380,9 +381,20 @@ function code(d: GateDetail, st: TabState, ctx: Context): Content {
     else if (diff.kind === "error")
       out.push(...wrapText(`Cannot read the diff: ${diff.message}`, width).map(red));
     else {
-      for (const l of diff.text.split("\n")) out.push(diffLine(l, width));
+      const p = prepare(diff, diff.text, file);
+      const cursor = st.line >= 0 ? st.line : firstCode(p);
+      const seen = viewDiff(p, {
+        width,
+        cursor,
+        focused: ctx.focused,
+        path: file,
+        comments: d.comments,
+      });
+      const head = out.length;
+      out.push(...seen.lines);
       if (diff.truncated)
         out.push(yellow("… the diff is cut here, it is longer than can be shown"));
+      return { lines: out.map((l) => fit(l, width)), anchor: head + seen.anchor };
     }
     return { lines: out.map((l) => fit(l, width)) };
   }
@@ -498,9 +510,7 @@ function openVisit(d: GateDetail, st: TabState, ctx: Context): Content {
       ).map((l) => dim(l)),
     );
   } else {
-    out.push(
-      ...(v.attempt.log.length === 0 ? [dim("No records.")] : v.attempt.log.map((l) => dim(l))),
-    );
+    out.push(...stepLog(d, v, ctx));
   }
   return { lines: out.map((l) => fit(l, width)) };
 }
@@ -524,6 +534,97 @@ function comments(d: GateDetail, st: TabState, ctx: Context): Content {
   return { lines: out.map((l) => fit(l, width)), anchor };
 }
 
+// ── the log: what the agent said and did ────────────────────────────────────
+
+const clock = (ts: number): string => new Date(ts).toTimeString().slice(0, 8);
+const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
+
+function bytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  return n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** What each entry looks like. A message wraps under its time; a tool call is a line and its result another. */
+function agentLines(entries: LogEntry[], width: number): string[] {
+  const out: string[] = [];
+  const indent = " ".repeat(15);
+  for (const e of entries) {
+    const at = dim(clock(e.ts));
+    if (e.kind === "text" || e.kind === "you") {
+      const who = e.kind === "text" ? bold(cyan("agent")) : bold(yellow("you  "));
+      for (const [i, l] of prose(e.text, Math.max(10, width - 15)).entries()) {
+        out.push(i === 0 ? `${at} ${who} ${l}` : `${indent}${l}`);
+      }
+    } else if (e.kind === "call") {
+      out.push(
+        fit(`${at} ${magenta("⚙")} ${bold(e.tool ?? "tool")}  ${dim(oneLine(e.text))}`, width),
+      );
+      const r = e.result;
+      if (r) {
+        const facts = [
+          r.ms === undefined ? "" : duration(r.ms),
+          r.size === undefined ? "" : bytes(r.size),
+        ]
+          .filter((x) => x !== "")
+          .join(" · ");
+        const said = r.text ? `  ${dim(oneLine(r.text))}` : "";
+        out.push(
+          fit(
+            `${indent}${r.ok ? green("↳ ok") : red("↳ failed")}${facts ? dim(` ${facts}`) : ""}${said}`,
+            width,
+          ),
+        );
+      }
+    } else {
+      out.push(fit(`${at} ${dim("⤷ subagent")} ${oneLine(e.text)}`, width));
+    }
+  }
+  return out;
+}
+
+const laidOut = new WeakMap<LogEntry[], Map<number, string[]>>();
+
+function agentView(entries: LogEntry[], width: number): string[] {
+  let byWidth = laidOut.get(entries);
+  if (!byWidth) {
+    byWidth = new Map();
+    laidOut.set(entries, byWidth);
+  }
+  let lines = byWidth.get(width);
+  if (!lines) {
+    lines = agentLines(entries, width).map((l) => fit(l, width));
+    byWidth.set(width, lines);
+  }
+  return lines;
+}
+
+const NO_AGENT_LOG =
+  "The agent's own log can be read for Claude Code only. These are the pipeline's events.";
+
+function logTab(d: GateDetail, ctx: Context): Content {
+  if (d.agentLog) return { lines: agentView(d.agentLog, ctx.width) };
+  return {
+    lines: [
+      ...wrapText(NO_AGENT_LOG, ctx.width).map((l) => fit(dim(l), ctx.width)),
+      "",
+      ...d.journal.map((l) => fit(dim(l), ctx.width)),
+    ],
+  };
+}
+
+/** The agent's words and calls while a step went on, or the pipeline's records of it when there is no agent log. */
+function stepLog(d: GateDetail, v: Visit, ctx: Context): string[] {
+  const from = v.attempt.from;
+  if (d.agentLog && from !== undefined) {
+    const to = v.attempt.to ?? Number.POSITIVE_INFINITY;
+    const within = d.agentLog.filter((e) => e.ts >= from && e.ts <= to);
+    return within.length === 0
+      ? [dim("The agent did nothing in this step.")]
+      : agentLines(within, ctx.width);
+  }
+  return v.attempt.log.length === 0 ? [dim("No records.")] : v.attempt.log.map((l) => dim(l));
+}
+
 export function tabContent(d: GateDetail, st: TabState, ctx: Context): Content {
   switch (st.tab) {
     case CODE:
@@ -533,7 +634,7 @@ export function tabContent(d: GateDetail, st: TabState, ctx: Context): Content {
     case COMMENTS:
       return comments(d, st, ctx);
     case LOG:
-      return { lines: d.journal.map((l) => fit(dim(l), ctx.width)) };
+      return logTab(d, ctx);
     default:
       return report(d, ctx);
   }

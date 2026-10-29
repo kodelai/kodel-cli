@@ -1,6 +1,15 @@
 /** Sample sessions for `kodel tui --demo`. Nothing here is read from a project. */
 import type { Loaded } from "./load";
-import type { Attempt, Comment, DiffState, GateDetail, Session, StepLine, Visit } from "./session";
+import type {
+  Attempt,
+  Comment,
+  DiffState,
+  GateDetail,
+  LogEntry,
+  Session,
+  StepLine,
+  Visit,
+} from "./session";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -406,6 +415,71 @@ export function demoGateDetail(runId: string, now: number = Date.now()): GateDet
       log: ["09:32:22 gate_waiting       final-approval"],
     }),
   ];
+  // When each visit began and ended, in minutes before now; the agent's log is laid on the same clock.
+  const windows: [number, number | null][] = [
+    [92, 91],
+    [91, 82],
+    [82, 78],
+    [78, 75],
+    [75, 74.9],
+    [74.9, 73.7],
+    [73.7, 72.3],
+    [72.3, 72.2],
+    [72, 71.6],
+    [21, null],
+  ];
+  const at = (minutes: number) => now - Math.round(minutes * 60_000);
+  for (const [i, v] of visits.entries()) {
+    const w = windows[i];
+    if (!w) continue;
+    v.attempt.from = at(w[0]);
+    if (w[1] !== null) v.attempt.to = at(w[1]);
+  }
+  const call = (
+    minutes: number,
+    tool: string,
+    text: string,
+    ok = true,
+    said?: string,
+  ): LogEntry => ({
+    ts: at(minutes),
+    kind: "call",
+    tool,
+    text,
+    result: { ok, ms: 40, size: 2048, ...(said ? { text: said } : {}) },
+  });
+  const agentLog: LogEntry[] = [
+    {
+      ts: at(91.9),
+      kind: "you",
+      text: "Make `kodel status` readable: one short line per run instead of the full task text.",
+    },
+    {
+      ts: at(91.6),
+      kind: "text",
+      text: "I'll read AGENTS.md and the status command first, then write the plan.",
+    },
+    call(91.4, "Read", "AGENTS.md"),
+    call(91.2, "Grep", "formatRuns packages/cli/src"),
+    { ts: at(91.05), kind: "text", text: "The plan is in docs/plans/make-status-readable.md." },
+    {
+      ts: at(77.5),
+      kind: "text",
+      text: "The first change was too big for the check. I am splitting it: the table printer stays as it was.",
+    },
+    call(76.5, "Edit", "packages/cli/src/format.ts"),
+    call(
+      75.5,
+      "Bash",
+      "bun run typecheck",
+      false,
+      "format.ts(9,3): error TS2322: Type 'string | undefined' is not assignable",
+    ),
+    call(75.3, "Edit", "packages/cli/src/format.ts"),
+    call(71.9, "kodel:pipeline_report_result", "review: 3 rows"),
+    { ts: at(71.7), kind: "text", text: "The review is in: 3 findings, none blocking." },
+    { ts: at(20), kind: "text", text: "Done: `kodel status` prints one short line per run." },
+  ];
   const journal = visits.flatMap((v) => v.attempt.log);
   return {
     node: "final-approval",
@@ -436,6 +510,7 @@ export function demoGateDetail(runId: string, now: number = Date.now()): GateDet
     },
     changedAfterChecks: [],
     comments: made.get(runId) ?? [],
+    agentLog,
     metrics: {
       workMs: 92 * 60_000,
       waitMs: 30 * 60_000,

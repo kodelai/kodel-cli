@@ -10,6 +10,7 @@ export const red = wrap("31");
 export const green = wrap("32");
 export const yellow = wrap("33");
 export const blue = wrap("34");
+export const magenta = wrap("35");
 export const cyan = wrap("36");
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching the escape character is the point

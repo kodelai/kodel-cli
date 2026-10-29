@@ -78,7 +78,7 @@ export function formatAge(ms: number): string {
   return `${Math.floor(h / 24)}d`;
 }
 
-/** Waiting sessions first (the longest wait on top), then running (newest first), then failed, then the rest, then the ones nobody can read. */
+/** Waiting sessions first, then running, then failed, then the rest, then the ones nobody can read; the newest on top in each. */
 export function sortSessions(sessions: Session[]): Session[] {
   const rank = (s: Session) =>
     s.status === "waiting"
@@ -93,7 +93,7 @@ export function sortSessions(sessions: Session[]): Session[] {
   return [...sessions].sort((a, b) => {
     const byGroup = rank(a) - rank(b);
     if (byGroup !== 0) return byGroup;
-    return a.status === "waiting" ? a.since - b.since : b.since - a.since;
+    return b.since - a.since;
   });
 }
 
@@ -134,6 +134,18 @@ export interface Attempt {
   review?: { completeness: string; findings: Finding[] };
   /** The journal records of this try, formatted. */
   log: string[];
+  /** When the try began, and when it ended (nothing while it goes on), in milliseconds. */
+  from?: number;
+  to?: number;
+}
+
+/** One thing the agent said or did, with a tool call joined to its result. */
+export interface LogEntry {
+  ts: number;
+  kind: "text" | "you" | "call" | "subagent";
+  text: string;
+  tool?: string;
+  result?: { ok: boolean; ms?: number; size?: number; text?: string };
 }
 
 /** One entry of a run into a step, in the order it happened: the call list of the run. */
@@ -193,6 +205,8 @@ export interface GateDetail {
   changedAfterChecks: string[];
   comments: Comment[];
   metrics: Metrics;
+  /** What the agent said and the tools it called, when its log can be read. */
+  agentLog?: LogEntry[];
   /** The journal of the run, oldest first. */
   journal: string[];
 }

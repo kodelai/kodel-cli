@@ -51,13 +51,9 @@ describe("tui loop", () => {
     expect(t.since()).toContain("WAITING FOR YOU");
     expect(t.raw().startsWith("\u001b[?1049h")).toBe(true);
 
-    // three runs wait before the one that needs an approval
-    const mark = t.mark();
-    t.type("\u001b[B");
-    t.type("\u001b[B");
-    t.type("\u001b[B");
+    // The newest run that waits is the one that needs an approval, and it is the one selected.
     await wait(80);
-    const card = t.since(mark);
+    const card = t.since();
     expect(card).toContain("Report");
     expect(card).toContain("ASKED");
 
@@ -70,7 +66,6 @@ describe("tui loop", () => {
     const t = terminal();
     const done = start(t);
     await wait(60);
-    t.type("\u001b[B\u001b[B\u001b[B"); // three keys in one chunk are all heard
     await wait(80);
 
     let mark = t.mark();
@@ -83,7 +78,7 @@ describe("tui loop", () => {
     expect(t.since(mark)).toContain("10 entries into steps · Enter opens one");
 
     mark = t.mark();
-    t.type("\u001b[B\u001b[B\u001b[B\u001b[B\u001b[B"); // down to the first test
+    t.type("\u001b[B\u001b[B\u001b[B\u001b[B\u001b[B"); // five keys in one chunk are all heard: down to the first test
     t.type("\r");
     expect(t.since(mark)).toContain("Steps › test");
     expect(t.since(mark)).toContain("1 test failed");
@@ -122,9 +117,7 @@ describe("tui loop", () => {
   test("a click on a tab and the wheel are heard when the mouse is on", async () => {
     const t = terminal();
     const done = start(t, true);
-    await wait(60);
-    t.type("\u001b[B\u001b[B\u001b[B");
-    await wait(80);
+    await wait(140);
     // The screen is drawn row by row with a cursor move before each; find the row of the tabs.
     const rowText = (n: number) =>
       (t.since().split(`\u001b[${n};1H`).at(-1) ?? "").split("\u001b[")[0] ?? "";

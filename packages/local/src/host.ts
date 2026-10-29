@@ -73,8 +73,10 @@ import {
 } from "./executor";
 import { GitSnapshotter, readHead, readRunCommits, repoPrefix } from "./git";
 import {
+  type AgentLogEntry,
   type AgentReport,
   type AgentUsage,
+  agentLog,
   agentUsage,
   lastAgentReport,
 } from "./history/claude-code/report";
@@ -1283,6 +1285,17 @@ export class LocalRun {
       workdir: await this.cwd(),
       since,
       rules: this.host.rules,
+    });
+  }
+
+  /** What the agent said and which tools it called while the run went on, when its logs can be read. */
+  async agentLog(): Promise<AgentLogEntry[] | undefined> {
+    const state = await this.state();
+    return agentLog({
+      root: this.host.options.root,
+      workdir: await this.cwd(),
+      from: state.startedAt,
+      to: state.finishedAt ?? this.host.clock(),
     });
   }
 

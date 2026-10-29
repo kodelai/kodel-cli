@@ -28,7 +28,7 @@ const screen = (m: ReturnType<typeof initialModel>, cols = 120, rows = 30) =>
 const demo = () => initialModel(demoSessions(NOW), "demo", NOW);
 
 describe("tui sessions list", () => {
-  test("waiting come first with the longest wait on top, then running, then failed before the rest", () => {
+  test("waiting come first, then running, then failed before the rest, the newest on top in each", () => {
     const order = ordered(demoSessions(NOW).sessions).map((s) => s.status);
     const firstRunning = order.indexOf("running");
     const firstFinished = order.findIndex(
@@ -40,7 +40,9 @@ describe("tui sessions list", () => {
 
     const waiting = ordered(demoSessions(NOW).sessions).filter((s) => s.status === "waiting");
     const since = waiting.map((s) => s.since);
-    expect(since).toEqual([...since].sort((a, b) => a - b));
+    expect(since).toEqual([...since].sort((a, b) => b - a));
+    const running = ordered(demoSessions(NOW).sessions).filter((s) => s.status === "running");
+    expect(running.map((s) => s.since)).toEqual(running.map((s) => s.since).sort((a, b) => b - a));
   });
 
   test("the list says what is asked in plain words, never the engine's names", () => {
@@ -408,7 +410,7 @@ describe("tui card of a run waiting for approval", () => {
     expect(at("Code 5")).toBeGreaterThan(at("Report"));
     expect(at("Steps 10")).toBeGreaterThan(at("Code"));
     expect(at("Comments 0")).toBeGreaterThan(at("Steps"));
-    expect(at("Log 14")).toBeGreaterThan(at("Comments"));
+    expect(at("Log 12")).toBeGreaterThan(at("Comments"));
   });
 
   test("it opens on the agent's report, whole, with what was asked above it", () => {
@@ -476,7 +478,8 @@ describe("tui card of a run waiting for approval", () => {
       truncated: false,
     });
     const shown = render(read, SIZE).join("\n");
-    expect(stripAnsi(shown)).toContain("+new");
+    expect(stripAnsi(shown)).toMatch(/\+ new/);
+    expect(stripAnsi(shown)).toMatch(/- old/);
     expect(shown).toContain("\u001b[32m"); // added lines are green
     expect(shown).toContain("\u001b[31m"); // removed ones red
     // The same file again asks for nothing; another file asks for its own.
@@ -486,6 +489,63 @@ describe("tui card of a run waiting for approval", () => {
     ]);
     expect(press(takeEffects(next)[0], SIZE, "p").effects).toEqual([]);
     expect(press(read, SIZE, "escape").open).toBe(false);
+  });
+
+  test("in a diff the arrows move a cursor over the code, [ and ] jump between hunks, g and G go to the ends", () => {
+    const diff = {
+      kind: "text" as const,
+      truncated: false,
+      text: "@@ -1,3 +1,3 @@\n one\n-two\n+2\n three\n@@ -20,2 +20,3 @@\n x\n+y\n z\n",
+    };
+    const path = "packages/cli/src/format.ts";
+    const opened = withDiff(
+      press(withCard(), SIZE, ...toTab(TAB.code), "down", "down", "enter"),
+      diffKey(gate().id, path),
+      diff,
+    );
+    expect(opened.line).toBe(-1);
+    expect(text(opened)).toMatch(/▸\s+1\s+one/);
+    let m = press(opened, SIZE, "down", "down");
+    expect(m.line).toBe(3); // "+2", over the "-two"
+    expect(text(m)).toMatch(/▸\s+2 \+ 2/);
+    m = press(m, SIZE, "]");
+    expect(text(m)).toMatch(/▸\s+20\s+x/);
+    m = press(m, SIZE, "[");
+    expect(text(m)).toMatch(/▸\s+1\s+one/);
+    expect(text(press(m, SIZE, "G"))).toMatch(/▸\s+22\s+z/);
+    expect(text(press(press(m, SIZE, "G"), SIZE, "g"))).toMatch(/▸\s+1\s+one/);
+    expect(press(m, SIZE, "pagedown").line).toBe(press(m, SIZE, "G").line);
+    expect(m.cardScroll).toBe(0); // the cursor moved, the page did not
+  });
+
+  test("c in a diff comments on the line the cursor is on; on a removed line it says so", () => {
+    const diff = {
+      kind: "text" as const,
+      truncated: false,
+      text: "@@ -1,3 +1,3 @@\n one\n-two\n+2\n three\n",
+    };
+    const path = "packages/cli/src/format.ts";
+    const opened = withDiff(
+      press(withCard(), SIZE, ...toTab(TAB.code), "down", "down", "enter"),
+      diffKey(gate().id, path),
+      diff,
+    );
+    expect(press(opened, SIZE, "c").input?.place).toBe(`${path}:1`);
+    expect(press(opened, SIZE, "down", "c").input?.place).toBe(`${path}:2 (removed line)`);
+    expect(press(opened, SIZE, "down", "down", "c").input?.place).toBe(`${path}:2`);
+  });
+
+  test("another file starts at its first line again", () => {
+    const diff = { kind: "text" as const, truncated: false, text: "@@ -1,2 +1,2 @@\n a\n b\n" };
+    let m = withDiff(
+      press(withCard(), SIZE, ...toTab(TAB.code), "down", "down", "enter"),
+      diffKey(gate().id, "packages/cli/src/format.ts"),
+      diff,
+    );
+    m = press(m, SIZE, "down");
+    expect(m.line).toBeGreaterThan(0);
+    m = press(m, SIZE, "n");
+    expect(m.line).toBe(-1);
   });
 
   test("a diff that cannot be read says why, and one that is cut says so", () => {
@@ -525,10 +585,10 @@ describe("tui card of a run waiting for approval", () => {
     expect(out).toContain("not recorded for it yet");
     m = press(m, SIZE, "right");
     out = text(m);
-    expect(out).toContain("09:30:31 command_finished   test exit 1");
+    expect(out).toContain("The agent did nothing in this step.");
     m = press(m, SIZE, "n");
     expect(text(m)).toContain("Steps › test #2");
-    expect(text(m)).toContain("09:31:58 command_finished   test exit 0");
+    expect(text(m)).toContain("The agent did nothing in this step.");
     m = press(m, SIZE, "escape");
     expect(m.open).toBe(false);
     expect(m.tab).toBe(TAB.steps);
@@ -683,27 +743,69 @@ describe("tui card of a run waiting for approval", () => {
     }
   });
 
-  test("Log opens at its end, where the newest records are, and scrolls up from there", () => {
+  test("Log is what the agent said and the tools it called, and opens at its end", () => {
     let m = press(withCard(), SMALL, ...toTab(TAB.log));
     const out = text(m, SMALL);
-    expect(out).toContain("gate_waiting       final-approval");
-    expect(out).not.toContain("09:12:01 node_entered       plan");
+    expect(out).toContain("agent Done: `kodel status` prints one short line per run.");
+    expect(out).not.toContain("Make `kodel status` readable");
     expect(out).toContain("▲ PgUp for earlier");
-    m = press(m, SMALL, "pageup", "pageup");
-    expect(text(m, SMALL)).toContain("09:12:01 node_entered       plan");
+    m = press(m, SMALL, ...n(6, "pageup"));
+    expect(text(m, SMALL)).toContain("you   Make `kodel status` readable");
   });
 
-  test("→ and Tab go to the next tab, ← and Shift+Tab to the previous, and ← stops at the first", () => {
+  test("a tool call is a line and its result is the next one; a failed call says so", () => {
+    const out = text(press(withCard(), { cols: 120, rows: 50 }, ...toTab(TAB.log)), {
+      cols: 120,
+      rows: 50,
+    });
+    expect(out).toMatch(/⚙ Read\s+AGENTS\.md/);
+    expect(out).toMatch(/↳ ok 40ms · 2\.0 KB/);
+    expect(out).toMatch(/⚙ Bash\s+bun run typecheck/);
+    expect(out).toMatch(/↳ failed 40ms · 2\.0 KB\s+format\.ts\(9,3\): error TS23/);
+    expect(out).toMatch(/⚙ kodel:pipeline_report_result\s+review: 3 rows/);
+  });
+
+  test("a step's Log is only what the agent did while that step went on", () => {
+    const keys = [...toTab(TAB.steps), ...n(3, "down"), "enter", "right", "right"]; // impl #2, Log
+    const out = text(press(withCard(), SIZE, ...keys));
+    expect(out).toContain("Steps › impl #2");
+    expect(out).toContain("splitting it: the table printer stays as it was.");
+    expect(out).toMatch(/⚙ Bash\s+bun run typecheck/);
+    expect(out).not.toContain("AGENTS.md");
+    expect(out).not.toContain("Done: `kodel status`");
+  });
+
+  test("without the agent's log, Log says so and shows the pipeline's own records, and so does a step", () => {
+    const d = { ...detail(), agentLog: undefined };
+    const out = text(press(withCard(d), SIZE, ...toTab(TAB.log)));
+    expect(out).toContain("The agent's own log can be read for Claude Code only.");
+    expect(out).toContain("gate_waiting       final-approval");
+    expect(text(withCard(d))).toContain("Log 14");
+    const step = text(
+      press(withCard(d), SIZE, ...toTab(TAB.steps), ...n(5, "down"), "enter", "right", "right"),
+    );
+    expect(step).toContain("09:30:31 command_finished   test exit 1");
+  });
+
+  test("→ and Tab go to the next tab, ← and Shift+Tab to the previous, and ← on the first tab is the list", () => {
     let m = press(withCard(), SIZE, "enter");
     expect(m.focus).toBe("card");
-    m = press(m, SIZE, "left");
-    expect(m.tab).toBe(0);
-    expect(m.focus).toBe("card");
+    expect(press(m, SIZE, "left").focus).toBe("list");
     m = press(m, SIZE, "right", "tab", "tab", "tab");
     expect(m.tab).toBe(4);
     expect(press(m, SIZE, "right").tab).toBe(4);
     expect(press(m, SIZE, "tab").tab).toBe(0);
     expect(press(m, SIZE, "shift-tab").tab).toBe(3);
+    expect(press(m, SIZE, "left", "left", "left", "left").tab).toBe(0);
+    expect(press(m, SIZE, "left", "left", "left", "left", "left").focus).toBe("list");
+  });
+
+  test("the first screen tells what can be done: approve, reject, add a comment", () => {
+    const out = text(press(withCard(), SIZE, "enter"));
+    expect(out).toContain("a approve   r reject   c add a comment");
+    expect(out).not.toContain("show the command to run");
+    const project = text(press({ ...withCard(), source: "project" as const }, SIZE, "enter"));
+    expect(project).toContain("(a and r show the command to run, for now)");
   });
 
   test("Esc steps back one level at a time: step, tab, list", () => {

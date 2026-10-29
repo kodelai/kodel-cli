@@ -117,6 +117,80 @@ export async function lastAgentReport(
   return best && { text: redactText(best.text, options.rules ?? []), ts: best.ts };
 }
 
+/** One thing the agent said or did, as the history events tell it, with a tool call joined to its result. */
+export interface AgentLogEntry {
+  /** In milliseconds. */
+  ts: number;
+  kind: "text" | "you" | "call" | "subagent";
+  /** What was said; for a call, what was asked of the tool. */
+  text: string;
+  /** For a call: the tool, and how it ended once it did. */
+  tool?: string;
+  result?: { ok: boolean; ms?: number; size?: number; text?: string };
+}
+
+/** Most entries kept for a run: the last ones, which are the ones a person looks for. */
+const LOG_LIMIT = 4000;
+
+/**
+ * What the agent said and the tools it called in the run's directory between `from` and `to`, in the order it
+ * happened. The texts are the previews the history events keep (a few hundred characters each).
+ */
+export async function agentLog(
+  options: LogOptions & { from: number; to: number; limit?: number },
+): Promise<AgentLogEntry[] | undefined> {
+  const refs = await sessionsOf(options, options.from);
+  if (refs.length === 0) return undefined;
+  const collector = claudeCodeCollector(
+    options.configDir === undefined ? {} : { configDir: options.configDir },
+  );
+  const window = {
+    from: new Date(options.from).toISOString(),
+    to: new Date(options.to).toISOString(),
+  };
+  const entries: AgentLogEntry[] = [];
+  const calls = new Map<string, AgentLogEntry>();
+  for (const ref of refs) {
+    try {
+      for await (const event of collector.read(ref, window)) {
+        const ts = Date.parse(event.ts);
+        if (event.kind === "message") {
+          entries.push({
+            ts,
+            kind: event.role === "assistant" ? "text" : "you",
+            text: event.text_preview,
+          });
+        } else if (event.kind === "tool_call") {
+          const entry: AgentLogEntry = {
+            ts,
+            kind: "call",
+            tool: event.mcp_server === undefined ? event.name : `${event.mcp_server}:${event.name}`,
+            text: event.input_preview ?? "",
+          };
+          calls.set(event.id, entry);
+          entries.push(entry);
+        } else if (event.kind === "tool_result") {
+          const call = calls.get(event.id);
+          if (call) {
+            call.result = {
+              ok: event.ok,
+              ...(event.duration_ms === undefined ? {} : { ms: event.duration_ms }),
+              ...(event.size === undefined ? {} : { size: event.size }),
+              ...(event.output_preview === undefined ? {} : { text: event.output_preview }),
+            };
+          }
+        } else if (event.kind === "subagent") {
+          entries.push({ ts, kind: "subagent", text: event.description_preview ?? event.agent_id });
+        }
+      }
+    } catch {
+      // A log that cannot be read adds nothing.
+    }
+  }
+  entries.sort((a, b) => a.ts - b.ts);
+  return entries.slice(-(options.limit ?? LOG_LIMIT));
+}
+
 /** Tokens (and cost, when the logs say) of the sessions in the run's directory between `from` and `to`. */
 export async function agentUsage(
   options: LogOptions & { from: number; to: number },

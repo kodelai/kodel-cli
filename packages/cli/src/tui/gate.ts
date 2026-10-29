@@ -16,6 +16,7 @@ import type {
   DiffState,
   Finding,
   GateDetail,
+  LogEntry,
   Metrics,
   StepState,
   Visit,
@@ -39,6 +40,7 @@ export interface GateRun {
   resultsOf(node: string, attempt: number): Promise<ResultReport | undefined>;
   agentReport?(since: number): Promise<{ text: string; ts: number } | undefined>;
   agentTokens?(): Promise<{ tokens: number; cost?: number; approx: boolean } | undefined>;
+  agentLog?(): Promise<LogEntry[] | undefined>;
   diffOf?(path: string): Promise<{ text: string; truncated: boolean } | undefined>;
   reportResult?(
     node: string,
@@ -80,13 +82,14 @@ export async function loadGateDetail(
   const attempt = gate?.attempt ?? 1;
   const since = journal.findLast((r) => r.event === "gate_waiting" && r.node === node)?.ts;
 
-  const [changed, afterGate, comments, reports, said, tokens] = await Promise.all([
+  const [changed, afterGate, comments, reports, said, tokens, spoken] = await Promise.all([
     run.changesSinceStart().catch((e: unknown) => unavailable(e)),
     run.changesSinceGate(node).catch((e: unknown) => unavailable(e)),
     gate ? run.resultsOf(node, attempt).catch(() => undefined) : undefined,
     readReports(run, journal),
     run.agentReport?.(since ?? state.startedAt).catch(() => undefined),
     run.agentTokens?.().catch(() => undefined),
+    run.agentLog?.().catch(() => undefined),
   ]);
   const visits = visitsOf(spec, journal, reports, node, attempt, now);
   const metrics = metricsOf(visits, state, now, tokens);
@@ -103,6 +106,7 @@ export async function loadGateDetail(
     changedAfterChecks: afterGate.kind === "changes" ? Object.keys(afterGate.files) : [],
     comments: (comments?.rows ?? []).map(commentOf),
     metrics,
+    ...(spoken && spoken.length > 0 ? { agentLog: spoken } : {}),
     journal: logLines(journal, now, journal.length),
   };
 }
@@ -190,6 +194,7 @@ function visitsOf(
       case "node_entered":
         current.set(r.node, n);
         a.enteredAt = r.ts;
+        a.from = r.ts;
         order.push({ slug: r.node, n, rework: r.rework === true });
         break;
       case "agent_completed":
@@ -227,6 +232,7 @@ function visitsOf(
       case "node_finished":
         a.outcome = String(r.outcome ?? "");
         a.ok = r.status === "passed";
+        a.to = r.ts;
         if (a.enteredAt > 0) a.ms = r.ts - a.enteredAt;
         break;
     }
