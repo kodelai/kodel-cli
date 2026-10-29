@@ -12,29 +12,41 @@ import {
   makeSandbox,
   runAgentTurn,
   type Sandbox,
+  type TokenCounts,
+  windowUsage,
 } from "./harness";
 
 /**
  * The tokens and the estimated cost of a run, on a real Claude Code: one headless turn in a throwaway Kodel project,
- * then the run's records set against what the agent says it used (`usage` and `modelUsage` of its result). They only
- * run with KODEL_AGENT_TESTS=1 (`bun run test:agents`); a person runs them before the change is merged, with the Claude
- * Code version noted in the pull request, and the figures below go in it. They are not in CI. What CI enforces is the
- * offline twin in `packages/local/test/usage-collector.test.ts` (`t9jrs_saved_session_agrees_offline`), which runs on a
- * hand-made session, not on a recording: it shows that nothing is lost or added, not that a real agent agrees.
+ * then the run's records set against what the agent says it used. They only run with KODEL_AGENT_TESTS=1
+ * (`bun run test:agents`); a person runs them before the change is merged, with the Claude Code version noted in the
+ * pull request, and the figures below go in it. They are not in CI. What CI enforces is the offline twin in
+ * `packages/local/test/usage-collector.test.ts` (`t9jrs_saved_session_agrees_offline`), which runs on a hand-made
+ * session, not on a recording: it shows that nothing is lost or added, not that a real agent agrees.
  *
  * What they are the only evidence for:
  *  - a real run records usage for every agent node and a run total;
- *  - the tokens agree with the agent's own within TOKEN_TOLERANCE. The transcript lacks the requests the agent makes
- *    for itself (titles and the like) and the last response of the run is outside the last pass, so the run total is a
- *    little below the agent's. A miss beyond the tolerance reopens the decision on how usage is read, it is not a
- *    reason to widen the number;
- *  - the cost is set against `total_cost_usd` and reported; its tolerance is set from the first runs.
+ *  - the tokens agree with the agent's own within TOKEN_TOLERANCE, **window to window**. The agent's own count for
+ *    the whole `claude -p` turn (`usage` of its result) is far above the run's by design: it holds the requests
+ *    before the run (a tool search, `pipeline_list`, the first big cache write) and after it (the final answer, the
+ *    background watch). A first real run showed 4 / 319 / 57 612 / 534 (input / output / cache read / cache write)
+ *    for the run against 14 / 1 133 / 186 722 / 17 448 for the turn. So the reference is built from the agent's own
+ *    stream (`--output-format stream-json`, a source apart from the transcript file the pass reads): the sum of the
+ *    responses from the one that issued `pipeline_start` to the one that issued the last `pipeline_complete_step`,
+ *    both included, which is what the pass credits to the run. The sum of the four counts is held to the tolerance;
+ *    a field is held to it too when the agent's own figure for it is at least MIN_FIELD (a handful of input tokens
+ *    is no measure). The step-end pass counts the last response as it stood, so its output may be a little low. A
+ *    miss beyond the tolerance reopens the decision on how usage is read, it is not a reason to widen the number;
+ *  - the cost is set against `total_cost_usd` (the whole turn, so it is only reported) and its tolerance is set from
+ *    the first runs.
  *
  * The suite does not depend on the version that CI pins writing `cache_creation`: the cache write is compared as a
  * sum, not by tier.
  */
 const scenario = ENABLED ? test : test.skip;
 export const TOKEN_TOLERANCE = 0.1;
+/** A field of the agent's own figure under this many tokens is not asserted alone, only in the sum. */
+export const MIN_FIELD = 100;
 /** Set from the first real runs; not guessed. `undefined` means the cost is only reported. */
 export const COST_TOLERANCE: number | undefined = undefined;
 
@@ -81,28 +93,52 @@ describe("Claude Code, tokens and cost of a run", () => {
     "t9jrs_real_run_tokens_agree_with_agent",
     async () => {
       const { runId, sandbox, turn, why } = await theRun();
-      const agent = turn.agentUsage;
-      expect(agent, `the result of claude -p has no usage${why}`).toBeDefined();
-      if (agent === undefined) return;
+      const whole = turn.agentUsage?.total;
+      expect(whole, `the result of claude -p has no usage${why}`).toBeDefined();
+      const window = windowUsage(turn.responses, "pipeline_start", "pipeline_complete_step");
+      expect(
+        window,
+        `the stream has no window from pipeline_start to the last pipeline_complete_step${why}`,
+      ).toBeDefined();
+      if (whole === undefined || window === undefined) return;
       const run = await humanHost(sandbox).open(runId);
       const state = await run?.state();
       const ours = tokensOf(
         runTotals(state?.usage ?? { attempts: {}, unattributed: { models: {}, passes: 0 } }),
       );
-      const ratio = (mine: number, theirs: number) => (theirs === 0 ? 0 : mine / theirs);
       const figures = {
-        input: [ours.input, agent.total.input],
-        output: [ours.output, agent.total.output],
-        cache_read: [ours.cache_read, agent.total.cacheRead],
-        cache_write: [ours.cache_write, agent.total.cacheWrite],
+        input: [ours.input, window.input],
+        output: [ours.output, window.output],
+        cache_read: [ours.cache_read, window.cacheRead],
+        cache_write: [ours.cache_write, window.cacheWrite],
       } as const;
-      console.log(`t9jrs tokens (ours, agent's): ${JSON.stringify(figures)}`);
-      for (const [name, [mine, theirs]] of Object.entries(figures)) {
-        if (theirs === 0) continue;
-        // never above the agent's by more than the tolerance (a repeat counted twice), never below by more
+      const sum = (counts: TokenCounts) =>
+        counts.input + counts.output + counts.cacheRead + counts.cacheWrite;
+      const mine = sum({
+        input: ours.input,
+        output: ours.output,
+        cacheRead: ours.cache_read,
+        cacheWrite: ours.cache_write,
+      });
+      const ratio = (a: number, b: number) => (b === 0 ? "n/a" : (a / b).toFixed(3));
+      console.log(
+        `t9jrs tokens, window (ours, agent's stream): ${JSON.stringify(figures)}; ` +
+          `sum ${mine} against ${sum(window)} (ratio ${ratio(mine, sum(window))}); ` +
+          `ratios ${JSON.stringify(Object.fromEntries(Object.entries(figures).map(([k, [a, b]]) => [k, ratio(a, b)])))}`,
+      );
+      console.log(
+        `t9jrs tokens, whole turn (the agent's result, information only): ${JSON.stringify(whole)}`,
+      );
+      // not below the agent's by more than the tolerance (a lost response), not above by more (a repeat counted twice)
+      expect(
+        Math.abs(1 - mine / sum(window)),
+        `sum: ${mine} against the agent's ${sum(window)} in the same window${why}`,
+      ).toBeLessThanOrEqual(TOKEN_TOLERANCE);
+      for (const [name, [a, b]] of Object.entries(figures)) {
+        if (b < MIN_FIELD) continue;
         expect(
-          Math.abs(1 - ratio(mine, theirs)),
-          `${name}: ${mine} against the agent's ${theirs}${why}`,
+          Math.abs(1 - a / b),
+          `${name}: ${a} against the agent's ${b} in the same window${why}`,
         ).toBeLessThanOrEqual(TOKEN_TOLERANCE);
       }
     },
