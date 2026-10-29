@@ -413,19 +413,31 @@ describe("tui card of a run waiting for approval", () => {
     expect(at("Log 12")).toBeGreaterThan(at("Comments"));
   });
 
-  test("it opens on the question and what can be done, then the agent's report, whole", () => {
+  test("it opens on the question, and straight after it the agent's report, whole", () => {
     const out = text(press(withCard(), SIZE, "enter"));
     expect(out).toContain("❯ Look at the diff and try the change.");
-    expect(out).toContain("a approve   r reject   c add a comment");
-    expect(out.indexOf("a approve")).toBeLessThan(out.indexOf("THE AGENT'S REPORT"));
     expect(out).not.toContain("ASKED");
-    expect(out).toContain("THE AGENT'S REPORT · from its log, written 20m ago");
+    expect(out).toContain("THE AGENT'S REPORT · written 20m ago");
+    expect(out.indexOf("THE AGENT'S REPORT")).toBeGreaterThan(out.indexOf("❯"));
+    const lines = plain(render(press(withCard(), SIZE, "enter"), SIZE));
+    const at = lines.findIndex((l) => l.includes("❯"));
+    expect(lines[at + 1]).toContain("with what is wrong.".slice(0, 4)); // the question wraps
+    expect(lines.slice(at, at + 5).some((l) => l.includes("THE AGENT'S REPORT"))).toBe(true);
     expect(out).toContain("Done: `kodel status` prints one short line per run");
     expect(out).toContain("- `packages/cli/src/format.ts`: a new `shortLine(run, max)`");
     expect(out).toContain("Not done: the plan asked for a test");
     expect(out).toContain("Approve to finish, or reject with what is wrong.");
     expect(out).not.toContain("**");
     expect(out).not.toContain("## ");
+  });
+
+  test("what can be done is on the bottom line, not between the question and the report", () => {
+    const lines = plain(render(press(withCard(), SIZE, "enter"), SIZE));
+    expect(lines.some((l) => l.includes("c add a comment"))).toBe(false);
+    const footer = lines.at(-1) ?? "";
+    expect(footer).toContain("a approve");
+    expect(footer).toContain("r reject");
+    expect(footer).toContain("c comment");
   });
 
   test("a line under the tabs sets them apart from what is under them", () => {
@@ -438,20 +450,20 @@ describe("tui card of a run waiting for approval", () => {
 
   test("the instructions the pipeline gives the agent for its message are not the person's business, unless asked for", () => {
     const d = { ...detail(), instructions: "The message must contain the path of the worktree." };
+    const footer = (m: ReturnType<typeof withCard>) => plain(render(m, SIZE)).at(-1) ?? "";
     let m = press(withCard(d), SIZE, "enter");
     expect(text(m)).not.toContain("path of the worktree");
-    expect(text(m)).toContain("i show instructions");
+    expect(footer(m)).toContain("i instructions");
     m = press(m, SIZE, "i");
     expect(text(m)).toContain("INSTRUCTIONS THE AGENT WAS GIVEN FOR ITS MESSAGE");
     expect(text(m)).toContain("path of the worktree");
-    expect(text(m)).toContain("i hide instructions");
     expect(text(press(m, SIZE, "i"))).not.toContain("path of the worktree");
     // nothing to show, nothing to toggle
-    expect(text(press(withCard(), SIZE, "enter"))).not.toContain("instructions");
+    expect(footer(press(withCard(), SIZE, "enter"))).not.toContain("i instructions");
     expect(press(press(withCard(), SIZE, "enter"), SIZE, "i").instructions).toBe(false);
   });
 
-  test("a report that is only a step's summary says which step, and no report says so", () => {
+  test("a report that is only a step's summary says which step it is from, and no report says so", () => {
     const d = detail();
     const fromJournal = text(
       press(
@@ -460,8 +472,9 @@ describe("tui card of a run waiting for approval", () => {
         "enter",
       ),
     );
-    expect(fromJournal).toContain("only the summary of «review», not checked");
-    expect(fromJournal).toContain("own message at this gate was not found");
+    expect(fromJournal).toContain("THE AGENT'S REPORT · from step «review»");
+    expect(fromJournal).not.toContain("only the summary");
+    expect(fromJournal).not.toContain("not checked");
     expect(fromJournal).toContain("I did it.");
     const none = text(press(withCard({ ...d, report: undefined }), SIZE, "enter"));
     expect(none).toContain("THE AGENT'S REPORT");
@@ -827,12 +840,11 @@ describe("tui card of a run waiting for approval", () => {
     expect(press(m, SIZE, "left", "left", "left", "left", "left").focus).toBe("list");
   });
 
-  test("the first screen tells what can be done: approve, reject, add a comment", () => {
-    const out = text(press(withCard(), SIZE, "enter"));
-    expect(out).toContain("a approve   r reject   c add a comment");
-    expect(out).not.toContain("show the command to run");
-    const project = text(press({ ...withCard(), source: "project" as const }, SIZE, "enter"));
-    expect(project).toContain("(a and r show the command to run, for now)");
+  test("pressing a or r in a project says which command to run", () => {
+    const project = { ...withCard(), source: "project" as const };
+    const m = press(project, SIZE, "enter", "a");
+    expect(m.confirm).toBeNull();
+    expect(m.notice).toContain("In a terminal: kodel gate approve");
   });
 
   test("Esc steps back one level at a time: step, tab, list", () => {

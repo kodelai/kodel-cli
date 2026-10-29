@@ -550,7 +550,6 @@ function panel(m: Model, width: number, height: number): Panel {
     focused,
     diffs: m.diffs,
     runId: s.id,
-    project: m.source === "project",
     instructions: m.instructions,
   });
   const band = headerBand(s, found.d, width, glyph(s, m.frame), m.now, height < 22);
@@ -825,8 +824,10 @@ function hints(m: Model): string {
       nav = `${bold("←→")} tabs   ${bold("↑↓")} select   ${bold("c")} add   ${bold("d")} delete   ${bold("Esc")} list`;
     } else if (isListTab(m.tab)) {
       nav = `${bold("←→")} tabs   ${bold("↑↓")} select   ${bold("Enter")} open   ${bold("c")} comment   ${bold("Esc")} list`;
-    } else
-      nav = `${bold("←→")} tabs   ${bold("↑↓")} scroll   ${bold("c")} comment   ${bold("Esc")} list`;
+    } else {
+      const more = m.tab === REPORT && found.d.instructions ? `   ${bold("i")} instructions` : "";
+      nav = `${bold("←→")} tabs   ${bold("↑↓")} scroll   ${bold("c")} comment${more}   ${bold("Esc")} list`;
+    }
     return `${nav}${decide}${zoom}   ${bold("q")} quit`;
   }
   const open = `   ${bold("Enter")} details`;
