@@ -5,6 +5,7 @@
 import type { JournalRecord, RunState } from "./run";
 import { runSlug } from "./slug";
 import type { TaskSize } from "./task-size";
+import { type UsageReport, usageReport } from "./usage-report";
 
 export interface AttemptReport {
   attempt: number;
@@ -148,6 +149,8 @@ export interface RunReport {
   task_size?: TaskSizeReport;
   prompts: PromptsReport;
   agent_log: AgentLogReport;
+  /** Tokens and the estimated cost of the agent's use, per attempt and for the run. */
+  usage: UsageReport;
 }
 
 const seconds = (from: number, to: number) => Math.max(0, Math.round((to - from) / 100) / 10);
@@ -418,6 +421,7 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
     // The state key is there from the start of a run that keeps prompts, so a run of zero serves says so.
     prompts: state.served === undefined ? { not_collected: true } : { served },
     agent_log: agentLogReport(state, lastAgentStep),
+    usage: usageReport(state, journal),
   };
 }
 

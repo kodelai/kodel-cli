@@ -182,8 +182,24 @@ export async function locateClaudeSessions(
 }
 
 /**
- * The log of a session whose id is known, without scanning the store: the folder of each directory given, then
- * the folders under the first one (a session started in a subdirectory of the project, or in a worktree gone since).
+ * The directories as given and, after each, the path they really are. Claude Code names a folder after the directory
+ * it was started in, which is the real one (`/private/var/...`), while the project may have been reached through a
+ * link (`/var/...` on macOS, a linked home): the name of either can be the one on disk. Only names are built here:
+ * what a log is allowed to be is still decided by whoever opens it.
+ */
+async function withRealNames(dirs: readonly string[]): Promise<string[]> {
+  const names = new Set<string>();
+  for (const dir of dirs) {
+    names.add(dir);
+    names.add(await realOrSelf(dir));
+  }
+  return [...names];
+}
+
+/**
+ * The log of a session whose id is known, without scanning the store: the folder of each directory given (and of
+ * the path it really is), then the folders that begin with the name of each of those directories (a session started in a
+ * subdirectory of the project, or in a worktree gone since).
  * The id must be a safe one; the path is inside `store` by construction and is checked again by whoever opens it.
  */
 export async function findSessionLog(
@@ -192,11 +208,12 @@ export async function findSessionLog(
   sessionId: string,
 ): Promise<string | undefined> {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(sessionId)) return undefined;
-  for (const dir of dirs) {
+  const named = await withRealNames(dirs);
+  for (const dir of named) {
     const exact = join(store, projectFolderName(dir), `${sessionId}.jsonl`);
     if (await isFile(exact)) return exact;
   }
-  for (const dir of dirs) {
+  for (const dir of named) {
     for (const folder of await foldersFor(store, dir)) {
       const path = join(folder, `${sessionId}.jsonl`);
       if (await isFile(path)) return path;

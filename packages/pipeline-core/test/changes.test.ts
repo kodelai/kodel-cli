@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   type ChangesRef,
   decide,
@@ -149,7 +150,7 @@ describe("the core stays free of I/O", () => {
       /from\s+["'](node:(fs|child_process|os|net|http|https)(\/promises)?|fs|child_process)["']/;
     const walk = (d: URL): string[] =>
       readdirSync(d, { withFileTypes: true }).flatMap((e) =>
-        e.isDirectory() ? walk(new URL(`${e.name}/`, d)) : [new URL(e.name, d).pathname],
+        e.isDirectory() ? walk(new URL(`${e.name}/`, d)) : [fileURLToPath(new URL(e.name, d))],
       );
     for (const file of walk(dir).filter((f) => f.endsWith(".ts"))) {
       expect({ file, imports: bad.test(readFileSync(file, "utf8")) }).toEqual({

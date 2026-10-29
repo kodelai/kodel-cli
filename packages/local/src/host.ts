@@ -89,6 +89,7 @@ import { MAX_PATCH_KB, PATCH_READ_MARGIN } from "./patch-text";
 import { fitServed, promptHashOf, type ServedNode, servedKeyOf } from "./served";
 import { type StoragePlace, scrubHome } from "./storage-paths";
 import { artifactFileName, FileStore, META_VERSION, newRunId, type RunMeta } from "./store";
+import { UsageWriter } from "./usage";
 import { GitWorktreeProvider, type Workdir, type WorkdirProvider } from "./worktree";
 
 export interface CommandContext {
@@ -187,6 +188,8 @@ export interface HostOptions {
    * opened through two of them is copied by one. A host makes its own when not given one.
    */
   agentLog?: AgentLogWriter;
+  /** What counts the agent's token use at the end of each step. One per process, like `agentLog`. */
+  usage?: UsageWriter;
   /**
    * The timers that copy the agent's log while runs go: present only in the process that serves the MCP tools, so
    * that a command a person runs (`status`, `report`, `wait`, `gate`) never starts one.
@@ -348,6 +351,7 @@ export class LocalHost {
   readonly ownerId: string;
   readonly isOwnerAlive: (owner: string) => boolean;
   readonly agentLog: AgentLogWriter;
+  readonly usage: UsageWriter;
 
   constructor(
     readonly spec: PipelineSpec,
@@ -364,6 +368,14 @@ export class LocalHost {
       options.agentLog ??
       new AgentLogWriter({
         store: this.store,
+        root: options.root,
+        rules: this.rules,
+        env: () => options.environment ?? process.env,
+        now: options.clock ?? Date.now,
+      });
+    this.usage =
+      options.usage ??
+      new UsageWriter({
         root: options.root,
         rules: this.rules,
         env: () => options.environment ?? process.env,
@@ -1489,6 +1501,7 @@ export class LocalRun {
         if (finished) {
           this.host.options.agentLogTickers?.stop(this.runId);
           this.host.agentLog.forget(this.runId);
+          this.host.usage.forget(this.runId);
         }
         if (finished) {
           const sealHash = await store.writeSeal(this.runId, clock());
@@ -2173,9 +2186,32 @@ export class LocalRun {
     this.watchAgentLog();
     // The agent's log up to its last closed response, copied before the step is judged: once the last step is
     // completed the run ends, and nothing is written to a run that has ended.
-    await this.host.agentLog
-      .capture(this.agentLogRun(), { why: "step", waitMs: 5_000, step: { node, attempt } })
+    // The count of usage runs under the same lock, right after the copy; it has a switch of its own.
+    const run = this.agentLogRun();
+    let counted = false;
+    const copied = await this.host.agentLog
+      .capture(run, {
+        why: "step",
+        waitMs: 5_000,
+        step: { node, attempt },
+        also: async (lock) => {
+          counted = true;
+          await this.host.usage.capture(run, { node, attempt }, lock);
+        },
+      })
       .catch(() => undefined);
+    if (!counted) {
+      // Said once: what the pass would have read is read by the next one, the cursor did not move. A step the copy
+      // had nothing to do with (the run is over, or it is not at an agent step) has nothing to say either.
+      // The copy threw, or the lock was busy or lost, before the count could run: nothing was read, so it is `busy`.
+      // With the copy switched off (`disabled`) the count still runs under the lock, so not running it means the lock
+      // was lost: that is `busy` too. Only a run that is over or not at an agent step has nothing to say.
+      const reason =
+        copied?.skipped === "not_running" || copied?.skipped === "no_step" ? undefined : "busy";
+      if (reason !== undefined) {
+        await this.apply({ type: "usage_failed", reason }).catch(() => undefined);
+      }
+    }
     const executor = await this.executorNow(caller);
     // HEAD of the run's own directory: the root may be somewhere else entirely.
     const head = await this.cwd()
@@ -2234,6 +2270,7 @@ export class LocalRun {
         if (where === undefined) return undefined;
         return this.inProject(where.path).catch(() => where.path);
       },
+      journal: () => this.host.store.readJournal(this.runId),
     };
   }
 

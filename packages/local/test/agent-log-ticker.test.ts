@@ -598,6 +598,7 @@ describe("t3bk2 the timer: giving up", () => {
       return { ok: true };
     },
     workdir: async () => undefined,
+    journal: async () => [],
   });
 
   test("t3bk2_tick_stops_after_3_failures", async () => {

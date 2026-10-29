@@ -151,6 +151,7 @@ export function claudeCodeCollector(
       drifted: false,
     };
     const state = reader.claude;
+    if (readOptions.usageDetail === true) state.usageDetail = true;
     const chosen = new Map<
       string,
       ReturnType<typeof selectProfile<(typeof CLAUDE_PROFILES)[number]>>
@@ -255,7 +256,7 @@ export function claudeCodeCollector(
         publish();
         yield* given;
       }
-      if (!holdBack) {
+      if (!holdBack && !(stopped && readOptions.usageDetail === true)) {
         const rest = shape(flushPending(state));
         publish();
         yield* rest;

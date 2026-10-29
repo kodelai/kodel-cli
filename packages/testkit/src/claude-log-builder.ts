@@ -18,6 +18,17 @@ export interface ClaudeLogOptions {
   start?: string;
 }
 
+/** What a response used, and the model that answered; the cache fields are left out of the line when not given. */
+export interface UsageOptions {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  /** All cache writes, of which `cacheWrite1h` have the 1-hour lifetime. */
+  cacheWrite?: number;
+  cacheWrite1h?: number;
+  model?: string;
+}
+
 export interface ToolUse {
   id: string;
   name: string;
@@ -66,31 +77,48 @@ export class ClaudeLogBuilder {
   }
 
   /** One line of an assistant response: the response is the lines that share `messageId`. */
-  assistant(messageId: string, block: Json, usage: { input?: number; output?: number } = {}): this {
+  assistant(messageId: string, block: Json, usage: UsageOptions = {}): this {
     return this.entry("assistant", {
       requestId: `req_${messageId}`,
       message: {
         id: messageId,
         type: "message",
         role: "assistant",
-        model: "claude-sonnet-5-5",
+        model: usage.model ?? "claude-sonnet-5-5",
         content: [block],
-        usage: { input_tokens: usage.input ?? 1, output_tokens: usage.output ?? 1 },
+        usage: {
+          input_tokens: usage.input ?? 1,
+          output_tokens: usage.output ?? 1,
+          ...(usage.cacheRead === undefined ? {} : { cache_read_input_tokens: usage.cacheRead }),
+          ...(usage.cacheWrite === undefined
+            ? {}
+            : {
+                cache_creation_input_tokens: usage.cacheWrite,
+                cache_creation: {
+                  ephemeral_5m_input_tokens: usage.cacheWrite - (usage.cacheWrite1h ?? 0),
+                  ephemeral_1h_input_tokens: usage.cacheWrite1h ?? 0,
+                },
+              }),
+        },
       },
     });
   }
 
-  say(messageId: string, text: string): this {
-    return this.assistant(messageId, { type: "text", text });
+  say(messageId: string, text: string, usage: UsageOptions = {}): this {
+    return this.assistant(messageId, { type: "text", text }, usage);
   }
 
-  call(messageId: string, tool: ToolUse): this {
-    return this.assistant(messageId, {
-      type: "tool_use",
-      id: tool.id,
-      name: tool.name,
-      input: tool.input,
-    });
+  call(messageId: string, tool: ToolUse, usage: UsageOptions = {}): this {
+    return this.assistant(
+      messageId,
+      {
+        type: "tool_use",
+        id: tool.id,
+        name: tool.name,
+        input: tool.input,
+      },
+      usage,
+    );
   }
 
   result(toolUseId: string, content: unknown, error = false): this {

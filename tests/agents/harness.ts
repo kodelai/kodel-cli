@@ -38,12 +38,52 @@ export interface ToolCall {
   isError: boolean;
 }
 
+/** What the agent says it used in a turn, per model, as the `result` event of `claude -p` has it. */
+export interface AgentUsage {
+  /** Tokens over all models. */
+  total: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  /** Tokens and dollars per model (`modelUsage`): the only per-model figures the agent gives. */
+  models: Record<
+    string,
+    { input: number; output: number; cacheRead: number; cacheWrite: number; usd: number }
+  >;
+}
+
+/** The four counts of one response (or of a sum of responses), as the agent's own stream gives them. */
+export interface TokenCounts {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+/**
+ * The part of a sum of the stream's counts that is a measurement: input, cache read and cache write. The stream's
+ * `output` is a streamed placeholder (see `responsesOf`), so it is left out of every comparison.
+ */
+export const comparableSum = (counts: TokenCounts): number =>
+  counts.input + counts.cacheRead + counts.cacheWrite;
+
+/**
+ * One response of the agent as the `assistant` events of the stream show it: the last `usage` of its message id
+ * (the stream writes one event per content block and the usage grows while it streams) and the tools it called.
+ */
+export interface AgentResponse {
+  id: string;
+  usage: TokenCounts;
+  tools: string[];
+}
+
 export interface AgentTurn {
   sessionId: string;
   calls: ToolCall[];
+  /** The responses of the turn in the order they began, from the stream (not from the transcript file). */
+  responses: AgentResponse[];
   /** The tools of the kodel server, as the agent saw them at the start. */
   kodelTools: string[];
   costUsd: number;
+  /** The agent's own count of its use in this turn; absent when the result event has none. */
+  agentUsage?: AgentUsage;
   finalText: string;
   isError: boolean;
   /** The raw stream, kept for the failure message. */
@@ -230,10 +270,120 @@ interface StreamEvent {
   subtype?: string;
   session_id?: string;
   tools?: string[];
-  message?: { content?: StreamBlock[] | string };
+  message?: { id?: string; usage?: Record<string, unknown>; content?: StreamBlock[] | string };
   total_cost_usd?: number;
+  usage?: Record<string, unknown>;
+  modelUsage?: Record<string, Record<string, unknown>>;
   result?: string;
   is_error?: boolean;
+}
+
+const num = (value: unknown): number =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+
+/**
+ * The agent's own count of its use, from the `result` event of a turn: `usage` for the total and `modelUsage` for
+ * each model. `undefined` when the event has neither.
+ */
+export function agentUsageOf(
+  event: Pick<StreamEvent, "usage" | "modelUsage">,
+): AgentUsage | undefined {
+  const { usage, modelUsage } = event;
+  if (usage === undefined && modelUsage === undefined) return undefined;
+  const models: AgentUsage["models"] = {};
+  for (const [model, given] of Object.entries(modelUsage ?? {})) {
+    models[model] = {
+      input: num(given["inputTokens"]),
+      output: num(given["outputTokens"]),
+      cacheRead: num(given["cacheReadInputTokens"]),
+      cacheWrite: num(given["cacheCreationInputTokens"]),
+      usd: num(given["costUSD"]),
+    };
+  }
+  return {
+    total: {
+      input: num(usage?.["input_tokens"]),
+      output: num(usage?.["output_tokens"]),
+      cacheRead: num(usage?.["cache_read_input_tokens"]),
+      cacheWrite: num(usage?.["cache_creation_input_tokens"]),
+    },
+    models,
+  };
+}
+
+/**
+ * The responses of a turn, from the `assistant` events of its `stream-json` output: one per message id, in the order
+ * they began, with the last `usage` seen for the id and the names of the tools it called. This is the agent's own
+ * account, a different source from the transcript file that the usage pass reads. **Its `output` is not a
+ * measurement:** the stream's per-message `output_tokens` is a streamed placeholder (a real run: 66 in the stream
+ * against 513 in the transcript, which holds the final value), so only input, cache read and cache write are an
+ * independent reference.
+ */
+export function responsesOf(stdout: string): AgentResponse[] {
+  const byId = new Map<string, AgentResponse>();
+  for (const line of stdout.split("\n")) {
+    if (!line.trim()) continue;
+    let event: StreamEvent;
+    try {
+      event = JSON.parse(line) as StreamEvent;
+    } catch {
+      continue;
+    }
+    const id = event.message?.id;
+    if (event.type !== "assistant" || typeof id !== "string" || id === "") continue;
+    let response = byId.get(id);
+    if (response === undefined) {
+      response = { id, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, tools: [] };
+      byId.set(id, response);
+    }
+    const usage = event.message?.usage;
+    if (usage !== undefined) {
+      response.usage = {
+        input: num(usage["input_tokens"]),
+        output: num(usage["output_tokens"]),
+        cacheRead: num(usage["cache_read_input_tokens"]),
+        cacheWrite: num(usage["cache_creation_input_tokens"]),
+      };
+    }
+    const blocks = Array.isArray(event.message?.content) ? (event.message?.content ?? []) : [];
+    for (const block of blocks) {
+      if (block.type === "tool_use" && typeof block.name === "string") {
+        response.tools.push(block.name);
+      }
+    }
+  }
+  return [...byId.values()];
+}
+
+/**
+ * The sum of the responses from the first that called a tool ending in `from` to the last that called one ending in
+ * `to`, both included: the same window the usage pass credits to a run. It starts at the response that issued
+ * `pipeline_start` (the pass reads from the log line of that call, and a response is one usage) and ends at the one
+ * that issued the last `pipeline_complete_step` (the step-end pass counts that response as it stands, still open).
+ * Everything before (the preamble, such as a tool search) and after (the final answer, a background watch) is the
+ * agent's own use of the turn, but not the run's. The window starts at the FIRST response that called `from`; the
+ * pass starts at the call that carries the run's id, so a first failed `pipeline_start` (a wrong pipeline name)
+ * would make this window wider than the pass's. Fine for the one-run scenario here. The `output` of the sum is the
+ * stream's placeholder (see `responsesOf`). `undefined` when the stream has no such window.
+ */
+export function windowUsage(
+  responses: readonly AgentResponse[],
+  from: string,
+  to: string,
+): TokenCounts | undefined {
+  const calls = (response: AgentResponse, suffix: string) =>
+    response.tools.some((name) => name.endsWith(suffix));
+  const start = responses.findIndex((r) => calls(r, from));
+  const end = responses.findLastIndex((r) => calls(r, to));
+  if (start === -1 || end === -1 || end < start) return undefined;
+  const total: TokenCounts = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  for (const response of responses.slice(start, end + 1)) {
+    total.input += response.usage.input;
+    total.output += response.usage.output;
+    total.cacheRead += response.usage.cacheRead;
+    total.cacheWrite += response.usage.cacheWrite;
+  }
+  return total;
 }
 
 function textOf(content: unknown): string {
@@ -339,6 +489,7 @@ export async function runAgentTurn(options: TurnOptions): Promise<AgentTurn> {
   let sessionId = "";
   let kodelTools: string[] = [];
   let costUsd = 0;
+  let agentUsage: AgentUsage | undefined;
   let finalText = "";
   let isError = false;
   for (const line of stdout.split("\n")) {
@@ -381,6 +532,7 @@ export async function runAgentTurn(options: TurnOptions): Promise<AgentTurn> {
     if (event.type === "result") {
       sessionId = String(event.session_id ?? sessionId);
       costUsd = Number(event.total_cost_usd ?? 0);
+      agentUsage = agentUsageOf(event);
       finalText = String(event.result ?? "");
       isError = event.is_error === true;
     }
@@ -388,8 +540,10 @@ export async function runAgentTurn(options: TurnOptions): Promise<AgentTurn> {
   const turn: AgentTurn = {
     sessionId,
     calls,
+    responses: responsesOf(stdout),
     kodelTools,
     costUsd,
+    ...(agentUsage === undefined ? {} : { agentUsage }),
     finalText,
     isError,
     transcript: `${stdout}\n--- stderr ---\n${stderr}`,

@@ -40,6 +40,11 @@ The fields of each kind:
     the cached tokens inside `input`, so a total subtracts them first.
   - `reasoning` is the part of `output` spent on thinking, when the agent says so. It is inside `output`
     already, never added to it.
+  - `cache_write_1h?` is the part of `cache_write` written with the 1-hour lifetime (priced higher than the
+    5-minute one). It is inside `cache_write`, never added to it, and only a read made for usage
+    (`ReadOptions.usageDetail`) carries it; the events other readers get have no such field. The same option makes
+    a stopped read without `holdBack` keep back the response it was in the middle of; the engine's own usage pass
+    reads with `holdBack` and does not need that, so it is a guard for other consumers.
   - `cost` is `{ amount?, basis }`; `basis` is `reported` (the agent wrote it), `reported_zero`, `computed` or
     `unknown`. Collectors do not compute a cost: a log that does not carry one gives `unknown`.
 - `tool_call`: `id`, `name`, `mcp_server?` (from `mcp__<server>__<tool>`), `input_preview?`, `started`.
@@ -232,9 +237,28 @@ Only the sessions of Kodel projects: a directory tree with the Kodel marker (`.k
 Logs are in `$CLAUDE_CONFIG_DIR/projects/<folder>/<session>.jsonl` (`~/.claude` by default). The folder name is the
 working directory with every character that is not a letter or digit replaced by `-`; a name over 200 characters
 is cut and followed by a hash, which is not reproduced: such a folder is found by its first 200 characters.
+The agent names the folder after the directory it really works in. A project reached through a link (on macOS the
+temporary directory is `/var/...`, a link to `/private/var/...`, and a linked home is the same) is therefore looked for
+under both names, the one as given and the real one, for the copy of the agent's log and for usage alike; what counts as the
+project's is still decided by the log's own `cwd`, so a folder of another project is never credited (its lines are scanned for the
+run's id only, and it is refused when its own `cwd` is not in the project).
 
 The transcript does not contain every request the agent makes (titles, summaries and the like), so the totals of
-the events are a little below the agent's own. On a clean one-turn session the test accepts a difference of 10%.
+the events are a little below the agent's own. On a clean one-turn session the test accepts a difference of 10%, and
+the comparison is **window to window**: the agent's own count for the whole `claude -p` turn is far above the run's by
+design, because it holds the requests before the run (a tool search, listing the pipelines, the first large cache write) and
+after it (the final answer, the background watch). In the first real run the run held 4 / 319 / 57 612 / 534 tokens (input /
+output / cache read / cache write) and the whole turn 14 / 1 133 / 186 722 / 17 448. The real-agent test therefore builds
+its reference from the agent's own stream: the responses from the one that issued `pipeline_start` to the one that issued
+the last `pipeline_complete_step`, both included, which is what the pass credits to a run. **Output is not compared:** in
+Claude Code's stream the per-message `output_tokens` is a streamed placeholder (66 in the stream against 513 in the transcript
+in the real run, while input, cache read and cache write were exactly equal), the transcript holds the final value, so the
+stream is no independent reference for it and output is only printed. The sum of input, cache read and cache write is held to
+10%, and each of them when the agent's own figure for it is at least 100 tokens.
+The transcript also undercounts uncached input and cache reads for a session with forks and subagents (a fork does not log the
+prompt it inherited, and a cache written again after it went idle is not in it): in a measured session they were 23-51% below
+Claude Code's own `/usage`, while output agreed within 1%. The 10% holds for a clean one-turn session only, and the cost of a model
+is only as good as its row of the price table.
 
 ## Writing a collector for another agent
 
@@ -401,22 +425,104 @@ have another session of the project copied into the run. Lower the exposure with
 `system` event. At the first release the sample run in `fixtures/agent-log/` is moved under the frozen formats (or its hash
 is pinned), and from then on a change of the event shape needs a reader of the previous format.
 
-## Prices (planned)
+## Usage and cost (`usage_recorded`)
 
-**Planned defaults, not yet built.** They were decided in TASK-52A8 and are built in TASK-9JRS (cost and prices). Until
-that lands, `usage.cost` has no `revision` or `source` and no cost is computed. The plan is `docs/plans/task_52a8.md`.
+Each run records what its agent used: tokens per model (`input`, `output`, `cache_read`, `cache_write` with its 1-hour part,
+`api_calls`) and an **estimated** cost, per attempt of an agent node and for the run. It is built in TASK-9JRS on the
+collectors above, and it is information only: usage and cost never feed a check, a route or a gate.
 
-**Prices.** A table in code (`pipeline-core`, plain data): `format`, `revision` (a date), per model the prices of input,
-output, cache read and cache write, and `effectiveFrom`, `sourceUrl`, `checkedAt`. The entry is chosen by the time of
-the usage event. A project can override it in `history.usage.prices`; an entry replaces the shipped one of that model
-whole, and the cost records `source: shipped | config`. A cost is computed when the usage is collected, stored with the
-`revision`, and not recomputed with a later table. A total over a model without a price is `partial`, never `$0`. Every
-cost from the table is an estimate. The check of the table (a script with a network mode and a `--local` mode, and a
-skill for the maintainers) is built with it. Claude Code's own `cost-state` entry totals a whole session, is written once
-when it ends, is missing from about half of the session files and is always above the event totals. It is not an event,
-is never in a run and is never shown as a run's cost; only the `--local` check reads it, with the same project scoping
-as the collectors (Kodel projects only).
+```yaml
+history:
+  usage:
+    enabled: true   # false writes nothing and does not read the agent's log
+    prices:         # optional; per model, replaces the shipped price of that model whole
+      claude-example-model: { input: 1.5, output: 7.5, cache_read: 0.15, cache_write: 1.875, cache_write_1h: 3 }  # an example, not a price: USD per million tokens
+```
 
-**Constraint.** The format change the prices need (optional `revision`/`source` on `usage.cost`, a `computed` basis, new
-keys in `run_started.history`) is allowed under `v: 1` only before the first release, so the release waits for it, or the
-version is bumped with a reader of the previous format.
+**It has its own switch.** `agent_log: false` does not stop the transcript being read; only `usage: false` does. Usage stores
+numbers and model ids and no text. The keys are frozen at the start of the run (`run_started.history.usage`), so an edit of
+the config during a run changes nothing for it; a run without them reads as `not_captured`.
+
+**When and what.** One pass at the end of each agent step, before the step is judged, under the same lock as the copy of the
+agent's log (the copy first, then usage); the timer never counts usage. The pass reads the log of the sessions that belong to
+the run (found as for the agent log, see "The agent log"), and the logs of their subagents whatever `tool_log` says, and journals
+a `usage_recorded` delta: `session`, `node`, `attempt`, the delta (tokens, costs and flags per model) and the cursor (`last_seq`,
+`last_key`, and the response that was still open). A delta is only added to; nothing is rewritten, and nothing is written to a
+run that has ended. The worst time a pass adds before a step is judged is the wait for the lock (5 s), the copy's budget (30 s),
+usage's own budget (10 s) and the wait for the step's own call in the log (2 s, below).
+
+**The wait for the step's call.** The pass runs inside the agent's `pipeline_complete_step` call, and the agent writes its log a
+little behind its work. Without a wait the response that makes this very call could be missing from the log when the pass reads
+it: it was then counted in the next step, and after the last step not at all (seen once on a real `claude -p` run, where the
+window's total was 34% short; a run before it had agreed to 0.5%). So a pass at a step end first waits, up to
+`STEP_END_LOG_WAIT_MS` (2 s, once per pass whatever the number of sessions, counted in the pass's own time), until the tail of
+the log of a session that proved the run holds the call that hands in this node and attempt with the run's id (the tail only is
+read, every 100 ms; the whole log never is). It ends the moment the call is there. If it never is, the pass goes on with what the
+log has, as before, and says nothing: it is not a failure. The timer's pass never waits, and nothing waits when usage is off,
+when the run is over or when no session proved the run.
+
+**Which attempt.** What a pass reads is credited to the attempt that pass completes, so the windows of attempts are contiguous
+from the run's first call (the response that calls `pipeline_next_step` is written before the step is served and is in its step).
+What falls inside a wait for a person (from a gate being reached to its decision, or a pause to its resume, by the journal's
+times) is outside every step and is recorded as `unattributed`. The agent talking with the person while the run waits at a gate
+is therefore not charged to a node. Polling through command and check nodes is charged to the next agent node. Use after the last
+pass (the agent's final turn after the last `pipeline_complete_step`, a wait at the end) is not recorded: the run's total is a
+lower bound. A hand-in the engine refused after the pass, and then repeated, simply adds another delta to the same attempt.
+
+**The cursor.** `seq` of the events is the same for the same log, and the state keeps, per session, the last `seq` credited.
+After a server restart the log is read again from the run's start (within the pass's budget) and what was credited is skipped; a
+pass that runs out of time credits only what it read and marks the record `incomplete`, and the next pass goes on (`complete:
+false` in the report until the log is read to its end). A log that is shorter than before, or whose event at the cursor is not
+the one that was credited, stops the count for that session (`unreadable`). Only closed responses are read from the log. The
+response the agent is writing at the end of a step (the one that calls `pipeline_complete_step`) is counted as it stands from a
+copy of the reader's state, marked `last_open` (its output may be low), and when it is whole the next pass adds only the rest.
+It is only counted if it is in the log when the pass reads: see "The wait for the step's call" for how the pass waits for it.
+
+**Cost.** A table of prices in code (`pipeline-core/src/price-table.json`): `format`, `revision` (a date), per model a list of
+dated entries with the prices of input, output, cache read, cache write and the 1-hour cache write (`cache_write_1h`, default
+twice the input price), `effectiveFrom`, `sourceUrl`, `checkedAt`. The entry is chosen by the time of the usage event; a model
+that is not in the table (a Bedrock or Vertex id, an alias) has no price, and a total over it is `partial`, never `$0`. An entry in
+`history.usage.prices` replaces the shipped entry of that model whole (it keeps the shipped `long_context_tokens` of the model unless it
+gives its own), and the report says the cost was priced from the config. A redaction rule of the project that matches a model id
+rewrites the id before it is priced, so that model has no price and the total is `partial`: such a rule removes the cost.
+Long context (more than 200 000 prompt tokens in one request, or the model's own `long_context_tokens` when the table gives one,
+priced higher by some models) is not modelled: such calls are
+counted in `long_context` and flagged, and the cost may be low. A cost is computed when the usage is read, stored in the delta
+with the table's `revision`, and never recomputed with a later table, so a run that crossed a table update lists both revisions.
+**Every cost is an estimate**, not a bill. Claude Code's own `cost-state` entry totals a whole session, is written once when it
+ends, is missing from about half of the session files and is always above the event totals: it is not an event, is never in a run
+and is never shown as a run's cost.
+
+**What the report shows** (`kodel report`, and the same object with `--json`): per attempt and for the run the tokens per model,
+calls and the estimated cost with the table revisions, and the flags `complete`, `partial`, `unattributed`, `last_open`,
+`long_context`, `incomplete`, `includes subagents`; or `not_collected` with a reason: `not_captured` (the run did not ask for it),
+`disabled`, `session_unknown`, `log_missing`, `refused`, `unreadable`, `busy` (the lock was taken by another pass; said once, and
+nothing is lost because the cursor did not move; also said when the copy that carries the pass failed, or the lock was lost, before the pass could run: nothing was read), `agent_unsupported` (the
+run's agent has no collector), and, next to a report that has numbers, `cap` (the run journaled as many records as it may) and
+`record_refused` (the run's account refused a record, so the pass stopped; said once). A subagent log with no time on any entry cannot be
+told from one that began before the run: it is not guessed at and reads `unreadable`. A record written in a
+format this engine does not know reads `cannot read (format X)`, never "modified".
+
+**Limits.** At most 16 models per record and 64 per run (the rest are `other`), 1000 `usage_recorded` events and 2000 attempts per
+run (past 2000 attempts the rest is counted in the run's `unattributed`; past 1000 events nothing more is counted and the report
+says `cap`). A model id that does not look like an id is counted as `other`; a session id that does not (it is at most 128 characters, like the run's own ids) is not looked at, so its use is
+not counted: the state is not redacted and holds numbers and safe ids only. The set that tells a response read from two logs apart holds 200 000 keys; beyond it a repeat may be counted twice and the
+record says so. Journal times are those of the machine that serves the run and log times those of the agent: a run served on
+another machine than the agent's (a devcontainer) may be windowed wrongly.
+
+**Format.** Additive, so no release waits for it: the optional `cache_write_1h` on the `usage` event (only a read made for usage
+carries it, so the events the other readers get and the golden fixtures are unchanged), the events `usage_recorded` and
+`usage_failed`, `state.usage` and `run_started.history.usage`. An engine without this change reads the journal and the state as
+plain JSON and ignores what it does not know. Every shipped price row carries `checkedAt: 2026-10-28`: that day all fourteen rows
+were compared with the live price page (the page of `https://docs.claude.com/en/docs/about-claude/pricing`, which redirects to
+`platform.claude.com`) and they match. How they were compared differs by row: the eleven rows that had first been taken from the
+model table of the `claude-api` skill (cached 2026-10-06) were also read column by hand (that table's Sonnet 5.5 cache read price
+was wrong, 0.20 against the 0.10 of the page; found from Claude Code's own `/usage`); the three 4.5 rows were verified by the set
+comparison of the script only. The copy of the page used was fetched with `curl` on 2026-10-28 and is **not committed**, so the
+repository's fixture page (`fixtures/price-pages/`) stays hand-made and the repository itself cannot show that the live page
+parses. `scripts/check-prices.mjs` is the check, and `skills/kodel-prices/` is how a maintainer runs it again. The check compares
+the SET of dollar amounts that follow a model's name and cannot tell the columns apart; it looks at every place that names the
+model, and reports a page whose places disagree on one price of a row (a stale mention that still quotes the old set does not hide
+a changed row), but a change of several prices at once while an old mention remains is not caught. A request
+over a model's own `long_context_tokens` (200 000 unless the table says otherwise, 100 000 for `claude-haiku-5-5`) is flagged, and
+the higher price of such requests is not modelled.
