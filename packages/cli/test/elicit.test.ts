@@ -943,3 +943,40 @@ describe("t_elicit: a paused run, a change of the pipeline, a state changed outs
     await s.close();
   });
 });
+
+describe("t40 a worker is never held for the person", () => {
+  test("t40_dialog_exemption_keys_on_token_not_slug", async () => {
+    const s = await connect(() => approve);
+    const runId = await start(s);
+    const took = await s.call("pipeline_take_step", { run_id: runId, node_slug: "write" });
+    expect(took.body).toMatchObject({ ok: true, status: "claimed", node_slug: "write" });
+    await writeFile(join(dir, "out.txt"), "hello\n");
+    // the same call, with the same node_slug, carries a claim token: no dialog, the worker reports
+    const done = await s.call("pipeline_complete_step", {
+      run_id: runId,
+      node_slug: "write",
+      attempt: 1,
+      claim_token: took.body.claim_token,
+    });
+    expect(s.forms).toHaveLength(0);
+    expect(done.body.dialog).toBeUndefined();
+    expect(done.body.next.waiting).toMatchObject({ reason: "gate", node_slug: "approve" });
+    expect(done.body.next.waiting.tell_the_person).toContain("Report this answer");
+    expect(done.body.next.waiting.tell_the_person).not.toContain("Write to the person");
+    // the gate is still the person's: the agent that started the worker meets the dialog
+    const next = await s.call("pipeline_next_step", { run_id: runId });
+    expect(s.forms).toHaveLength(1);
+    expect(next.body.dialog).toMatchObject({ answer: "decided" });
+    await s.close();
+  });
+
+  test("t40_sequential_gate_dialog_still_opens_in_complete_step", async () => {
+    const s = await connect(() => approve);
+    const runId = await start(s);
+    // node_slug alone is every completion's: the dialog opens as it always did
+    const done = await toGate(s, runId);
+    expect(s.forms).toHaveLength(1);
+    expect(done.body.dialog).toMatchObject({ answer: "decided" });
+    await s.close();
+  });
+});

@@ -47,7 +47,7 @@ const size = (file: ServedFile) => Buffer.byteLength(JSON.stringify(file, null, 
 
 /** The long texts that are shortened, and the objects that can only be left out. */
 const TEXTS: readonly string[][] = [["prompt"], ["reentry_feedback"], ["execution", "instruction"]];
-const OBJECTS = ["result_spec", "pipeline_change"] as const;
+const OBJECTS = ["result_spec", "pipeline_change", "steps"] as const;
 
 /** The object that holds the field and the field's name, when the answer has it. */
 function at(answer: Record<string, unknown>, path: readonly string[]) {

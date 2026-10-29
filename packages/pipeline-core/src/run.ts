@@ -130,16 +130,49 @@ export interface NodeRun {
   fork?: ForkRef;
   /** The node is no longer in the pipeline; its attempts stay in the history. */
   removed?: boolean;
+  /**
+   * A worker's hold on the node's open agent step. It sits on the node, not on the attempt, so it
+   * outlives a restart of the step (an accepted change, a recheck, a resume): the worker that holds
+   * it goes on with the new attempt, and no second worker is handed the step meanwhile.
+   */
+  claim?: StepClaim;
 }
 
 export type Phase = "agent" | "engine" | "checks" | "human";
 
-/** A worker's hold on an agent step; a mark, not a lock (the host writes it, the engine never refuses on it). */
+/**
+ * A worker's hold on an agent step: a mark, not a lock. The engine never refuses a completion on it;
+ * it only keeps two workers from being handed the same step, and says when one was crossed.
+ */
 export interface StepClaim {
-  /** The token, hashed by the host. */
+  /** The token, hashed by the host; the token itself is never stored. */
   token: string;
   at: number;
-  by?: string;
+  /** When the claim lapses unless renewed (`at` plus the project's `claim_ttl_s`). */
+  until: number;
+  /** A short mark of the holder (a prefix of the hash), for the answers; it identifies nobody. */
+  by: string;
+}
+
+/** The claim on a node's step that still holds at `now`, if any. */
+export function liveClaim(run: NodeRun | undefined, now: number): StepClaim | undefined {
+  const claim = run?.claim;
+  return claim !== undefined && now < claim.until ? claim : undefined;
+}
+
+/** How many claim events of each kind a run journals; the claims themselves are not limited. */
+export const MAX_LOGGED_CLAIMS = 200;
+
+/** Default `agents.claim_ttl_s`: how long a worker's hold on a step lasts unless renewed. */
+export const DEFAULT_CLAIM_TTL_S = 900;
+
+/**
+ * Whether the run has open agent steps and every one of them is held by a live claim: then a caller
+ * that asks what to do next has nothing to do but wait for the workers, as it does for engine work.
+ */
+export function claimedStepsOpen(state: RunState, now: number): boolean {
+  const open = state.active.filter((v) => v.phase === "agent");
+  return open.length > 0 && open.every((v) => liveClaim(state.nodes[v.node], now) !== undefined);
 }
 
 /** An attempt that is in progress. The state holds a set of them: one per node, several in a fork. */
@@ -150,7 +183,6 @@ export interface Visit {
   phase: Phase;
   /** The branch this visit belongs to, when it is inside a fork. */
   fork?: ForkRef;
-  claim?: StepClaim;
   /** Which check is running, in the `checks` phase. */
   checkIndex: number;
   /** Last sign of life of the process running engine work. */
@@ -232,6 +264,8 @@ export interface RunState {
   refusals?: number;
   /** How many proposals to change the pipeline were journaled; there is a limit. */
   proposals?: number;
+  /** How many `step_claimed` and `step_claim_conflict` events were journaled; each has a limit. */
+  claimEvents?: { claimed: number; conflicts: number };
   /**
    * Where the host runs this run's commands, when not in the repository root; opaque to the core.
    * It lives in the state, which the host checks against its trusted hash, because a command must
@@ -330,6 +364,9 @@ export type AgentLogFailure = (typeof AGENT_LOG_FAILURES)[number];
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 
+/** The mark of a claim's holder: a prefix of the hash, which gives nothing of the token away. */
+const markOf = (tokenHash: string) => `w-${tokenHash.slice(0, 8)}`;
+
 // ── events in, effects out ──────────────────────────────────────────────────
 
 /**
@@ -386,6 +423,11 @@ export type RunEvent =
       engineVersion?: string;
       /** One of the node's other outcomes (`outcomes:`), instead of the usual `passed`. */
       outcome?: string;
+      /**
+       * The hash of the claim token the worker handed in with, as the host hashed it. A completion
+       * is never refused for a missing or wrong one: it is journaled as crossing the live claim.
+       */
+      claimToken?: string;
       /** HEAD of the run's directory when the step was handed in, as the host read it. */
       head?: string;
       /** The patch of the work since the previous hand-in, when the host kept one (`history.changes`). */
@@ -504,6 +546,14 @@ export type RunEvent =
     }
   /** The file of a `step_served` event could not be written. */
   | { type: "served_write_failed"; node: string; attempt: number; n: number; message: string }
+  /**
+   * A worker takes the open agent step of `node`, or, without one, the first free open step (chosen
+   * here, under the run's lock, so two workers never pick the same). `token` is the hash of the
+   * token the host made for it (the core has no crypto). A live claim with another hash, or no
+   * free step, leaves the state as it is and says so (`noop`): the host reads who holds what from
+   * the state it gets back. The same hash renews the claim. `ttlMs` is the project's `claim_ttl_s`.
+   */
+  | { type: "step_claimed"; node?: string; token: string; ttlMs: number }
   /**
    * Events of the agent's log were appended to the run's `agent_log/<session>.jsonl`. The stream was
    * `stream_from` bytes long before and is `stream_to` now; `first_seq`..`last_seq` are the events appended.
@@ -827,6 +877,8 @@ class Machine {
     if (!rework) {
       run.visitId = this.s.nextVisitId++;
       this.s.trail.push(slug);
+      // A new visit is new work; a rework or a restart of the step stays with its worker.
+      delete run.claim;
     }
     const begin = this.handler(node).begin(node.params, this.render);
     const visit: Visit = {
@@ -1338,6 +1390,7 @@ class Machine {
     }
     if (event.type === "step_served") return this.stepServed(event);
     if (event.type === "served_write_failed") return this.servedWriteFailed(event);
+    if (event.type === "step_claimed") return this.claim(event);
     if (event.type === "agent_log_saved") return this.agentLogSaved(event);
     if (event.type === "agent_log_failed") return this.agentLogFailed(event);
     if (event.type === "cancel") {
@@ -1371,8 +1424,22 @@ class Machine {
               );
             }
           }
+          // The step was started again under its worker (a change was accepted, a check was rerun,
+          // the branch was resumed): the claim is still the worker's, and the new attempt is one
+          // call away.
+          if (
+            error instanceof KodelError &&
+            error.code === "ATTEMPT_MISMATCH" &&
+            liveClaim(this.s.nodes[event.node], this.now) !== undefined
+          ) {
+            throw fail(
+              "ATTEMPT_MISMATCH",
+              `${error.message}; the step was restarted; call pipeline_take_step with your token to continue`,
+            );
+          }
           throw error;
         }
+        this.claimCrossed(event);
         const node = this.node(event.node);
         if (event.outcome !== undefined && event.outcome !== "passed") {
           const others = (
@@ -1599,6 +1666,69 @@ class Machine {
       prompt_hash: event.promptHash,
       ...(event.executor === undefined ? {} : { executor: event.executor }),
     });
+  }
+
+  /**
+   * A worker takes a step. The hold is on the node and keyed by the token's hash, so the worker
+   * that holds it may renew it and go on after a restart of the step, and another worker meets a
+   * live claim as a quiet no-op (the host reads the holder from the state). A lapsed claim is free.
+   */
+  private claim(event: Extract<RunEvent, { type: "step_claimed" }>) {
+    if (this.s.status !== "running") throw fail("NODE_NOT_RUNNING", `the run is ${this.s.status}`);
+    const slug =
+      event.node ??
+      this.s.active.find(
+        (v) => v.phase === "agent" && liveClaim(this.s.nodes[v.node], this.now) === undefined,
+      )?.node;
+    if (slug === undefined) throw new Repeat();
+    const visit = this.visitFor(slug, undefined, ["agent"]);
+    const run = this.run(slug);
+    const live = liveClaim(run, this.now);
+    if (live !== undefined && live.token !== event.token) throw new Repeat();
+    const ttl = Math.max(1_000, Math.trunc(event.ttlMs) || DEFAULT_CLAIM_TTL_S * 1000);
+    run.claim = {
+      token: event.token,
+      at: this.now,
+      until: this.now + ttl,
+      by: markOf(event.token),
+    };
+    const events = this.s.claimEvents ?? { claimed: 0, conflicts: 0 };
+    this.s.claimEvents = events;
+    if (events.claimed >= MAX_LOGGED_CLAIMS) return;
+    events.claimed += 1;
+    this.log("step_claimed", {
+      node: slug,
+      attempt: visit.attempt,
+      by: run.claim.by,
+      ttl_s: Math.round(ttl / 1000),
+      ...(live === undefined ? {} : { renewed: true }),
+      ...this.forkFields(visit.fork),
+    });
+  }
+
+  /**
+   * A completion that does not carry the token of the live claim on its step is accepted all the
+   * same (the checks decide, not the claim) and journaled, so a run worked by two workers at once
+   * can be read afterwards. The claim is released: the step is handed in.
+   */
+  private claimCrossed(event: Extract<RunEvent, { type: "agent_completed" }>) {
+    const run = this.run(event.node);
+    const live = liveClaim(run, this.now);
+    if (live !== undefined && live.token !== event.claimToken) {
+      const events = this.s.claimEvents ?? { claimed: 0, conflicts: 0 };
+      this.s.claimEvents = events;
+      if (events.conflicts < MAX_LOGGED_CLAIMS) {
+        events.conflicts += 1;
+        this.log("step_claim_conflict", {
+          node: event.node,
+          attempt: event.attempt,
+          holder: live.by,
+          // Whether the completion named a token at all; whose it was is not recorded.
+          token_given: event.claimToken !== undefined,
+        });
+      }
+    }
+    delete run.claim;
   }
 
   private servedWriteFailed(event: Extract<RunEvent, { type: "served_write_failed" }>) {

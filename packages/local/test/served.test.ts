@@ -579,3 +579,27 @@ describe("the cut of a served file", () => {
     expect(cut.answer.prompt).toBe("p".repeat(10));
   });
 });
+
+describe("t40 the cut of a served file with several steps", () => {
+  test("t40_fit_served_cuts_steps", () => {
+    const steps = Array.from({ length: 4 }, (_, i) => ({
+      slug: `s${i}`,
+      kind: "agent",
+      attempt: 1,
+      prompt: "x".repeat(SERVED_MAX_BYTES / 2),
+    }));
+    const file: ServedFile = {
+      v: 1,
+      node: "s0",
+      attempt: 1,
+      n: 1,
+      prompt_hash: promptHashOf({}),
+      answer: { slug: "s0", attempt: 1, prompt: "short", steps },
+    };
+    const cut = fitServed(file);
+    expect(cut.truncated).toBe(true);
+    expect(cut.answer.steps).toEqual({ omitted: true });
+    expect(cut.answer.prompt).toBe("short");
+    expect(Buffer.byteLength(JSON.stringify(cut, null, 2))).toBeLessThanOrEqual(SERVED_MAX_BYTES);
+  });
+});

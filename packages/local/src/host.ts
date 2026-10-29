@@ -6,20 +6,24 @@
  * caller gets the next answer and asks again later. If the process dies, a later `tick` finds the
  * work without a heartbeat and restarts it; the state on disk is all that is needed for that.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { mkdir, readFile, realpath } from "node:fs/promises";
 import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import {
   type AgentDecision,
+  type AgentStep,
+  type AgentsConfig,
   type Caller,
   type ChangeSet,
   type ChangesRef,
   type CheckVerdict,
   canonicalPipeline,
+  claimedStepsOpen,
   cleanExecutorText,
   clientOf,
+  DEFAULT_AGENTS,
   type Decision,
   decide,
   defaultRegistry,
@@ -37,9 +41,12 @@ import {
   isTreeId,
   type JournalRecord,
   KodelError,
+  liveClaim,
   measurePatch,
   mergeReports,
   type NextStep,
+  type NextStepOptions,
+  type NextStepRequest,
   nextStep,
   type OutputRef,
   type PendingChange,
@@ -57,12 +64,14 @@ import {
   redactText,
   renderContextOf,
   renderDeep,
+  resolveMode,
   rowsToCsv,
   runSlug,
   type ServedSurface,
   type StepResult,
   standingOf,
   summarizeRun,
+  type TakeOutcome,
   validateReport,
 } from "@kodel-ai/pipeline-core";
 import { type AgentLogRun, AgentLogWriter } from "./agent-log";
@@ -214,6 +223,32 @@ export function engineEnv(
 
 /** `<host>:<pid>` of this process. */
 export const processOwnerId = (): string => `${hostname()}:${process.pid}`;
+
+/**
+ * The part of a step that is the step's own: what is recorded as served, and what a worker is handed.
+ * Who else works the run (`steps`, `taken_by`, `also_waiting`, the mode) is left out, so the record
+ * of a step is the same whatever its siblings do.
+ */
+export function servedPart(
+  step: AgentStep,
+  change?: PipelineChange,
+): AgentStep & { pipeline_change?: PipelineChange } {
+  const out: AgentStep & { pipeline_change?: PipelineChange } = {
+    slug: step.slug,
+    kind: step.kind,
+    attempt: step.attempt,
+    prompt: step.prompt,
+  };
+  // A change of the run's pipeline that waits is shown with every step, and is part of what was shown.
+  if (change !== undefined) out.pipeline_change = change;
+  if (step.name !== undefined) out.name = step.name;
+  if (step.reentry_feedback !== undefined) out.reentry_feedback = step.reentry_feedback;
+  if (step.result_spec !== undefined) out.result_spec = step.result_spec;
+  if (step.execution !== undefined) out.execution = { instruction: step.execution.instruction };
+  if (step.outcomes !== undefined) out.outcomes = step.outcomes;
+  if (step.workdir !== undefined) out.workdir = step.workdir;
+  return out;
+}
 
 /**
  * Whether the process behind an owner id is alive. Only an owner on this machine can be judged;
@@ -758,12 +793,40 @@ export class LocalRun {
    * be read leaves the default: this is a hint, and the commands that need the config say what is wrong.
    */
   private async waitHint(): Promise<boolean> {
+    return (await this.hints()).wait;
+  }
+
+  /**
+   * The hints and the `agents` block of the project config, read at each answer like `waitHint` and
+   * for the same reason: a config that cannot be read leaves the defaults, so a bad value never
+   * fails `pipeline_next_step` or a worker's claim for a run that is going; the commands that need
+   * the config say what is wrong.
+   */
+  private async hints(): Promise<{ wait: boolean; agents: AgentsConfig }> {
     const { options } = this.host;
     try {
-      return (await loadConfig(options.storeRoot ?? `${options.root}/.kodel`)).agent_hints.wait;
+      const config = await loadConfig(options.storeRoot ?? `${options.root}/.kodel`);
+      return { wait: config.agent_hints.wait, agents: config.agents };
     } catch {
-      return true;
+      return { wait: true, agents: { ...DEFAULT_AGENTS } };
     }
+  }
+
+  /** The options of an answer that depend on the config and on the request. */
+  private async answerOptions(request: NextStepRequest, state: RunState): Promise<NextStepOptions> {
+    const hints = await this.hints();
+    const mode = resolveMode(hints.agents, request.subagents);
+    const where = state.workdir === undefined ? undefined : await this.inProject(state.workdir);
+    return {
+      waitHint: hints.wait,
+      agentDecisions: this.agentDecisions(),
+      agents: { mode, maxParallel: hints.agents.max_parallel },
+      ...(where === undefined ? {} : { workdir: where }),
+      ...(request.nodeSlug === undefined ? {} : { nodeSlug: request.nodeSlug }),
+      ...(request.completionOf === undefined ? {} : { completionOf: request.completionOf }),
+      ...(request.worker === true ? { worker: true } : {}),
+      ...(request.atCompletion === true ? { atCompletion: true } : {}),
+    };
   }
 
   private agentDecisions(): { gate: boolean; pipelineChange: boolean } {
@@ -1906,9 +1969,17 @@ export class LocalRun {
     }
   }
 
+  /**
+   * Engine work is going, or every open agent step is in a worker's hands: either way the caller
+   * that waits has nothing to do until something hands in.
+   */
   private async engineBusy(): Promise<boolean> {
     const state = await this.state().catch(() => undefined);
-    return state?.active.some((v) => v.phase === "engine" || v.phase === "checks") ?? false;
+    if (!state) return false;
+    return (
+      state.active.some((v) => v.phase === "engine" || v.phase === "checks") ||
+      claimedStepsOpen(state, this.host.clock())
+    );
   }
 
   /**
@@ -1925,9 +1996,7 @@ export class LocalRun {
   // what callers do
 
   /** What the agent should do next. Throws `STATE_MODIFIED_EXTERNALLY` if the files were tampered with. */
-  async nextStep(
-    options: { atCompletion?: boolean; serve?: { caller?: Caller } } = {},
-  ): Promise<NextStep> {
+  async nextStep(options: NextStepRequest = {}): Promise<NextStep> {
     // Only a call of the agent through the MCP tools starts the copy of its log; looking at a run does not.
     if (options.serve !== undefined) this.watchAgentLog();
     const tick = await this.tick();
@@ -1949,10 +2018,8 @@ export class LocalRun {
       this.host.clock(),
       this.host.engine.registry ?? defaultRegistry(),
       {
-        waitHint: await this.waitHint(),
-        agentDecisions: this.agentDecisions(),
+        ...(await this.answerOptions(options, state)),
         ...(pending ? { pending: pending.info } : {}),
-        ...(options.atCompletion === true ? { atCompletion: true } : {}),
       },
     );
     if ("done" in step && step.run_status === "completed") {
@@ -1982,9 +2049,73 @@ export class LocalRun {
       }
     }
     if (options.serve !== undefined && "node" in step) {
-      await this.recordServed(step.node, options.serve.caller, state);
+      // Every step handed out is recorded, each on its own: what a step says does not depend on its
+      // siblings, so the record of one is the same whoever else is working the run.
+      for (const handed of step.node.steps ?? [step.node]) {
+        await this.recordServed(
+          servedPart(handed, step.node.pipeline_change),
+          options.serve.caller,
+          state,
+        );
+      }
     }
     return step;
+  }
+
+  /**
+   * A worker takes a step: the one named, or the next free one. The token is made here and only its
+   * hash reaches the state and the journal; the machine decides under the run's lock whether the
+   * step is free, so two workers taking at once get one claim between them.
+   */
+  async takeStep(input: { node?: string; token?: string; caller?: Caller }): Promise<TakeOutcome> {
+    const hints = await this.hints();
+    const serve = { ...(input.caller === undefined ? {} : { caller: input.caller }) };
+    const token = input.token ?? randomBytes(16).toString("hex");
+    const hash = hashSource(token);
+    const before = await this.state();
+    const renewed = Object.values(before.nodes).some(
+      (n) => liveClaim(n, this.host.clock())?.token === hash,
+    );
+    // Which step is free is decided by the machine under the lock, with the claim itself.
+    const decision = await this.apply({
+      type: "step_claimed",
+      ...(input.node === undefined ? {} : { node: input.node }),
+      token: hash,
+      ttlMs: hints.agents.claim_ttl_s * 1000,
+    });
+    if (!decision.ok) {
+      await this.recordRefusal("take_step", input.node, undefined, decision.error);
+      throw decision.error;
+    }
+    const after = decision.state;
+    const now = this.host.clock();
+    const mine = Object.values(after.nodes).find((n) => liveClaim(n, now)?.token === hash);
+    if (mine === undefined) {
+      if (input.node === undefined) return { status: "none", next: await this.nextStep({ serve }) };
+      const visit = after.active.find((v) => v.node === input.node && v.phase === "agent");
+      if (!visit) {
+        throw new KodelError(
+          "NODE_NOT_RUNNING",
+          `node "${input.node}" is not an open agent step; call pipeline_next_step to see what is open`,
+        );
+      }
+      return {
+        status: "taken",
+        node_slug: input.node,
+        attempt: visit.attempt,
+        taken_by: liveClaim(after.nodes[input.node], now)?.by ?? "another worker",
+      };
+    }
+    const answer = await this.nextStep({ nodeSlug: mine.slug, serve });
+    if (!("node" in answer)) {
+      // The step was taken and is gone already (a sibling died and ended the run, say): say what is.
+      return { status: "none", next: answer };
+    }
+    return {
+      status: renewed ? "renewed" : "claimed",
+      step: servedPart(answer.node),
+      claim_token: token,
+    };
   }
 
   /**
@@ -2111,6 +2242,7 @@ export class LocalRun {
     summary?: string,
     outcome?: string,
     caller?: Caller,
+    claimToken?: string,
   ) {
     // A change of the pipeline that waits for a person is met here: what the step is judged by may be
     // about to change, so it is not judged yet. The agent is told to wait for the person.
@@ -2155,6 +2287,8 @@ export class LocalRun {
         ...(head === undefined ? {} : { head }),
         ...(summary === undefined ? {} : { summary }),
         ...(outcome === undefined ? {} : { outcome }),
+        // Only the hash travels: the token itself is the worker's and is written nowhere.
+        ...(claimToken === undefined ? {} : { claimToken: hashSource(claimToken) }),
         ...(executor === undefined ? {} : executor),
         ...(recorded.changes === undefined ? {} : { changes: recorded.changes }),
         ...(recorded.changesError === undefined ? {} : { changesError: recorded.changesError }),

@@ -8,7 +8,13 @@
 import { docTopics } from "./docs";
 import { type ErrorCode, KodelError } from "./errors";
 import type { Caller } from "./executor";
-import { MAX_WAIT_S, type NextStep, type PipelineChange } from "./next-step";
+import {
+  type AgentStep,
+  MAX_WAIT_S,
+  type NextStep,
+  type PipelineChange,
+  type SubagentsDeclaration,
+} from "./next-step";
 import type { PipelineSpec } from "./pipeline";
 import type { NodeDiff } from "./pipeline-diff";
 import { defaultRegistry, type Registry } from "./registry";
@@ -68,6 +74,36 @@ export type PipelineProposalOutcome =
   | { ok: true; status: "proposed"; proposal: PipelineProposalInfo }
   | { ok: true; status: "withdrawn" | "none"; name: string };
 
+/** What `pipeline_next_step` may ask for besides the run. */
+export interface NextStepRequest {
+  /** The agent has just said its step is done (see `RunHandle.nextStep`). */
+  atCompletion?: boolean;
+  /** The node whose completion this answer follows: its own step again, never a sibling's. */
+  completionOf?: string;
+  /** Exactly this open agent step. */
+  nodeSlug?: string;
+  /** What the agent says of itself; counts when the config leaves the mode to it. */
+  subagents?: SubagentsDeclaration;
+  /** The caller is a worker on one step: it is told to report back, not to write to the person. */
+  worker?: boolean;
+  /** The answer goes to the agent (see `RunHandle.nextStep`). */
+  serve?: { caller?: Caller };
+}
+
+/** What came of a worker taking a step. */
+export type TakeOutcome =
+  | {
+      /** `claimed`: the step is the caller's now. `renewed`: it was already, and the hold is fresh. */
+      status: "claimed" | "renewed";
+      step: AgentStep;
+      /** Keep it, and complete the step with it; it is shown to nobody else. */
+      claim_token: string;
+    }
+  /** Another worker holds the step; `taken_by` is the mark of that hold, not a name. */
+  | { status: "taken"; node_slug: string; attempt: number; taken_by: string }
+  /** No open agent step is free (or open at all). */
+  | { status: "none"; next: NextStep };
+
 /** One run, as the service sees it. */
 export interface RunHandle {
   readonly runId: string;
@@ -80,7 +116,13 @@ export interface RunHandle {
    * decides whether, per the run's settings); `caller` is who the transport says is asking. A call
    * without it is the host looking at the run for itself and records nothing.
    */
-  nextStep(options?: { atCompletion?: boolean; serve?: { caller?: Caller } }): Promise<NextStep>;
+  nextStep(options?: NextStepRequest): Promise<NextStep>;
+  /**
+   * A worker takes an open agent step: the one named, or the next free one. The host makes the
+   * token and keeps only its hash; a live hold by another token answers `taken`. A claim is advice
+   * to the workers, never a verdict on the step.
+   */
+  takeStep(input: { node?: string; token?: string; caller?: Caller }): Promise<TakeOutcome>;
   completeStep(
     node: string,
     attempt: number,
@@ -88,6 +130,8 @@ export interface RunHandle {
     outcome?: string,
     /** Who the transport says is calling; the host adds what else it observes. */
     caller?: Caller,
+    /** The token the worker took the step with; a missing or wrong one is journaled, not refused. */
+    claimToken?: string,
   ): Promise<Decision>;
   /** `replace` starts the stored report over instead of adding the rows to it. */
   reportResult(
@@ -518,18 +562,80 @@ export class PipelineService {
   }
 
   /**
-   * What to do next. With `wait_s`, and engine work going, it waits (up to `MAX_WAIT_S`) for that
-   * work to finish before answering, so the agent does not have to guess how long to wait.
+   * What to do next. With `wait_s`, and engine work going (or every open step in a worker's hands),
+   * it waits (up to `MAX_WAIT_S`) for that to end before answering, so the agent does not have to
+   * guess how long to wait. It reads: nothing is taken, claimed or started by asking.
    */
-  nextStep(input: { run_id: string; wait_s?: number }): Promise<ToolResult> {
+  nextStep(input: {
+    run_id: string;
+    wait_s?: number;
+    node_slug?: string;
+    subagents?: SubagentsDeclaration;
+  }): Promise<ToolResult> {
     return guarded(async () => {
       const run = await this.run(input.run_id);
-      let step = await run.nextStep({ serve: this.who() });
+      const request: NextStepRequest = {
+        serve: this.who(),
+        ...(input.node_slug === undefined ? {} : { nodeSlug: input.node_slug }),
+        ...(input.subagents === undefined ? {} : { subagents: input.subagents }),
+      };
+      let step = await run.nextStep(request);
       if (input.wait_s !== undefined && input.wait_s > 0 && "running" in step) {
         await run.waitForRest(Math.min(input.wait_s, MAX_WAIT_S) * 1000);
-        step = await run.nextStep({ serve: this.who() });
+        step = await run.nextStep(request);
       }
       return { ok: true, ...step };
+    });
+  }
+
+  /**
+   * A worker takes a step. With `node_slug` that step; without, the next free one. The answer carries
+   * the `claim_token` to complete the step with, or says the step is `taken`.
+   */
+  takeStep(input: {
+    run_id: string;
+    node_slug?: string;
+    claim_token?: string;
+  }): Promise<ToolResult> {
+    return guarded(async () => {
+      const run = await this.run(input.run_id);
+      const outcome = await run.takeStep({
+        ...(input.node_slug === undefined ? {} : { node: input.node_slug }),
+        ...(input.claim_token === undefined ? {} : { token: input.claim_token }),
+        ...this.who(),
+      });
+      switch (outcome.status) {
+        case "claimed":
+        case "renewed":
+          return {
+            ok: true,
+            status: outcome.status,
+            node_slug: outcome.step.slug,
+            attempt: outcome.step.attempt,
+            claim_token: outcome.claim_token,
+            step: outcome.step,
+            note:
+              "The step is yours: do it (where `step.workdir` says, if it is there), then call " +
+              "pipeline_complete_step with node_slug, attempt and this claim_token. The engine's checks " +
+              "decide whether it is done; the token only keeps other workers off it.",
+          };
+        case "taken":
+          return {
+            ok: true,
+            status: "taken",
+            node_slug: outcome.node_slug,
+            attempt: outcome.attempt,
+            taken_by: outcome.taken_by,
+            note: "Another worker holds this step; leave it to them. If you are a worker, report back; otherwise call pipeline_next_step to see what is open.",
+          };
+        case "none":
+          return {
+            ok: true,
+            status: "none",
+            next: outcome.next,
+            note: "No open step is free to take; `next` says what the run is doing.",
+          };
+      }
     });
   }
 
@@ -559,6 +665,7 @@ export class PipelineService {
     attempt: number;
     summary?: string;
     outcome?: string;
+    claim_token?: string;
   }): Promise<ToolResult> {
     return guarded(async () => {
       const run = await this.run(input.run_id);
@@ -568,6 +675,7 @@ export class PipelineService {
         input.summary,
         input.outcome,
         this.caller(),
+        input.claim_token,
       );
       if (!decision.ok)
         return failure(decision.error.code, decision.error.message, decision.error.issues);
@@ -578,6 +686,8 @@ export class PipelineService {
         node &&
         (node.status === "rework" || node.status === "failed") &&
         failed?.source.startsWith("check:");
+      // The answer is about the completed step: its own rework, or a summary; a sibling's open step
+      // is handed out by pipeline_next_step, never claimed here for whoever completed this one.
       return {
         ok: true,
         advanced: decision.noop !== true && node?.status === "passed",
@@ -585,7 +695,12 @@ export class PipelineService {
         ...(checkFailed && failed
           ? { failed_check: { kind: failed.source.slice("check:".length), reason: failed.reason } }
           : {}),
-        next: await run.nextStep({ atCompletion: true, serve: this.who() }),
+        next: await run.nextStep({
+          atCompletion: true,
+          completionOf: input.node_slug,
+          ...(input.claim_token === undefined ? {} : { worker: true }),
+          serve: this.who(),
+        }),
       };
     });
   }

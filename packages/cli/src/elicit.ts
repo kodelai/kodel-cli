@@ -349,6 +349,10 @@ export function createElicitor(
 
   return async (call) => {
     if (!DIALOG_TOOLS.has(call.tool)) return undefined;
+    // A worker (a call that hands in a claim token) is never held for the person: the agent that
+    // started it talks to them. The token, not `node_slug`, is the mark: every completion names a
+    // node, and the one of a run worked by one agent is where the gate dialog belongs.
+    if (typeof call.args["claim_token"] === "string") return undefined;
     if (!server.getClientCapabilities()?.elicitation?.form) return undefined;
     if (busy) return undefined;
     busy = true;

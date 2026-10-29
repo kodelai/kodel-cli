@@ -8,6 +8,8 @@ import { join } from "node:path";
 import {
   AGENT_LOG_KINDS,
   AGENT_LOG_MODES,
+  type AgentsConfig,
+  DEFAULT_AGENTS,
   DEFAULT_TASK_ON_RUN,
   defaultAgentLog,
   defaultHistory,
@@ -92,7 +94,11 @@ export interface ProjectConfig {
   decisions: DecisionsConfig;
   tasks: TasksConfig;
   history: HistoryConfig;
+  /** How the open steps of a fork are worked, and how long a worker's hold on one lasts. */
+  agents: AgentsConfig;
 }
+
+export { DEFAULT_AGENTS };
 
 export const DEFAULT_WORKTREE: WorktreeConfig = { mode: "auto", dir: DEFAULT_WORKTREE_DIR };
 export const DEFAULT_PIPELINE: PipelineConfig = { uncommitted: "ask" };
@@ -221,6 +227,14 @@ const configSchema = z
       .strict()
       .optional(),
     history: historySchema.optional(),
+    agents: z
+      .object({
+        subagents: z.enum(["auto", "yes", "no"]).optional(),
+        max_parallel: z.number().int().min(1).max(64).optional(),
+        claim_ttl_s: z.number().int().min(1).max(86_400).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -243,6 +257,7 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
         decisions: { dialog: false, agent: { ...DEFAULT_DECISIONS.agent } },
         tasks: { ...DEFAULT_TASKS, on_run: { ...DEFAULT_TASKS.on_run }, adapters: {} },
         history: { ...defaultHistory(), agent_log: defaultAgentLog() },
+        agents: { ...DEFAULT_AGENTS },
       };
     }
     throw error;
@@ -308,6 +323,11 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
       adapters: parsed.data.tasks?.adapters ?? {},
     },
     history: mergeHistory(parsed.data.history),
+    agents: {
+      subagents: parsed.data.agents?.subagents ?? DEFAULT_AGENTS.subagents,
+      max_parallel: parsed.data.agents?.max_parallel ?? DEFAULT_AGENTS.max_parallel,
+      claim_ttl_s: parsed.data.agents?.claim_ttl_s ?? DEFAULT_AGENTS.claim_ttl_s,
+    },
   };
 }
 

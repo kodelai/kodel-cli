@@ -8,7 +8,10 @@ import {
   decide,
   type Effect,
   type FeedbackInput,
+  KodelError,
+  liveClaim,
   type NextStep,
+  type NextStepRequest,
   type PipelineHost,
   type PipelineInfo,
   PipelineService,
@@ -20,8 +23,10 @@ import {
   type RunHandle,
   type RunLocation,
   type RunState,
+  resolveMode,
   type StartOutcome,
   type StepResult,
+  type TakeOutcome,
   validateReport,
 } from "../src";
 import {
@@ -160,17 +165,71 @@ class FakeRun implements RunHandle {
     return undefined;
   }
 
-  async nextStep(): Promise<NextStep> {
-    return projectNextStep(this.spec, this.state_ as RunState, 0);
+  async nextStep(options: NextStepRequest = {}): Promise<NextStep> {
+    return projectNextStep(this.spec, this.state_ as RunState, 0, undefined, {
+      ...(options.nodeSlug === undefined ? {} : { nodeSlug: options.nodeSlug }),
+      ...(options.completionOf === undefined ? {} : { completionOf: options.completionOf }),
+      ...(options.worker === true ? { worker: true } : {}),
+      ...(options.subagents === undefined
+        ? {}
+        : { agents: { mode: resolveMode(undefined, options.subagents), maxParallel: 8 } }),
+    });
   }
 
-  completeStep(node: string, attempt: number, summary?: string, outcome?: string) {
+  /** The fake's hash of a token: no crypto needed to tell two tokens apart. */
+  private tokens = 0;
+
+  async takeStep(input: { node?: string; token?: string }): Promise<TakeOutcome> {
+    const state = this.state_ as RunState;
+    const slug =
+      input.node ??
+      state.active.find(
+        (v) => v.phase === "agent" && liveClaim(state.nodes[v.node], 0) === undefined,
+      )?.node;
+    if (slug === undefined) return { status: "none", next: await this.nextStep() };
+    const token = input.token ?? `tok-${++this.tokens}`;
+    const hash = `hash:${token}`;
+    const renewed = liveClaim(state.nodes[slug], 0)?.token === hash;
+    const decision = await this.send({
+      type: "step_claimed",
+      node: slug,
+      token: hash,
+      ttlMs: 1000,
+    });
+    if (!decision.ok) throw decision.error;
+    const after = decision.state;
+    const visit = after.active.find((v) => v.node === slug && v.phase === "agent");
+    if (!visit)
+      throw new KodelError("NODE_NOT_RUNNING", `node "${slug}" is not an open agent step`);
+    const claim = liveClaim(after.nodes[slug], 0);
+    if (claim === undefined || claim.token !== hash) {
+      return {
+        status: "taken",
+        node_slug: slug,
+        attempt: visit.attempt,
+        taken_by: claim?.by ?? "?",
+      };
+    }
+    const answer = await this.nextStep({ nodeSlug: slug });
+    if (!("node" in answer)) return { status: "none", next: answer };
+    return { status: renewed ? "renewed" : "claimed", step: answer.node, claim_token: token };
+  }
+
+  completeStep(
+    node: string,
+    attempt: number,
+    summary?: string,
+    outcome?: string,
+    _caller?: unknown,
+    claimToken?: string,
+  ) {
     return this.send({
       type: "agent_completed",
       node,
       attempt,
       ...(summary === undefined ? {} : { summary }),
       ...(outcome === undefined ? {} : { outcome }),
+      ...(claimToken === undefined ? {} : { claimToken: `hash:${claimToken}` }),
     });
   }
 
@@ -657,8 +716,9 @@ describe("where a run works", () => {
 });
 
 describe("the tool surface", () => {
-  test("these tools exist, in this order, and the surface is versioned", () => {
-    expect(CONTRACT_VERSION).toBe(2);
+  test("t40_contract_version_and_surface_snapshot", () => {
+    // Bumped from 2 for pipeline_take_step, node_slug/subagents on next_step, claim_token on complete.
+    expect(CONTRACT_VERSION).toBe(3);
     expect(TOOLS.map((t) => t.name)).toEqual([
       "pipeline_list",
       "pipeline_docs",
@@ -666,6 +726,7 @@ describe("the tool surface", () => {
       "pipeline_plan",
       "pipeline_start",
       "pipeline_next_step",
+      "pipeline_take_step",
       "pipeline_report_result",
       "pipeline_complete_step",
       "pipeline_feedback",
@@ -692,7 +753,8 @@ describe("the tool surface", () => {
       pipeline_resolve: ["pipeline", "run_id"],
       pipeline_plan: ["pipeline", "task"],
       pipeline_start: ["task", "pipeline", "restart", "title", "pipeline_version", "cwd"],
-      pipeline_next_step: ["run_id", "wait_s"],
+      pipeline_next_step: ["run_id", "wait_s", "node_slug", "subagents"],
+      pipeline_take_step: ["run_id", "node_slug", "claim_token"],
       pipeline_report_result: [
         "run_id",
         "node_slug",
@@ -703,7 +765,14 @@ describe("the tool surface", () => {
         "replace",
         "metrics",
       ],
-      pipeline_complete_step: ["run_id", "node_slug", "attempt", "summary", "outcome"],
+      pipeline_complete_step: [
+        "run_id",
+        "node_slug",
+        "attempt",
+        "summary",
+        "outcome",
+        "claim_token",
+      ],
       pipeline_feedback: [
         "run_id",
         "node_slug",
@@ -910,5 +979,140 @@ describe("over a real MCP connection", () => {
     });
     expect(text(done)).toMatchObject({ ok: true, advanced: true });
     await close();
+  });
+});
+
+// ── several steps through the tools (T-40) ──────────────────────────────────
+
+const forkSpec = parsePipeline(
+  [
+    "name: fork",
+    "nodes:",
+    "  - { slug: plan, kind: agent, prompt: plan }",
+    "  - { slug: a, kind: agent, prompt: do a }",
+    "  - { slug: b, kind: agent, prompt: do b }",
+    "  - { slug: merge, kind: agent, prompt: merge, join: all }",
+    "edges:",
+    "  - { from: plan, to: a }",
+    "  - { from: plan, to: b }",
+    "  - { from: a, to: merge }",
+    "  - { from: b, to: merge }",
+    "",
+  ].join("\n"),
+);
+
+/** The fork with both agent steps open, through the service. */
+async function openForkRun() {
+  const { svc } = service([forkSpec]);
+  const started = asOk(await svc.start({ task: "split" }));
+  const runId = started.run_id as string;
+  asOk(await svc.completeStep({ run_id: runId, node_slug: "plan", attempt: 1 }));
+  return { svc, runId };
+}
+
+describe("t40 steps through the tools", () => {
+  test("t40_take_step_returns_token", async () => {
+    const { svc, runId } = await openForkRun();
+    const took = asOk(
+      await invokeTool(svc, "pipeline_take_step", { run_id: runId, node_slug: "b" }),
+    );
+    expect(took).toMatchObject({
+      status: "claimed",
+      node_slug: "b",
+      attempt: 1,
+      step: { slug: "b", attempt: 1, prompt: "do b" },
+    });
+    expect(typeof took.claim_token).toBe("string");
+    expect(String(took.note)).toContain("pipeline_complete_step");
+    // the step is marked as taken for everyone else, by a mark that is not the token
+    const next = asOk(await svc.nextStep({ run_id: runId }));
+    const steps = (next.node as { steps: { slug: string; taken_by?: string }[] }).steps;
+    expect(steps.find((s) => s.slug === "b")?.taken_by).toMatch(/^w-/);
+    expect(JSON.stringify(next)).not.toContain(String(took.claim_token));
+  });
+
+  test("t40_take_step_without_slug_gives_different_steps_to_different_workers", async () => {
+    const { svc, runId } = await openForkRun();
+    const first = asOk(await svc.takeStep({ run_id: runId }));
+    const second = asOk(await svc.takeStep({ run_id: runId }));
+    expect([first.node_slug, second.node_slug].sort()).toEqual(["a", "b"]);
+    expect(first.claim_token).not.toBe(second.claim_token);
+    const third = asOk(await svc.takeStep({ run_id: runId }));
+    expect(third.status).toBe("none");
+    expect(third.next).toMatchObject({
+      running: { open_steps: [{ node_slug: "a" }, { node_slug: "b" }] },
+    });
+  });
+
+  test("t40_take_step_taken_and_renewed_through_the_tool", async () => {
+    const { svc, runId } = await openForkRun();
+    const mine = asOk(await svc.takeStep({ run_id: runId, node_slug: "a" }));
+    const other = asOk(await svc.takeStep({ run_id: runId, node_slug: "a" }));
+    expect(other).toMatchObject({ status: "taken", node_slug: "a", attempt: 1 });
+    expect(other.taken_by).toMatch(/^w-/);
+    expect(other).not.toHaveProperty("claim_token");
+    const again = asOk(
+      await svc.takeStep({
+        run_id: runId,
+        node_slug: "a",
+        claim_token: mine.claim_token as string,
+      }),
+    );
+    expect(again).toMatchObject({ status: "renewed", claim_token: mine.claim_token });
+    // a step that is not open is refused, not taken
+    const closed = await svc.takeStep({ run_id: runId, node_slug: "merge" });
+    expect(closed).toMatchObject({ ok: false, code: "NODE_NOT_RUNNING" });
+  });
+
+  test("t40_complete_with_token_is_a_worker_and_next_stays_on_its_own_step", async () => {
+    const { svc, runId } = await openForkRun();
+    const took = asOk(await svc.takeStep({ run_id: runId, node_slug: "a" }));
+    const done = asOk(
+      await svc.completeStep({
+        run_id: runId,
+        node_slug: "a",
+        attempt: 1,
+        claim_token: took.claim_token as string,
+      }),
+    );
+    expect(done.advanced).toBe(true);
+    // the sibling is open but not handed to the worker
+    expect(done.next).toMatchObject({ running: { open_steps: [{ node_slug: "b", attempt: 1 }] } });
+    expect(JSON.stringify(done.next)).not.toContain("do b");
+  });
+
+  test("t40_next_step_takes_node_slug_and_the_declaration", async () => {
+    const { svc, runId } = await openForkRun();
+    const exact = asOk(await svc.nextStep({ run_id: runId, node_slug: "b" }));
+    expect(exact.node).toMatchObject({ slug: "b" });
+    const parallel = asOk(await svc.nextStep({ run_id: runId, subagents: { can: true } }));
+    expect((parallel.node as { execution: { mode: string } }).execution.mode).toBe("parallel");
+    const sequential = asOk(await svc.nextStep({ run_id: runId }));
+    expect((sequential.node as { execution: { mode: string } }).execution.mode).toBe("sequential");
+    // the schema of the tool takes both, and refuses a stranger in the declaration
+    const bad = await invokeTool(svc, "pipeline_next_step", {
+      run_id: runId,
+      subagents: { can: true, model: "x" },
+    });
+    expect(bad).toMatchObject({ ok: false, code: "INVALID_ARGUMENTS" });
+    const unknown = await invokeTool(svc, "pipeline_next_step", {
+      run_id: runId,
+      node_slug: "zzz",
+    });
+    expect(unknown).toMatchObject({ ok: false, code: "UNKNOWN_NODE" });
+  });
+
+  test("t40_instructions_cover_steps_and_workers", () => {
+    for (const part of [
+      "pipeline_take_step",
+      "claim_token",
+      "`steps`",
+      "execution.mode",
+      "open_steps",
+      "also_waiting",
+      "never takes a step",
+    ]) {
+      expect(SERVER_INSTRUCTIONS, part).toContain(part);
+    }
   });
 });

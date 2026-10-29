@@ -7,8 +7,23 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parsePipeline, RECORD_VERSION } from "@kodel-ai/pipeline-core";
-import { hashSource, LocalHost, LocalPipelineHost, type LocalRun, META_VERSION } from "../src";
+import {
+  DEFAULT_AGENTS,
+  defaultHistory,
+  KodelError,
+  type PipelineHost,
+  PipelineService,
+  parsePipeline,
+  RECORD_VERSION,
+} from "@kodel-ai/pipeline-core";
+import {
+  hashSource,
+  LocalHost,
+  LocalPipelineHost,
+  type LocalRun,
+  loadConfig,
+  META_VERSION,
+} from "../src";
 
 let dir: string;
 beforeEach(async () => {
@@ -322,5 +337,208 @@ describe("t40 repair in a fork on the host", () => {
     await run.completeStep("merge", 1);
     await run.waitForRest(10_000);
     expect((await run.state()).status).toBe("completed");
+  });
+});
+
+// ── claims on the host (T-40, commit 3) ─────────────────────────────────────
+
+/** Two agent branches and a join: what workers take. */
+const AGENT_FORK = parsePipeline(
+  [
+    "name: agents",
+    "nodes:",
+    "  - { slug: plan, kind: agent, prompt: plan }",
+    "  - { slug: a, kind: agent, prompt: do a }",
+    "  - { slug: b, kind: agent, prompt: do b }",
+    "  - { slug: merge, kind: agent, prompt: merge, join: all }",
+    "edges:",
+    "  - { from: plan, to: a }",
+    "  - { from: plan, to: b }",
+    "  - { from: a, to: merge }",
+    "  - { from: b, to: merge }",
+    "",
+  ].join("\n"),
+);
+
+describe("t40 claims on the host", () => {
+  const config = (text: string) => writeFile(join(dir, ".kodel", "config.yaml"), text);
+  async function openAgents(clock?: () => number, task = "split the work") {
+    await mkdir(join(dir, ".kodel"), { recursive: true });
+    const h = new LocalHost(AGENT_FORK, {
+      root: dir,
+      heartbeatMs: 0,
+      ...(clock === undefined ? {} : { clock }),
+    });
+    // prompts are recorded (the default of a project), the rest of the history is off
+    const history = defaultHistory();
+    history.changes.enabled = false;
+    history.executor.enabled = false;
+    const { run } = await h.start(task, { history });
+    await run.completeStep("plan", 1);
+    expect((await run.state()).active.map((v) => v.node)).toEqual(["a", "b"]);
+    return { h, run };
+  }
+  const files = async (id: string) =>
+    (
+      await Promise.all(
+        (
+          await readdir(runDir(id), { recursive: true })
+        )
+          .filter((f) => /\.(json|jsonl)$/.test(f))
+          .map((f) => readFile(join(runDir(id), f), "utf8")),
+      )
+    ).join("\n");
+
+  test("t40_token_generated_and_hashed_by_host", async () => {
+    const { h, run } = await openAgents();
+    const took = await run.takeStep({ node: "a" });
+    if (took.status !== "claimed") throw new Error(`expected claimed, got ${took.status}`);
+    expect(took.claim_token).toMatch(/^[0-9a-f]{32}$/);
+    expect(took.step).toMatchObject({ slug: "a", attempt: 1, prompt: "do a" });
+    const state = await run.state();
+    expect(state.nodes.a?.claim).toMatchObject({
+      token: hashSource(took.claim_token),
+      by: `w-${hashSource(took.claim_token).slice(0, 8)}`,
+    });
+    // the token itself is written nowhere: not in the state, the journal or any other file of the run
+    expect(await files(run.runId)).not.toContain(took.claim_token);
+    const journal = await h.store.readJournal(run.runId);
+    expect(journal.find((r) => r.event === "step_claimed")).toMatchObject({
+      node: "a",
+      attempt: 1,
+    });
+    // a completion with the token leaves no conflict, one without leaves one
+    await run.completeStep("a", 1, undefined, undefined, undefined, took.claim_token);
+    await run.takeStep({ node: "b" });
+    await run.completeStep("b", 1);
+    await run.waitForRest(10_000);
+    const events = (await h.store.readJournal(run.runId)).filter(
+      (r) => r.event === "step_claim_conflict",
+    );
+    expect(events.map((r) => r.node)).toEqual(["b"]);
+  });
+
+  test("t40_two_takes_race_under_lock", async () => {
+    const { run } = await openAgents();
+    const [one, two] = await Promise.all([
+      run.takeStep({ node: "a" }),
+      run.takeStep({ node: "a" }),
+    ]);
+    expect([one.status, two.status].sort()).toEqual(["claimed", "taken"]);
+    const winner = one.status === "claimed" ? one : two;
+    const loser = one.status === "taken" ? one : two;
+    if (winner.status !== "claimed" || loser.status !== "taken") throw new Error("unreachable");
+    expect(loser.taken_by).toBe(`w-${hashSource(winner.claim_token).slice(0, 8)}`);
+    // without a slug two workers get the two different steps (another run: a start reuses a task's run)
+    const fresh = await openAgents(undefined, "split another piece of work");
+    const [x, y] = await Promise.all([fresh.run.takeStep({}), fresh.run.takeStep({})]);
+    if (x.status !== "claimed" || y.status !== "claimed") throw new Error("both should be claimed");
+    expect([x.step.slug, y.step.slug].sort()).toEqual(["a", "b"]);
+  });
+
+  test("t40_wait_s_waits_while_claimed_steps_open", async () => {
+    const { h, run } = await openAgents();
+    const a = await run.takeStep({ node: "a" });
+    const b = await run.takeStep({ node: "b" });
+    if (a.status !== "claimed" || b.status !== "claimed") throw new Error("not claimed");
+    const service = new PipelineService(h as unknown as PipelineHost, { waitBudgetMs: 0 });
+    // Everything is in the workers' hands: the wait goes on until they hand in, then answers at once.
+    const begun = Date.now();
+    const waiting = service.nextStep({ run_id: run.runId, wait_s: 20 });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await service.nextStep({ run_id: run.runId })).toMatchObject({
+      running: { open_steps: [{ node_slug: "a" }, { node_slug: "b" }] },
+    });
+    await run.completeStep("b", 1, undefined, undefined, undefined, b.claim_token);
+    await run.completeStep("a", 1, undefined, undefined, undefined, a.claim_token);
+    const answer = await waiting;
+    expect(Date.now() - begun).toBeLessThan(10_000);
+    expect(answer).toMatchObject({ ok: true, node: { slug: "merge" } });
+  });
+
+  test("t40_served_records_every_step", async () => {
+    const { h, run } = await openAgents();
+    await run.nextStep({ serve: {} });
+    const served = (await h.store.readJournal(run.runId)).filter((r) => r.event === "step_served");
+    expect(served.map((r) => [r.node, r.attempt])).toEqual([
+      ["a", 1],
+      ["b", 1],
+    ]);
+    expect(Object.keys((await run.state()).served ?? {}).sort()).toEqual(["a:1", "b:1"]);
+  });
+
+  test("t40_served_hash_ignores_sibling_state", async () => {
+    const { h, run } = await openAgents();
+    await run.nextStep({ serve: {} });
+    const first = (await h.store.readJournal(run.runId)).filter((r) => r.event === "step_served");
+    // the sibling is taken, and the answer shows that; what is recorded for `a` is the same
+    const took = await run.takeStep({ node: "b" });
+    if (took.status !== "claimed") throw new Error("not claimed");
+    const answer = await run.nextStep({ serve: {} });
+    if (!("node" in answer)) throw new Error("expected a node");
+    expect(answer.node.steps?.find((s) => s.slug === "b")?.taken_by).toBeDefined();
+    const again = (await h.store.readJournal(run.runId)).filter((r) => r.event === "step_served");
+    expect(again).toHaveLength(first.length);
+    const recordA = again.find((r) => r.node === "a");
+    expect(recordA?.prompt_hash).toBe(first.find((r) => r.node === "a")?.prompt_hash as string);
+    // the file of a step holds the step alone: no siblings, no hold, no mode
+    const file = (await h.store.readServed(run.runId, String(recordA?.ref))) as {
+      answer: Record<string, unknown>;
+    };
+    expect(file.answer).toMatchObject({ slug: "a", attempt: 1, prompt: "do a" });
+    for (const key of ["steps", "taken_by", "also_waiting", "note"]) {
+      expect(file.answer, key).not.toHaveProperty(key);
+    }
+    expect((file.answer.execution as Record<string, unknown> | undefined)?.mode).toBeUndefined();
+  });
+
+  test("t40_served_not_recorded_for_completion_next", async () => {
+    const { h, run } = await openAgents();
+    await run.completeStep("a", 1);
+    const next = await run.nextStep({ completionOf: "a", serve: {} });
+    expect(next).toMatchObject({ running: { open_steps: [{ node_slug: "b", attempt: 1 }] } });
+    const served = (await h.store.readJournal(run.runId)).filter((r) => r.event === "step_served");
+    expect(served.filter((r) => r.node === "b")).toHaveLength(0);
+    // the plain answer hands `b` out and records it
+    await run.nextStep({ serve: {} });
+    const after = (await h.store.readJournal(run.runId)).filter((r) => r.event === "step_served");
+    expect(after.filter((r) => r.node === "b")).toHaveLength(1);
+  });
+
+  test("t40_agents_bad_value_never_fails_next_step", async () => {
+    const { run } = await openAgents();
+    await config("agents:\n  subagents: maybe\n");
+    await expect(loadConfig(join(dir, ".kodel"))).rejects.toBeInstanceOf(KodelError);
+    const answer = await run.nextStep({ serve: {}, subagents: { can: true } });
+    if (!("node" in answer)) throw new Error("expected a node");
+    // the defaults stand: `auto`, so the declaration decides, and the default cap and TTL
+    expect(answer.node.execution?.mode).toBe("parallel");
+    expect(answer.node.steps).toHaveLength(2);
+    const took = await run.takeStep({ node: "a" });
+    expect(took.status).toBe("claimed");
+    const claim = (await run.state()).nodes.a?.claim;
+    expect((claim?.until ?? 0) - (claim?.at ?? 0)).toBe(DEFAULT_AGENTS.claim_ttl_s * 1000);
+  });
+
+  test("t40_config_values_reach_next_step_in_host", async () => {
+    let now = 1_000_000;
+    const { run } = await openAgents(() => now);
+    await config("agents:\n  subagents: yes\n  max_parallel: 1\n  claim_ttl_s: 60\n");
+    const answer = await run.nextStep({ serve: {} });
+    if (!("node" in answer)) throw new Error("expected a node");
+    expect(answer.node.execution?.mode).toBe("parallel");
+    expect(answer.node.steps?.map((s) => s.slug)).toEqual(["a"]);
+    expect(answer.node.queued).toBe(1);
+    const took = await run.takeStep({ node: "a" });
+    expect(took.status).toBe("claimed");
+    expect((await run.state()).nodes.a?.claim?.until).toBe(now + 60_000);
+    // the claim lapses by the host's clock
+    now += 60_001;
+    const other = await run.takeStep({ node: "a" });
+    expect(other.status).toBe("claimed");
+    await config("agents:\n  subagents: no\n");
+    const sequential = await run.nextStep({ serve: {}, subagents: { can: true } });
+    if (!("node" in sequential)) throw new Error("expected a node");
+    expect(sequential.node.execution?.mode).toBe("sequential");
   });
 });

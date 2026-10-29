@@ -16,7 +16,12 @@ import {
   LocalHost,
   type LocalRun,
 } from "@kodel-ai/local";
-import { DEFAULT_STALE_MS, defaultHistory, type HistoryConfig } from "@kodel-ai/pipeline-core";
+import {
+  DEFAULT_STALE_MS,
+  defaultHistory,
+  type HistoryConfig,
+  KodelError,
+} from "@kodel-ai/pipeline-core";
 import type {
   Production,
   ScenarioEngine,
@@ -124,12 +129,37 @@ export class LocalScenarioEngine implements ScenarioEngine {
           slug,
           Number(args.attempt),
           typeof args.summary === "string" ? args.summary : undefined,
+          undefined,
+          undefined,
+          typeof args.claim_token === "string" ? args.claim_token : undefined,
         );
         if (!result.ok)
           return { ok: false, code: result.error.code, message: result.error.message };
         await this.drive();
         const node = (await this.run.state()).nodes[slug];
         return { ok: true, advanced: node?.status === "passed", outcome: node?.outcome ?? null };
+      }
+      case "pipeline_take_step": {
+        try {
+          const outcome = await this.run.takeStep({
+            ...(typeof args.node_slug === "string" ? { node: args.node_slug } : {}),
+            ...(typeof args.claim_token === "string" ? { token: args.claim_token } : {}),
+          });
+          if (outcome.status === "none") return { ok: true, status: "none" };
+          if (outcome.status === "taken") return { ok: true, ...outcome };
+          return {
+            ok: true,
+            status: outcome.status,
+            node_slug: outcome.step.slug,
+            attempt: outcome.step.attempt,
+            claim_token: outcome.claim_token,
+          };
+        } catch (error) {
+          if (error instanceof KodelError) {
+            return { ok: false, code: error.code, message: error.message };
+          }
+          throw error;
+        }
       }
       case "pipeline_feedback": {
         const slug = typeof args.node_slug === "string" ? args.node_slug : undefined;
@@ -145,7 +175,13 @@ export class LocalScenarioEngine implements ScenarioEngine {
         return { ok: true, id: `f-${this.feedbackCount}` };
       }
       case "pipeline_next_step":
-        return { ok: true, ...(await this.run.nextStep({ serve: {} })) };
+        return {
+          ok: true,
+          ...(await this.run.nextStep({
+            serve: {},
+            ...(typeof args.node_slug === "string" ? { nodeSlug: args.node_slug } : {}),
+          })),
+        };
       default:
         return { ok: false, code: "UNKNOWN_TOOL", message: `unknown tool "${tool}"` };
     }

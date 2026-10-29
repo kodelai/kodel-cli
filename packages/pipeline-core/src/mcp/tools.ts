@@ -10,7 +10,7 @@ import { RUN_ID_PATTERN } from "../run-id";
 import type { PipelineService, ToolResult } from "../service";
 
 /** Bump when a tool is renamed or its arguments change; a snapshot test pins the surface. */
-export const CONTRACT_VERSION = 2;
+export const CONTRACT_VERSION = 3;
 
 /**
  * What the agent is told about this server when it connects (the MCP `instructions` field), so the
@@ -60,7 +60,7 @@ export function serverInstructions(
     "When the user asks you to do something through a pipeline (or to run one), work only through the pipeline_* tools:",
     "1. If you do not know the pipeline's name, call pipeline_list. Then call pipeline_start with the task in the user's words and a title for the run: English, 2-5 words, kebab-case (for example fix-login-timeout).",
     "2. Follow each answer. Never pick, reorder or skip steps yourself, and never decide that a step is done: after you do a step, call pipeline_complete_step and let the engine's checks decide. If a check fails you get the reason and the same step again.",
-    "3. pipeline_next_step tells you what is next: `node` (do it), `waiting` (a person has to decide), `running` (the engine is working: pass wait_s to wait, as the hint says), or `done`.",
+    "3. pipeline_next_step tells you what is next: `node` (do it), `waiting` (a person has to decide), `running` (the engine is working, or every open step is in a worker's hands: pass wait_s to wait, as the hint says), or `done`.",
     "4. At a `waiting` answer, do what `tell_the_person` says: write the person what they are asked to decide, a summary of what was done and changed, what to look at, and the command to decide with. Then end your turn. " +
       (decides
         ? `Unless rule ${decidesRule} applies, you cannot approve, reject or resume anything yourself, and you must not try: those commands are for the person and refuse to run for an agent.`
@@ -71,10 +71,20 @@ export function serverInstructions(
     "7. If the answer to pipeline_start names a `workdir`, do all your work for the run in that directory (read and write files there, not in the directory you started in): the engine runs the commands and checks there.",
     "8. If you are asked to write or change a pipeline, read pipeline_docs first: it is the reference for this engine version. To add a pipeline, or to change one outside a run (start from the `yaml` of pipeline_resolve), call pipeline_propose_change without run_id: a person accepts it with a command. Never put a file in .kodel/pipelines yourself and never run that command. When the change is about a check, the summary names its check_id and what should get better.",
     "9. If an answer tells you that the pipeline of the run was changed and a person has to accept it (a `waiting` answer about the change, or a note about it on a `node` answer), do what `tell_the_person` says. If the change was made by editing the pipeline file and not through pipeline_propose_change, put the file back as it was and propose it instead.",
+    stepsRule(options.waitHint !== false),
     ...(options.dialog === true ? [DIALOG_RULE] : []),
     ...agentDecisionsRule(options.decisions, decidesRule),
   ].join("\n");
 }
+
+/**
+ * Several steps open at once (a fork of the pipeline). Numbered after rule 9, so the dialog rule and
+ * the agent-decision rule keep the numbers the other texts refer to.
+ */
+const stepsRule = (waitHint: boolean) =>
+  "9a. A `node` answer may list several open steps (`steps`): `execution.mode` says how this project works them, and `execution.instruction` says exactly what to do. In `parallel` mode you start one worker per free step; each worker takes its step with pipeline_take_step (node_slug), keeps the `claim_token`, does the step, completes it with pipeline_complete_step and that token, and reports the answer back to you; a worker never writes to the person" +
+  (waitHint ? " and never starts `kodel wait`" : "") +
+  ". In `sequential` mode you do them one by one. A `running` answer with `open_steps` means every open step is in a worker's hands: wait for them (wait_s) or for their reports. `also_waiting` on an answer names decisions a person has to make meanwhile: tell them. pipeline_next_step only reads; it never takes a step.";
 
 export const SERVER_INSTRUCTIONS = serverInstructions();
 
@@ -231,10 +241,13 @@ export const TOOLS: ToolDescriptor[] = [
     name: "pipeline_next_step",
     title: "What to do next",
     description:
-      "Ask what to do next in a run. It is safe to repeat. The answer is one of four: `node` (do this work, " +
-      "then call pipeline_complete_step), `waiting` (a person has to decide: do what `tell_the_person` says, " +
-      "then end your turn), `running` (the engine is working: pass wait_s to wait for it, as the hint says, " +
-      "or tell the user and end your turn; never ask again in a tight loop), or `done`.",
+      "Ask what to do next in a run. It only reads and is safe to repeat: it never takes or claims a step. " +
+      "The answer is one of four: `node` (do this work, then call pipeline_complete_step; with several steps " +
+      "open, `steps` lists them all and `execution.mode` says whether to work them in parallel with one " +
+      "worker each or one by one), `waiting` (a person has to decide: do what `tell_the_person` says, " +
+      "then end your turn), `running` (the engine is working, or every open step is held by a worker: pass " +
+      "wait_s to wait, as the hint says, or tell the user and end your turn; never ask again in a tight " +
+      "loop), or `done`. With node_slug you get exactly that open step, whoever holds it.",
     shape: {
       run_id: runId,
       wait_s: z
@@ -244,12 +257,55 @@ export const TOOLS: ToolDescriptor[] = [
         .max(MAX_WAIT_S)
         .optional()
         .describe(
-          `If the engine is working, wait up to this many seconds (at most ${MAX_WAIT_S}) for it to finish before answering.`,
+          `If the engine is working, or every open step is held by a worker, wait up to this many seconds (at most ${MAX_WAIT_S}) for that to end before answering.`,
+        ),
+      node_slug: nodeSlug
+        .optional()
+        .describe(
+          "Only this open step (a worker asks for its own); refused if it is not an open agent step.",
+        ),
+      subagents: z
+        .object({
+          can: z.boolean().describe("Whether you can start subagents that call these tools."),
+          max_depth: z.number().int().min(0).max(16).optional(),
+        })
+        .strict()
+        .optional()
+        .describe(
+          "What you can do, when the project leaves the mode to you (agents.subagents: auto): with can: true several open steps are handed out for one worker each; without it they are done one by one.",
         ),
     },
     readOnly: true,
     idempotent: true,
-    run: (service, input) => service.nextStep(input as { run_id: string; wait_s?: number }),
+    run: (service, input) => service.nextStep(input as Parameters<PipelineService["nextStep"]>[0]),
+  },
+  {
+    name: "pipeline_take_step",
+    title: "Take a step",
+    description:
+      "Take one of the open steps of a run for yourself, when several are open at once (a fork) and workers " +
+      "work them: with node_slug that step, without it the next free one. The answer carries a `claim_token`: " +
+      "keep it, and pass it to pipeline_complete_step when the step is done. `taken` means another worker " +
+      "holds the step: leave it. Calling again with your claim_token renews the hold, and after the step was " +
+      "restarted it gives you the new attempt. The hold is advice to the workers, not a verdict on the step: " +
+      "the engine's checks decide whether the step is done, and a person is never asked anything here.",
+    shape: {
+      run_id: runId,
+      node_slug: nodeSlug
+        .optional()
+        .describe("The step to take, from `steps`; leave it out to take the next free one."),
+      claim_token: z
+        .string()
+        .min(1)
+        .max(LIMITS.name)
+        .optional()
+        .describe(
+          "Your token from an earlier pipeline_take_step, to renew the hold or to go on after a restart.",
+        ),
+    },
+    readOnly: false,
+    idempotent: true,
+    run: (service, input) => service.takeStep(input as Parameters<PipelineService["takeStep"]>[0]),
   },
   {
     name: "pipeline_report_result",
@@ -303,7 +359,8 @@ export const TOOLS: ToolDescriptor[] = [
       "your word is not the verdict. The answer says whether the run advanced, the outcome, and what to do " +
       "next. If a check failed you get the reason and the same node again to fix. If the step lists other " +
       "`outcomes`, you may pass `outcome` to finish with one of them (the step's prompt says when); the checks " +
-      "still apply, and anything else is refused.",
+      "still apply, and anything else is refused. `next` is about this step: its own rework, or a summary of " +
+      "what the run does; it never hands you another worker's step.",
     shape: {
       run_id: runId,
       node_slug: nodeSlug,
@@ -318,6 +375,14 @@ export const TOOLS: ToolDescriptor[] = [
         .max(64)
         .optional()
         .describe("One of the step's `outcomes`, when the prompt says to finish it that way."),
+      claim_token: z
+        .string()
+        .min(1)
+        .max(LIMITS.name)
+        .optional()
+        .describe(
+          "The token pipeline_take_step gave you for this step, if you took it. With it you are a worker: `next` tells you to report back instead of writing to the person.",
+        ),
     },
     readOnly: false,
     idempotent: true,

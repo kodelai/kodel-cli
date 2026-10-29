@@ -9,7 +9,13 @@ import {
   HISTORY_CATEGORIES,
   KodelError,
 } from "@kodel-ai/pipeline-core";
-import { CONFIG_FILE, DEFAULT_WORKTREE_DIR, HISTORY_SECTION_KEYS, loadConfig } from "../src";
+import {
+  CONFIG_FILE,
+  DEFAULT_AGENTS,
+  DEFAULT_WORKTREE_DIR,
+  HISTORY_SECTION_KEYS,
+  loadConfig,
+} from "../src";
 
 let dir: string;
 beforeEach(async () => {
@@ -48,6 +54,7 @@ describe("the project config", () => {
         adapters: {},
       },
       history: { ...DEFAULT_HISTORY, agent_log: DEFAULT_AGENT_LOG },
+      agents: { subagents: "auto", max_parallel: 8, claim_ttl_s: 900 },
     });
   });
 
@@ -368,5 +375,45 @@ describe("the agent_log section", () => {
       expect(error.code).toBe("CONFIG_INVALID");
       expect(error.message).toContain("history.agent_log");
     }
+  });
+});
+
+describe("t40 the agents section", () => {
+  test("t40_config_agents_defaults", async () => {
+    expect((await loadConfig(dir)).agents).toEqual({
+      subagents: "auto",
+      max_parallel: 8,
+      claim_ttl_s: 900,
+    });
+    await write("agents: {}\n");
+    expect((await loadConfig(dir)).agents).toEqual(DEFAULT_AGENTS);
+    expect(DEFAULT_AGENTS).toEqual({ subagents: "auto", max_parallel: 8, claim_ttl_s: 900 });
+  });
+
+  test("t40_config_agents_block_parses", async () => {
+    await write("agents:\n  subagents: yes\n  max_parallel: 3\n  claim_ttl_s: 120\n");
+    expect((await loadConfig(dir)).agents).toEqual({
+      subagents: "yes",
+      max_parallel: 3,
+      claim_ttl_s: 120,
+    });
+    await write("agents:\n  subagents: no\n");
+    expect((await loadConfig(dir)).agents).toEqual({ ...DEFAULT_AGENTS, subagents: "no" });
+  });
+
+  test("t40_config_agents_bad_values_refused", async () => {
+    expect((await failure("agents:\n  subagents: maybe\n")).message).toContain("agents.subagents");
+    expect((await failure("agents:\n  max_parallel: 0\n")).message).toContain(
+      "agents.max_parallel",
+    );
+    expect((await failure("agents:\n  max_parallel: 1.5\n")).message).toContain(
+      "agents.max_parallel",
+    );
+    expect((await failure("agents:\n  claim_ttl_s: 0\n")).message).toContain("agents.claim_ttl_s");
+    expect((await failure("agents:\n  claim_ttl_s: 100000\n")).message).toContain(
+      "agents.claim_ttl_s",
+    );
+    expect((await failure("agents:\n  parallel: true\n")).message).toContain("parallel");
+    expect((await failure("agents: true\n")).message).toContain("agents");
   });
 });

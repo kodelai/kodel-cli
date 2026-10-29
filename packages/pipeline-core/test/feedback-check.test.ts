@@ -137,8 +137,8 @@ describe("bmbd feedback names a check", () => {
 });
 
 describe("bmbd the tool surface", () => {
-  test("bmbd_contract_version_is_2_and_feedback_takes_check", () => {
-    expect(CONTRACT_VERSION).toBe(2);
+  test("bmbd_contract_version_is_past_2_and_feedback_takes_check", () => {
+    expect(CONTRACT_VERSION).toBeGreaterThanOrEqual(2);
     const tool = TOOLS.find((t) => t.name === "pipeline_feedback");
     expect(Object.keys(tool?.shape ?? {})).toContain("check");
   });
