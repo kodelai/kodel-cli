@@ -56,6 +56,28 @@ const GATE_AND_SLOW = [
   "",
 ].join("\n");
 
+/** A gate in one branch; in the other an agent step that leads into a command that takes a while. */
+const GATE_AND_MOVING = [
+  "name: moving",
+  "nodes:",
+  "  - { slug: plan, kind: agent, prompt: plan }",
+  "  - { slug: a, kind: agent, prompt: a }",
+  "  - { slug: a-gate, kind: human, prompt: a looks fine? }",
+  "  - { slug: b, kind: agent, prompt: b }",
+  `  - { slug: b-slow, kind: command, command: "node -e \\"setTimeout(() => {}, 3000)\\"" }`,
+  "  - { slug: merge, kind: agent, prompt: merge, join: all }",
+  "edges:",
+  "  - { from: plan, to: a }",
+  "  - { from: plan, to: b }",
+  "  - { from: a, to: a-gate }",
+  "  - { from: a-gate, to: merge, when: approved }",
+  "  - { from: a-gate, to: a, when: rejected }",
+  "  - { from: b, to: b-slow }",
+  "  - { from: b-slow, to: merge }",
+  "  - { from: b-slow, to: merge, when: failed }",
+  "",
+].join("\n");
+
 /** Two command branches that fail at once and pause their branches; an agent branch beside them. */
 const PAUSES = [
   "name: pauses",
@@ -151,6 +173,7 @@ beforeEach(async () => {
   for (const [name, text] of [
     ["gates", GATES],
     ["slow", GATE_AND_SLOW],
+    ["moving", GATE_AND_MOVING],
     ["pauses", PAUSES],
     ["failed-branch", FAILED_BRANCH],
     ["ends", ENDS],
@@ -170,6 +193,8 @@ interface Person {
   answer?: boolean;
   pollMs?: number;
   onWatching?: () => void;
+  /** What happens elsewhere while the person reads a question. */
+  onAsk?: (question: string) => Promise<void>;
 }
 
 /** Run a command as a person at a terminal who says yes, unless told otherwise. */
@@ -192,6 +217,7 @@ async function cliAs(person: Person, ...args: string[]) {
     select: async () => [],
     confirm: async (question) => {
       asked.push(question);
+      await person.onAsk?.(question);
       return person.answer ?? true;
     },
   });
@@ -388,6 +414,44 @@ describe("t40 several gates at once", () => {
     expect(decided.code).toBe(0);
     expect(Date.now() - begun).toBeLessThan(2_500);
     expect(decided.out).toContain("running at b#1 [b]");
+    await run.waitForRest(10_000);
+    expect((await run.state()).active.map((v) => v.node)).toEqual(["merge"]);
+  });
+
+  test("t40_after_decision_ignores_a_sibling_that_moved_on_while_the_person_read", async () => {
+    // While the person reads the question, the other branch hands its step in and enters a command
+    // that runs for 3 s. That node was not entered by the decision, so the decision does not wait
+    // for it: the standing the decision is judged against is read right before it is made.
+    const h = host();
+    const run = (await h.start({ pipeline: "moving", task: "t", restart: false })).run as LocalRun;
+    await run.completeStep("plan", 1);
+    await run.completeStep("a", 1);
+    await run.waitForRest(5_000, "a");
+    expect((await run.state()).active.map((v) => [v.node, v.phase]).sort()).toEqual([
+      ["a-gate", "human"],
+      ["b", "agent"],
+    ]);
+    const begun = Date.now();
+    const decided = await cliAs(
+      {
+        onAsk: async () => {
+          await run.completeStep("b", 1);
+          expect((await run.state()).active.map((v) => v.node).sort()).toEqual([
+            "a-gate",
+            "b-slow",
+          ]);
+        },
+      },
+      "gate",
+      "approve",
+      run.runId,
+      "--node",
+      "a-gate",
+    );
+    expect(decided.code).toBe(0);
+    expect(decided.asked).toHaveLength(1);
+    expect(Date.now() - begun).toBeLessThan(2_500);
+    expect(decided.out).toContain("running at b-slow#1 [b]");
     await run.waitForRest(10_000);
     expect((await run.state()).active.map((v) => v.node)).toEqual(["merge"]);
   });

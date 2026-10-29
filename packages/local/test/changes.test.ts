@@ -97,6 +97,20 @@ describe("a pipeline file edited under a run in the repository root", () => {
     expect(JSON.stringify(held)).not.toContain("node -e 1"); // the new text is not sent to the agent
   });
 
+  test("t40_a_changed_file_is_shown_with_the_step_a_worker_takes", async () => {
+    const run = await startRun();
+    await writeFile(join(dir, FILE), PIPELINE("node -e 1"));
+    const took = await run.takeStep({ node: "write" });
+    expect(took).toMatchObject({
+      status: "claimed",
+      step: {
+        slug: "write",
+        pipeline_change: { source: "file", watched: FILE, apply: expect.stringContaining("apply") },
+      },
+    });
+    expect(JSON.stringify(took)).not.toContain("node -e 1");
+  });
+
   test("tNN_the_config_turns_the_offer_of_kodel_wait_off_and_on_again_without_a_restart", async () => {
     const run = await startRun();
     await run.completeStep("write", 1);

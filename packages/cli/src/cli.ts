@@ -714,6 +714,9 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
             "Approve although what changed since the run stopped here could not be checked?",
           );
         }
+        // Read again right before the decision: what a sibling branch entered while the person read
+        // the question is not what this decision led into.
+        const before = await run.state();
         failIfRefused(
           await run.decideHuman(
             node,
@@ -723,7 +726,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         );
         // The decided node's own work, and the node the decision led into (a rejection sends the
         // branch back to the node the edge names): a sibling branch's work is not waited for.
-        await afterDecision(run, [node, ...nodesEnteredAfter(state, await run.state(), node)]);
+        await afterDecision(run, [node, ...nodesEnteredAfter(before, await run.state(), node)]);
       },
     );
 

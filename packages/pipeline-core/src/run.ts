@@ -95,6 +95,11 @@ export interface Arrival {
   failure?: Feedback;
   /** The branch stopped with no way on; the join can never start. */
   dead?: true;
+  /**
+   * The journal record of the arrival (`seq` of its `branch_settled`). It orders the arrivals: the
+   * keys of `arrived` do not, since an integer-like key comes first whenever it was added.
+   */
+  seq?: number;
 }
 
 /** One time a fork fired. A fork in a loop fires once per pass, each pass its own instance. */
@@ -1145,7 +1150,16 @@ class Machine {
       this.pause({ reason: "consecutive", node: route.from, blocked: route, ...pauseFields });
       return;
     }
-    const to = this.node(route.to);
+    const to = this.nodes.get(route.to);
+    if (to === undefined) {
+      // The pipeline the run is on lost the node (a change accepted on a state that still named
+      // it). A route is taken on a check path, where a refusal would stall the branch for good, so
+      // the branch dies with the missing node named, and the run ends by the dead-branch rule.
+      const reason = `node "${route.to}" is no longer in the pipeline`;
+      if (route.fork) this.die(route.fork, route.from, route.label, { source: "pipeline", reason });
+      else this.end("failed", reason);
+      return;
+    }
     const toRun = this.run(route.to);
     if (toRun.attempt + 1 > to.max_attempts + toRun.extraAttempts) {
       this.pause({ reason: "total", node: route.to, blocked: route, ...pauseFields });
@@ -1256,12 +1270,6 @@ class Machine {
   /** A branch settled at a node with an edge to the join. */
   private arrive(ref: ForkRef, node: string, label: string, failure: Feedback | undefined) {
     const fork = this.forkState(ref);
-    const arrival: Arrival = {
-      node,
-      label,
-      ...(failure ? { failure: { ...failure, from: node } } : {}),
-    };
-    fork.arrived[ref.branch] = arrival;
     this.log("branch_settled", {
       fork: fork.id,
       branch: ref.branch,
@@ -1270,13 +1278,18 @@ class Machine {
       failed: failure !== undefined,
       ...(failure ? { source: failure.source, reason: failure.reason } : {}),
     });
+    fork.arrived[ref.branch] = {
+      node,
+      label,
+      ...(failure ? { failure: { ...failure, from: node } } : {}),
+      seq: this.s.seq,
+    };
     this.tryJoin(fork);
   }
 
   /** A branch stopped with nothing to handle its failure: it is settled, but the join cannot start. */
   private die(ref: ForkRef, node: string, label: string, failure: Feedback) {
     const fork = this.forkState(ref);
-    fork.arrived[ref.branch] = { node, label, failure: { ...failure, from: node }, dead: true };
     this.log("branch_settled", {
       fork: fork.id,
       branch: ref.branch,
@@ -1287,6 +1300,23 @@ class Machine {
       source: failure.source,
       reason: failure.reason,
     });
+    fork.arrived[ref.branch] = {
+      node,
+      label,
+      failure: { ...failure, from: node },
+      dead: true,
+      seq: this.s.seq,
+    };
+  }
+
+  /** The arrival that came last, by the order of the arrivals (ties by branch order). */
+  private lastArrival(fork: ForkState): Arrival {
+    let last: Arrival | undefined;
+    for (const branch of fork.branches) {
+      const arrival = fork.arrived[branch];
+      if (arrival && (last === undefined || (arrival.seq ?? 0) >= (last.seq ?? 0))) last = arrival;
+    }
+    return last as Arrival;
   }
 
   /** Enter the join once every branch has arrived and none is dead. */
@@ -1295,7 +1325,7 @@ class Machine {
     if (arrivals.some((a) => a === undefined || a.dead)) return;
     const failed = fork.branches.filter((branch) => fork.arrived[branch]?.failure !== undefined);
     const feedbacks = failed.map((branch) => fork.arrived[branch]?.failure as Feedback);
-    const last = Object.values(fork.arrived).at(-1) as Arrival;
+    const last = this.lastArrival(fork);
     this.proceed({
       from: last.node,
       label: last.label,
@@ -1378,6 +1408,7 @@ class Machine {
         .map((visit) => `${visit.node}:${visit.attempt}`);
     }
     this.s.active = [];
+    this.s.pauses = [];
     this.log("run_finished", {
       status,
       ...(reason === undefined ? {} : { reason }),

@@ -2251,7 +2251,7 @@ export class LocalRun {
     }
     return {
       status: renewed ? "renewed" : "claimed",
-      step: servedPart(answer.node),
+      step: servedPart(answer.node, answer.node.pipeline_change),
       claim_token: token,
     };
   }

@@ -95,7 +95,8 @@ export type TakeOutcome =
   | {
       /** `claimed`: the step is the caller's now. `renewed`: it was already, and the hold is fresh. */
       status: "claimed" | "renewed";
-      step: AgentStep;
+      /** The step, with the change of the run's pipeline that waits for a person, when one does. */
+      step: AgentStep & { pipeline_change?: PipelineChange };
       /** Keep it, and complete the step with it; it is shown to nobody else. */
       claim_token: string;
     }

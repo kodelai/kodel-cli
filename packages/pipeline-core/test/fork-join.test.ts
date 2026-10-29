@@ -739,7 +739,9 @@ describe("t40 fork machine", () => {
   test("t40_join_waits_for_all_branches", () => {
     const h = openFork();
     h.release("a");
-    expect(h.state.forks?.f1?.arrived).toEqual({ a: { node: "a-test", label: "passed" } });
+    expect(h.state.forks?.f1?.arrived).toEqual({
+      a: { node: "a-test", label: "passed", seq: expect.any(Number) },
+    });
     expect(h.state.active.map((v) => v.node)).toEqual(["b"]);
     expect(h.state.nodes.merge?.attempt).toBe(0);
     h.release("b");
@@ -843,7 +845,9 @@ describe("t40 fork machine", () => {
     h.hold("a");
     h.send(START);
     h.send(complete("plan", 1));
-    expect(h.state.forks?.f1?.arrived).toEqual({ merge: { node: "plan", label: "passed" } });
+    expect(h.state.forks?.f1?.arrived).toEqual({
+      merge: { node: "plan", label: "passed", seq: expect.any(Number) },
+    });
     expect(h.state.active.map((v) => v.node)).toEqual(["a"]);
     h.release("a");
     expect(h.state.trail).toEqual(["plan", "a", "merge"]);
@@ -1068,7 +1072,7 @@ describe("t40 failed branches", () => {
     h.send(complete("plan", 1));
     expect(h.state.nodes.a).toMatchObject({ attempt: 2, fork: { id: "f1", branch: "a" } });
     expect(h.state.nodes["a-test"]?.attempt).toBe(2);
-    expect(h.state.forks?.f1?.arrived.a).toEqual({ node: "a-test", label: "passed" });
+    expect(h.state.forks?.f1?.arrived.a).toMatchObject({ node: "a-test", label: "passed" });
     expect(h.state.trail).toEqual(["plan", "a", "b", "a-test", "a", "a-test"]);
   });
 
@@ -1215,7 +1219,7 @@ describe("t40 failed branches", () => {
     h.send(complete("plan", 1));
     h.hold("b");
     must(h.send(complete("merge", 1, RESTART_FAILED)));
-    expect(h.state.forks?.f1?.arrived.a).toEqual({ node: "a-test", label: "passed" });
+    expect(h.state.forks?.f1?.arrived.a).toMatchObject({ node: "a-test", label: "passed" });
     expect(h.state.nodes.a?.attempt).toBe(1);
   });
 
@@ -2265,17 +2269,32 @@ function forkInvariants(
   expect(state.trail[0]).toBe(spec.entry);
 }
 
-function simulate(spec: PipelineSpec, seed: number, steps = 300, withRestart = false) {
+/**
+ * A random schedule of a run of `spec`: the pending effects are answered in random order, with
+ * ticks, resumes and a cancel thrown in and, with `variant`, the pipeline changed back and forth
+ * between the two versions (a refused change is one more thing that must leave the state alone).
+ * The state goes through JSON between events, as the host writes it and reads it back.
+ */
+function simulate(
+  spec: PipelineSpec,
+  seed: number,
+  steps = 300,
+  withRestart = false,
+  variant?: PipelineSpec,
+) {
   const random = mulberry32(seed);
   let state: RunState | undefined;
   let now = 0;
+  let current = spec;
+  let changes = 0;
+  const hashOf = (version: PipelineSpec) => (version === spec ? "h" : "h2");
   const pending: Effect[] = [];
   const journal: JournalRecord[] = [];
   const seen = new Set<string>();
   let refusedFollowUps = 0;
   const send = (event: RunEvent) => {
     const before = state === undefined ? undefined : structuredClone(state);
-    const result = decide(spec, state, event, now);
+    const result = decide(current, state, event, now);
     if (!result.ok) {
       expect(state).toEqual(before);
       // A result for the attempt a visit is on, in the phase it is in, refused while the run goes
@@ -2298,17 +2317,29 @@ function simulate(spec: PipelineSpec, seed: number, steps = 300, withRestart = f
       }
       return result;
     }
-    state = result.state;
+    state = JSON.parse(JSON.stringify(result.state)) as RunState;
     seen.add(state.status);
     journal.push(...result.journal);
     pending.push(...result.effects);
-    forkInvariants(spec, state, journal, seed);
+    forkInvariants(current, state, journal, seed);
     return result;
   };
   send(START);
   for (let i = 0; i < steps; i++) {
     const roll = random();
-    if (pending.length > 0 && roll < 0.8) {
+    if (variant !== undefined && roll >= 0.962 && roll < 0.975) {
+      const was = current;
+      current = was === spec ? variant : spec;
+      const result = send({
+        type: "pipeline_accepted",
+        from: hashOf(was),
+        to: hashOf(current),
+        source: "file",
+        before: was,
+      });
+      if (result.ok) changes += 1;
+      else current = was;
+    } else if (pending.length > 0 && roll < 0.8) {
       const [effect] = pending.splice(Math.floor(random() * pending.length), 1);
       if (!effect) continue;
       if (effect.type === "need_agent") {
@@ -2350,24 +2381,41 @@ function simulate(spec: PipelineSpec, seed: number, steps = 300, withRestart = f
       send({ type: "cancel" });
     }
   }
-  return { state: state as RunState, journal, seen, refusedFollowUps };
+  return { state: state as RunState, journal, seen, refusedFollowUps, changes };
 }
 
 describe("t40 random schedules", () => {
   const SEEDS = Array.from({ length: 120 }, (_, i) => i + 1);
+  /** Another version of each pipeline: the join's prompt and a's check; a's prompt. */
+  const forkVariant = parsePipeline(
+    FORK.replace("prompt: merge", "prompt: merge again").replace(
+      "command: a-check",
+      "command: a-check-2",
+    ),
+  );
+  const gatedVariant = parsePipeline(GATED.replace("prompt: a }", "prompt: a again }"));
 
   test("t40_random_schedule_keeps_invariants", () => {
     const statuses = new Set<string>();
     let forked = 0;
+    let changed = 0;
     for (const seed of SEEDS) {
-      const { state, seen, refusedFollowUps } = simulate(fork, seed);
+      const { state, seen, refusedFollowUps, changes } = simulate(
+        fork,
+        seed,
+        300,
+        false,
+        forkVariant,
+      );
       for (const s of seen) statuses.add(s);
       if (state.forks) forked += 1;
+      changed += changes;
       // a result of work this run asked for is never refused while the run goes (a pending effect
       // answered after the run ended is the one case, and that is the end, not a stall)
       expect(refusedFollowUps, `seed ${seed}`).toBe(0);
     }
     expect(forked).toBeGreaterThan(SEEDS.length / 2);
+    expect(changed).toBeGreaterThan(SEEDS.length / 8);
     for (const wanted of ["running", "completed", "paused", "canceled"]) {
       expect(statuses.has(wanted), wanted).toBe(true);
     }
@@ -2385,8 +2433,8 @@ describe("t40 random schedules", () => {
     let restarted = 0;
     let resumedInFork = 0;
     for (const seed of SEEDS) {
-      const { journal } = simulate(gated, seed, 300, true);
-      const { journal: j2 } = simulate(fork, seed + 1000, 300, true);
+      const { journal } = simulate(gated, seed, 300, true, gatedVariant);
+      const { journal: j2 } = simulate(fork, seed + 1000, 300, true, forkVariant);
       for (const j of [journal, j2]) {
         restarted += j.filter(
           (r) => r.event === "node_finished" && r.outcome === RESTART_FAILED,
@@ -2815,7 +2863,7 @@ describe("t40 repair in a fork", () => {
         ),
     );
     expect(diffPipelines(fork, third, h.state).refused).toContain(
-      'the fork at "plan" is open (its branches have not all met at "merge"), so its edges cannot change now',
+      'the fork at "plan" is open (its branches have not all met at "merge" and gone on from there), so its edges cannot change now',
     );
     const noJoin: PipelineSpec = {
       ...fork,
@@ -3111,5 +3159,178 @@ describe("t40 repair in a fork", () => {
     const refused = diffPipelines(before, parsePipeline(FIXERS), h.state).refused;
     expect(refused).toContain('"fix-c"');
     expect(refused).toContain("about to enter");
+  });
+
+  // ── the join held back at its attempt limit (fourth review) ───────────────
+
+  /** Two command branches that fail, a join of one attempt that can send the run back to `plan`. */
+  const LIMIT = (a: string, b: string) =>
+    yaml([
+      "name: limit",
+      "nodes:",
+      "  - { slug: plan, kind: agent, prompt: plan }",
+      `  - { slug: "${a}", kind: command, command: "${a}" }`,
+      `  - { slug: "${b}", kind: command, command: "${b}" }`,
+      "  - slug: merge",
+      "    kind: agent",
+      "    prompt: merge",
+      "    join: all",
+      "    max_attempts: 1",
+      "    max_consecutive_failures: 1",
+      "    outcomes: [again]",
+      "    checks: [{ kind: command, command: merge-check }]",
+      "edges:",
+      `  - { from: plan, to: "${a}" }`,
+      `  - { from: plan, to: "${b}" }`,
+      `  - { from: "${a}", to: merge }`,
+      `  - { from: "${a}", to: merge, when: failed }`,
+      `  - { from: "${b}", to: merge }`,
+      `  - { from: "${b}", to: merge, when: failed }`,
+      "  - { from: merge, to: plan, when: again }",
+    ]);
+
+  /**
+   * The `limit` run after both branches failed, the join ran them again with `restart_failed` and
+   * they failed again: every branch has arrived, and the join is held back at its attempt limit.
+   */
+  function joinAtLimit(a = "a", b = "b") {
+    const text = LIMIT(a, b);
+    const before = parsePipeline(text);
+    const h = host(before, (effect) =>
+      effect.type === "run_command" ? failed(effect, `${effect.node} is red`) : answer(effect),
+    );
+    h.hold("plan", "merge");
+    h.send(START);
+    h.send(complete("plan", 1));
+    expect(h.state.active.map((v) => v.node)).toEqual(["merge"]);
+    must(h.send(complete("merge", 1, RESTART_FAILED)));
+    expect(h.state.active).toEqual([]);
+    expect(h.state.pauses).toEqual([
+      expect.objectContaining({
+        reason: "total",
+        node: "merge",
+        blocked: expect.objectContaining({ to: "merge", join: "f1" }),
+      }),
+    ]);
+    expect(h.state.pauses[0]?.fork).toBeUndefined();
+    expect(h.state.status).toBe("paused");
+    expect(Object.keys(h.state.forks?.f1?.arrived ?? {}).sort()).toEqual([a, b].sort());
+    return { text, before, h };
+  }
+
+  test("t40_fork_held_at_join_limit_is_open_so_its_edges_cannot_change", () => {
+    const { text, before, h } = joinAtLimit();
+    // branch a replaced by c: a is "removed" although the fork still names it
+    const replaced = parsePipeline(LIMIT("c", "b"));
+    expect(diffPipelines(before, replaced, h.state).refused).toContain(
+      'the fork at "plan" is open',
+    );
+    expect(diffPipelines(before, replaced, h.state).refused).toContain('"merge"');
+    // a branch added to the paused fork
+    const added = parsePipeline(
+      text
+        .replace(
+          "  - slug: merge\n",
+          '  - { slug: "c", kind: command, command: "c" }\n  - slug: merge\n',
+        )
+        .replace(
+          "  - { from: merge, to: plan, when: again }\n",
+          '  - { from: plan, to: "c" }\n  - { from: "c", to: merge }\n  - { from: "c", to: merge, when: failed }\n  - { from: merge, to: plan, when: again }\n',
+        ),
+    );
+    expect(diffPipelines(before, added, h.state).refused).toContain('the fork at "plan" is open');
+    // a change outside the fork's shape is still taken
+    const prompt = parsePipeline(text.replace("prompt: plan", "prompt: plan again"));
+    expect(diffPipelines(before, prompt, h.state).refused).toBeUndefined();
+    // and once the join went on and the run completed, the fork is history
+    h.use(parsePipeline(text.replace("max_attempts: 1", "max_attempts: 2")));
+    must(h.send({ type: "pipeline_accepted", from: "h", to: "h2", source: "file", before }));
+    expect(h.state.active.map((v) => v.node)).toEqual(["merge"]);
+    must(h.send(complete("merge", 2)));
+    expect(h.state.status).toBe("completed");
+  });
+
+  test("t40_restart_failed_into_a_removed_branch_kills_the_branch_instead_of_throwing", () => {
+    // The state still names branch a, the pipeline the run is on does not (a change accepted on a
+    // state like this before the rule above). Nothing on a check path may throw: the branch dies
+    // with the missing node named, and the run ends by the dead-branch rule.
+    const { text, h } = joinAtLimit();
+    const raised = parsePipeline(text.replace("max_attempts: 1", "max_attempts: 2"));
+    h.use({
+      ...raised,
+      nodes: raised.nodes.filter((n) => n.slug !== "a"),
+      edges: raised.edges.filter((e) => e.from !== "a" && e.to !== "a"),
+    });
+    must(h.send({ type: "resume" }));
+    expect(h.state.active.map((v) => v.node)).toEqual(["merge"]);
+    const result = h.send(complete("merge", 2, RESTART_FAILED));
+    expect(result.ok).toBe(true);
+    expect(h.state.status).toBe("failed");
+    const settled = h.journal.filter((r) => r.event === "branch_settled" && r.branch === "a");
+    expect(settled.at(-1)).toMatchObject({ dead: true, source: "pipeline" });
+    expect(String(settled.at(-1)?.reason)).toContain('node "a" is no longer in the pipeline');
+    const finished = h.journal.find((r) => r.event === "run_finished");
+    expect(String(finished?.reason)).toContain('branch "a" failed at "merge" (pipeline)');
+    expect(String(finished?.reason)).toContain('node "a" is no longer in the pipeline');
+    // the branch that still exists ran once more before the run ended
+    expect(h.state.nodes.b?.attempt).toBe(3);
+    expect(text).toContain('slug: "a"');
+  });
+
+  test("t40_last_arrival_is_by_arrival_order_not_by_key_order", () => {
+    // Integer-like keys come first in an object, also after the state went through JSON: the
+    // branch that arrived last is found by the order of the arrivals, not of the record's keys.
+    const { h } = joinAtLimit("zz", "1");
+    const arrived = h.state.forks?.f1?.arrived ?? {};
+    expect(Object.keys(arrived)).toEqual(["1", "zz"]);
+    expect(h.state.pauses[0]?.blocked).toMatchObject({ from: "1", label: "failed", to: "merge" });
+    expect(standingOf(h.state)).toContain("pause:merge:total:1>merge");
+    // the feedbacks of the join stay in branch order
+    expect(h.state.nodes.merge?.lastFailures?.map((f) => f.from)).toEqual(["zz", "1"]);
+  });
+
+  test("t40_change_that_leaves_the_join_at_its_limit_offers_no_reroute", () => {
+    const { text, before, h } = joinAtLimit();
+    const pausedBefore = h.events().filter((e) => e === "run_paused").length;
+    // the join's prompt changes, its limit does not: taking the route again would pause at once
+    const prompt = parsePipeline(text.replace("prompt: merge", "prompt: merge again"));
+    const diff = diffPipelines(before, prompt, h.state);
+    expect(diff.refused).toBeUndefined();
+    expect(diff.nodes).toEqual([{ slug: "merge", changes: ["work"] }]);
+    expect(diff.effects).toEqual([]);
+    h.use(prompt);
+    must(h.send(accepted(before)));
+    expect(h.state.pauses.map((p) => [p.reason, p.node])).toEqual([["total", "merge"]]);
+    expect(h.state.status).toBe("paused");
+    expect(h.events().filter((e) => e === "run_paused")).toHaveLength(pausedBefore);
+    expect(h.state.active).toEqual([]);
+    // the limit raised: the route into the join is taken, and the join is entered once
+    const raised = parsePipeline(
+      text
+        .replace("prompt: merge", "prompt: merge again")
+        .replace("max_attempts: 1", "max_attempts: 2"),
+    );
+    const lifted = diffPipelines(prompt, raised, h.state);
+    expect(lifted.effects).toEqual([{ kind: "reroute", node: "b" }]);
+    h.use(raised);
+    must(
+      h.send({ type: "pipeline_accepted", from: "h2", to: "h3", source: "file", before: prompt }),
+    );
+    expect(h.state.pauses).toEqual([]);
+    expect(h.state.active.map((v) => v.node)).toEqual(["merge"]);
+    expect(h.state.nodes.merge?.attempt).toBe(2);
+    expect(h.events().filter((e) => e === "run_paused")).toHaveLength(pausedBefore);
+  });
+
+  test("t40_end_clears_pauses", () => {
+    const { before, h } = joinAtLimit();
+    expect(h.state.pauses).toHaveLength(1);
+    must(h.send({ type: "cancel" }));
+    expect(h.state.status).toBe("canceled");
+    expect(h.state.pauses).toEqual([]);
+    expect(h.state.active).toEqual([]);
+    expect(nextStep(before, h.state, 0)).toEqual({ done: true, run_status: "canceled" });
+    expect(refusal(h.send({ type: "resume" })).code).toBe("NODE_NOT_RUNNING");
+    expect(refusal(h.send({ type: "resume", node: "merge" })).code).toBe("NODE_NOT_RUNNING");
   });
 });

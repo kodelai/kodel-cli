@@ -487,7 +487,13 @@ describe("t40 modes", () => {
         Object.values(s.nodes).map((n) => [n.slug, [n.status, n.outcome, n.attempt]]),
       ),
       trail: [...s.trail].sort(),
-      arrived: s.forks?.f1?.arrived,
+      // the order of the arrivals (`seq`) is the one thing about them the mode decides
+      arrived: Object.fromEntries(
+        Object.entries(s.forks?.f1?.arrived ?? {}).map(([branch, { seq: _seq, ...rest }]) => [
+          branch,
+          rest,
+        ]),
+      ),
     });
     expect(outcome(parallel.state)).toEqual(outcome(sequential.state));
     expect(parallel.state.status).toBe("completed");

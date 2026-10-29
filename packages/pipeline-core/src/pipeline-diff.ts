@@ -90,12 +90,27 @@ export function standingOf(state: RunState): string {
   return [...visits.sort(), ...pauses.sort()].join(" ");
 }
 
-/** A fork instance whose branches have not all met at the join yet (or whose join is being worked). */
+/**
+ * A fork instance whose branches have not all met at the join yet, or whose join is being worked
+ * or is held back at its attempt limit with the branches arrived (that pause is the join's, it
+ * carries no branch, so it is known by the route it holds).
+ */
 function isOpen(fork: ForkState, state: RunState): boolean {
   return (
     state.active.some((v) => v.node === fork.join || v.fork?.id === fork.id) ||
-    state.pauses.some((p) => p.fork?.id === fork.id) ||
+    state.pauses.some((p) => p.fork?.id === fork.id || p.blocked?.join === fork.id) ||
     fork.branches.some((branch) => fork.arrived[branch] === undefined)
+  );
+}
+
+/** Whether `slug` may be entered once more under `after`, given the attempts it has used. */
+function limitLifted(after: PipelineSpec, state: RunState, slug: string): boolean {
+  const node = after.nodes.find((n) => n.slug === slug);
+  const run = state.nodes[slug];
+  return (
+    node !== undefined &&
+    run !== undefined &&
+    run.attempt + 1 <= node.max_attempts + run.extraAttempts
   );
 }
 
@@ -160,7 +175,7 @@ export function diffPipelines(
     const now = forkTargets(after, fork);
     if (was.length !== now.length || was.some((to, i) => to !== now[i])) {
       return refuse(
-        `the fork at "${fork.from}" is open (its branches have not all met at "${fork.join}"), so its edges cannot change now`,
+        `the fork at "${fork.from}" is open (its branches have not all met at "${fork.join}" and gone on from there), so its edges cannot change now`,
       );
     }
     const joinBefore = before.nodes.find((n) => n.slug === fork.join)?.join;
@@ -216,7 +231,14 @@ export function diffPipelines(
       !routeEntersBranch(state, blocked)
     ) {
       effects.push({ kind: "recheck", node: blocked.from });
-    } else if (from.length > 0 || ahead.some((to) => changesOf(to).length > 0)) {
+      continue;
+    }
+    // A route into the join, or into a head from outside its branch, is taken as it is when the run
+    // goes on (`applyEffect`), so it enters its node only once that node's attempt limit lets it: a
+    // change that leaves the limit where it is leaves the pause where it is, and says nothing.
+    const takenAsIs = blocked.join !== undefined || routeEntersBranch(state, blocked);
+    if (takenAsIs && pause.reason === "total" && !limitLifted(after, state, blocked.to)) continue;
+    if (from.length > 0 || ahead.some((to) => changesOf(to).length > 0)) {
       effects.push({ kind: "reroute", node: blocked.from });
     }
   }
