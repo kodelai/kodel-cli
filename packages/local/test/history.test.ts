@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   type HistoryEvent,
   historyEventSchema,
@@ -36,7 +37,7 @@ import {
 import { SESSIONS_INDEX } from "../src/hooks";
 
 const MARKER = join(".kodel", "config.yaml");
-const GOLDEN = new URL("../../../fixtures/formats/v1/history/", import.meta.url).pathname;
+const GOLDEN = fileURLToPath(new URL("../../../fixtures/formats/v1/history/", import.meta.url));
 
 let base: string;
 let configDir: string;
@@ -876,7 +877,7 @@ describe("vh9g history: safety", () => {
   });
 
   test("vh9g_the_collector_never_names_a_credential_file_or_table", async () => {
-    const dir = new URL("../src/history/", import.meta.url).pathname;
+    const dir = fileURLToPath(new URL("../src/history/", import.meta.url));
     const files: string[] = [];
     const walk = async (d: string): Promise<void> => {
       for (const entry of await readdir(d, { withFileTypes: true })) {

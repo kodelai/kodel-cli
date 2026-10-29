@@ -5,6 +5,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import {
   buildDelta,
@@ -19,7 +20,7 @@ import {
   type UsageEvent,
 } from "../src";
 
-const src = (name: string) => new URL(`../src/${name}`, import.meta.url).pathname;
+const src = (name: string) => fileURLToPath(new URL(`../src/${name}`, import.meta.url));
 
 /** Every module a file imports from: static imports (type-only too), re-exports and dynamic `import()`. */
 async function importsOf(path: string): Promise<string[]> {

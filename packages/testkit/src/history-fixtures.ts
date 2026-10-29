@@ -3,13 +3,14 @@
  * conversation replaced. `__CWD__` in a fixture stands for the working directory of the session and is set
  * when the fixture is installed, so a test puts the session into whatever project it builds.
  */
+
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-export const CLAUDE_FIXTURE = new URL(
-  "../../../fixtures/history/claude-code/v2.1.306/",
-  import.meta.url,
-).pathname;
+export const CLAUDE_FIXTURE = fileURLToPath(
+  new URL("../../../fixtures/history/claude-code/v2.1.306/", import.meta.url),
+);
 export const CLAUDE_FIXTURE_SESSION = "11111111-1111-4111-8111-111111111111";
 
 export const claudeFolderName = (cwd: string): string => cwd.replace(/[^a-zA-Z0-9]/g, "-");

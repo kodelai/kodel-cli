@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   addDelta,
   buildDelta,
@@ -17,9 +18,11 @@ import { ClaudeLogBuilder, claudeFolderName, installClaudeSession } from "../../
 import { claudeCodeCollector } from "../src/history";
 
 const MARKER = join(".kodel", "config.yaml");
-const GOLDEN = new URL("../../../fixtures/formats/v1/history/", import.meta.url).pathname;
+const GOLDEN = fileURLToPath(new URL("../../../fixtures/formats/v1/history/", import.meta.url));
 /** The hand-made session with the 1-hour cache tier; see its README. */
-const TIERS = new URL("../../../fixtures/history/claude-code/v2.1.310/", import.meta.url).pathname;
+const TIERS = fileURLToPath(
+  new URL("../../../fixtures/history/claude-code/v2.1.310/", import.meta.url),
+);
 const TIERS_SESSION = "33333333-3333-4333-8333-333333333333";
 
 let base: string;

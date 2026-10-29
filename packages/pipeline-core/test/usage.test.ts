@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import {
   addDelta,
@@ -544,7 +545,7 @@ describe("t9jrs the pure modules do no I/O", () => {
     const files = ["price-table.ts", "usage.ts", "usage-record.ts"];
     const forbidden = /^(node:|fs$|path$|child_process$|os$|crypto$)/;
     for (const name of files) {
-      const path = new URL(`../src/${name}`, import.meta.url).pathname;
+      const path = fileURLToPath(new URL(`../src/${name}`, import.meta.url));
       const source = ts.createSourceFile(
         path,
         await readFile(path, "utf8"),

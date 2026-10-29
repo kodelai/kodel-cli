@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import {
   AGENT_LOG_FAILURES,
   DEFAULT_AGENT_LOG,
@@ -10,8 +11,8 @@ import {
 import { parse } from "yaml";
 import { HISTORY_SECTION_KEYS } from "../src";
 
-const DOCS = new URL("../../../docs/history.md", import.meta.url).pathname;
-const CONFIG_SOURCE = new URL("../src/config.ts", import.meta.url).pathname;
+const DOCS = fileURLToPath(new URL("../../../docs/history.md", import.meta.url));
+const CONFIG_SOURCE = fileURLToPath(new URL("../src/config.ts", import.meta.url));
 const read = () => readFile(DOCS, "utf8");
 
 /** The part of the page about the agent log, up to the next section. */
@@ -85,7 +86,7 @@ describe("t3bk2 the page about the agent log", () => {
     );
     // and the comment that tells which are which says so
     const source = await readFile(
-      new URL("../../pipeline-core/src/history-config.ts", import.meta.url).pathname,
+      fileURLToPath(new URL("../../pipeline-core/src/history-config.ts", import.meta.url)),
       "utf8",
     );
     expect(source).toContain(
