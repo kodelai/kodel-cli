@@ -338,3 +338,23 @@ state.usage: {"sessions":{},"attempts":{},"unattributed":{"models":{},"passes":0
 - **Still not done by the builder:** the real-agent tests were not run after this fix (the main session runs them); fixtures are
   hand-made; the 1-hour share of cache writes in a real run is only what the log says; `docs/history.md` is updated for the link case
   and for `checkedAt`.
+
+## After the real run
+
+The real-agent tests were run outside the sandbox after the link fix (Claude Code 2.1.312). Three of four passed: a run records usage
+for its node, the cost is reported (0.0111 against 0.0998 for the whole turn, partial false), and the canary reads the real log. The
+fourth, `t9jrs_real_run_tokens_agree_with_agent`, failed, and the cause is the reference, not the pass:
+
+- **Whole turn against run window.** The test compared the run total (4 input, 319 output, 57 612 cache read, 534 cache write) with the
+  agent's own `usage` of the whole `claude -p` turn (14, 1 133, 186 722, 17 448). The turn holds the requests before the run (a tool
+  search, `pipeline_list`, the first big cache write) and after it (the final answer, the background `kodel wait`), which are not the
+  run's by design: the run is credited from the response that issued `pipeline_start` to the end of the last step.
+- **Fix of the reference, not of the tolerance (Decision 5).** `tests/agents/harness.ts` now folds the agent's own `stream-json` output
+  to one response per message id (`responsesOf`) and sums the window from the response that issued `pipeline_start` to the one that issued
+  the last `pipeline_complete_step`, both included (`windowUsage`): the same window the pass credits, from a source apart from the
+  transcript file. The test holds the sum of the four counts to 10% and each field too when the agent's own figure for it is at least
+  100 tokens; the whole-turn figures are printed for information. Unit tests of the parsing are in `tests/agents/harness.test.ts`.
+- **What stays open.** The last response of the run is counted as it stood at the step end, so its output may be a little low; the
+  window figure is the agent's own, so a real miss beyond 10% still reopens the decision on how usage is read. The cost is compared with
+  the whole turn's `total_cost_usd`, so it is only reported and `COST_TOLERANCE` stays unset. These tests were not run again by the
+  builder after this change.

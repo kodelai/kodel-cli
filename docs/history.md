@@ -134,7 +134,13 @@ under both names, the one as given and the real one, for the copy of the agent's
 project's is still decided by the log's own `cwd`, so a folder of another project is refused, never read.
 
 The transcript does not contain every request the agent makes (titles, summaries and the like), so the totals of
-the events are a little below the agent's own. On a clean one-turn session the test accepts a difference of 10%.
+the events are a little below the agent's own. On a clean one-turn session the test accepts a difference of 10%, and
+the comparison is **window to window**: the agent's own count for the whole `claude -p` turn is far above the run's by
+design, because it holds the requests before the run (a tool search, listing the pipelines, the first large cache write) and
+after it (the final answer, the background watch). In the first real run the run held 4 / 319 / 57 612 / 534 tokens (input /
+output / cache read / cache write) and the whole turn 14 / 1 133 / 186 722 / 17 448. The real-agent test therefore builds
+its reference from the agent's own stream: the responses from the one that issued `pipeline_start` to the one that issued
+the last `pipeline_complete_step`, both included, which is what the pass credits to a run.
 The transcript also undercounts uncached input and cache reads for a session with forks and subagents (a fork does not log the
 prompt it inherited, and a cache written again after it went idle is not in it): in a measured session they were 23-51% below
 Claude Code's own `/usage`, while output agreed within 1%. The 10% holds for a clean one-turn session only, and the cost of a model
