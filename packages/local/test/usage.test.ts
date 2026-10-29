@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
@@ -26,9 +35,11 @@ import {
   FileStore,
   LocalPipelineHost,
   type LocalRun,
+  STEP_END_LOG_WAIT_MS,
   UsageWriter,
 } from "../src";
 import { claudeCodeCollector } from "../src/history/claude-code/collector";
+import { hasStepCall } from "../src/history/claude-code/window";
 
 const SESSION = "55555555-5555-4555-8555-555555555555";
 
@@ -82,6 +93,13 @@ interface RigOptions {
   session?: string | null;
   budgetMs?: number;
   now?: () => number;
+  /**
+   * How the pass sleeps while it waits for the step's call in the log, and for how long it may. By default there is no
+   * wait (`0`), so that a test whose log has no such call, or whose clock moves at every look, is not changed by it; the
+   * tests of the wait give their own sleep with a fake clock and `STEP_END_LOG_WAIT_MS`.
+   */
+  sleep?: (ms: number) => Promise<void>;
+  stepWaitMs?: number;
 }
 
 interface Rig {
@@ -116,6 +134,8 @@ async function rig(options: RigOptions = {}): Promise<Rig> {
     ...(options.collector === undefined ? {} : { collector: options.collector }),
     ...(options.budgetMs === undefined ? {} : { budgetMs: options.budgetMs }),
     ...(options.now === undefined ? {} : { now: options.now }),
+    sleep: options.sleep ?? (async () => undefined),
+    stepWaitMs: options.stepWaitMs ?? 0,
   });
   const store = new FileStore({ root: join(root, ".kodel") });
   const agentLog = new AgentLogWriter({
@@ -1590,4 +1610,210 @@ describe("usage pass: the fifth review", () => {
     expect(failed).not.toContain("record_refused");
     expect((await journalOf(r)).filter((rec) => rec.event === "usage_recorded").length).toBe(1_000);
   }, 120_000);
+});
+
+describe("usage pass: the wait for the call that hands the step in", () => {
+  /** The response the agent writes last: the one that makes the call that hands step `a` in. */
+  function stepCall(
+    runId: string,
+    input: { run_id?: string; node_slug?: string; attempt?: number } = {},
+  ): ClaudeLogBuilder {
+    return new ClaudeLogBuilder({
+      sessionId: SESSION,
+      cwd: dir,
+      start: "2026-10-21T10:05:00.000Z",
+    }).call(
+      "msg_2",
+      {
+        id: "toolu_done",
+        name: "mcp__kodel__pipeline_complete_step",
+        input: { run_id: runId, node_slug: "a", attempt: 1, summary: "done", ...input },
+      },
+      { input: 50, output: 5, cacheRead: 500 },
+    );
+  }
+
+  /** A fake clock that only the wait moves; `onSleep` runs after the n-th sleep, as the agent writing its log would. */
+  function clock() {
+    let t = 1_000_000;
+    const sleeps: number[] = [];
+    const fake = {
+      sleeps,
+      onSleep: undefined as ((n: number) => Promise<void>) | undefined,
+      now: () => t,
+      sleep: async (ms: number) => {
+        t += ms;
+        sleeps.push(ms);
+        await fake.onSleep?.(sleeps.length);
+      },
+      waited: () => sleeps.reduce((sum, ms) => sum + ms, 0),
+    };
+    return fake;
+  }
+
+  test("t9jrs_wait_for_the_step_call_credits_the_response_in_the_same_pass", async () => {
+    const c = clock();
+    const r = await rig({
+      task: "wait-appears",
+      now: c.now,
+      sleep: c.sleep,
+      stepWaitMs: STEP_END_LOG_WAIT_MS,
+    });
+    const path = await install(sessionLog(r.runId));
+    // the agent's log catches up with the call while the pass waits
+    c.onSleep = async (n) => {
+      if (n === 3) await appendFile(path, stepCall(r.runId).text());
+    };
+    await r.run.completeStep("a", 1);
+    const state = await stateOf(r);
+    // all three responses are in step a, none is left for the next attempt
+    expect(Object.keys(state.usage?.attempts ?? {})).toEqual(["a:1"]);
+    const a = state.usage?.attempts["a:1"];
+    if (a === undefined) throw new Error("no usage for a:1");
+    const tokens = tokensOf(a);
+    expect(tokens.api_calls).toBe(3);
+    expect(tokens.input).toBe(350);
+    expect(tokens.cache_read).toBe(1_500);
+    // it stopped waiting the moment the call was there
+    expect(c.sleeps).toHaveLength(3);
+  });
+
+  test("t9jrs_wait_for_the_step_call_never_appearing_waits_at_most_the_bound_and_goes_on", async () => {
+    const c = clock();
+    const r = await rig({
+      task: "wait-never",
+      now: c.now,
+      sleep: c.sleep,
+      stepWaitMs: STEP_END_LOG_WAIT_MS,
+    });
+    await install(sessionLog(r.runId));
+    await r.run.completeStep("a", 1);
+    expect(c.waited()).toBeLessThanOrEqual(STEP_END_LOG_WAIT_MS);
+    expect(c.waited()).toBeGreaterThanOrEqual(STEP_END_LOG_WAIT_MS - 100);
+    const state = await stateOf(r);
+    const a = state.usage?.attempts["a:1"];
+    if (a === undefined) throw new Error("no usage for a:1");
+    // what the log had is recorded, nothing failed and nothing is said
+    expect(tokensOf(a).api_calls).toBe(2);
+    expect(state.usage?.failed ?? []).toEqual([]);
+    expect((await journalOf(r)).filter((rec) => rec.event === "usage_failed")).toEqual([]);
+  });
+
+  test("t9jrs_wait_for_the_step_call_already_there_does_not_wait", async () => {
+    const c = clock();
+    const r = await rig({
+      task: "wait-there",
+      now: c.now,
+      sleep: c.sleep,
+      stepWaitMs: STEP_END_LOG_WAIT_MS,
+    });
+    await install(
+      sessionLog(r.runId).call(
+        "msg_2",
+        {
+          id: "toolu_done",
+          name: "mcp__kodel__pipeline_complete_step",
+          input: { run_id: r.runId, node_slug: "a", attempt: 1, summary: "done" },
+        },
+        { input: 50, output: 5, cacheRead: 500 },
+      ),
+    );
+    await r.run.completeStep("a", 1);
+    expect(c.sleeps).toHaveLength(0);
+    const a = (await stateOf(r)).usage?.attempts["a:1"];
+    if (a === undefined) throw new Error("no usage for a:1");
+    expect(tokensOf(a).api_calls).toBe(3);
+  });
+
+  test("t9jrs_wait_for_the_step_call_is_not_made_by_the_pass_of_the_timer", async () => {
+    const c = clock();
+    const r = await rig({
+      task: "wait-tick",
+      now: c.now,
+      sleep: c.sleep,
+      stepWaitMs: STEP_END_LOG_WAIT_MS,
+    });
+    await install(sessionLog(r.runId));
+    await r.agentLog.capture(r.run.agentLogRun(), { why: "tick", waitMs: 0 });
+    expect(c.sleeps).toHaveLength(0);
+    expect(Object.keys((await stateOf(r)).usage?.attempts ?? {})).toEqual([]);
+  });
+
+  test("t9jrs_wait_for_the_step_call_is_not_made_when_usage_is_off", async () => {
+    const c = clock();
+    const r = await rig({
+      task: "wait-off",
+      usage: { enabled: false },
+      now: c.now,
+      sleep: c.sleep,
+      stepWaitMs: STEP_END_LOG_WAIT_MS,
+    });
+    await install(sessionLog(r.runId));
+    await r.run.completeStep("a", 1);
+    expect(c.sleeps).toHaveLength(0);
+  });
+
+  test("t9jrs_wait_for_the_step_call_is_not_satisfied_by_another_run_node_or_attempt", async () => {
+    const c = clock();
+    const r = await rig({
+      task: "wait-other",
+      now: c.now,
+      sleep: c.sleep,
+      stepWaitMs: STEP_END_LOG_WAIT_MS,
+    });
+    const log = sessionLog(r.runId);
+    // the call of another run, of another node and of another attempt of this node: none is this step's
+    const others = [{ run_id: "r_000000000_zzzz" }, { node_slug: "b" }, { attempt: 2 }];
+    others.forEach((input, i) => {
+      log.call(
+        `msg_other${i}`,
+        {
+          id: `toolu_other${i}`,
+          name: "mcp__kodel__pipeline_complete_step",
+          input: { run_id: r.runId, node_slug: "a", attempt: 1, ...input },
+        },
+        { input: 1, output: 1 },
+      );
+    });
+    await install(log);
+    await r.run.completeStep("a", 1);
+    expect(c.waited()).toBeGreaterThanOrEqual(STEP_END_LOG_WAIT_MS - 100);
+    expect(c.waited()).toBeLessThanOrEqual(STEP_END_LOG_WAIT_MS);
+  });
+
+  test("t9jrs_wait_for_the_step_call_looks_only_at_the_end_of_the_log", async () => {
+    const path = join(dir, "tail.jsonl");
+    const call = (runId: string) =>
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "t",
+              name: "mcp__kodel__pipeline_complete_step",
+              input: { run_id: runId, node_slug: "a", attempt: 1 },
+            },
+          ],
+        },
+      });
+    const filler = `${JSON.stringify({ type: "user", message: { role: "user", content: "x".repeat(90) } })}\n`;
+    const runId = "r_0aaaaaaaa_bbbb";
+    // the call is among the last lines: found by reading only a short tail
+    await writeFile(path, `${filler.repeat(500)}${call(runId)}\n`);
+    expect(await hasStepCall(path, runId, "a", 1, 2_000)).toBe(true);
+    // the call is long before the end: outside the tail, so not found (the whole log is never read for it)
+    await writeFile(path, `${call(runId)}\n${filler.repeat(500)}`);
+    expect(await hasStepCall(path, runId, "a", 1, 2_000)).toBe(false);
+    expect(await hasStepCall(path, runId, "a", 1, 1_000_000)).toBe(true);
+    // a line cut by the start of the tail is not read, a line that is not JSON is skipped, a missing file is "not there"
+    await writeFile(path, `${call(runId).slice(20)}\nnot json ${runId} pipeline_complete_step\n`);
+    expect(await hasStepCall(path, runId, "a", 1)).toBe(false);
+    expect(await hasStepCall(join(dir, "nothing.jsonl"), runId, "a", 1)).toBe(false);
+    // the node and the attempt have to be the step's
+    await writeFile(path, `${call(runId)}\n`);
+    expect(await hasStepCall(path, runId, "b", 1)).toBe(false);
+    expect(await hasStepCall(path, runId, "a", 2)).toBe(false);
+  });
 });

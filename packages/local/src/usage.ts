@@ -54,6 +54,7 @@ import { SESSION_ENV } from "./executor";
 import { claudeCodeCollector } from "./history/claude-code/collector";
 import { claudeConfigDir, firstTimestamp, subagentLogs } from "./history/claude-code/locate";
 import { AGENT_ID } from "./history/claude-code/normalize";
+import { hasStepCall } from "./history/claude-code/window";
 import {
   proveRunStart,
   type RunStartMemo,
@@ -64,6 +65,15 @@ import {
 
 /** A pass stops reading after this long and keeps what it has: a big log catches up over several passes. */
 export const USAGE_BUDGET_MS = 10_000;
+/**
+ * How long the pass at a step end waits for the agent's log to hold the call that hands the step in. The pass runs
+ * inside that very call, and the agent writes its log a little behind its work: without the wait the response that
+ * makes the call can be missed, and then it is counted in the next step (or, after the last step, not at all). The
+ * wait is part of the pass's own time, comes only once per pass whatever the number of sessions, and ends as soon as
+ * the call is in the log; if it never is, the pass goes on with what the log has.
+ */
+export const STEP_END_LOG_WAIT_MS = 2_000;
+const STEP_END_LOG_POLL_MS = 100;
 /**
  * What is kept in memory, bounded per run so that one busy run cannot make another (or its own main session) forget:
  * a run keeps the memos of its candidate sessions (the one of the environment and the newest of the hook index, 21 at
@@ -151,6 +161,10 @@ export interface UsageWriterOptions {
   rules: readonly RedactRule[];
   env: () => NodeJS.ProcessEnv;
   now?: () => number;
+  /** How the wait for the step's call in the log sleeps; tests move a fake clock with it. */
+  sleep?: (ms: number) => Promise<void>;
+  /** How long that wait may last: `STEP_END_LOG_WAIT_MS` unless given; `0` is no wait at all. */
+  stepWaitMs?: number;
   /** The collector to read with; the Claude Code one, looking in the config dir of the environment, when not given. */
   collector?: (configDir: string) => AgentHistoryCollector;
   /** How long one pass may read before it keeps what it has. */
@@ -195,12 +209,16 @@ interface PassContext {
   seen: Set<string>;
   /** How many `usage_recorded` the journal held when the pass began: the pass may add records up to the cap. */
   events: number;
+  /** When the wait for the step's call in the log ends; set at the first wait of the pass, shared by all sessions. */
+  waitUntil?: number;
   result: UsageResult;
 }
 
 /** Counts usage from the agent's log into the runs of one host. One per process, like the copy of the log. */
 export class UsageWriter {
   private readonly now: () => number;
+  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly stepWaitMs: number;
   private readonly budgetMs: number;
   /** What is kept for each run, least recently used first; see `RUN_CAP`. */
   private readonly runs = new Map<string, RunMemos>();
@@ -210,7 +228,27 @@ export class UsageWriter {
   constructor(private readonly options: UsageWriterOptions) {
     this.finder = new SessionFinder({ root: options.root, env: options.env });
     this.now = options.now ?? Date.now;
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.stepWaitMs = Math.max(0, options.stepWaitMs ?? STEP_END_LOG_WAIT_MS);
     this.budgetMs = options.budgetMs ?? USAGE_BUDGET_MS;
+  }
+
+  /**
+   * Wait until the log of a session that proved the run holds the call that hands in this step, for at most
+   * `STEP_END_LOG_WAIT_MS` of the whole pass. Never fails: a log that does not get there is read as it is.
+   */
+  private async awaitStepCall(ctx: PassContext, path: string): Promise<void> {
+    if (this.stepWaitMs === 0) return;
+    const there = () => hasStepCall(path, ctx.run.runId, ctx.node.node, ctx.node.attempt);
+    if (await there()) return;
+    ctx.waitUntil ??= this.now() + this.stepWaitMs;
+    // Also bounded by the number of looks, so a clock that does not move cannot make the wait endless.
+    for (let looks = 0; looks <= this.stepWaitMs / STEP_END_LOG_POLL_MS; looks += 1) {
+      const left = ctx.waitUntil - this.now();
+      if (left <= 0) return;
+      await this.sleep(Math.min(STEP_END_LOG_POLL_MS, left));
+      if (await there()) return;
+    }
   }
 
   /** Let go of what is kept for a run that has ended. */
@@ -354,6 +392,8 @@ export class UsageWriter {
       }
       if (!(await proveRunStart(run.runId, memo))) continue;
       proven += 1;
+      // The response that makes the call of this step may not be in the log yet.
+      await this.awaitStepCall(ctx, candidate.path);
       if ((await this.credit(ctx, candidate.session, undefined, memo)) === "abort") return result;
       // Subagents are counted whatever the switch of the tool log says: their use is use.
       for (const log of await subagentLogs(candidate.path, candidate.session)) {
