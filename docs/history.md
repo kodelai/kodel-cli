@@ -338,8 +338,18 @@ agent's log (the copy first, then usage); the timer never counts usage. The pass
 the run (found as for the agent log, see "The agent log"), and the logs of their subagents whatever `tool_log` says, and journals
 a `usage_recorded` delta: `session`, `node`, `attempt`, the delta (tokens, costs and flags per model) and the cursor (`last_seq`,
 `last_key`, and the response that was still open). A delta is only added to; nothing is rewritten, and nothing is written to a
-run that has ended. The worst time a pass adds before a step is judged is the wait for the lock (5 s), the copy's budget (30 s)
-and usage's own budget (10 s).
+run that has ended. The worst time a pass adds before a step is judged is the wait for the lock (5 s), the copy's budget (30 s),
+usage's own budget (10 s) and the wait for the step's own call in the log (2 s, below).
+
+**The wait for the step's call.** The pass runs inside the agent's `pipeline_complete_step` call, and the agent writes its log a
+little behind its work. Without a wait the response that makes this very call could be missing from the log when the pass reads
+it: it was then counted in the next step, and after the last step not at all (seen once on a real `claude -p` run, where the
+window's total was 34% short; a run before it had agreed to 0.5%). So a pass at a step end first waits, up to
+`STEP_END_LOG_WAIT_MS` (2 s, once per pass whatever the number of sessions, counted in the pass's own time), until the tail of
+the log of a session that proved the run holds the call that hands in this node and attempt with the run's id (the tail only is
+read, every 100 ms; the whole log never is). It ends the moment the call is there. If it never is, the pass goes on with what the
+log has, as before, and says nothing: it is not a failure. The timer's pass never waits, and nothing waits when usage is off,
+when the run is over or when no session proved the run.
 
 **Which attempt.** What a pass reads is credited to the attempt that pass completes, so the windows of attempts are contiguous
 from the run's first call (the response that calls `pipeline_next_step` is written before the step is served and is in its step).
@@ -356,6 +366,7 @@ false` in the report until the log is read to its end). A log that is shorter th
 the one that was credited, stops the count for that session (`unreadable`). Only closed responses are read from the log. The
 response the agent is writing at the end of a step (the one that calls `pipeline_complete_step`) is counted as it stands from a
 copy of the reader's state, marked `last_open` (its output may be low), and when it is whole the next pass adds only the rest.
+It is only counted if it is in the log when the pass reads: see "The wait for the step's call" for how the pass waits for it.
 
 **Cost.** A table of prices in code (`pipeline-core/src/price-table.json`): `format`, `revision` (a date), per model a list of
 dated entries with the prices of input, output, cache read, cache write and the 1-hour cache write (`cache_write_1h`, default

@@ -44,7 +44,7 @@ Nothing blocks the start. Defaults are what I do without an answer.
 - **Records are deltas.** `usage_recorded {session, node?, attempt?, delta, cursor}`: the machine accepts one with a node only for the **active agent visit in phase agent while running** (else `Repeat`), and one without a node (`unattributed`) while running; the report sums deltas. A hand-in refused after the pass (`UNKNOWN_OUTCOME`, `NODE_NOT_RUNNING`) and retried simply adds another delta to the same attempt. Nothing is rewritten and nothing is written to a finished run.
 - **Cursor.** State keeps per session `{last_seq, last_key, flushed?}`: `seq` is deterministic for the same log, so after a server restart the pass re-reads from the run's start (up to its budget) and skips what is credited; a budget stop credits only what was read, the rest comes next pass (`complete: false` meanwhile). Nothing is orphaned.
 - **Double counting.** One `usage` per response (the collector folds lines); the aggregator also dedupes by `message.id`/`requestId` across the main file and subagent files (set capped at 200 000 keys; beyond it the record is flagged `dedupe_overflow`). Subagents are counted regardless of `tool_log`.
-- **Time and lock.** The step end takes the pass lock once and runs the agent-log pass, then the usage pass, under it; the ticker never runs usage and yields as it does for the agent log. Worst added time before a step is judged: lock wait 5 s + agent-log budget 30 s + usage budget 10 s, stated in the docs. If the lock is not obtained, `usage_failed: busy` is journaled once (the delta waits for the next pass; nothing is lost because the cursor did not move).
+- **Time and lock.** The step end takes the pass lock once and runs the agent-log pass, then the usage pass, under it; the ticker never runs usage and yields as it does for the agent log. Worst added time before a step is judged: lock wait 5 s + agent-log budget 30 s + usage budget 10 s, stated in the docs (and, added after the race finding below, + 2 s of wait for the step's own call in the log). If the lock is not obtained, `usage_failed: busy` is journaled once (the delta waits for the next pass; nothing is lost because the cursor did not move).
 - **Journal size.** `usage_recorded` only at step ends, at most `MAX_USAGE_EVENTS` (1000) per run, plus `usage_failed` once per reason.
 - **Clock.** Journal `ts` is epoch ms, log `ts` ISO (converted); same machine assumed (a remote or devcontainer MCP would mis-window: documented). The normalizer clamps non-monotonic log time forward, so skew errs toward the earlier node, deterministically.
 - **Price shape.** Dated entries per model (a list). Long context (>200k input in one request) is counted per event in `long_context` and flagged, not modelled. Models seen under other names (Bedrock/Vertex ids, `[1m]`) read as `partial`: accepted.
@@ -369,7 +369,8 @@ fourth, `t9jrs_real_run_tokens_agree_with_agent`, failed, and the cause is the r
   test did before the eighth review, the sum was 88 170 against 87 723 (ratio 1.005), which says little because cache read dominates it.
   The cost of the run window 0.0171 against the whole turn's `total_cost_usd` 0.1004, information only (the earlier 0.0111 against
   0.0998 was the first run). The tolerance stayed 10%.
-- **What stays open.** The reference for output is the weak point, and the output of the last response is counted as it stood at the
+- **What stays open** (the gap about a response that may be missing at the step end was found afterwards and is handled in "After the
+  race finding" below). The reference for output is the weak point, and the output of the last response is counted as it stood at the
   step end (the transcript's value, which is the higher one here, not a low one: in the real run ours was 513 against the stream's 66,
   so the stream is the low side). A real miss beyond 10% on input, cache read or cache write still reopens the decision on how usage
   is read. The cost is compared with the whole turn's `total_cost_usd`, so it is only reported and `COST_TOLERANCE` stays unset. The
@@ -392,3 +393,32 @@ fourth, `t9jrs_real_run_tokens_agree_with_agent`, failed, and the cause is the r
 - **Docs:** a folder of another project is "never credited (its lines are scanned for the run's id only)", not "never read"; the
   `checkedAt` paragraph says the three 4.5 rows were verified by the set comparison only and that the live page copy (fetched with
   `curl` on 2026-10-28) is not committed, so the repository's fixture page stays hand-made.
+
+### After the race finding
+
+- **The evidence (real `claude -p`, Claude Code 2.1.312, the same one-turn scenario run repeatedly outside the sandbox).** The first
+  run agreed with the agent's own stream for the window: the sum 88 170 against 87 723 (ratio 1.005), input, cache read and cache
+  write exactly equal. A later run of the same scenario was off by 0.34 on the sum of input + cache read + cache write. The
+  difference is about one response of three or four in the window.
+- **The hypothesis (not yet confirmed).** The pass runs inside the agent's own `pipeline_complete_step` call, and Claude Code writes its
+  transcript a little behind its work, so the response that makes that call is sometimes not in the file when the pass reads. Then
+  it is not counted in its step: the cursor leaves it for the next pass (it lands in the next attempt) and, after the last step of a
+  run, there is no next pass and it is lost. The size of the effect is one response per step, a visible share only in a very short
+  window like the test's.
+- **The fix (variant 1).** The pass at a step end (never the timer's) first waits, up to `STEP_END_LOG_WAIT_MS` (2 s, once per pass,
+  in the pass's own time, injectable `sleep`/`now`), until the tail of the log of a session that proved the run holds the
+  `pipeline_complete_step` call with the run's id, this node and this attempt (`hasStepCall` in `history/claude-code/window.ts`; only
+  the last 256 KB are read, polled every 100 ms). It ends the moment the call is there; if it never is, the pass goes on exactly as
+  before and says nothing. The worst added time before a step is judged becomes 5 s + 30 s + 10 s + 2 s. Nothing waits when usage is
+  off, when the run is over or no session proved the run.
+- **Tests** (`packages/local/test/usage.test.ts`): `t9jrs_wait_for_the_step_call_credits_the_response_in_the_same_pass` (the call is
+  written after a few fake sleeps; all three responses are in `a:1` and none is left for the next attempt),
+  `..._never_appearing_waits_at_most_the_bound_and_goes_on` (no failure, no journal line), `..._already_there_does_not_wait` (no
+  sleep), `..._is_not_made_by_the_pass_of_the_timer`, `..._is_not_made_when_usage_is_off`, `..._is_not_satisfied_by_another_run_node_or_attempt`,
+  `..._looks_only_at_the_end_of_the_log` (unit tests of `hasStepCall`). A mutation that removes the wait fails three of them.
+  `UsageWriter` takes `sleep` and `stepWaitMs` options (default `STEP_END_LOG_WAIT_MS`, `0` is no wait). The test rig defaults to no
+  wait, because the three budget tests move the clock at every look and the wait would spend that clock before the read; the tests
+  of the wait switch it on with a fake clock.
+- **What this does not show.** The hypothesis is only confirmed if real runs now agree repeatedly: the main session runs the real-agent
+  tests several times and the result goes in the PR. If a real run still misses by more than the tolerance, the cause is something
+  else and the decision is reopened, not the test bent.
