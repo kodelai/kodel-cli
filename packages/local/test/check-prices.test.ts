@@ -4,7 +4,15 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -237,6 +245,39 @@ describe("t9jrs check-prices network mode (saved pages)", () => {
     expect(out).toContain("claude-sonnet-5-5: differs");
     expect(code).toBe(1);
   });
+
+  test("t9jrs_check_prices_a_stale_mention_with_the_old_price_does_not_hide_a_changed_row", () => {
+    // The Sonnet 5.5 row now says $4 for input (one price changed), while a sentence elsewhere still quotes the old
+    // set: the set comparison finds a place that holds all the prices, but the row is a place that disagrees.
+    const dir = livePage(true);
+    const file = join(dir, PAGE_FILE);
+    const changed = readFileSync(file, "utf8").replace(
+      /(Claude Sonnet 5\.5 For long-running work )\$2 \/ MTok/,
+      "$1$$4 / MTok",
+    );
+    writeFileSync(
+      file,
+      `${changed}\n<p>Claude Sonnet 5.5 was $2 / MTok and $10 / MTok, $2.5 / MTok, $4 / MTok, $0.1 / MTok</p>`,
+    );
+    const { code, out } = run(["--pages", dir]);
+    expect(out).toContain("claude-sonnet-5-5: differs");
+    expect(out).toContain("another place on the page holds all the prices");
+    expect(code).toBe(1);
+  });
+
+  test("t9jrs_check_prices_other_tables_that_name_the_model_are_not_a_disagreement", () => {
+    // The live page names a model in a batch table and in a worked example with amounts of their own.
+    const dir = livePage(true);
+    const file = join(dir, PAGE_FILE);
+    writeFileSync(
+      file,
+      `${readFileSync(file, "utf8")}\n<p>Claude Sonnet 5.5 batch $1 / MTok $5 / MTok $1.25 / MTok $2 / MTok $0.05 / MTok</p>` +
+        "\n<p>Claude Sonnet 5.5 example: 50,000 input tokens $0.10 output $0.15 cache $0.01 total $0.26</p>",
+    );
+    const { code, out } = run(["--pages", dir]);
+    expect(out).toContain("claude-sonnet-5-5: ok");
+    expect(code).toBe(0);
+  });
 });
 
 describe("t9jrs check-prices network mode (loopback server)", () => {
@@ -309,7 +350,8 @@ describe("t9jrs check-prices --local", () => {
       writeFileSync(join(proj, ".kodel", "config.yaml"), "version: 1\n");
     }
     const configDir = mkdtempSync(join(scratch, "claude-"));
-    const folder = join(configDir, "projects", projectFolderName(proj));
+    // Claude Code names the folder after the physical directory (on macOS a temp dir is under /private/var)
+    const folder = join(configDir, "projects", projectFolderName(realpathSync(proj)));
     mkdirSync(folder, { recursive: true });
     const lines: object[] = [
       {
@@ -344,7 +386,7 @@ describe("t9jrs check-prices --local", () => {
       ...(costStates ?? []),
     ];
     writeFileSync(join(folder, "s1.jsonl"), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
-    return { proj, configDir };
+    return { proj, configDir, folder };
   }
   const state = (total: number, extra: object = {}) => ({
     type: "cost-state",
@@ -357,6 +399,17 @@ describe("t9jrs check-prices --local", () => {
     const { code, out } = run(["--local", "--root", proj, "--config-dir", configDir]);
     expect(code).toBe(0);
     expect(out).toContain("compared 1 session(s)");
+  });
+
+  test("t9jrs_check_prices_local_through_a_symlinked_root_finds_the_sessions", () => {
+    // Claude Code names the folder after the physical directory; the project is reached through a link.
+    const { proj, configDir } = project([state(2 / 1.099)]);
+    const link = join(scratch, `link-${Date.now()}`);
+    symlinkSync(proj, link);
+    // the log of the project lies under the folder of the REAL path, the folder of the link's name does not exist
+    const { code, out } = run(["--local", "--root", link, "--config-dir", configDir]);
+    expect(out).toContain("compared 1 session(s)");
+    expect(code).toBe(0);
   });
 
   test("t9jrs_check_prices_local_drift_over_10pct: 10.1% is flagged, exit 1", () => {
@@ -374,8 +427,8 @@ describe("t9jrs check-prices --local", () => {
   });
 
   test("t9jrs_check_prices_local_drift_over_10pct: models the table lacks are listed", () => {
-    const { proj, configDir } = project([state(2)]);
-    const file = join(configDir, "projects", projectFolderName(proj), "s2.jsonl");
+    const { proj, configDir, folder } = project([state(2)]);
+    const file = join(folder, "s2.jsonl");
     writeFileSync(
       file,
       `${JSON.stringify({
@@ -399,9 +452,9 @@ describe("t9jrs check-prices --local", () => {
   });
 
   test("t9jrs_check_prices_local_ignores_a_session_of_another_project", () => {
-    const { proj, configDir } = project([state(0.01)]);
+    const { proj, configDir, folder } = project([state(0.01)]);
     const other = mkdtempSync(join(scratch, "other-"));
-    const log = join(configDir, "projects", projectFolderName(proj), "s1.jsonl");
+    const log = join(folder, "s1.jsonl");
     writeFileSync(log, readFileSync(log, "utf8").replaceAll(proj, other));
     const { code, out } = run(["--local", "--root", proj, "--config-dir", configDir]);
     expect(code).toBe(0);

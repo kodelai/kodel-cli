@@ -161,8 +161,8 @@ async function withRealNames(dirs: readonly string[]): Promise<string[]> {
 
 /**
  * The log of a session whose id is known, without scanning the store: the folder of each directory given (and of
- * the path it really is), then
- * the folders under the first one (a session started in a subdirectory of the project, or in a worktree gone since).
+ * the path it really is), then the folders that begin with the name of each of those directories (a session started in a
+ * subdirectory of the project, or in a worktree gone since).
  * The id must be a safe one; the path is inside `store` by construction and is checked again by whoever opens it.
  */
 export async function findSessionLog(

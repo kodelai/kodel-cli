@@ -10,7 +10,7 @@
 // Exit codes: 0 nothing differs, 1 a price on a page or in a cost-state differs, 2 a page is unreachable or
 // does not hold the table's models, or the arguments are wrong.
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -91,8 +91,16 @@ function pageText(html) {
 const sameNumber = (a, b) => Math.abs(a - b) < 1e-9;
 
 /**
- * Compares one entry with a page: `missing` when the page never names the model, `changed` when a price of the
- * entry is not among the dollar amounts that follow the name, else `ok`.
+ * Compares one entry with a page: `missing` when the page never names the model, `changed` when no place that names
+ * it holds all the prices of the entry, or when one place holds them and another place that looks like the model's
+ * row (three amounts or more, all of the entry's prices but one) does not (`conflict`), else `ok`.
+ *
+ * The check is a comparison of SETS of dollar amounts after the name, not of columns: it cannot tell the input price
+ * from the output price, and an old price that is still quoted in prose elsewhere is a place that "holds" the entry.
+ * So a page where one price of a row changed while an old mention remains is reported (exit 1) and a person looks,
+ * rather than the change being hidden behind the place that still matches. Known limits: a change of SEVERAL prices
+ * at once while an old mention remains looks like another table and is not caught, and a menu, a batch table or a
+ * worked example that names the model with other amounts is not a disagreement (the live page has all three).
  */
 export function checkEntryAgainstPage(model, entry, text) {
   // Every place the name stands: a page names a model in its menu and in prose as well as in its price table, and the
@@ -100,7 +108,9 @@ export function checkEntryAgainstPage(model, entry, text) {
   const pattern = modelNamePattern(model);
   const matches = [...text.matchAll(new RegExp(pattern.source, "gi"))];
   if (matches.length === 0) return { status: "missing" };
+  let matching = false;
   let best;
+  let disagreeing;
   for (const match of matches) {
     const after = text.slice(match.index + match[0].length, match.index + REGION_CHARS);
     // The row of the next model is not this model's prices.
@@ -110,10 +120,19 @@ export function checkEntryAgainstPage(model, entry, text) {
     const absent = PRICE_KEYS.filter(
       (key) => typeof entry[key] === "number" && !amounts.some((a) => sameNumber(a, entry[key])),
     );
-    if (absent.length === 0) return { status: "ok" };
+    if (absent.length === 0) {
+      matching = true;
+      continue;
+    }
     // The place with the most of the prices is the one a change is reported against.
     if (best === undefined || absent.length < best.length) best = absent;
+    // A place that looks like the row of this model with ONE price changed. Other tables that name the model (a batch
+    // table, a worked example, a long-context line) share few of its prices and are not a disagreement.
+    if (amounts.length >= 3 && absent.length === 1 && disagreeing === undefined)
+      disagreeing = absent;
   }
+  if (matching && disagreeing === undefined) return { status: "ok" };
+  if (matching) return { status: "changed", absent: disagreeing, conflict: true };
   return { status: "changed", absent: best };
 }
 
@@ -158,7 +177,12 @@ async function checkPages(table, opts) {
       console.log(`${model}: not found on ${url} (the page format may have changed)`);
       missing++;
     } else if (result.status === "changed") {
-      console.log(`${model}: differs from ${url}: ${result.absent.join(", ")}`);
+      console.log(
+        `${model}: differs from ${url}: ${result.absent.join(", ")}` +
+          (result.conflict
+            ? " (another place on the page holds all the prices: a stale mention, or the change itself; look at the page)"
+            : ""),
+      );
       changed++;
     } else console.log(`${model}: ok`);
   }
@@ -274,13 +298,28 @@ export function costStateTotal(entry) {
   return typeof total === "number" && Number.isFinite(total) ? total : undefined;
 }
 
+const realOrSelf = (path) => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+};
+
 export function sessionFilesOfProject(root, configDir) {
   const store = join(configDir, "projects");
-  const name = projectFolderName(root);
-  const prefix = name.length > NAME_LIMIT ? name.slice(0, NAME_LIMIT) : `${name}-`;
+  // Claude Code names the folder after the physical directory (`/private/var/...`), a project may be reached through a
+  // link (`/var/...`): the folders of both names are looked at, as `findSessionLog` of @kodel-ai/local does.
+  const real = realOrSelf(root);
+  const names = [...new Set([projectFolderName(root), projectFolderName(real)])];
+  const matches = (entry) =>
+    names.some((name) => {
+      const prefix = name.length > NAME_LIMIT ? name.slice(0, NAME_LIMIT) : `${name}-`;
+      return entry === name || entry.startsWith(prefix);
+    });
   let folders;
   try {
-    folders = readdirSync(store).filter((entry) => entry === name || entry.startsWith(prefix));
+    folders = readdirSync(store).filter(matches);
   } catch {
     return [];
   }
@@ -293,7 +332,11 @@ export function sessionFilesOfProject(root, configDir) {
       if (!statSync(path).isFile()) continue;
       // A log counts only when the cwd of its first entry that has one lies in the project.
       const cwd = [...jsonLines(path)].find((e) => typeof e?.cwd === "string")?.cwd;
-      if (typeof cwd === "string" && isInside(root, resolve(cwd))) files.push(path);
+      if (
+        typeof cwd === "string" &&
+        (isInside(real, realOrSelf(resolve(cwd))) || isInside(root, resolve(cwd)))
+      )
+        files.push(path);
     }
   }
   return files;

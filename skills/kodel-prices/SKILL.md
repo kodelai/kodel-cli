@@ -16,7 +16,11 @@ installed by `kodel init`.
 1. Run `node scripts/check-prices.mjs` from the repository root. It fetches each `sourceUrl` and
    compares the dollar amounts after the model's name with the entry. Read its answer:
    - exit 0: the page agrees with the table;
-   - exit 1: a price differs (the model and the amounts that are not on the page are named);
+   - exit 1: a price differs (the model and the amounts that are not on the page are named). The check
+     compares the SET of dollar amounts after the model's name, not the columns, and looks at every place
+     that names the model. It also reports a page whose places disagree on one price of a row (a stale
+     mention that still quotes the old prices does not hide a changed row); a change of several prices at once
+     while an old mention remains is not caught, so read the page when a price list is announced to change;
    - exit 2: a page is unreachable, or no longer names a model (the page format may have changed). Do
      not edit the table from a page you could not read; say what failed.
    The line `not yet checked (checkedAt null)` lists entries nobody has compared with a price list.
