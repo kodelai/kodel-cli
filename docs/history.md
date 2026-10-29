@@ -101,6 +101,114 @@ version uses the newest (`unknown_version`). The collector says so, never silent
 
 A real-agent test fails when the installed agent is outside every profile, and says what to add.
 
+## Where the history is kept
+
+A config without the `storage` key keeps what Kodel writes under the project's own `.kodel` folder, so a project
+that already exists does not change. `kodel init` writes `storage: home` and a generated `project_id` into a new config
+(`kodel init --storage project` writes neither, and an existing config is never rewritten). With `storage: home` the
+history goes to the project's folder under the user's home instead, so it is never committed and a `git clean` or a
+branch switch cannot touch it:
+
+```yaml
+storage: home
+project_id: etude-k3f9a2x1
+```
+
+| kept in `~/.kodel/projects/<project_id>/` with `storage: home` | stays in the project |
+| --- | --- |
+| `runs/` (the journal, state, reports, prompts, the agent log of each run) | `config.yaml`, `pipelines/`, `tasks/` |
+| `proposals/<checkout key>/` (pipelines the agent proposed outside a run) | `worktrees/` (the run worktrees) |
+| `start.lock` | `hooks.log` |
+| `sessions.jsonl` (the hook's index of agent sessions) | |
+
+`kodel init --storage home` writes both lines into a **new** config; the id is the folder name (lowercased, cut to
+`[a-z0-9._-]`, at most 24 characters) and 8 random characters. An existing config is not rewritten: add the two lines
+yourself. The id is a folder name on three systems, so it must be 3 to 64 characters of `a-z`, `0-9`, `.`, `_`, `-`
+starting with a letter or a digit, with no `..`, no trailing dot and not a name Windows keeps for a device (`con`, `nul`,
+`com1`, ...). Both keys must be written as lines of their own at the top level (`storage: home`, optional quotes and a
+trailing comment): the hook reads them with a line matcher, so the config refuses any other spelling (a flow mapping,
+an anchor, a block).
+
+**`KODEL_STATE_DIR`** replaces `~/.kodel` as the base (`$KODEL_STATE_DIR/projects/<project_id>/`). It must be an absolute
+path. It is also where the integrity hashes are kept, so with it set the history and the hashes share one folder;
+`XDG_STATE_HOME` moves the hashes but not the history. Set it in your shell profile, not only in `.mcp.json`: the MCP
+server, your shell, the agent's shell and the hook each read their own environment, and `kodel wait` (which the agent
+runs) looks where its own environment says. `KODEL_*` is not passed to the commands the engine runs.
+
+**One place is read: the one the config names.** Switching `storage` hides the runs of the other place until you move
+them. To carry the history from `.kodel` to `home` (with `$HOME_TREE` for `~/.kodel/projects/<project_id>`, or
+`$KODEL_STATE_DIR/projects/<project_id>`):
+
+```sh
+mkdir -p "$HOME_TREE/runs"
+mv .kodel/runs/* "$HOME_TREE/runs/"
+cat .kodel/sessions.jsonl >> "$HOME_TREE/sessions.jsonl"
+```
+
+and the other way round with the two places swapped. Pending proposals made outside a run are not moved: the folder
+inside `proposals/` is named by a hash of the checkout. **Before** you switch, take them back with
+`kodel pipeline proposals discard <name>` (afterwards that command reads only the new place and cannot see them), and let
+the agent propose again. Then restart the MCP server: it refuses every call that opens or starts a run while the
+config names another place than the one it started with (a checkout of a branch without the keys does the same). A run
+that was open when you moved the history does not resume (its `workdir` is an absolute path), as after any move.
+
+**The id is stable, the path is not.** Renaming, moving or re-cloning the project keeps its history, because the folder
+is named by `project_id`, not by where the project stands. The integrity hashes are keyed by the id in `home` mode too,
+so a moved project keeps its trust. Switching the mode, or editing `project_id`, changes the key: the moved runs read as
+*unknown* and are adopted on first use (so does a run whose hash file was deleted; `kodel status` counts the runs
+without a recorded hash). Treat both as ways to reset trust.
+
+**Several clones of one project on one machine** share one history, because they share the `project_id`; the same
+goes for a fork that copied the config. Each run records the checkout that made it (`root` in `meta.json`); a clone
+does not reuse or continue a run of another one (`resume`, `next_step` and the like fail with "belongs to the checkout at
+..."), starts its own, and shows the others as `foreign` in `kodel status`. `gate`, `ack` and `seal` by id still work
+and say whose run it is. `root` is advisory: it sits in a file the agent can rewrite, so it keeps honest clones from
+stepping on each other and is not a security boundary. Outside-a-run proposals are kept per checkout. To separate two
+clones, give one of them another `project_id`.
+
+**Who can change it.** `storage` and `project_id` are in the config, which is the person's file, and no MCP tool takes
+them. The deny rules of this repository (`Edit/Write` on `.kodel/runs/**`) cover the project place only: with `home`
+the person adds rules for the home tree and for the config to the agent's settings (they are the person's file;
+nothing is shipped). For Claude Code, in `.claude/settings.json`; the path forms matter there: `~/` is the home folder,
+`//` starts a path from the root of the file system, and a path with a single leading `/` is relative to the project, so
+it would match nothing here:
+
+```json
+"deny": [
+  "Edit(~/.kodel/projects/<project_id>/**)",
+  "Write(~/.kodel/projects/<project_id>/**)",
+  "Edit(.kodel/config.yaml)",
+  "Write(.kodel/config.yaml)"
+]
+```
+
+With `KODEL_STATE_DIR` set the tree is under that folder: write it with `//` (`Edit(//data/kodel/projects/<project_id>/**)`
+for `KODEL_STATE_DIR=/data/kodel`).
+
+An agent that edits the config can still move new runs out of the rules, and nothing alerts the person: this is
+accepted and stated here, and the requirement "only a person changes the setting" holds by the rule in `AGENTS.md`, not
+by enforcement.
+
+**For a team.** The keys are committed, so the mode is the team's and follows the branch. An older kodel refuses a
+config with the keys ("unknown key"), so upgrade everybody's kodel before committing them. The history is per user:
+teammates and CI do not see each other's runs, and a machine without a writable `$HOME` (CI, a sandboxed agent) cannot
+start a run in `home` mode; set `KODEL_STATE_DIR` to a writable folder there. A sandbox that confines writes to the
+workspace also stops the hook from writing the session index (it logs the failure and skips; the sessions of that agent
+are then not recorded); one that cannot even read `~/.kodel` stops `kodel wait` too, which then does not find the run.
+
+**What `kodel status` shows.** With `storage: home` it prints the same table as before (it does not name the folder),
+marks the runs of another clone as `[foreign]` and counts the runs that have no recorded hash. A project that keeps its history in `.kodel` prints what it
+always printed on a machine that has no history under `~/.kodel` (or `KODEL_STATE_DIR`); on a machine that has (the
+`projects` folder is there) it adds one line, `storage: project (this project keeps its history in .kodel; ...)`, so a
+branch that flips a project from `home` to `project` is named, not just seen as "no runs". The server refuses the
+next call that opens or starts a run in that case. A server that is already running writes to the place it started
+with until it is restarted: the check stops new calls, it does not move a call that has begun.
+
+**If a run cannot be found** the message says it may be kept in the other place: after a switch, or because
+`KODEL_STATE_DIR` is not the same in the shell and in the server. It says so for a `home` project and for any project
+on a machine that has the `projects` folder; a machine with no history under `~/.kodel` keeps the plain text. An orphan
+folder left by a project that was deleted is removed by hand (the folder name starts with the project's name).
+
 ## Which sessions are read
 
 Only the sessions of Kodel projects: a directory tree with the Kodel marker (`.kodel/config.yaml`, found as
@@ -108,8 +216,9 @@ Only the sessions of Kodel projects: a directory tree with the Kodel marker (`.k
 
 - A collector works only on a root that has the marker: `locate` of a directory without it returns nothing and `read`
   of a ref into it is refused with `HISTORY_PATH_OUTSIDE_PROJECT`, whatever sessions the agent has for that directory.
-- With the session index of the hook transport (`.kodel/sessions.jsonl`), when it has lines of the agent, the
-  index is the answer and nothing is scanned. It lists only the sessions started since the hooks were connected.
+- With the session index of the hook transport (`.kodel/sessions.jsonl`, or the project's folder under `~/.kodel` with
+  `storage: home`; there the lines whose `cwd` is outside this checkout and its worktrees are ignored), when it has lines
+  of the agent, the index is the answer and nothing is scanned. It lists only the sessions started since the hooks were connected.
 - Otherwise the agent's own folders for the root and for its worktrees are scanned, and the folders of the
   directories under them (a session started in a subdirectory, or in a worktree that was removed with its run).
   A log counts only when the `cwd` of its first entry that has one, found in the first 256 KB, is in the project;
@@ -179,7 +288,7 @@ is `{ value, source }`, and a part that cannot be observed is left out, never gu
 | --- | --- |
 | `observed` | the transport says it (the MCP handshake: the client's name and version) |
 | `observed-env` | the environment of the server (`CLAUDE_CODE_SESSION_ID`): the session that was current when the server started. A server lives as long as its agent process, so after `/clear` it still names the old session |
-| `observed-hook` | the newest session the hooks registered in `.kodel/sessions.jsonl` for the run's directories; used when the environment has none |
+| `observed-hook` | the newest session the hooks registered in the session index (`.kodel/sessions.jsonl`, or its place under `~/.kodel` with `storage: home`) for the run's directories; used when the environment has none |
 | `derived` | read out of the session's own log (the model of its last answer) |
 
 Strings from outside are stripped of control characters and cut at 200 characters, and the store redacts them like
@@ -226,6 +335,7 @@ Each run keeps the sessions of its agent in `agent_log/` of the run folder, as n
 previews. It is **on by default and `full`**, with no opt-in (like the other history categories that are on by default).
 The raw log is never copied. The run folder is committed when the project tracks `.kodel/runs` (this repository ignores
 it, and `kodel init` does not write `.gitignore`); a project that tracks it should ignore `.kodel/runs/*/agent_log`.
+With `storage: home` the run folder is not in the repository at all.
 **Projects that upgrade start storing full sessions.** The decisions behind it were taken in TASK-52A8 and built in
 TASK-3BK2.
 

@@ -62,7 +62,8 @@ cannot start these scenarios again.
 
 `hooks.test.ts` is about the hooks and needs `claude`, `codex` and `opencode` on the PATH, each logged in. For each
 agent it runs `kodel init` in a throwaway directory, starts a headless session there and expects the session in
-`.kodel/sessions.jsonl`; the same session in a directory that is not a Kodel project must leave nothing behind. Codex
+`.kodel/sessions.jsonl` (these scenarios use the default `storage: project`); the same session in a directory that is
+not a Kodel project must leave nothing behind. Codex
 runs with `--dangerously-bypass-hook-trust` (trust is a person's), and every agent is started with `PWD` set (OpenCode
 finds its project by it). If an agent fails only because it hit its own usage limit (a free model), the exit status is not
 checked, a line says so, and the file assertions still run.

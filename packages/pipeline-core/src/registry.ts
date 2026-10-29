@@ -212,7 +212,9 @@ const humanNode: NodeHandler = {
     prompt: nonEmpty.describe("What the person is asked to decide."),
     instructions: nonEmpty
       .optional()
-      .describe("What the person should do or look at; the agent passes it on in its own words."),
+      .describe(
+        "What the person should do or look at; the agent passes it on in its own words. It may also say what the agent's message to them holds and in which order.",
+      ),
     // Where the person's comments are recorded while they talk to the agent; sent back on a rejection.
     results: z
       .object({ columns: columnsSchema })

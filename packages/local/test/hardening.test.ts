@@ -492,6 +492,8 @@ describe("two starts and stray locks", () => {
     const store = new FileStore({ root: join(dir, ".kodel"), staleLockMs: 50 });
     const other = new FileStore({ root: join(dir, ".kodel"), staleLockMs: 50 });
     const id = newRunId();
+    // A lock for a run never makes the run's folder (a run that is not there has none to lock).
+    await mkdir(join(dir, ".kodel", "runs", id), { recursive: true });
     const lock = join(dir, ".kodel", "runs", id, "lock");
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {

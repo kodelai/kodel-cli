@@ -21,6 +21,21 @@ const artifact = join(root, "packages/cli/dist/kodel.js");
 const pkg = JSON.parse(readFileSync(join(root, "packages/cli/package.json"), "utf8"));
 const BUDGET_BYTES = 5 * 1024 * 1024;
 
+// Everything the checks run writes its history under this base (`KODEL_STATE_DIR`), never under the
+// real home of whoever runs the script. Children inherit it through the environment.
+// `fail` exits at once, so the folders are removed on exit and not only in `finally`.
+const temps = [];
+process.on("exit", () => {
+  for (const dir of temps) rmSync(dir, { recursive: true, force: true });
+});
+const tempDir = (prefix) => {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  temps.push(dir);
+  return dir;
+};
+const stateBase = tempDir("kodel-artifact-state-");
+process.env.KODEL_STATE_DIR = stateBase;
+
 const fail = (msg) => {
   console.error(`artifact check failed: ${msg}`);
   process.exit(1);
@@ -52,6 +67,7 @@ for (const line of [
   "A pipeline is one YAML file",
   "Which check for which job",
   "Complete pipelines. Replace the commands",
+  "A checklist for a pipeline that exists",
 ]) {
   if (!built.includes(line)) fail(`the documentation line "${line}" is not in the artifact`);
 }
@@ -68,7 +84,23 @@ const hookSize = statSync(hookArtifact).size;
 if (hookSize > HOOK_BUDGET_BYTES)
   fail(`hook bundle size ${hookSize} exceeds budget ${HOOK_BUDGET_BYTES}`);
 
-const project = mkdtempSync(join(tmpdir(), "kodel-artifact-"));
+// storage_hook_bundle_clean_and_in_budget: the hook reads `storage` with a small line matcher. Parsing the
+// config with yaml/zod or opening the store would blow the budget above, so the built text must not hold them.
+const hookText = readFileSync(hookArtifact, "utf8");
+// `config.yaml` is a file name the hook reads, so only an import of the module counts for yaml.
+const banned = [
+  ["the yaml module", /(require\(|from\s*)["']yaml["']/],
+  ["zod", /zod/],
+  ["minimatch", /minimatch/],
+  // The store is what the hook must not pull in: its class, and the lock and the start lock it keeps.
+  ["the store", /class FileStore\b|withStartLock|start\.lock/],
+];
+for (const [name, pattern] of banned) {
+  if (pattern.test(hookText))
+    fail(`storage_hook_bundle_clean_and_in_budget: the hook bundle contains ${name}`);
+}
+
+const project = tempDir("kodel-artifact-");
 try {
   mkdirSync(join(project, ".kodel"));
   writeFileSync(join(project, ".kodel", "config.yaml"), "version: 1\n");
@@ -141,11 +173,12 @@ const { Client } = await import(sdkPath("client/index.js"));
 const { StdioClientTransport } = await import(sdkPath("client/stdio.js"));
 
 async function runOnce(outputEnabled) {
-  const dir = mkdtempSync(join(tmpdir(), "kodel-artifact-run-"));
+  const dir = tempDir("kodel-artifact-run-");
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [artifact, "--root", dir, "mcp"],
     cwd: dir,
+    env: { ...process.env },
     stderr: "ignore",
   });
   const client = new Client({ name: "check-artifact", version: "0" });
@@ -220,6 +253,7 @@ async function runChanges(enabled) {
     command: process.execPath,
     args: [artifact, "--root", dir, "mcp"],
     cwd: dir,
+    env: { ...process.env },
     stderr: "ignore",
   });
   const client = new Client({ name: "check-artifact", version: "0" });
@@ -322,6 +356,134 @@ for (const file of ["one.txt", "two.txt", "three.txt"]) {
 const withoutChanges = await runChanges(false);
 if (withoutChanges.after.length > 0) {
   fail(`history.changes.enabled false still wrote: ${withoutChanges.after.join()}`);
+}
+
+// `storage: home`: the runs, the start lock and the session index live under the state base and nothing of
+// them in the repository. `kodel gate` refuses to run without a terminal, so the scenario stops at the
+// waiting gate (as the scenario above stops where a person is needed) and checks what `status` says.
+// A failure inside the scenario throws, so that its `finally` closes the server it started and removes
+// its folders; `process.exit` would leave the child of `kodel mcp` running.
+const bail = (msg) => {
+  throw new Error(msg);
+};
+
+async function runHome() {
+  const dir = tempDir("kodel-artifact-home-");
+  const base = tempDir("kodel-artifact-home-state-");
+  const id = "check-aaaa1111";
+  const place = join(base, "projects", id);
+  const env = { ...process.env, KODEL_STATE_DIR: base };
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [artifact, "--root", dir, "mcp"],
+    cwd: dir,
+    env,
+    stderr: "ignore",
+  });
+  const client = new Client({ name: "check-artifact", version: "0" });
+  try {
+    const git = (...args) =>
+      execFileSync(
+        "git",
+        ["-c", "user.name=check", "-c", "user.email=check@example.com", ...args],
+        { cwd: dir, stdio: "ignore" },
+      );
+    git("init", "-q");
+    mkdirSync(join(dir, ".kodel", "pipelines"), { recursive: true });
+    writeFileSync(
+      join(dir, ".kodel", "config.yaml"),
+      ["version: 1", "worktree: { mode: off }", "storage: home", `project_id: ${id}`, ""].join(
+        "\n",
+      ),
+    );
+    writeFileSync(
+      join(dir, ".kodel", "pipelines", "p.yaml"),
+      [
+        "version: 1",
+        "name: p",
+        "nodes:",
+        "  - slug: work",
+        "    kind: agent",
+        "    prompt: do the work",
+        "  - slug: approve",
+        "    kind: human",
+        "    prompt: look at it",
+        "edges:",
+        "  - { from: work, to: approve }",
+        "  - { from: approve, to: work, when: rejected }",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(join(dir, "README.md"), "check\n");
+    git("add", ".");
+    git("commit", "-q", "-m", "init");
+
+    await client.connect(transport);
+    const call = async (name, args) => {
+      const result = await client.callTool({ name, arguments: args });
+      return JSON.parse(result.content[0].text);
+    };
+    const started = await call("pipeline_start", {
+      task: "keep it at home",
+      pipeline: "p",
+      cwd: dir,
+      title: "keep-at-home",
+    });
+    if (!started.run_id) bail(`storage home: the run did not start: ${JSON.stringify(started)}`);
+    const step = await call("pipeline_next_step", { run_id: started.run_id, wait_s: 1 });
+    const done = await call("pipeline_complete_step", {
+      run_id: started.run_id,
+      node_slug: "work",
+      attempt: step.attempt ?? 1,
+      summary: "done",
+    });
+    if (done.ok === false) bail(`storage home: the step did not complete: ${JSON.stringify(done)}`);
+    const waiting = await call("pipeline_next_step", { run_id: started.run_id, wait_s: 1 });
+    if (waiting.waiting?.reason !== "gate" || waiting.waiting?.node_slug !== "approve")
+      bail(`storage home: the run does not wait at the gate: ${JSON.stringify(waiting)}`);
+
+    const status = spawnSync(process.execPath, [artifact, "--root", dir, "status"], {
+      cwd: dir,
+      env,
+      encoding: "utf8",
+    });
+    const shown = `${status.stdout}${status.stderr}`;
+    if (status.status !== 0) bail(`storage home: kodel status failed: ${shown}`);
+    if (shown.includes(base)) bail(`storage home: kodel status prints the state base: ${shown}`);
+    if (!status.stdout.includes(started.run_id) || !status.stdout.includes("approve"))
+      bail(`storage home: kodel status does not show the run at the gate: ${shown}`);
+
+    if (!existsSync(join(place, "runs", started.run_id)))
+      bail(`storage home: no run folder in ${join(place, "runs")}`);
+    if (existsSync(join(dir, ".kodel", "runs")))
+      bail("storage home: the project has a .kodel/runs folder");
+
+    const hook = spawnSync(process.execPath, [hookArtifact, "claude-code"], {
+      cwd: dir,
+      env,
+      input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "home-1", cwd: dir }),
+      encoding: "utf8",
+    });
+    if (hook.status !== 0 || hook.stdout !== "" || hook.stderr !== "")
+      bail(
+        `storage home: the hook must exit 0 and say nothing: ${hook.status} ${hook.stdout}${hook.stderr}`,
+      );
+    const index = join(place, "sessions.jsonl");
+    if (!existsSync(index) || !readFileSync(index, "utf8").includes('"home-1"'))
+      bail(`storage home: the hook did not record the session in ${index}`);
+    if (existsSync(join(dir, ".kodel", "sessions.jsonl")))
+      bail("storage home: the hook wrote .kodel/sessions.jsonl into the project");
+  } finally {
+    await client.close().catch(() => {});
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(base, { recursive: true, force: true });
+  }
+}
+
+try {
+  await runHome();
+} catch (error) {
+  fail(error instanceof Error ? error.message : String(error));
 }
 
 console.log(`artifact ok under node ${process.version}: ${size} bytes, version ${version}`);

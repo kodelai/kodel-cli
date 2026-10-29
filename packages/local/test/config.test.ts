@@ -49,6 +49,7 @@ describe("the project config", () => {
         adapters: {},
       },
       history: { ...DEFAULT_HISTORY, agent_log: DEFAULT_AGENT_LOG, usage: DEFAULT_USAGE },
+      storage: "project",
     });
   });
 

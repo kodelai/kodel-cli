@@ -4,7 +4,19 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
+  licenses:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      # Every dependency must have a license compatible with Apache-2.0.
+      - run: node scripts/check-licenses.mjs
+
   test:
     strategy:
       fail-fast: false

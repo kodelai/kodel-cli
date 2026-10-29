@@ -19,12 +19,12 @@ export const HOOK_BIN = "kodel-hook";
 
 /**
  * The command an agent runs for an event. It starts the same program the server does: for the
- * installed `kodel mcp` that is the small `kodel-hook <agent>`, for any other server command (a
- * script run by `bun`, `npx kodel@1 mcp`) it is that command with `hook <agent>` in place of `mcp`.
+ * installed `kodel` that is the small `kodel-hook <agent>`, for any other command (a script run by
+ * `bun`, `npx kodel@1`) it is that command with `hook <agent>` after it. `serverCommand` has no
+ * subcommand: `mcp` is added where the server is started.
  */
 export function hookCommand(serverCommand: string, agent: HookAgent): string {
   const words = serverCommand.trim().split(/\s+/).filter(Boolean);
-  if (words.at(-1) === "mcp") words.pop();
   if (words.length === 1 && words[0] === "kodel") return `${HOOK_BIN} ${agent}`;
   return [...words, "hook", agent].join(" ");
 }

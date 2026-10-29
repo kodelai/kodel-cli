@@ -25,6 +25,13 @@ import { parse } from "yaml";
 import { z } from "zod";
 import { MAX_PATCH_KB } from "./patch-text";
 import { CONFIG_FILE } from "./project-locate";
+import {
+  parseStorageLines,
+  projectIdProblem,
+  STORAGE_MODES,
+  type StorageMode,
+  StoragePathsError,
+} from "./storage-paths";
 
 export const DEFAULT_WORKTREE_DIR = ".kodel/worktrees";
 
@@ -94,6 +101,13 @@ export interface ProjectConfig {
   decisions: DecisionsConfig;
   tasks: TasksConfig;
   history: HistoryConfig;
+  /**
+   * Where runs, the proposals made outside a run, `start.lock` and the session index are kept:
+   * `project` (under `.kodel`, the default) or `home` (`~/.kodel/projects/<project_id>/`).
+   */
+  storage: StorageMode;
+  /** The stable name of the project's folder in `home` mode; it is committed, so a move keeps the history. */
+  project_id?: string;
 }
 
 export const DEFAULT_WORKTREE: WorktreeConfig = { mode: "auto", dir: DEFAULT_WORKTREE_DIR };
@@ -233,6 +247,8 @@ const configSchema = z
       .strict()
       .optional(),
     history: historySchema.optional(),
+    storage: z.enum(STORAGE_MODES as [StorageMode, ...StorageMode[]]).optional(),
+    project_id: z.string().optional(),
   })
   .strict();
 
@@ -255,6 +271,7 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
         decisions: { dialog: false, agent: { ...DEFAULT_DECISIONS.agent } },
         tasks: { ...DEFAULT_TASKS, on_run: { ...DEFAULT_TASKS.on_run }, adapters: {} },
         history: { ...defaultHistory(), agent_log: defaultAgentLog(), usage: defaultUsage() },
+        storage: "project",
       };
     }
     throw error;
@@ -283,6 +300,36 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
       );
     }
     throw invalid(file, `${first?.message ?? "invalid"}${keys}${where ? ` (at "${where}")` : ""}`);
+  }
+  // The hook reads these two keys with a line matcher (it cannot load this file within its budget),
+  // so a spelling the matcher cannot read is refused here: the hook and the server then cannot
+  // disagree about where the history goes.
+  try {
+    const lines = parseStorageLines(text);
+    // Both ways: what the parser read is what the matcher reads, and a line the matcher reads is
+    // the key the parser read (a line of the matcher's that is not the parser's key would be a
+    // setting for the hook and none for the server).
+    if (lines.storage !== parsed.data.storage) {
+      throw new StoragePathsError(
+        parsed.data.storage === undefined
+          ? `storage is a line the config does not read as that key; write it as "storage: home" or "storage: project" at the top level`
+          : `storage must be written as "storage: ${parsed.data.storage}" on a line of its own, not as a flow mapping, an anchor or a block`,
+      );
+    }
+    if (parsed.data.project_id !== undefined) {
+      const problem = projectIdProblem(parsed.data.project_id);
+      if (problem !== undefined) throw new StoragePathsError(`project_id ${problem}`);
+    }
+    if (lines.project_id !== parsed.data.project_id) {
+      throw new StoragePathsError(
+        parsed.data.project_id === undefined
+          ? `project_id is a line the config does not read as that key; write it as "project_id: my-app-k3f9a2x1" at the top level`
+          : `project_id must be written as "project_id: ${parsed.data.project_id}" on a line of its own`,
+      );
+    }
+  } catch (error) {
+    if (error instanceof StoragePathsError) throw invalid(file, error.message);
+    throw error;
   }
   let version: { version: string; major: number };
   try {
@@ -320,6 +367,8 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
       adapters: parsed.data.tasks?.adapters ?? {},
     },
     history: mergeHistory(parsed.data.history),
+    storage: parsed.data.storage ?? "project",
+    ...(parsed.data.project_id === undefined ? {} : { project_id: parsed.data.project_id }),
   };
 }
 

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { defaultRegistry, docTopics } from "@kodel-ai/pipeline-core";
 import { TOOLS } from "@kodel-ai/pipeline-core/mcp";
 import { runCli } from "../src/cli";
 import type { Choice } from "../src/init";
@@ -256,7 +257,7 @@ describe("kodel init", () => {
       "--agent",
       "codex,opencode",
       "--server-command",
-      "bun run kodel mcp",
+      "bun run kodel",
     );
     expect(await read(".codex/config.toml")).toContain('args = ["run","kodel","mcp"]');
     expect((await json("opencode.json")).mcp.kodel).toEqual({
@@ -396,6 +397,33 @@ describe("skills", () => {
     for (const name of ["pipeline_docs", "pipeline_propose_change"]) expect(named).toContain(name);
     for (const name of named) expect(known.has(name)).toBe(true);
     expect(designer()).toContain("pipeline-design");
+    expect(designer()).toContain("`pipeline-quality`");
+    expect(designer().replace(/\s+/g, " ")).toContain("the `minimal` form");
+    // step 7 is conditional on a new pipeline and fits the minimal form
+    const seven = /\n7\. [\s\S]*?\n\n/.exec(designer())?.[0].replace(/\s+/g, " ") ?? "";
+    expect(seven).toContain("For a new pipeline add");
+    expect(seven).toContain("where the pipeline is");
+    expect(seven).toContain("(for the `minimal` form only the offer to add checks)");
+  });
+
+  test("tr5j7_kodel_design_stops_when_pipeline_list_returns_an_error", () => {
+    const first = /^1\. [\s\S]*?\n2\. /m.exec(designer())?.[0].replace(/\s+/g, " ") ?? "";
+    expect(first).toContain("Call `pipeline_list`");
+    expect(first).toContain("returns an error");
+    expect(first).toContain("`NO_PROJECT`");
+    expect(first).toContain("and stop: explore nothing and call no other tool");
+    // the person runs `kodel init`: the agent is never told to, and the check can fail
+    const tellsAgentToInit = (text: string) =>
+      [...text.matchAll(/(.{0,24})`kodel init`/g)].some(
+        (m) => !(m[1] ?? "").endsWith("tell them to run "),
+      );
+    expect(first).toContain("`kodel init`");
+    expect(tellsAgentToInit(first)).toBe(false);
+    expect(tellsAgentToInit(`${first} Run \`kodel init\` and stop.`)).toBe(true);
+    // the stop comes before the rest of the step
+    expect(first.indexOf("and stop: explore nothing")).toBeLessThan(
+      first.indexOf("If a pipeline already covers"),
+    );
   });
 
   test("t2t8e_kodel_design_proposes_and_never_writes_pipelines", () => {
@@ -404,6 +432,18 @@ describe("skills", () => {
     for (const forbidden of ["gate", "ack", "seal", "resume", "proposals apply"]) {
       expect(designer()).not.toMatch(new RegExp(`\\b${forbidden}\\b`));
     }
+  });
+
+  test("tr5j7_skill_cites_headings_that_exist_without_the_banned_words", () => {
+    const topic =
+      docTopics(defaultRegistry()).find((t) => t.topic === "pipeline-design")?.text ?? "";
+    const cited = [...designer().matchAll(/sections? "([^"]+)"(?:\s+and\s+"([^"]+)")?/g)].flatMap(
+      (m) => [m[1], m[2]].filter((h): h is string => h !== undefined),
+    );
+    expect(cited).toEqual(["Hand it over", "After the proposal"]);
+    for (const heading of cited)
+      expect(topic).toMatch(new RegExp(`^#+ (\\d+\\. )?${heading}$`, "m"));
+    expect(designer()).not.toMatch(/\b(gate|ack|seal|resume)\b/);
   });
 
   test("t2t8e_init_installs_kodel_design_for_every_agent", async () => {
@@ -565,18 +605,33 @@ describe("kodel init hooks", () => {
     }
   });
 
-  test("the_hook_command_is_the_server_command_with_hook_for_mcp", async () => {
-    await init(
-      {},
-      "--agent",
-      "claude-code",
-      "--server-command",
-      "bun packages/cli/src/main.ts mcp",
-    );
+  test("the_server_command_has_no_subcommand_init_adds_mcp_to_the_server_and_hook_to_the_hooks", async () => {
+    await init({}, "--agent", "claude-code", "--server-command", "bun packages/cli/src/main.ts");
+    expect((await json(".mcp.json")).mcpServers.kodel).toEqual({
+      command: "bun",
+      args: ["packages/cli/src/main.ts", "mcp"],
+    });
     const hooks = await claudeHooks();
     expect(commandsOf(hooks.SessionStart ?? [])).toEqual([
       "bun packages/cli/src/main.ts hook claude-code",
     ]);
+  });
+
+  test("a_server_command_that_ends_in_mcp_or_hook_is_refused_and_nothing_is_written", async () => {
+    for (const command of ["kodel mcp", "bun packages/cli/src/main.ts hook"]) {
+      const refused = await init({}, "--agent", "claude-code", "--server-command", command);
+      expect(refused.code).not.toBe(0);
+      expect(refused.err).toContain("without");
+      await expect(read(".mcp.json")).rejects.toThrow();
+    }
+  });
+
+  test("the_default_server_command_is_kodel_and_gets_mcp", async () => {
+    await init({}, "--agent", "claude-code");
+    expect((await json(".mcp.json")).mcpServers.kodel).toEqual({
+      command: "kodel",
+      args: ["mcp"],
+    });
   });
 
   test("codex_is_told_to_trust_the_hook_every_time_also_on_a_rerun_and_a_dry_run", async () => {
