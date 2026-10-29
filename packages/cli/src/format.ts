@@ -142,6 +142,15 @@ export function agentLogLine(report: RunReport["agent_log"]): string {
   return `agent log: ${parts.join(", ")} (unverified)`;
 }
 
+/** What a change of the pipeline did to the run, one entry per step it stood at: `restart impl, recheck b`. */
+export function formatEffects(
+  effects: { kind: string; node: string }[],
+  plain: (text: string) => string,
+): string {
+  if (effects.length === 0) return "nothing";
+  return effects.map((e) => `${plain(e.kind)} ${plain(e.node)}`).join(", ");
+}
+
 export function formatDuration(seconds: number): string {
   const whole = Math.round(seconds);
   if (whole < 60) return `${whole} s`;
@@ -214,7 +223,7 @@ export function formatReport(
       );
       const how = change.source === "proposal" ? "the agent's proposal" : "a change in the file";
       lines.push(
-        `  ${when}  ${how}  ${steps.join(", ") || "no step differs"}  then: ${plain(change.effect)}` +
+        `  ${when}  ${how}  ${steps.join(", ") || "no step differs"}  then: ${formatEffects(change.effects, plain)}` +
           (change.by === "agent" ? "  (accepted by the agent on the person's instruction)" : "") +
           (change.reason ? `  (${plain(change.reason)})` : ""),
       );

@@ -8,7 +8,14 @@ import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } fro
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { decide, type JournalRecord, parsePipeline, RECORD_VERSION, type RunState } from "../src";
+import {
+  decide,
+  type JournalRecord,
+  parsePipeline,
+  RECORD_VERSION,
+  type RunState,
+  summarizeRun,
+} from "../src";
 
 const FORMATS = resolve(
   fileURLToPath(import.meta.url),
@@ -97,14 +104,42 @@ test("t40_v1_fixtures_carry_format_1_and_the_engine_writes_format_2", () => {
 test("t40_formats_loop_refuses_v1_and_opens_later_formats", () => {
   const { refused, opened } = checkFormats(FORMATS);
   expect(refused).toBe(runIds(FORMATS, "v1").length);
-  // no run of the current format is kept yet; the loop opens them once `v2/` holds real runs
-  expect(opened).toBe(formatDirs(FORMATS).includes("v2") ? runIds(FORMATS, "v2").length : 0);
+  expect(opened).toBe(runIds(FORMATS, "v2").length);
+  expect(opened).toBeGreaterThan(0);
+});
+
+test("t40_v2_fixtures_open", () => {
+  // real runs of the `dev` pipeline written by this engine: the state and every record carry
+  // format 2, the summary reads them, and the accepted change carries its `effects` list
+  const ids = runIds(FORMATS, "v2");
+  expect(ids).toEqual(["r_0mvtewczh_4i2w", "r_0mvtewgdn_zfhl"]);
+  const effects: unknown[] = [];
+  for (const id of ids) {
+    const { state, journal } = load(FORMATS, "v2", id);
+    expect(state.v).toBe(RECORD_VERSION);
+    expect(state.status).toBe("completed");
+    expect(state.pauses).toEqual([]);
+    expect(state).not.toHaveProperty("pause");
+    expect(journal.every((r) => r.v === RECORD_VERSION)).toBe(true);
+    const report = summarizeRun(state, journal);
+    expect(report.status).toBe("completed");
+    expect(report.feedback).toBe(1);
+    expect(report.pipeline_changes).toHaveLength(1);
+    effects.push(report.pipeline_changes[0]?.effects);
+    expect(journal.filter((r) => r.event === "gate_decided").length).toBeGreaterThanOrEqual(2);
+    const accepted = journal.find((r) => r.event === "pipeline_accepted");
+    expect(accepted).toBeDefined();
+    expect(accepted).not.toHaveProperty("effect");
+    expect(Array.isArray(accepted?.effects)).toBe(true);
+  }
+  expect(effects).toEqual([[{ kind: "restart", node: "plan-critique" }], []]);
 });
 
 test("t40_formats_loop_passes_with_empty_v2_dir", () => {
   const tmp = mkdtempSync(join(tmpdir(), "kodel-formats-"));
   try {
     cpSync(FORMATS, tmp, { recursive: true });
+    rmSync(join(tmp, "v2"), { recursive: true, force: true });
     mkdirSync(join(tmp, "v2"), { recursive: true });
     expect(formatDirs(tmp)).toContain("v2");
     expect(runIds(tmp, "v2")).toEqual([]);

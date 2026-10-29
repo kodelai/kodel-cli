@@ -1,0 +1,37 @@
+# kodel-patch v1
+diff --git a/docs/plans/document_the_kodel_wait_command_in_the_readme.md b/docs/plans/document_the_kodel_wait_command_in_the_readme.md
+--- a/docs/plans/document_the_kodel_wait_command_in_the_readme.md
++++ b/docs/plans/document_the_kodel_wait_command_in_the_readme.md
+@@ -2,7 +2,7 @@
+ 
+ ## TL;DR
+ 
+-The README already documents kodel wait in the section "Humans".
++The README documents kodel wait and, since the last release, its --timeout flag too.
+ 
+ evidence: line 1 of the plan text.
+ evidence: line 2 of the plan text.
+@@ -14,3 +14,23 @@ evidence: line 7 of the plan text.
+ evidence: line 8 of the plan text.
+ evidence: line 9 of the plan text.
+ evidence: line 10 of the plan text.
++evidence: line 11 of the plan text.
++evidence: line 12 of the plan text.
++evidence: line 13 of the plan text.
++evidence: line 14 of the plan text.
++evidence: line 15 of the plan text.
++evidence: line 16 of the plan text.
++evidence: line 17 of the plan text.
++evidence: line 18 of the plan text.
++evidence: line 19 of the plan text.
++evidence: line 20 of the plan text.
++evidence: line 21 of the plan text.
++evidence: line 22 of the plan text.
++evidence: line 23 of the plan text.
++evidence: line 24 of the plan text.
++evidence: line 25 of the plan text.
++evidence: line 26 of the plan text.
++evidence: line 27 of the plan text.
++evidence: line 28 of the plan text.
++evidence: line 29 of the plan text.
++evidence: line 30 of the plan text.

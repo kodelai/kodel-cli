@@ -35,7 +35,8 @@ export interface PipelineChangeReport {
   to: string;
   source: string;
   nodes: { slug: string; changes: string[] }[];
-  effect: string;
+  /** What the run did about it, per step it stood at; empty when nothing was redone. */
+  effects: { kind: string; node: string }[];
   reason?: string;
   /** Set when the agent accepted the change on the person's instruction. */
   by?: "agent";
@@ -152,6 +153,17 @@ export interface RunReport {
 
 const seconds = (from: number, to: number) => Math.max(0, Math.round((to - from) / 100) / 10);
 
+/** The `effects` of a `pipeline_accepted` record, as written; a record is history and is not trusted to be well-formed. */
+export function effectsOf(raw: unknown): { kind: string; node: string }[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item) => {
+    const effect = item as { kind?: unknown; node?: unknown } | null;
+    return typeof effect?.kind === "string" && typeof effect.node === "string"
+      ? [{ kind: effect.kind, node: effect.node }]
+      : [];
+  });
+}
+
 export function summarizeRun(state: RunState, journal: JournalRecord[]): RunReport {
   const nodes = new Map<string, NodeReport>();
   const entered = new Map<string, number>();
@@ -233,7 +245,7 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
           to: String(record.to),
           source: String(record.source),
           nodes: (record.nodes as PipelineChangeReport["nodes"] | undefined) ?? [],
-          effect: String((record.effect as { kind?: string } | undefined)?.kind ?? "none"),
+          effects: effectsOf(record.effects),
           ...(typeof record.reason === "string" ? { reason: record.reason } : {}),
           ...(record.decided_by === "agent" ? { by: "agent" as const } : {}),
         });

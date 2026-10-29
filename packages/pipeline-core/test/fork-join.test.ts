@@ -21,6 +21,8 @@ import {
   RESTART_FAILED,
   type RunEvent,
   type RunState,
+  standingOf,
+  summarizeRun,
   validatePipeline,
 } from "../src";
 
@@ -139,6 +141,7 @@ function host(
   options: EngineOptions = {},
 ) {
   let state: RunState | undefined;
+  let current = spec;
   let now = 0;
   const journal: JournalRecord[] = [];
   const effects: Effect[] = [];
@@ -149,7 +152,7 @@ function host(
     let firstResult: ReturnType<typeof decide> | undefined;
     while (queue.length > 0) {
       const event = queue.shift() as RunEvent;
-      const result = decide(spec, state, event, now, options);
+      const result = decide(current, state, event, now, options);
       firstResult ??= result;
       if (!result.ok) {
         if (event === first) return result;
@@ -189,6 +192,10 @@ function host(
     },
     advance: (ms: number) => {
       now += ms;
+    },
+    /** The pipeline the run is on from now on (a person accepted another version). */
+    use: (next: PipelineSpec) => {
+      current = next;
     },
     events: () => journal.map((r) => r.event),
     get state() {
@@ -2177,5 +2184,432 @@ describe("t40 random schedules", () => {
       { v: 2, seq: 99, ts: 0, event: "join_reached", fork: "f1", join: "merge", failed: ["b"] },
     ];
     expect(() => forkInvariants(fork, h.state, journal, 0)).toThrow();
+  });
+});
+
+// ── repair in a fork (X) ────────────────────────────────────────────────────
+
+describe("t40 repair in a fork", () => {
+  const accepted = (before: PipelineSpec, standing?: string): RunEvent => ({
+    type: "pipeline_accepted",
+    from: "h",
+    to: "h2",
+    source: "file",
+    before,
+    ...(standing === undefined ? {} : { standing }),
+  });
+  const failed = (effect: Effect, reason: string): RunEvent | undefined =>
+    effect.type === "run_command"
+      ? { type: "work_finished", node: effect.node, attempt: effect.attempt, passed: false, reason }
+      : effect.type === "run_check"
+        ? {
+            type: "check_finished",
+            node: effect.node,
+            attempt: effect.attempt,
+            index: effect.index,
+            passed: false,
+            reason,
+          }
+        : answer(effect);
+  /** `node` fails (its command or its checks) while the run is still on the first version of the pipeline. */
+  const failsUntilRepaired =
+    (node: string) =>
+    (effect: Effect, state: RunState): RunEvent | undefined =>
+      "node" in effect && effect.node === node && state.specHash === "h"
+        ? failed(effect, `${node} is red`)
+        : answer(effect);
+  const branchOf = (record: JournalRecord | undefined) => [record?.fork, record?.branch];
+
+  /** `a` may be entered once; a-test fails, so branch a is held back at a `total` pause while b is open. */
+  function totalA(reply: (effect: Effect, state: RunState) => RunEvent | undefined) {
+    const text = FORK.replace(
+      "  - slug: a\n",
+      "  - slug: a\n    max_attempts: 1\n    max_consecutive_failures: 1\n",
+    );
+    const before = parsePipeline(text);
+    const h = host(before, reply);
+    h.hold("b", "merge");
+    h.send(START);
+    h.send(complete("plan", 1));
+    expect(h.state.pauses).toEqual([
+      expect.objectContaining({
+        reason: "total",
+        node: "a",
+        blocked: expect.objectContaining({ from: "a-test", to: "a" }),
+        fork: { id: "f1", branch: "a" },
+      }),
+    ]);
+    expect(h.state.status).toBe("running");
+    return { text, before, h };
+  }
+
+  test("t40_effects_list_recheck_for_paused_branch", () => {
+    const text = FORK.replace("  - slug: a\n", "  - slug: a\n    max_consecutive_failures: 1\n");
+    const before = parsePipeline(text);
+    const after = parsePipeline(text.replace("command: a-check", "command: a-check-fixed"));
+    const h = host(before, failsUntilRepaired("a"));
+    h.hold("b", "merge");
+    h.send(START);
+    h.send(complete("plan", 1));
+    h.send(complete("a", 1));
+    expect(h.state.pauses).toEqual([
+      expect.objectContaining({
+        reason: "consecutive",
+        node: "a",
+        fork: { id: "f1", branch: "a" },
+      }),
+    ]);
+    expect(h.state.nodes.a?.lastFailure?.source).toBe("check:command");
+    expect(h.state.status).toBe("running");
+
+    const diff = diffPipelines(before, after, h.state);
+    expect(diff.refused).toBeUndefined();
+    expect(diff.effects).toEqual([{ kind: "recheck", node: "a" }]);
+    h.use(after);
+    const result = must(h.send(accepted(before)));
+    expect(result.journal.find((r) => r.event === "pipeline_accepted")).toMatchObject({
+      effects: [{ kind: "recheck", node: "a" }],
+    });
+    // the check ran again on the work that is there, in its own branch, and the branch went on
+    expect(h.events().filter((e) => e === "checks_rerun")).toHaveLength(1);
+    expect(h.state.nodes.a?.attempt).toBe(1);
+    expect(h.state.pauses).toEqual([]);
+    expect(h.state.forks?.f1?.arrived.a).toMatchObject({ node: "a-test", label: "passed" });
+    expect(h.state.forks?.f1?.arrived.b).toBeUndefined();
+    expect(h.state.active.map((v) => v.node)).toEqual(["b"]);
+  });
+
+  test("t40_effects_reroute_inside_fork", () => {
+    const { text, before, h } = totalA(failsUntilRepaired("a-test"));
+    const after = parsePipeline(text.replace("max_attempts: 1", "max_attempts: 3"));
+    const diff = diffPipelines(before, after, h.state);
+    expect(diff.refused).toBeUndefined();
+    expect(diff.nodes).toEqual([{ slug: "a", changes: ["routing"] }]);
+    expect(diff.effects).toEqual([{ kind: "reroute", node: "a-test" }]);
+    h.use(after);
+    must(h.send(accepted(before)));
+    // the way on was worked out again: `a` got its second attempt, inside its branch
+    const entered = h.journal.filter((r) => r.event === "node_entered" && r.node === "a");
+    expect(entered.map((r) => r.attempt)).toEqual([1, 2]);
+    expect(branchOf(entered[1])).toEqual(["f1", "a"]);
+    expect(h.state.pauses).toEqual([]);
+    expect(h.state.forks?.f1?.arrived.a).toMatchObject({ node: "a-test", label: "passed" });
+    expect(h.state.active.map((v) => v.node)).toEqual(["b"]);
+  });
+
+  test("t40_repair_loop_works_in_open_fork", () => {
+    // a-test fails three times in a row (the loop a-test -> a -> a-test), so branch a is held back
+    const before = fork;
+    const after = parsePipeline(FORK.replace("command: a-test", "command: a-test-fixed"));
+    const h = host(before, failsUntilRepaired("a-test"));
+    h.hold("b", "merge");
+    h.send(START);
+    h.send(complete("plan", 1));
+    expect(h.state.pauses).toEqual([
+      expect.objectContaining({
+        reason: "consecutive",
+        node: "a-test",
+        blocked: expect.objectContaining({ from: "a-test", to: "a" }),
+      }),
+    ]);
+    expect(h.state.nodes.a?.attempt).toBe(3);
+
+    const diff = diffPipelines(before, after, h.state);
+    expect(diff.effects).toEqual([{ kind: "reroute", node: "a-test" }]);
+    h.use(after);
+    must(h.send(accepted(before)));
+    // the repaired loop runs: a once more, a-test with the new command, and the branch arrives
+    expect(h.state.nodes.a?.attempt).toBe(4);
+    const commands = h.effects.filter((e) => e.type === "run_command" && e.node === "a-test");
+    expect(commands.at(-1)).toMatchObject({ command: "a-test-fixed", attempt: 4 });
+    expect(h.state.forks?.f1?.arrived.a).toMatchObject({ node: "a-test", label: "passed" });
+    expect(h.state.pauses).toEqual([]);
+    // and the other branch still joins as usual
+    h.release("b");
+    expect(h.events()).toContain("join_reached");
+    expect(h.state.active.map((v) => v.node)).toEqual(["merge"]);
+  });
+
+  test("t40_rejected_repair_leaves_run_unchanged", () => {
+    const h = openFork();
+    const without: PipelineSpec = {
+      ...fork,
+      nodes: fork.nodes.filter((n) => n.slug !== "b"),
+      edges: fork.edges.filter((e) => e.from !== "b" && e.to !== "b"),
+    };
+    const before = JSON.stringify(h.state);
+    const result = decide(without, h.state, accepted(fork), 0);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("PIPELINE_CHANGE_REFUSED");
+      expect(result.error.message).toContain('node "b" is where the run stands');
+    }
+    expect(JSON.stringify(h.state)).toBe(before);
+    expect(h.state.specHash).toBe("h");
+  });
+
+  test("t40_pipeline_change_multi_visit_diff", () => {
+    const h = openFork();
+    const after = parsePipeline(
+      FORK.replace("    prompt: a\n", "    prompt: a!\n").replace(
+        "{ slug: b, kind: agent, prompt: b }",
+        "{ slug: b, kind: agent, prompt: b! }",
+      ),
+    );
+    const diff = diffPipelines(fork, after, h.state);
+    expect(diff.refused).toBeUndefined();
+    expect(diff.effects).toEqual([
+      { kind: "restart", node: "a" },
+      { kind: "restart", node: "b" },
+    ]);
+    h.use(after);
+    const result = must(h.send(accepted(fork)));
+    expect(result.journal.map((r) => r.event)).toEqual([
+      "pipeline_accepted",
+      "node_superseded",
+      "node_entered",
+      "node_superseded",
+      "node_entered",
+    ]);
+    expect(h.state.active.map((v) => [v.node, v.attempt, v.fork])).toEqual([
+      ["a", 2, { id: "f1", branch: "a" }],
+      ["b", 2, { id: "f1", branch: "b" }],
+    ]);
+    for (const slug of ["a", "b"]) {
+      expect(h.state.nodes[slug]).toMatchObject({ attempt: 2, extraAttempts: 1 });
+      const entered = result.journal.find((r) => r.event === "node_entered" && r.node === slug);
+      expect(branchOf(entered)).toEqual(["f1", slug]);
+    }
+  });
+
+  test("t40_pipeline_change_one_paused_one_running", () => {
+    const { text, before, h } = totalA(failsUntilRepaired("a-test"));
+    const after = parsePipeline(
+      text
+        .replace("max_attempts: 1", "max_attempts: 3")
+        .replace("{ slug: b, kind: agent, prompt: b }", "{ slug: b, kind: agent, prompt: b! }"),
+    );
+    const diff = diffPipelines(before, after, h.state);
+    expect(diff.refused).toBeUndefined();
+    // the standing visits first, then the pauses
+    expect(diff.effects).toEqual([
+      { kind: "restart", node: "b" },
+      { kind: "reroute", node: "a-test" },
+    ]);
+    h.use(after);
+    const result = must(h.send(accepted(before)));
+    expect(result.journal.find((r) => r.event === "pipeline_accepted")).toMatchObject({
+      effects: diff.effects,
+    });
+    expect(h.state.pauses).toEqual([]);
+    expect(h.state.active.map((v) => [v.node, v.attempt])).toEqual([["b", 2]]);
+    expect(h.state.forks?.f1?.arrived.a).toMatchObject({ node: "a-test", label: "passed" });
+    expect(h.state.status).toBe("running");
+  });
+
+  test("t40_pipeline_change_join_check_allowed_in_open_fork", () => {
+    const h = openFork();
+    const fixedCheck = parsePipeline(
+      FORK.replace("command: merge-check", "command: merge-check-2"),
+    );
+    // the join has not started: its new check is simply the one that runs later
+    const early = diffPipelines(fork, fixedCheck, h.state);
+    expect(early.refused).toBeUndefined();
+    expect(early.nodes).toEqual([{ slug: "merge", changes: ["checks"] }]);
+    expect(early.effects).toEqual([]);
+    // the join is being worked: a change of its checks waits for its completion, of its prompt restarts it
+    h.release("a");
+    h.release("b");
+    expect(h.state.active.map((v) => v.node)).toEqual(["merge"]);
+    const late = diffPipelines(fork, fixedCheck, h.state);
+    expect(late.refused).toBeUndefined();
+    expect(late.effects).toEqual([]);
+    const prompt = parsePipeline(FORK.replace("    prompt: merge\n", "    prompt: merge!\n"));
+    expect(diffPipelines(fork, prompt, h.state)).toMatchObject({
+      effects: [{ kind: "restart", node: "merge" }],
+    });
+    h.use(prompt);
+    must(h.send(accepted(fork)));
+    expect(h.state.active.map((v) => [v.node, v.attempt])).toEqual([["merge", 2]]);
+    expect(h.state.forks?.f1?.joined).toBe(1);
+  });
+
+  test("t40_pipeline_change_removing_standing_node_refused", () => {
+    const h = openFork();
+    const without: PipelineSpec = {
+      ...fork,
+      nodes: fork.nodes.filter((n) => n.slug !== "a"),
+      edges: fork.edges
+        .filter((e) => e.from !== "a" && e.to !== "a")
+        .concat([{ from: "plan", to: "a-test", when: "passed" }]),
+    };
+    const diff = diffPipelines(fork, without, h.state);
+    expect(diff.refused).toContain('node "a" is where the run stands, so it cannot be removed');
+    expect(diff.effects).toEqual([]);
+  });
+
+  test("t40_pipeline_change_blocked_node_refused", () => {
+    const { before, h } = totalA(fails("a-test"));
+    // `a` is the node the paused branch is about to enter
+    const withoutA: PipelineSpec = {
+      ...before,
+      nodes: before.nodes.filter((n) => n.slug !== "a"),
+      edges: before.edges
+        .filter((e) => e.from !== "a" && e.to !== "a")
+        .concat([{ from: "plan", to: "a-test", when: "passed" }]),
+    };
+    expect(diffPipelines(before, withoutA, h.state).refused).toContain(
+      'node "a" is the one a paused step is about to enter, so it cannot be removed',
+    );
+    // a-test is the node the branch is held back at
+    const withoutTest: PipelineSpec = {
+      ...before,
+      nodes: before.nodes.filter((n) => n.slug !== "a-test"),
+      edges: before.edges
+        .filter((e) => e.from !== "a-test" && e.to !== "a-test")
+        .concat([{ from: "a", to: "merge", when: "passed" }]),
+    };
+    expect(diffPipelines(before, withoutTest, h.state).refused).toContain(
+      'node "a-test" is where the run is held back, so it cannot be removed',
+    );
+  });
+
+  test("t40_pipeline_change_fork_edges_or_join_field_refused", () => {
+    const h = openFork();
+    const third = parsePipeline(
+      FORK.replace(
+        "  - { slug: ship,",
+        "  - { slug: c, kind: command, command: c }\n  - { slug: ship,",
+      )
+        .replace(
+          "  - { from: plan, to: b }\n",
+          "  - { from: plan, to: b }\n  - { from: plan, to: c }\n",
+        )
+        .replace(
+          "  - { from: merge, to: ship }\n",
+          "  - { from: c, to: merge }\n  - { from: c, to: merge, when: failed }\n  - { from: merge, to: ship }\n",
+        ),
+    );
+    expect(diffPipelines(fork, third, h.state).refused).toContain(
+      'the fork at "plan" is open (its branches have not all met at "merge"), so its edges cannot change now',
+    );
+    const noJoin: PipelineSpec = {
+      ...fork,
+      nodes: fork.nodes.map((n) => {
+        if (n.slug !== "merge") return n;
+        const { join: _join, ...rest } = n;
+        return rest;
+      }),
+    };
+    expect(diffPipelines(fork, noJoin, h.state).refused).toContain(
+      'node "merge" is the join of an open fork, so its `join` cannot change now',
+    );
+    // once the branches have met and the join has passed, the fork is history and may change
+    h.hold("ship");
+    h.release("a");
+    h.release("b");
+    h.release("merge");
+    expect(h.state.active.map((v) => v.node)).toEqual(["ship"]);
+    const closed = diffPipelines(fork, third, h.state);
+    expect(closed.refused).toBeUndefined();
+    expect(closed.effects).toEqual([]);
+  });
+
+  test("t40_accept_refused_when_standing_visits_changed", () => {
+    const h = openFork();
+    const shown = standingOf(h.state);
+    expect(shown).toBe(standingOf(structuredClone(h.state)));
+    const after = parsePipeline(FORK.replace("    prompt: merge\n", "    prompt: merge!\n"));
+    // the run moved on while the person read: branch a arrived
+    h.release("a");
+    expect(standingOf(h.state)).not.toBe(shown);
+    h.use(after);
+    const stale = h.send(accepted(fork, shown));
+    expect(stale.ok).toBe(false);
+    if (!stale.ok) {
+      expect(stale.error.code).toBe("PIPELINE_CHANGE_REFUSED");
+      expect(stale.error.message).toContain("the run moved on since the change was shown");
+      expect(stale.error.message).toContain("look at it again");
+    }
+    expect(h.state.specHash).toBe("h");
+    // looked at again, the same change is taken
+    must(h.send(accepted(fork, standingOf(h.state))));
+    expect(h.state.specHash).toBe("h2");
+    // a pause is part of where the run stands
+    const { h: paused } = totalA((effect) =>
+      effect.type === "run_command" && effect.node === "a-test" && effect.attempt === 1
+        ? failed(effect, "red once")
+        : answer(effect),
+    );
+    const withPause = standingOf(paused.state);
+    expect(withPause).toContain("pause:a:total:a-test>a");
+    paused.send({ type: "resume", node: "a" });
+    expect(standingOf(paused.state)).not.toBe(withPause);
+  });
+
+  test("t40_failed_arrived_branch_reachable_for_repair", () => {
+    // b-test fails and arrives failed; the join is being worked on
+    const before = fork;
+    const after = parsePipeline(FORK.replace("command: b-test", "command: b-test-fixed"));
+    const h = host(before, failsUntilRepaired("b-test"));
+    h.hold("merge");
+    h.send(START);
+    h.send(complete("plan", 1));
+    expect(h.state.active.map((v) => v.node)).toEqual(["merge"]);
+    expect(h.state.forks?.f1?.arrived.b).toMatchObject({ node: "b-test", label: "failed" });
+    const diff = diffPipelines(before, after, h.state);
+    expect(diff.refused).toBeUndefined();
+    expect(diff.nodes).toEqual([{ slug: "b-test", changes: ["work"] }]);
+    expect(diff.effects).toEqual([]);
+    h.use(after);
+    must(h.send(accepted(before)));
+    // restart_failed runs the failed branch on the repaired definition
+    must(h.send(complete("merge", 1, RESTART_FAILED)));
+    const commands = h.effects.filter((e) => e.type === "run_command" && e.node === "b-test");
+    expect(commands.at(-1)).toMatchObject({ command: "b-test-fixed", attempt: 2 });
+    expect(h.state.forks?.f1?.arrived.b).toMatchObject({ node: "b-test", label: "passed" });
+  });
+
+  test("t40_report_format_history_read_effects_list", () => {
+    const { text, before, h } = totalA(failsUntilRepaired("a-test"));
+    const after = parsePipeline(
+      text
+        .replace("max_attempts: 1", "max_attempts: 3")
+        .replace("{ slug: b, kind: agent, prompt: b }", "{ slug: b, kind: agent, prompt: b! }"),
+    );
+    h.use(after);
+    must(
+      h.send({
+        type: "pipeline_accepted",
+        from: "h",
+        to: "h2",
+        source: "proposal",
+        before,
+        reason: "both branches",
+      }),
+    );
+    const report = summarizeRun(h.state, h.journal);
+    expect(report.pipeline_changes).toEqual([
+      {
+        at: 0,
+        from: "h",
+        to: "h2",
+        source: "proposal",
+        nodes: [
+          { slug: "a", changes: ["routing"] },
+          { slug: "b", changes: ["work"] },
+        ],
+        effects: [
+          { kind: "restart", node: "b" },
+          { kind: "reroute", node: "a-test" },
+        ],
+        reason: "both branches",
+      },
+    ]);
+    // a record with no or a malformed list reads as nothing redone, never as a crash
+    const odd = h.journal.map((r) =>
+      r.event === "pipeline_accepted" ? { ...r, effects: [{ kind: "restart" }, 3, null] } : r,
+    );
+    expect(summarizeRun(h.state, odd).pipeline_changes[0]?.effects).toEqual([]);
   });
 });

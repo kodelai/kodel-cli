@@ -243,6 +243,41 @@ describe("pipeline changes", () => {
     expect((await journalOf(id)).some((r) => r.event === "pipeline_accepted")).toBe(false);
   });
 
+  test("t40_accept_refused_when_standing_visits_changed", async () => {
+    const id = await runAtGate();
+    await editPipeline();
+    let err = "";
+    // While the person reads, the gate is decided elsewhere: the run is back at `write`, and the
+    // change (the same text) was shown for another standing of the run.
+    const result = await runCli(["pipeline", "changes", "apply", id], {
+      cwd: dir,
+      out: () => {},
+      err: (t) => {
+        err += t;
+      },
+      interactive: true,
+      environment: {},
+      confirm: async () => {
+        const other = await hostOf().open(id);
+        const decided = await other?.decideHuman("approve", "rejected", "not yet");
+        expect(decided?.ok).toBe(true);
+        return true;
+      },
+      select: async () => [],
+    });
+    expect(result).toBe(1);
+    expect(err).toContain("PIPELINE_CHANGE_REFUSED");
+    expect(err).toContain("the run moved on since the change was shown");
+    expect((await journalOf(id)).some((r) => r.event === "pipeline_accepted")).toBe(false);
+    // looked at again, the same change is taken for the run as it stands now
+    const again = await cli("pipeline", "changes", "apply", id);
+    expect(again.code).toBe(0);
+    expect((await journalOf(id)).some((r) => r.event === "pipeline_accepted")).toBe(true);
+    const history = await cli("pipeline", "changes", "history", id);
+    expect(history.out).toContain("changed: build (work)");
+    expect(history.out).not.toContain("then:");
+  });
+
   test("nothing to accept, or a change that cannot be accepted, is said", async () => {
     const id = await runAtGate();
     const none = await cli("pipeline", "changes", "apply", id);
@@ -1409,6 +1444,45 @@ describe("a store made from the golden runs of the stored formats", () => {
     expectRefusedClearly(await cli("pipeline", "changes", "show", id));
     expectRefusedClearly(await cli("pipeline", "changes", "history", id));
     expectRefusedClearly(await cli("pipeline", "changes", "apply", id));
+  });
+
+  test("t40_v2_fixtures_open", async () => {
+    // the real runs of this engine beside the refused ones: `status`, `report` and the history of
+    // the pipeline read them, and the accepted change is shown with what it redid
+    const V2 = join(V1, "..", "v2");
+    const ids = ["r_0mvtewczh_4i2w", "r_0mvtewgdn_zfhl"];
+    for (const id of ids) {
+      await cp(join(V2, id), join(dir, ".kodel", "runs", id), { recursive: true });
+    }
+    const list = await cli("status");
+    expect(list.code).toBe(0);
+    for (const id of ids) expect(list.out).toContain(id);
+    expect(list.out.match(/completed/g)?.length).toBe(2);
+    expect(list.out.match(/format 1/g)?.length).toBe(2);
+    for (const id of ids) {
+      expect((await cli("status", id)).code).toBe(0);
+      const report = await cli("report", id);
+      expect(report.code).toBe(0);
+      expect(report.out).toContain(`run ${id}  completed`);
+      expect(report.out).toContain("the pipeline was changed while the run went:");
+      const parsed = JSON.parse((await cli("report", id, "--json")).out) as {
+        pipeline_changes: { effects: unknown[] }[];
+      };
+      expect(parsed.pipeline_changes).toHaveLength(1);
+      expect(Array.isArray(parsed.pipeline_changes[0]?.effects)).toBe(true);
+    }
+    const [proposal, file] = ids as [string, string];
+    expect((await cli("report", proposal)).out).toContain(
+      "the agent's proposal  plan-critique (work)  then: restart plan-critique",
+    );
+    const history = await cli("pipeline", "changes", "history", proposal);
+    expect(history.code).toBe(0);
+    expect(history.out).toContain("accepted (the agent's proposal)  <- now");
+    expect(history.out).toContain("changed: plan-critique (work)  then: restart plan-critique");
+    expect((await cli("report", file)).out).toContain(
+      "a change in the file  review (work)  then: nothing",
+    );
+    expect((await cli("pipeline", "changes", "history", file)).out).not.toContain("then:");
   });
 
   test("t40_report_without_run_picks_latest_readable", async () => {

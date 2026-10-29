@@ -33,6 +33,16 @@ const FORMATS = resolve(
  */
 const V1_RUNS = ["r_0mviewgvl_i1ig", "r_0mvimyn54_tc9o"];
 
+/**
+ * The two format-2 runs of the `dev` pipeline, written by this engine: `r_0mvtewczh_4i2w` (the
+ * agent's proposal accepted mid-run and the critique step restarted on it, a note from the agent,
+ * three gate decisions, the whole path to `publish`) and `r_0mvtewgdn_zfhl` (a change made in the
+ * pipeline file accepted with nothing redone, a note, `nothing_to_change` with its gate rejected once).
+ */
+const V2_RUNS = ["r_0mvtewczh_4i2w", "r_0mvtewgdn_zfhl"];
+/** The format-2 run that stands in for "a finished run of this engine" in the tests of how a run that is read behaves. */
+const V2_RUN = V2_RUNS[1] as string;
+
 const sha256 = (data: Uint8Array) => createHash("sha256").update(data).digest("hex");
 
 /** Every file under `dir`, as `a/b` paths (the same on every system) with the hash of its bytes. */
@@ -116,17 +126,6 @@ const readState = async (id: string) =>
 const writeState = (id: string, state: Record<string, unknown>) =>
   writeFile(statePath(id), `${JSON.stringify(state, null, 2)}\n`);
 
-/**
- * A run of the current run-state format made from a format-1 fixture, for the tests of how a run
- * that *is* read behaves (an unknown field, a newer format, a state that is not JSON). It is not a
- * reader of format 1: the two fields that differ are set by hand, and the result stands in for a
- * `v2/` fixture until real runs of this engine are kept there.
- */
-async function asCurrentFormat(id: string): Promise<void> {
-  const state = await readState(id);
-  await writeState(id, { ...state, v: RECORD_VERSION, pauses: [] });
-}
-
 const refusal = (promise: Promise<unknown>) =>
   promise.then(
     () => undefined,
@@ -150,8 +149,9 @@ function expectRefusedClearly(
 
 describe("the golden runs of the stored formats", () => {
   test("formats_fixtures_have_a_known_set_of_formats_and_runs", async () => {
-    expect(await formatDirs()).toContain("v1");
+    expect(await formatDirs()).toEqual(["v1", "v2"]);
     expect(await runIds("v1")).toEqual([...V1_RUNS].sort());
+    expect(await runIds("v2")).toEqual([...V2_RUNS].sort());
   });
 
   test("formats_a_fixture_file_that_was_edited_fails_the_hash_list", async () => {
@@ -240,10 +240,66 @@ describe("every stored format against the current engine", () => {
   });
 
   test("t40_formats_loop_passes_with_empty_v2_dir", async () => {
+    // the loop is not fooled by a format directory with no run in it (the state before the first
+    // run of a new format is kept there)
     const copy = join(tmp, "formats");
     await cp(FORMATS, copy, { recursive: true });
+    await rm(join(copy, "v2"), { recursive: true, force: true });
     await mkdir(join(copy, "v2"), { recursive: true });
     expect(await checkFormats(copy)).toEqual({ refused: V1_RUNS.length, opened: 0 });
+  });
+
+  test("t40_v2_fixtures_open", async () => {
+    await copyRuns("v2");
+    const before = await hashTree(runsDir());
+    const host = hostFor();
+    const store = storeFor();
+    for (const id of V2_RUNS) {
+      const run = await host.open(id);
+      expect(run).toBeDefined();
+      if (!run) continue;
+      const state = await run.state();
+      expect(state.v).toBe(RECORD_VERSION);
+      expect(state.status).toBe("completed");
+      expect(state.pauses).toEqual([]);
+      expect(state.active).toEqual([]);
+      const report = await run.report();
+      expect(report.runId).toBe(id);
+      expect(report.status).toBe("completed");
+      expect(report.pipeline_changes).toHaveLength(1);
+      expect(report.feedback).toBe(1);
+      const journal = await store.readJournal(id);
+      expect(journal.every((r) => r.v === RECORD_VERSION)).toBe(true);
+      expect(journal.filter((r) => r.event === "gate_decided").length).toBeGreaterThanOrEqual(2);
+      expect(journal.filter((r) => r.event === "feedback_reported")).toHaveLength(1);
+      expect(Array.isArray(journal.find((r) => r.event === "pipeline_accepted")?.effects)).toBe(
+        true,
+      );
+    }
+    // the proposal accepted while the critique step was being worked restarted that step
+    const proposal = (await host.open(V2_RUNS[0] as string)) as NonNullable<
+      Awaited<ReturnType<typeof host.open>>
+    >;
+    const { versions } = await proposal.history();
+    expect(versions.map((v) => [v.how, v.effects])).toEqual([
+      ["started", []],
+      ["proposal", [{ kind: "restart", node: "plan-critique" }]],
+    ]);
+    expect((await proposal.report()).pipeline_changes[0]).toMatchObject({
+      source: "proposal",
+      nodes: [{ slug: "plan-critique", changes: ["work"] }],
+      effects: [{ kind: "restart", node: "plan-critique" }],
+    });
+    // the change made in the file touched a step the run had not reached: nothing was redone
+    const file = (await host.open(V2_RUN)) as NonNullable<Awaited<ReturnType<typeof host.open>>>;
+    expect((await file.report()).pipeline_changes[0]).toMatchObject({
+      source: "file",
+      nodes: [{ slug: "review", changes: ["work"] }],
+      effects: [],
+    });
+    expect((await store.readJournal(V2_RUN)).map((r) => r.event)).toContain("gate_decided");
+    // reading changed nothing on disk
+    expect(await hashTree(runsDir())).toEqual(before);
   });
 
   test("t40_v1_history_fixtures_skipped_by_refusal_loop", async () => {
@@ -370,23 +426,25 @@ describe("every stored format against the current engine", () => {
 
   test("t40_report_without_run_picks_latest_readable", async () => {
     await copyRuns("v1");
-    const id = V1_RUNS[1] as string;
-    await asCurrentFormat(id);
+    await copyRuns("v2", V2_RUN);
     const summaries = await hostFor().runSummaries();
     const readable = summaries.filter((r) => r.state !== undefined).map((r) => r.meta.runId);
-    expect(readable).toEqual([id]);
-    expect(summaries.filter((r) => r.state === undefined).map((r) => r.meta.runId)).toEqual([
-      V1_RUNS[0] as string,
-    ]);
+    expect(readable).toEqual([V2_RUN]);
+    expect(
+      summaries
+        .filter((r) => r.state === undefined)
+        .map((r) => r.meta.runId)
+        .sort(),
+    ).toEqual([...V1_RUNS].sort());
   });
 
   test("t40_meta_version_unchanged_and_messages_distinct", async () => {
     expect(META_VERSION).toBe(2);
     expect(RECORD_VERSION).toBe(2);
     await copyRuns("v1");
-    const id = V1_RUNS[0] as string;
+    await copyRuns("v2", V2_RUN);
+    const id = V2_RUN;
     // a state of the current format with a meta of an old one: the message names the meta format
-    await asCurrentFormat(id);
     const metaPath = join(runsDir(), id, "meta.json");
     const meta = JSON.parse(await readFile(metaPath, "utf8"));
     await writeFile(metaPath, JSON.stringify({ ...meta, v: 1 }));
@@ -458,9 +516,8 @@ describe("every stored format against the current engine", () => {
   });
 
   test("formats_a_finished_run_opens_with_no_git_repository_and_no_workdir", async () => {
-    await copyRuns("v1");
-    const id = V1_RUNS[0] as string;
-    await asCurrentFormat(id);
+    await copyRuns("v2", V2_RUN);
+    const id = V2_RUN;
     // The root is not a repository, the snapshots name git objects that exist nowhere, and the
     // workdir in the state is a placeholder path that does not exist.
     expect((await readdir(root)).includes(".git")).toBe(false);
@@ -473,9 +530,8 @@ describe("every stored format against the current engine", () => {
   });
 
   test("formats_a_field_the_engine_does_not_know_is_kept_not_an_error", async () => {
-    await copyRuns("v1");
-    const id = V1_RUNS[0] as string;
-    await asCurrentFormat(id);
+    await copyRuns("v2", V2_RUN);
+    const id = V2_RUN;
     const journalPath = join(runsDir(), id, "journal.jsonl");
     await writeState(id, { ...(await readState(id)), from_the_future: { n: 1 } });
     const lines = (await readFile(journalPath, "utf8")).trimEnd().split("\n");
@@ -526,14 +582,9 @@ describe("every stored format against the current engine", () => {
     const [running, paused] = V1_RUNS as [string, string];
     await writeState(running, { ...(await readState(running)), status: "running" });
     await writeState(paused, { ...(await readState(paused)), status: "paused" });
-    const current = "r_0mvqyegg2_zzzz";
-    await cp(join(runsDir(), running), join(runsDir(), current), { recursive: true });
-    await writeState(current, {
-      ...(await readState(current)),
-      v: RECORD_VERSION,
-      runId: current,
-      pauses: [],
-    });
+    const current = V2_RUN;
+    await copyRuns("v2", current);
+    await writeState(current, { ...(await readState(current)), status: "running" });
     const found = await listOpenRuns(root);
     expect(found.map((r) => [r.runId, r.status, r.pipeline])).toEqual([
       [running, "running", "dev"],

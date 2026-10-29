@@ -19,9 +19,15 @@ export interface PipelineChange {
   watched?: string;
   /** What differs, per step; changes of checks are listed in each step's `changes`. */
   changes: NodeDiff[];
-  effect: AcceptEffect;
+  /** What the run does about it, per step it stands at; empty when nothing is redone. */
+  effects: AcceptEffect[];
   /** What will run again once the person accepts, in words. */
   redo: string[];
+  /**
+   * Where the run stood when this was worked out (`standingOf`). Accepting is refused when the run
+   * has moved on since, so what is accepted is what was shown; look again then.
+   */
+  standing: string;
   /** Why the change cannot be accepted, when it cannot; then it holds nothing back. */
   refused?: string;
   /** The command the person accepts it with. */

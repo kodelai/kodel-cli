@@ -36,11 +36,29 @@ directories under `.kodel/runs`. Two things differ from the originals:
 `hashes.json` lists the sha256 of every file in the directory. The test fails if a file is edited,
 removed or added: do not fix such a failure by regenerating the list, add a new version instead.
 
-## `v2/` and later
+## `v2/`
 
-`v2/` is the current run-state format (forks). It holds real runs written by this engine, taken with
-the script above; the tests open every one of them. A reader was not shipped for the break from 1
-to 2 (see above), so `v2/` is where the frozen history begins.
+The current run-state format (forks; `pauses[]`, `forks`, `effects[]` on `pipeline_accepted`). Two
+runs of the `dev` pipeline written by this engine, taken with the script above; the tests open every
+one of them (`status`, `report`, the history of the pipeline) and check that reading changes no byte.
+A reader was not shipped for the break from 1 to 2 (see above), so `v2/` is where the frozen history
+begins.
+
+- `r_0mvtewczh_4i2w`: the agent's proposal to change the `plan-critique` prompt, accepted while that
+  step was being worked (`effects: [{ kind: "restart", node: "plan-critique" }]`, a superseded
+  attempt); a note from the agent (`feedback_reported`); three gate decisions (the plan rejected once,
+  then approved; the result approved); the whole path to `publish`, with result reports.
+- `r_0mvtewgdn_zfhl`: a change made in the run's pipeline file (the `review` prompt, a step the run
+  never reached: `effects: []`), accepted; a note from the agent; `plan` ending with
+  `nothing_to_change` and its gate rejected once, then approved.
+
+They were made by a script in place of the agent, in a scratch repository with the pipeline's commands
+answered by a stub (as `packages/local/test/changes-dev-yaml.test.ts` does), each run in a worktree
+of its own, so `meta.json` carries the placeholder workdir and branch. The run directories hold what
+the engine writes for such a run: `changes/` (the patch of every handed-in attempt and of the run),
+`artifacts/` (the output of the stubbed commands), `reports/`, `snapshots.json` and `specs/`.
+
+## Later formats
 
 Add a directory when a change renames, removes or retypes a stored field (run state, journal
 records, the pipeline snapshot kept with a run, reports). The same change ships:

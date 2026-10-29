@@ -83,7 +83,7 @@ describe("a pipeline file edited under a run in the repository root", () => {
           source: "file",
           watched: FILE,
           changes: [{ slug: "write", changes: ["checks"] }],
-          effect: { kind: "none" },
+          effects: [],
           apply: `kodel pipeline changes apply ${run.runId}`,
         },
       },

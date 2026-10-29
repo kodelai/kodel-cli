@@ -41,7 +41,7 @@ import {
   isFeedbackType,
   submitFeedback,
 } from "./feedback";
-import { formatProposal, formatReport } from "./format";
+import { formatEffects, formatProposal, formatReport } from "./format";
 import { type Choice, InitError, runInit } from "./init";
 import { dialogTimeoutFrom, noProjectHost, serveStdio } from "./mcp-server";
 import { plain, UNSAFE_CODES } from "./plain";
@@ -710,10 +710,13 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           `the change was modified while you were looking at it; nothing was accepted. Look at it again: kodel pipeline changes ${runId}`,
         );
       }
+      // And what was shown is what the run was doing then: if it moved on while the person read, the
+      // engine refuses and says to look again.
       failIfRefused(
         await run.acceptChange({
           source: found.info.source,
           text: found.text,
+          standing: found.info.standing,
           ...(opts.reason === undefined ? {} : { reason: opts.reason }),
         }),
       );
@@ -760,10 +763,10 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
             ? "started with"
             : `accepted (${v.how === "proposal" ? "the agent's proposal" : "a change in the file"})`;
         const steps = v.nodes.map((n) => `${plain(n.slug)} (${n.changes.map(plain).join(", ")})`);
-        const effect = v.effect && v.effect !== "none" ? `  then: ${plain(v.effect)}` : "";
+        const effects = v.effects.length > 0 ? `  then: ${formatEffects(v.effects, plain)}` : "";
         env.out(
           `${i + 1}  ${plain(v.hash)}  ${when}  ${how}${v.current ? "  <- now" : ""}${
-            steps.length > 0 ? `\n     changed: ${steps.join(", ")}${effect}` : ""
+            steps.length > 0 ? `\n     changed: ${steps.join(", ")}${effects}` : ""
           }${v.reason ? `\n     reason: ${plain(v.reason)}` : ""}\n`,
         );
       }

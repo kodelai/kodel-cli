@@ -50,6 +50,7 @@ export interface HumanRun {
     text: string;
     reason?: string;
     byAgent?: AgentDecision;
+    standing?: string;
   }): Promise<Decision>;
   discardProposal(): Promise<boolean>;
   restoreFile(hash?: string): Promise<{ path: string; hash: string }>;
@@ -605,6 +606,7 @@ async function changeQuestion(runId: string, run: HumanRun): Promise<Question | 
       const done = await run.acceptChange({
         source: found.info.source,
         text: found.text,
+        standing: found.info.standing,
         ...(reason === "" ? {} : { reason }),
       });
       return done.ok

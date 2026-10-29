@@ -20,7 +20,7 @@ import { type ErrorCode, KodelError } from "./errors";
 import type { EngineRecord, ExecutorRecord } from "./executor";
 import type { HistoryConfig } from "./history-config";
 import type { EdgeSpec, NodeSpec, PipelineSpec } from "./pipeline";
-import { diffPipelines } from "./pipeline-diff";
+import { type AcceptEffect, diffPipelines, standingOf } from "./pipeline-diff";
 import { defaultRegistry, labelsOf, RESTART_FAILED, type Registry } from "./registry";
 import { renderContextOf, renderDeep, renderTemplate } from "./render";
 import { runSlug } from "./slug";
@@ -168,6 +168,13 @@ export interface Visit {
   /** Engine work that was restarted too often; waits for `resume`. */
   suspended?: boolean;
   startedAt: number;
+  /**
+   * The pipeline version the engine work in flight (the command, or the current check) was issued
+   * under; set again each time work is issued. A result that names another version is dropped: it
+   * came from work issued before a change re-issued it. An accepted change that leaves the node as
+   * it is does not re-issue, so a command or check in flight in a sibling branch is kept.
+   */
+  spec?: string;
 }
 
 export interface BlockedRoute {
@@ -433,6 +440,11 @@ export type RunEvent =
       before: PipelineSpec;
       reason?: string;
       byAgent?: AgentDecision;
+      /**
+       * Where the run stood when the change was shown (`standingOf`): the change is refused when the
+       * run has moved on since, so what is accepted is what was looked at.
+       */
+      standing?: string;
     }
   /** The host accepted the agent's report of findings. Journaled; it changes nothing else. */
   | {
@@ -725,6 +737,16 @@ class Machine {
     });
   }
 
+  /**
+   * A result that names the pipeline version it was made under, and that version is not the one the
+   * node's work was issued under (`Visit.spec`): it ran against another definition and is dropped.
+   */
+  private staleResult(event: { node: string; specHash?: string }): boolean {
+    if (event.specHash === undefined) return false;
+    const visit = this.s.active.find((v) => v.node === event.node);
+    return event.specHash !== (visit?.spec ?? this.s.specHash);
+  }
+
   /** The active visit an event is about, or a precise error, or `Repeat` for a duplicate. */
   private visitFor(slug: string, attempt: number | undefined, phases: Phase[]): Visit {
     this.node(slug);
@@ -816,6 +838,7 @@ class Machine {
       checkIndex: 0,
       restarts: 0,
       startedAt: this.now,
+      spec: this.s.specHash,
     };
     this.s.active.push(visit);
     run.status = begin.needs === "human" ? "waiting" : rework ? "rework" : "running";
@@ -903,6 +926,7 @@ class Machine {
             ? `attempt:${visit.visitId}:${visit.attempt}`
             : undefined;
     visit.heartbeatAt = this.now;
+    visit.spec = this.s.specHash;
     const effect: Effect = {
       type: "run_check",
       node: node.slug,
@@ -1404,7 +1428,7 @@ class Machine {
         return;
       }
       case "work_finished": {
-        if (event.specHash !== undefined && event.specHash !== this.s.specHash) throw new Repeat();
+        if (this.staleResult(event)) throw new Repeat();
         const visit = this.visitFor(event.node, event.attempt, ["engine"]);
         const node = this.node(event.node);
         this.log("command_finished", {
@@ -1422,7 +1446,7 @@ class Machine {
         return;
       }
       case "check_finished": {
-        if (event.specHash !== undefined && event.specHash !== this.s.specHash) throw new Repeat();
+        if (this.staleResult(event)) throw new Repeat();
         const visit = this.visitFor(event.node, event.attempt, ["checks"]);
         if (event.index !== visit.checkIndex) throw new Repeat();
         const check = this.node(event.node).checks[event.index];
@@ -1712,6 +1736,7 @@ class Machine {
   }
 
   private reissue(visit: Visit) {
+    visit.spec = this.s.specHash;
     if (visit.phase === "engine")
       this.effects.push(this.commandEffect(this.node(visit.node), visit, true));
     else this.emitCheck(visit, true);
@@ -1728,6 +1753,14 @@ class Machine {
       throw fail(
         "PIPELINE_CHANGE_REFUSED",
         "the run is no longer on the version this change was made from",
+      );
+    }
+    // Before the change itself is judged: a change worked out for another standing may well be
+    // acceptable still, but it is not the one the person looked at.
+    if (event.standing !== undefined && event.standing !== standingOf(this.s)) {
+      throw fail(
+        "PIPELINE_CHANGE_REFUSED",
+        "the run moved on since the change was shown; look at it again before accepting it",
       );
     }
     const diff = diffPipelines(event.before, this.spec, this.s);
@@ -1754,12 +1787,24 @@ class Machine {
       to: event.to,
       source: event.source,
       nodes: diff.nodes,
-      effect: diff.effect,
+      effects: diff.effects,
       ...(event.reason === undefined ? {} : { reason: event.reason }),
       ...decidedBy(event.byAgent),
     });
 
-    const effect = diff.effect;
+    // Each effect names its own node, and no node is standing in two places at once (a branch is
+    // its own set of nodes), so they apply one after the other without stepping on each other. A
+    // branch that ends the run on the way (a reroute into a dead end) ends it for all of them.
+    for (const effect of diff.effects) {
+      if (this.ended) return;
+      this.applyEffect(effect);
+    }
+    // What is still running was not touched by the change (a touched running step is refused, a
+    // suspended one restarted or rechecked above): its work keeps the version it was issued under
+    // (`Visit.spec`), so its result is not dropped for naming that version.
+  }
+
+  private applyEffect(effect: AcceptEffect) {
     if (effect.kind === "restart") {
       const visit = this.s.active.find((v) => v.node === effect.node);
       if (!visit) return;
@@ -1806,16 +1851,19 @@ class Machine {
         restarts: 0,
         heartbeatAt: this.now,
         startedAt: this.now,
+        spec: this.s.specHash,
       };
       this.s.active.push(reopened);
       this.log("checks_rerun", { node: effect.node, attempt: run.attempt });
       this.emitCheck(reopened, false);
-    } else if (effect.kind === "reroute") {
-      const pause =
-        this.takePause((p) => p.blocked?.from === effect.node) ??
-        this.takePause((p) => p.blocked !== undefined);
+    } else {
+      const pause = this.takePause((p) => p.blocked?.from === effect.node);
       const blocked = pause?.blocked;
       if (!blocked) return;
+      // The person accepted a repair of this very failure: like `resume`, that starts the failure
+      // count over, or a branch held back for failing in a row would pause again before the new
+      // definition got its turn. The attempt limit is not touched: a raised one is in the pipeline.
+      this.run(blocked.from).consecutiveFailures = 0;
       this.route(this.node(blocked.from), blocked.label, true);
     }
   }

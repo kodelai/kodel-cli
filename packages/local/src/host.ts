@@ -23,11 +23,12 @@ import {
   type Decision,
   decide,
   defaultRegistry,
-  describeEffect,
+  describeEffects,
   diffPipelines,
   type Effect,
   type EngineOptions,
   type ExecutorRecord,
+  effectsOf,
   evaluateCommand,
   evaluateDiff,
   evaluateResult,
@@ -60,6 +61,7 @@ import {
   runSlug,
   type ServedSurface,
   type StepResult,
+  standingOf,
   summarizeRun,
   validateReport,
 } from "@kodel-ai/pipeline-core";
@@ -886,7 +888,8 @@ export class LocalRun {
       at: number;
       how: "started" | "proposal" | "file";
       nodes: { slug: string; changes: string[] }[];
-      effect?: string;
+      /** What the run did about the change, per step it stood at; empty when nothing was redone. */
+      effects: { kind: string; node: string }[];
       reason?: string;
       current: boolean;
     }[];
@@ -902,16 +905,16 @@ export class LocalRun {
           at: record.ts,
           how: "started",
           nodes: [],
+          effects: [],
           current: false,
         });
       } else if (record.event === "pipeline_accepted") {
-        const effect = record.effect as { kind?: string } | undefined;
         out.push({
           hash: String(record.to),
           at: record.ts,
           how: record.source === "proposal" ? "proposal" : "file",
           nodes: (record.nodes as { slug: string; changes: string[] }[] | undefined) ?? [],
-          ...(effect?.kind === undefined ? {} : { effect: effect.kind }),
+          effects: effectsOf(record.effects),
           ...(typeof record.reason === "string" ? { reason: record.reason } : {}),
           current: false,
         });
@@ -976,8 +979,9 @@ export class LocalRun {
         source,
         ...(watched === undefined ? {} : { watched }),
         changes: diff.nodes,
-        effect: diff.effect,
-        redo: describeEffect(diff.effect),
+        effects: diff.effects,
+        redo: describeEffects(diff.effects),
+        standing: standingOf(now),
         ...(diff.refused === undefined ? {} : { refused: diff.refused }),
         apply: `kodel pipeline changes apply ${this.runId}`,
         hash,
@@ -1081,6 +1085,8 @@ export class LocalRun {
     text: string;
     reason?: string;
     byAgent?: AgentDecision;
+    /** The `standing` of the change as it was shown; the engine refuses once the run has moved on. */
+    standing?: string;
   }): Promise<Decision> {
     const state = await this.state();
     const before = await this.currentSpec(state);
@@ -1104,6 +1110,7 @@ export class LocalRun {
       before,
       ...(input.reason === undefined ? {} : { reason: input.reason }),
       ...(input.byAgent === undefined ? {} : { byAgent: input.byAgent }),
+      ...(input.standing === undefined ? {} : { standing: input.standing }),
     });
     if (decision.ok) await this.host.store.removeProposal(this.runId).catch(() => undefined);
     return decision;

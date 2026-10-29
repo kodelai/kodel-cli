@@ -1,0 +1,10 @@
+{
+  "completeness": "complete",
+  "rows": [
+    {
+      "severity": "major",
+      "location": "docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md:14",
+      "description": "[tests] the plan names no test for the JSON of a store with no runs at all; the empty list must still be valid JSON"
+    }
+  ]
+}

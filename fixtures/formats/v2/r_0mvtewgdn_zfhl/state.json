@@ -1,0 +1,201 @@
+{
+  "v": 2,
+  "runId": "r_0mvtewgdn_zfhl",
+  "task": "Document the kodel wait command in the README",
+  "specHash": "61b9c0e2e90efcad",
+  "status": "completed",
+  "startedAt": 1793270410534,
+  "nodes": {
+    "plan": {
+      "slug": "plan",
+      "status": "passed",
+      "outcome": "nothing_to_change",
+      "attempt": 2,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 3
+    },
+    "plan-critique": {
+      "slug": "plan-critique",
+      "status": "pending",
+      "outcome": null,
+      "attempt": 0,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 0
+    },
+    "plan-revise": {
+      "slug": "plan-revise",
+      "status": "pending",
+      "outcome": null,
+      "attempt": 0,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 0
+    },
+    "plan-approval": {
+      "slug": "plan-approval",
+      "status": "pending",
+      "outcome": null,
+      "attempt": 0,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 0
+    },
+    "confirm-nothing-to-do": {
+      "slug": "confirm-nothing-to-do",
+      "status": "passed",
+      "outcome": "approved",
+      "attempt": 2,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 4
+    },
+    "impl": {
+      "slug": "impl",
+      "status": "pending",
+      "outcome": null,
+      "attempt": 0,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 0
+    },
+    "verify": {
+      "slug": "verify",
+      "status": "pending",
+      "outcome": null,
+      "attempt": 0,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 0
+    },
+    "test": {
+      "slug": "test",
+      "status": "pending",
+      "outcome": null,
+      "attempt": 0,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 0
+    },
+    "build": {
+      "slug": "build",
+      "status": "pending",
+      "outcome": null,
+      "attempt": 0,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 0
+    },
+    "review": {
+      "slug": "review",
+      "status": "pending",
+      "outcome": null,
+      "attempt": 0,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 0
+    },
+    "sync": {
+      "slug": "sync",
+      "status": "pending",
+      "outcome": null,
+      "attempt": 0,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 0
+    },
+    "final-approval": {
+      "slug": "final-approval",
+      "status": "pending",
+      "outcome": null,
+      "attempt": 0,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 0
+    },
+    "publish": {
+      "slug": "publish",
+      "status": "pending",
+      "outcome": null,
+      "attempt": 0,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 0
+    }
+  },
+  "active": [],
+  "trail": [
+    "plan",
+    "confirm-nothing-to-do",
+    "plan",
+    "confirm-nothing-to-do"
+  ],
+  "pauses": [],
+  "nextVisitId": 5,
+  "seq": 22,
+  "slug": "document-the-kodel-wait-command-in-the-r",
+  "workdir": "/kodel-fixture/workdir/r_0mvtewgdn_zfhl",
+  "pipelineFile": ".kodel/pipelines/dev.yaml",
+  "history": {
+    "changes": {
+      "enabled": true,
+      "exclude": [],
+      "max_kb": 512
+    },
+    "output": {
+      "enabled": true,
+      "max_kb": 64
+    },
+    "prompts": {
+      "enabled": true
+    },
+    "executor": {
+      "enabled": true
+    },
+    "tool_log": {
+      "enabled": true
+    },
+    "agent_log": {
+      "enabled": true,
+      "mode": "full",
+      "preview_chars": {
+        "user": 4000,
+        "agent": 4000,
+        "tool_input": 4000,
+        "tool_result": 8000
+      },
+      "max_kb": 20480,
+      "interval_s": 10
+    }
+  },
+  "engineVersion": "unknown",
+  "served": {},
+  "agentLog": {
+    "nodes": [
+      "plan",
+      "plan-critique",
+      "plan-revise",
+      "plan-approval",
+      "confirm-nothing-to-do",
+      "impl",
+      "verify",
+      "test",
+      "build",
+      "review",
+      "sync",
+      "final-approval",
+      "publish"
+    ],
+    "sessions": {},
+    "ticks": 0,
+    "steps": 0,
+    "bytes": 0,
+    "cut": 0,
+    "failed": [
+      "log_missing"
+    ],
+    "endedInStep": []
+  },
+  "finishedAt": 1793270411667
+}
