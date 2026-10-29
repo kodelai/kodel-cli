@@ -55,7 +55,7 @@ describe("tui loop", () => {
     await wait(80);
     const card = t.since();
     expect(card).toContain("Report");
-    expect(card).toContain("ASKED");
+    expect(card).toContain("Look at the diff and try the change.");
 
     t.type("q");
     expect(await done).toBe(0);

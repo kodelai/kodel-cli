@@ -68,6 +68,8 @@ export interface Context {
   runId: string;
   /** Deciding is not done from here yet, so a and r only show the command. */
   project: boolean;
+  /** The instructions written for the agent are shown. */
+  instructions: boolean;
 }
 
 export interface Content {
@@ -326,28 +328,52 @@ function subStrip(active: number, width: number, focused: boolean) {
 
 function report(d: GateDetail, ctx: Context): Content {
   const { width } = ctx;
-  const out: string[] = [dim("ASKED")];
-  out.push(...wrapText(d.prompt, width));
-  for (const l of wrapText(d.instructions ?? "", width)) out.push(dim(l));
-  out.push("");
-  out.push(`${bold("a")} approve   ${bold("r")} reject   ${bold("c")} add a comment`);
-  if (ctx.project) out.push(dim("(a and r show the command to run, for now)"));
+  // The question the pipeline asks, and what can be done about it, under the tabs.
+  const out: string[] = [];
+  for (const [i, l] of wrapText(d.prompt, Math.max(10, width - 2)).entries()) {
+    out.push(i === 0 ? `${cyan("❯")} ${bold(l)}` : `  ${bold(l)}`);
+  }
+  const keys = [
+    `${bold("a")} approve`,
+    `${bold("r")} reject`,
+    `${bold("c")} add a comment`,
+    ...(d.instructions ? [`${bold("i")} ${ctx.instructions ? "hide" : "show"} instructions`] : []),
+  ];
+  out.push(`  ${keys.join("   ")}`);
+  if (ctx.project) out.push(dim("  (a and r show the command to run, for now)"));
+  // What the pipeline's author wrote for the agent to turn into its message; the person needs it
+  // only when they want to see what the agent was told.
+  if (ctx.instructions && d.instructions) {
+    out.push("", dim("INSTRUCTIONS THE AGENT WAS GIVEN FOR ITS MESSAGE"));
+    for (const l of wrapText(d.instructions, width)) out.push(dim(l));
+  }
   out.push("");
   if (d.report === undefined) {
     out.push(dim("THE AGENT'S REPORT"));
     out.push(
       ...wrapText(
-        "No report found. The agent's own log can be read for Claude Code only, and no step left a summary.",
+        "Not found. The agent's own log can be read for Claude Code only, and no step left a summary.",
         width,
       ).map((l) => dim(l)),
     );
     return { lines: out.map((l) => fit(l, width)) };
   }
-  const source =
-    d.report.from === "log"
-      ? `from its log, written ${formatAge(ctx.now - d.report.ts)} ago`
-      : "a step's summary (not checked)";
-  out.push(dim(`THE AGENT'S REPORT · ${source}`));
+  if (d.report.from === "log") {
+    out.push(
+      dim(`THE AGENT'S REPORT · from its log, written ${formatAge(ctx.now - d.report.ts)} ago`),
+    );
+  } else {
+    out.push(
+      dim(`THE AGENT'S REPORT · only the summary of «${d.report.step ?? "a step"}», not checked`),
+    );
+    out.push(
+      ...wrapText(
+        "The agent's own message at this gate was not found (its log can be read for Claude Code only).",
+        width,
+      ).map((l) => dim(l)),
+      "",
+    );
+  }
   out.push(...prose(d.report.text, width));
   return { lines: out.map((l) => fit(l, width)) };
 }

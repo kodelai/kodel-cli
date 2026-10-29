@@ -330,7 +330,12 @@ describe("tui gate detail", () => {
       ts: NOW - 5 * MIN,
       from: "log",
     });
-    expect((await load())?.report).toEqual({ text: "Wrote the plan.", ts: 0, from: "journal" });
+    expect((await load())?.report).toEqual({
+      text: "Wrote the plan.",
+      ts: 0,
+      from: "journal",
+      step: "plan",
+    });
     const quiet = JOURNAL.map((r) => (r.event === "agent_completed" ? { ...r, summary: null } : r));
     expect((await load({ journal: quiet }))?.report).toBeUndefined();
   });

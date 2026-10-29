@@ -36,6 +36,7 @@ import {
   isListTab,
   itemCount,
   LOG,
+  REPORT,
   STEPS,
   SUBTABS,
   TABS,
@@ -77,6 +78,8 @@ export interface Model {
   zoom: boolean;
   /** Which part of an opened step is shown. */
   sub: number;
+  /** The Report shows the instructions the pipeline gives the agent for its message. */
+  instructions: boolean;
   /** The row of the opened file's diff the cursor is on; -1 until it has been read. */
   line: number;
   /** A comment being typed, or nothing. */
@@ -158,6 +161,7 @@ export function initialModel(
     open: false,
     zoom: false,
     sub: 0,
+    instructions: false,
     line: -1,
     input: null,
     diffs: {},
@@ -360,6 +364,10 @@ function cardKey(m: Model, key: string, size: Size): Model | undefined {
         : m;
     case "escape":
       return m.open ? { ...m, open: false, cardScroll: 0 } : { ...m, focus: "list", zoom: false };
+    case "i":
+      return m.tab === REPORT && found.d.instructions
+        ? { ...m, instructions: !m.instructions, cardScroll: 0 }
+        : undefined;
     case "c": {
       const place = commentPlace(found.d, tabState(m, found.d));
       return { ...m, input: { text: "", severity: "major", place }, notice: "" };
@@ -543,10 +551,11 @@ function panel(m: Model, width: number, height: number): Panel {
     diffs: m.diffs,
     runId: s.id,
     project: m.source === "project",
+    instructions: m.instructions,
   });
   const band = headerBand(s, found.d, width, glyph(s, m.frame), m.now, height < 22);
   return {
-    head: [...band, tabs.line],
+    head: [...band, tabs.line, dim("─".repeat(width))],
     body: content.lines,
     ...(content.anchor === undefined ? {} : { anchor: content.anchor }),
     spans: tabs.spans,
@@ -920,7 +929,7 @@ export function hitTest(m: Model, { cols, rows }: Size, x: number, y: number): H
   const found = detailOf(m);
   if (found) {
     const head = panel(m, layout.cardWidth, bodyHeight).head;
-    if (row === head.length - 1) {
+    if (row === head.length - 2) {
       const { spans } = tabStrip(found.d, m.tab, layout.cardWidth, m.focus === "card");
       const at = x - layout.cardX;
       const index = spans.findIndex(([from, to]) => at >= from && at < to);

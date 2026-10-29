@@ -185,6 +185,8 @@ export interface AgentWords {
   ts: number;
   /** Where it came from: the agent's log, or the summary a step left in the journal. */
   from: "log" | "journal";
+  /** For a summary: the step that left it. */
+  step?: string;
 }
 
 /** Everything the card of a run waiting at a human step shows beyond the list row. */

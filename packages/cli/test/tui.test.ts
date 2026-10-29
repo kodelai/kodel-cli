@@ -413,10 +413,12 @@ describe("tui card of a run waiting for approval", () => {
     expect(at("Log 12")).toBeGreaterThan(at("Comments"));
   });
 
-  test("it opens on the agent's report, whole, with what was asked above it", () => {
+  test("it opens on the question and what can be done, then the agent's report, whole", () => {
     const out = text(press(withCard(), SIZE, "enter"));
-    expect(out).toContain("ASKED");
-    expect(out).toContain("Look at the diff and try the change.");
+    expect(out).toContain("❯ Look at the diff and try the change.");
+    expect(out).toContain("a approve   r reject   c add a comment");
+    expect(out.indexOf("a approve")).toBeLessThan(out.indexOf("THE AGENT'S REPORT"));
+    expect(out).not.toContain("ASKED");
     expect(out).toContain("THE AGENT'S REPORT · from its log, written 20m ago");
     expect(out).toContain("Done: `kodel status` prints one short line per run");
     expect(out).toContain("- `packages/cli/src/format.ts`: a new `shortLine(run, max)`");
@@ -426,19 +428,44 @@ describe("tui card of a run waiting for approval", () => {
     expect(out).not.toContain("## ");
   });
 
-  test("a report that is only a step's summary says it is the agent's word, and no report says so", () => {
+  test("a line under the tabs sets them apart from what is under them", () => {
+    const lines = plain(render(press(withCard(), SIZE, "enter"), SIZE));
+    const tabs = lines.findIndex((l) => l.includes("Report") && l.includes("Comments"));
+    expect(tabs).toBeGreaterThan(0);
+    expect(lines[tabs + 1]).toMatch(/─{40,}/);
+    expect(lines[tabs + 2]).toContain("❯");
+  });
+
+  test("the instructions the pipeline gives the agent for its message are not the person's business, unless asked for", () => {
+    const d = { ...detail(), instructions: "The message must contain the path of the worktree." };
+    let m = press(withCard(d), SIZE, "enter");
+    expect(text(m)).not.toContain("path of the worktree");
+    expect(text(m)).toContain("i show instructions");
+    m = press(m, SIZE, "i");
+    expect(text(m)).toContain("INSTRUCTIONS THE AGENT WAS GIVEN FOR ITS MESSAGE");
+    expect(text(m)).toContain("path of the worktree");
+    expect(text(m)).toContain("i hide instructions");
+    expect(text(press(m, SIZE, "i"))).not.toContain("path of the worktree");
+    // nothing to show, nothing to toggle
+    expect(text(press(withCard(), SIZE, "enter"))).not.toContain("instructions");
+    expect(press(press(withCard(), SIZE, "enter"), SIZE, "i").instructions).toBe(false);
+  });
+
+  test("a report that is only a step's summary says which step, and no report says so", () => {
     const d = detail();
     const fromJournal = text(
       press(
-        withCard({ ...d, report: { text: "I did it.", ts: 0, from: "journal" } }),
+        withCard({ ...d, report: { text: "I did it.", ts: 0, from: "journal", step: "review" } }),
         SIZE,
         "enter",
       ),
     );
-    expect(fromJournal).toContain("a step's summary (not checked)");
+    expect(fromJournal).toContain("only the summary of «review», not checked");
+    expect(fromJournal).toContain("own message at this gate was not found");
     expect(fromJournal).toContain("I did it.");
     const none = text(press(withCard({ ...d, report: undefined }), SIZE, "enter"));
-    expect(none).toContain("No report found.");
+    expect(none).toContain("THE AGENT'S REPORT");
+    expect(none).toContain("Not found.");
   });
 
   test("a long report scrolls", () => {

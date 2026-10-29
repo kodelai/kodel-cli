@@ -143,7 +143,7 @@ function wordsOf(
   const last = visits.findLast((v) => v.attempt.summary !== undefined);
   return last?.attempt.summary === undefined
     ? {}
-    : { report: { text: last.attempt.summary, ts: 0, from: "journal" } };
+    : { report: { text: last.attempt.summary, ts: 0, from: "journal", step: last.slug } };
 }
 
 /** Every result report a step handed in, by `node:attempt`. */
