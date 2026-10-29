@@ -449,8 +449,6 @@ async function runHome() {
     });
     const shown = `${status.stdout}${status.stderr}`;
     if (status.status !== 0) bail(`storage home: kodel status failed: ${shown}`);
-    if (!status.stdout.includes("storage: home ("))
-      bail(`storage home: kodel status does not say "storage: home (": ${shown}`);
     if (shown.includes(base)) bail(`storage home: kodel status prints the state base: ${shown}`);
     if (!status.stdout.includes(started.run_id) || !status.stdout.includes("approve"))
       bail(`storage home: kodel status does not show the run at the gate: ${shown}`);

@@ -15,7 +15,6 @@ import {
   type ProjectRoot,
   resolveStoragePlace,
   type StoragePlace,
-  scrubHome,
 } from "@kodel-ai/local";
 import { MAX_PAYLOAD_BYTES, runHook } from "@kodel-ai/local/hooks";
 import {
@@ -235,15 +234,6 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
   };
   const storeRoot = async () => (await project()).dataDir;
 
-  /**
-   * The folder of the history for a person at a terminal. An agent's shell has none, and the folder
-   * (with the user's name in it) is not put into what an agent reads.
-   */
-  const shownPlace = (place: StoragePlace): string =>
-    env.interactive
-      ? plain(place.tree ?? place.lockRoot)
-      : scrubHome(plain(place.tree ?? "."), place);
-
   async function openRun(host_: LocalPipelineHost, runId: string) {
     const run = await host_.open(runId);
     if (!run) {
@@ -423,9 +413,13 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .option("--tasks", "turn the local task tracker on (asked when not given)")
     .option(
       "--storage <mode>",
-      "where the history is kept: home (~/.kodel/projects/<id>, written into a new config) or project (.kodel, the default)",
+      "where the history is kept: home (~/.kodel/projects/<id>, the default; written into a new config) or project (.kodel)",
     )
-    .option("--server-command <command>", "how the agent starts the server", "kodel mcp")
+    .option(
+      "--server-command <command>",
+      'how the agent starts kodel, without a subcommand: init adds "mcp" for the server and "hook <agent>" for the hooks',
+      "kodel",
+    )
     .option("--hooks", "register the hooks without asking (they are on by default)")
     .option("--no-hooks", "do not register the hooks that let Kodel see your agent sessions")
     .option("--force", "replace skills that were edited or that kodel did not write")
@@ -532,7 +526,6 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         }
         // Notes before the table: a script that asks for no headers parses only the table.
         const notes = home && opts.headers !== false;
-        if (notes) env.out(`storage: home (${shownPlace(place)})\n`);
         // A project that keeps its history in `.kodel` on a machine that keeps some under `~/.kodel`:
         // say which of the two this command reads, so a branch that dropped the keys is seen.
         if (!home && opts.headers !== false && !opts.json && (await homeTreeInUse())) {

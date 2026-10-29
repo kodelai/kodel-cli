@@ -48,11 +48,11 @@ export interface InitOptions {
   /** Turn the task tracker on. Without it the person is asked, or it stays off. */
   tasks?: boolean;
   /**
-   * `home` keeps the history under `~/.kodel/projects/<id>` (the keys are written into a new
-   * config only). Absent or `project`: under `.kodel`, and no key is written.
+   * `home` (absent means `home`) keeps the history under `~/.kodel/projects/<id>`: the keys are
+   * written into a new config only. `project`: under `.kodel`, and no key is written.
    */
   storage?: "project" | "home";
-  /** The command the agent starts the server with. */
+  /** How the agent starts kodel, without a subcommand: `mcp` is added for the server, `hook <agent>` for a hook. */
   serverCommand: string;
   /** Register the hooks. Without it the person is asked (default yes), or they are registered. */
   hooks?: boolean;
@@ -117,17 +117,24 @@ async function chooseTasks(opts: InitOptions, io: InitIO, canAsk: boolean): Prom
   );
 }
 
-async function setUpConfig(ctx: Context, tasks: boolean, storage: "project" | "home") {
+async function setUpConfig(
+  ctx: Context,
+  tasks: boolean,
+  storage: "project" | "home",
+  asked: boolean,
+) {
   const existed = (await readIfExists(join(ctx.root, KODEL_DIR, "config.yaml"))) !== undefined;
-  // `--storage home` writes the two keys that put the history under `~/.kodel/projects/<id>`: the
-  // id is made here, once, and committed with the config, so a moved project keeps its history.
+  // `home` (the default of init; a config without the keys still means `project`) writes the two keys
+  // that put the history under `~/.kodel/projects/<id>`: the id is made here, once, and committed
+  // with the config, so a moved project keeps its history.
   const projectId = generateProjectId(basename(resolve(ctx.root)));
   const storageLines = storage === "home" ? linesToAdd(projectId).split("\n") : [];
   // The file is the person's and may carry comments: an existing one is not rewritten.
   await editFile(ctx, `${KODEL_DIR}/config.yaml`, (previous) => ({
     text: previous ?? configText(tasks, storageLines),
   }));
-  if (storage === "home") {
+  // An existing config is the person's: left alone, and said so only when `--storage home` was asked for.
+  if (storage === "home" && (asked || !existed)) {
     ctx.hints.push(
       "every kodel that reads this config must be upgraded before it is committed: an older build refuses the keys storage and project_id on every command",
     );
@@ -190,7 +197,13 @@ export async function runInit(opts: InitOptions, io: InitIO): Promise<Change[]> 
   if (!rootStat?.isDirectory()) throw new InitError(`${opts.root} is not a directory`);
   const [command, ...args] = opts.serverCommand.trim().split(/\s+/);
   if (!command) throw new InitError("--server-command is empty");
-  const server: ServerCommand = { command, args };
+  const last = args.at(-1) ?? command;
+  if (last === "mcp" || last === "hook") {
+    throw new InitError(
+      `--server-command is the command that starts kodel, without "${last}": init adds it (for example "node /path/to/kodel.js")`,
+    );
+  }
+  const server: ServerCommand = { command, args: [...args, "mcp"] };
 
   const canAsk = io.interactive && !opts.yes;
   const agents = await chooseAgents(opts, io, canAsk);
@@ -205,7 +218,7 @@ export async function runInit(opts: InitOptions, io: InitIO): Promise<Change[]> 
     hints: [],
   };
 
-  await setUpConfig(ctx, tasks, opts.storage ?? "project");
+  await setUpConfig(ctx, tasks, opts.storage ?? "home", opts.storage !== undefined);
 
   for (const agent of agents) {
     await agent.connect(ctx, server);

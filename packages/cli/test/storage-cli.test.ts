@@ -174,12 +174,31 @@ describe("kodel init --storage", () => {
     expect(result.out).toContain("must be upgraded before it is committed");
   });
 
-  test("storage_init_without_flag_is_unchanged", async () => {
+  test("storage_init_without_flag_writes_home", async () => {
     const result = await init();
+    expect(result.code).toBe(0);
+    const text = await readFile(join(fresh, ".kodel", "config.yaml"), "utf8");
+    expect(text).toContain("storage: home\n");
+    expect(/^project_id: (.+)$/m.exec(text)?.[1]).toBeDefined();
+    expect((await loadConfig(join(fresh, ".kodel"))).storage).toBe("home");
+  });
+
+  test("storage_init_project_writes_no_keys", async () => {
+    const result = await init("--storage", "project");
     expect(result.code).toBe(0);
     expect(await readFile(join(fresh, ".kodel", "config.yaml"), "utf8")).toBe(
       "# The Kodel project config. Every key is optional.\nversion: 1\ntasks:\n  enabled: false\n",
     );
+    expect(result.out).not.toContain("project_id");
+  });
+
+  test("storage_init_default_leaves_an_existing_config_alone_and_says_nothing", async () => {
+    await mkdir(join(fresh, ".kodel"), { recursive: true });
+    const mine = "# mine\nversion: 1\n";
+    await writeFile(join(fresh, ".kodel", "config.yaml"), mine);
+    const result = await init();
+    expect(result.code).toBe(0);
+    expect(await readFile(join(fresh, ".kodel", "config.yaml"), "utf8")).toBe(mine);
     expect(result.out).not.toContain("project_id");
   });
 
@@ -204,17 +223,17 @@ describe("kodel init --storage", () => {
 // ── status ────────────────────────────────────────────────────────────────────
 
 describe("status in home mode", () => {
-  test("storage_status_prints_mode_and_place", async () => {
+  test("storage_status_does_not_print_the_place", async () => {
     const place = await placeOf(dir, { KODEL_STATE_DIR: base });
-    await runAtGate(hostFor(dir, place));
+    const id = await runAtGate(hostFor(dir, place));
 
-    const person = await cliAs({ interactive: true }, "status");
-    expect(person.code).toBe(0);
-    expect(person.out).toContain(`storage: home (${tree()})`);
-
-    const agent = await cliAs({ interactive: false }, "status");
-    expect(agent.out).toContain(`storage: home (<home>${join("/projects", ID)})`);
-    expect(agent.out).not.toContain(base);
+    for (const interactive of [true, false]) {
+      const shown = await cliAs({ interactive }, "status");
+      expect(shown.code).toBe(0);
+      expect(shown.out).toContain(id);
+      expect(shown.out).not.toContain("storage:");
+      expect(shown.out).not.toContain(base);
+    }
   });
 
   test("storage_status_json_has_foreign", async () => {

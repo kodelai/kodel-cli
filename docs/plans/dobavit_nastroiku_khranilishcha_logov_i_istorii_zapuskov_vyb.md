@@ -310,3 +310,7 @@ Where the built change differs from, or settles, what the plan above says (found
 - `tick()` has no `assertOurs`: it only observes, it does not change a run.
 - `homeTreeInUse` reads `HOME`/`USERPROFILE` from the command's environment, not `os.homedir()`.
 - The count of runs without a hash in `status` is shown in `home` mode only.
+- **Changes asked for by the person while trying the change (after the review of the first build):**
+  - `kodel init` writes `storage: home` and a generated `project_id` into a NEW config by default (`--storage project` writes neither). The default of the engine does not change: a config without the key means `project`, so projects that exist keep their history in `.kodel/runs`. An existing config is not rewritten and, when `--storage` was not given, nothing is said about it.
+  - `kodel status` no longer prints the `storage: home (...)` line (a deviation from Decision 11, which asked for the mode and the place). The `storage: project (...)` hint for a project that lost the keys stays, and so do the foreign marks and the note about runs without a hash. The test `storage_status_prints_mode_and_place` became `storage_status_does_not_print_the_place`.
+  - `kodel init --server-command` is the command that starts kodel WITHOUT a subcommand (default `kodel`): init adds `mcp` for the server entry of every agent and `hook <agent>` for the hooks. A value that ends in `mcp` or `hook` is refused with a message. No backward compatibility (the plan did not ask for this; the PR description says so).

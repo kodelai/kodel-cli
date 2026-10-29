@@ -98,9 +98,11 @@ A real-agent test fails when the installed agent is outside every profile, and s
 
 ## Where the history is kept
 
-By default a project keeps what Kodel writes under its own `.kodel` folder. With `storage: home` the history goes to
-the project's folder under the user's home instead, so it is never committed and a `git clean` or a branch switch
-cannot touch it:
+A config without the `storage` key keeps what Kodel writes under the project's own `.kodel` folder, so a project
+that already exists does not change. `kodel init` writes `storage: home` and a generated `project_id` into a new config
+(`kodel init --storage project` writes neither, and an existing config is never rewritten). With `storage: home` the
+history goes to the project's folder under the user's home instead, so it is never committed and a `git clean` or a
+branch switch cannot touch it:
 
 ```yaml
 storage: home
@@ -130,7 +132,7 @@ runs) looks where its own environment says. `KODEL_*` is not passed to the comma
 
 **One place is read: the one the config names.** Switching `storage` hides the runs of the other place until you move
 them. To carry the history from `.kodel` to `home` (with `$HOME_TREE` for `~/.kodel/projects/<project_id>`, or
-`$KODEL_STATE_DIR/projects/<project_id>`; `kodel status` prints it on a terminal once `storage: home` is set):
+`$KODEL_STATE_DIR/projects/<project_id>`):
 
 ```sh
 mkdir -p "$HOME_TREE/runs"
@@ -189,9 +191,8 @@ start a run in `home` mode; set `KODEL_STATE_DIR` to a writable folder there. A 
 workspace also stops the hook from writing the session index (it logs the failure and skips; the sessions of that agent
 are then not recorded); one that cannot even read `~/.kodel` stops `kodel wait` too, which then does not find the run.
 
-**What `kodel status` shows.** With `storage: home` it prints the mode and the place on its first line (the real
-folder on a terminal, `<home>` when it is not one: an agent's shell has none), marks the runs of another clone as
-`[foreign]` and counts the runs that have no recorded hash. A project that keeps its history in `.kodel` prints what it
+**What `kodel status` shows.** With `storage: home` it prints the same table as before (it does not name the folder),
+marks the runs of another clone as `[foreign]` and counts the runs that have no recorded hash. A project that keeps its history in `.kodel` prints what it
 always printed on a machine that has no history under `~/.kodel` (or `KODEL_STATE_DIR`); on a machine that has (the
 `projects` folder is there) it adds one line, `storage: project (this project keeps its history in .kodel; ...)`, so a
 branch that flips a project from `home` to `project` is named, not just seen as "no runs". The server refuses the
