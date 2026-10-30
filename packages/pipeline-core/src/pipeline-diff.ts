@@ -198,6 +198,93 @@ function heldInFork(fork: ForkState, state: RunState, before: PipelineSpec): Set
   return held;
 }
 
+/** The forks of `spec`: the edges that share a `from` and a label, and the join their branches meet at. */
+function forksOf(
+  spec: PipelineSpec,
+): { from: string; heads: string[]; join: string; branches: Set<string>[] }[] {
+  const joins = new Set(spec.nodes.filter((n) => n.join !== undefined).map((n) => n.slug));
+  const groups = new Map<string, { from: string; heads: string[] }>();
+  for (const edge of spec.edges) {
+    const key = JSON.stringify([edge.from, edge.when]);
+    const group = groups.get(key) ?? { from: edge.from, heads: [] };
+    group.heads.push(edge.to);
+    groups.set(key, group);
+  }
+  const out: { from: string; heads: string[]; join: string; branches: Set<string>[] }[] = [];
+  for (const { from, heads } of groups.values()) {
+    if (heads.length < 2) continue;
+    // The first join reached without passing another, as the machine finds it when it forks.
+    const seen = new Set<string>();
+    const queue = [...heads];
+    let join: string | undefined;
+    for (let slug = queue.shift(); slug !== undefined && join === undefined; slug = queue.shift()) {
+      if (seen.has(slug)) continue;
+      seen.add(slug);
+      if (joins.has(slug)) join = slug;
+      else for (const edge of spec.edges) if (edge.from === slug) queue.push(edge.to);
+    }
+    if (join === undefined) continue;
+    const { branches } = branchRegions(spec.edges, joins, from, heads, join);
+    out.push({ from, heads, join, branches });
+  }
+  return out;
+}
+
+/**
+ * Why the change would put a fork around a place the run stands, if it would. A step stands in a
+ * branch only as part of an instance of that branch's fork, and a join only waits for one: a node
+ * that stands outside every instance and that the new pipeline puts in a branch or at a join would go
+ * on as a plain step, and the join would then run with branches that never ran. A route held back at
+ * the fork node itself is fine: it is taken again under the new pipeline, and forks there.
+ */
+function forkAroundStanding(
+  after: PipelineSpec,
+  state: RunState,
+  effects: AcceptEffect[],
+): string | undefined {
+  const joinOfInstance = (id: string | undefined) =>
+    id === undefined ? undefined : state.forks?.[id]?.join;
+  const open = Object.values(state.forks ?? {}).filter((f) => isOpen(f, state));
+  for (const fork of forksOf(after)) {
+    const place = (slug: string) => {
+      if (slug === fork.join) return `at its join "${fork.join}"`;
+      const i = fork.branches.findIndex((b) => b.has(slug));
+      return i < 0 ? undefined : `in its branch "${fork.heads[i]}"`;
+    };
+    const holds = (slug: string, id: string | undefined) =>
+      slug === fork.join
+        ? open.some((f) => f.join === fork.join)
+        : joinOfInstance(id) === fork.join;
+    const say = (slug: string, where: string) =>
+      `node "${slug}" is where the run stands, and the change would put it ${where} of the fork at "${fork.from}", which the run has not started; a fork cannot be put around the place a run stands now`;
+    for (const visit of state.active) {
+      const where = place(visit.node);
+      if (where !== undefined && !holds(visit.node, visit.fork?.id)) return say(visit.node, where);
+    }
+    for (const pause of state.pauses) {
+      const blocked = pause.blocked;
+      // A pause without a route is held work, which stands as a visit and is judged above.
+      if (!blocked) continue;
+      const id = pause.fork?.id ?? blocked.join;
+      // The route is taken again from `from`, which is not entered by it: from inside a branch it would
+      // go on to the join outside an instance; from the join itself it goes on after the fork.
+      if (blocked.join === undefined && blocked.from !== fork.join) {
+        const where = place(blocked.from);
+        if (where !== undefined && !holds(blocked.from, id)) return say(blocked.from, where);
+      }
+      const retaken =
+        blocked.from === fork.from &&
+        (blocked.heads !== undefined ||
+          effects.some((e) => e.kind !== "restart" && e.node === blocked.from));
+      for (const to of blocked.heads ?? [blocked.to]) {
+        const where = place(to);
+        if (where !== undefined && !retaken && !holds(to, id)) return say(to, where);
+      }
+    }
+  }
+  return undefined;
+}
+
 export function diffPipelines(
   before: PipelineSpec,
   after: PipelineSpec,
@@ -350,6 +437,8 @@ export function diffPipelines(
       });
     }
   }
+  const wrapped = forkAroundStanding(after, state, effects);
+  if (wrapped !== undefined) return refuse(wrapped);
   return { nodes, effects };
 }
 

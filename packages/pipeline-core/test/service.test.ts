@@ -28,6 +28,7 @@ import {
   type StepResult,
   type TakeOutcome,
   validateReport,
+  type WaitScope,
 } from "../src";
 import {
   CONTRACT_VERSION,
@@ -52,6 +53,8 @@ class FakeHost implements PipelineHost {
   holdCommands = false;
   /** The waits the service asked for, in milliseconds. */
   readonly waited: number[] = [];
+  /** Whose work each of those waits was for: the node and the scope the service named. */
+  readonly waitedFor: { node?: string; scope?: WaitScope }[] = [];
   /** What the service asked `start` for. */
   readonly starts: { pipeline: string; task: string; restart: boolean; cwd?: string }[] = [];
   /** Where this host says its runs work, when it has an opinion. */
@@ -262,8 +265,12 @@ class FakeRun implements RunHandle {
     return input.yaml === "" ? { ok: true, status: "withdrawn" } : { ok: true, status: "proposed" };
   }
 
-  async waitForRest(ms: number): Promise<void> {
+  async waitForRest(ms: number, node?: string, scope?: WaitScope): Promise<void> {
     this.host.waited.push(ms);
+    this.host.waitedFor.push({
+      ...(node === undefined ? {} : { node }),
+      ...(scope === undefined ? {} : { scope }),
+    });
   }
 }
 
@@ -400,6 +407,15 @@ describe("driving a run", () => {
       next: { waiting: { node_slug: "plan-approval" } },
     });
     expect(done.failed_check).toBeUndefined();
+  });
+
+  test("t40_complete_step_waits_for_the_completed_steps_own_work_only", async () => {
+    // the completion waits for its own node's checks (`step`), not for the chain it led into
+    const { svc, host } = service();
+    const { run_id } = asOk(await svc.start({ task: "t" }));
+    host.waitedFor.length = 0;
+    asOk(await svc.completeStep({ run_id: run_id as string, node_slug: "plan", attempt: 1 }));
+    expect(host.waitedFor).toEqual([{ node: "plan", scope: "step" }]);
   });
 
   test("a failed check gives the reason and the same node again", async () => {
@@ -623,8 +639,11 @@ describe("waiting for the engine's work", () => {
   test("with wait_s the service waits that long for the work, then answers again", async () => {
     const { host, svc, runId } = await running();
     host.waited.length = 0;
+    host.waitedFor.length = 0;
     await svc.nextStep({ run_id: runId, wait_s: 25 });
     expect(host.waited).toEqual([25_000]);
+    // for whatever runs: no node, the default scope
+    expect(host.waitedFor).toEqual([{}]);
   });
 
   test("a wait is never longer than 45 seconds, whatever was asked", async () => {

@@ -165,7 +165,11 @@ export interface RunReport {
   status: string;
   /** Seconds from the start to the end (to the last record, for a run still going). */
   total_s: number;
-  /** Seconds the engine and the agent spent on nodes that are not gates, summed over the attempts. */
+  /**
+   * Seconds the engine and the agent spent on nodes that are not gates, summed over the attempts. The
+   * `seconds` of those nodes come from the same spans (an attempt held at a failed check before a
+   * recheck counts in neither), so they add up to this, give or take the 0.1 s each attempt is rounded to.
+   */
   work_s: number;
   /**
    * Seconds in which some node that is not a gate was active (wall clock): with a fork two branches
@@ -227,7 +231,6 @@ export function effectsOf(raw: unknown): { kind: string; node: string }[] {
 
 export function summarizeRun(state: RunState, journal: JournalRecord[]): RunReport {
   const nodes = new Map<string, NodeReport>();
-  const entered = new Map<string, number>();
   const gates = new Set<string>();
   let restarts = 0;
   let pauses = 0;
@@ -276,6 +279,15 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
   const spans: Span[] = [];
   const spanOf = (name: string, attempt: number) =>
     spans.findLast((s) => s.node === name && s.attempt === attempt);
+  // An attempt's seconds come from its spans, as `work_s` does: the time it was held at a failed check
+  // before a recheck opened it again is in neither.
+  const attemptSeconds = (name: string, attempt: number, end: number) =>
+    seconds(
+      0,
+      spans
+        .filter((s) => s.node === name && s.attempt === attempt)
+        .reduce((total, s) => total + Math.max(0, (s.to ?? end) - s.from), 0),
+    );
   const forks = new Map<string, ForkReport>();
   let failedBranches = false;
 
@@ -285,7 +297,6 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
     switch (record.event) {
       case "node_entered":
         if (name && attempt !== undefined) {
-          entered.set(`${name}#${attempt}`, record.ts);
           const definition = record.definition as AttemptReport["definition"] | undefined;
           nodeOf(name).attempts.push({
             attempt,
@@ -351,13 +362,12 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
         // closed without a verdict because the pipeline changed under it
         if (name && attempt !== undefined) {
           const found = attemptOf(name, attempt);
-          const from = entered.get(`${name}#${attempt}`) ?? record.ts;
-          if (found) {
-            found.seconds = seconds(from, record.ts);
-            found.outcome = "superseded";
-          }
           const span = spanOf(name, attempt);
           if (span) span.to = record.ts;
+          if (found) {
+            found.seconds = attemptSeconds(name, attempt, record.ts);
+            found.outcome = "superseded";
+          }
         }
         break;
       case "pipeline_accepted":
@@ -399,9 +409,10 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
       case "node_finished":
         if (name && attempt !== undefined) {
           const found = nodeOf(name).attempts.find((a) => a.attempt === attempt);
-          const from = entered.get(`${name}#${attempt}`) ?? record.ts;
+          const span = spanOf(name, attempt);
+          if (span) span.to = record.ts;
           if (found) {
-            found.seconds = seconds(from, record.ts);
+            found.seconds = attemptSeconds(name, attempt, record.ts);
             if (typeof record.outcome === "string") found.outcome = record.outcome;
             if (typeof record.reason === "string") {
               found.failure = {
@@ -410,8 +421,6 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
               };
             }
           }
-          const span = spanOf(name, attempt);
-          if (span) span.to = record.ts;
         }
         break;
       case "agent_completed": {
@@ -510,7 +519,7 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
   for (const report of nodes.values()) {
     for (const attempt of report.attempts) {
       if (attempt.outcome === undefined) {
-        attempt.seconds = seconds(entered.get(`${report.node}#${attempt.attempt}`) ?? last, last);
+        attempt.seconds = attemptSeconds(report.node, attempt.attempt, last);
       }
     }
     // Which attempts ran on another definition than the one before them.

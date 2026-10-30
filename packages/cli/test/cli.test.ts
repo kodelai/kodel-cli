@@ -59,6 +59,8 @@ interface Person {
   pollMs?: number;
   /** Called when `wait` is watching a run that waits. */
   onWatching?: () => void;
+  /** In place of `wait`'s pause between two looks. */
+  betweenLooks?: () => Promise<void>;
 }
 
 /** Run a command as a person at a terminal who says yes, unless told otherwise. */
@@ -78,6 +80,7 @@ async function cliAs(person: Person, ...args: string[]) {
     environment: person.environment ?? {},
     ...(person.pollMs === undefined ? {} : { pollMs: person.pollMs }),
     ...(person.onWatching === undefined ? {} : { onWatching: person.onWatching }),
+    ...(person.betweenLooks === undefined ? {} : { betweenLooks: person.betweenLooks }),
     select: async () => [],
     confirm: async (question) => {
       asked.push(question);
@@ -1285,12 +1288,33 @@ describe("wait", () => {
     };
     await toPause();
     const before = JSON.stringify((await run.state()).pauses);
-    // Slow rounds: the resume and the pause after it both happen before wait looks again.
-    const wait = started({ pollMs: 4_000 }, "wait", run.runId, "--timeout", "12");
+    // wait looks again only when the test lets it: the resume and the pause after it both happen
+    // before its second look, so the state it sees is the one it saw first
+    let looked = 0;
+    let letLook: () => void = () => {};
+    const mayLook = new Promise<void>((resolve) => {
+      letLook = resolve;
+    });
+    const wait = started(
+      {
+        betweenLooks: () => {
+          looked += 1;
+          return mayLook;
+        },
+      },
+      "wait",
+      run.runId,
+      "--timeout",
+      "60",
+    );
     await wait.ready();
     await cli("resume", run.runId);
     await toPause();
     expect(JSON.stringify((await run.state()).pauses)).toBe(before);
+    // it is still before its second look: nothing it could have seen differs from the first
+    expect(looked).toBe(1);
+    expect(wait.isDone()).toBe(false);
+    letLook();
     expect((await wait.result).out).toBe(LINE(run.runId, "resumed"));
   }, 30_000);
 

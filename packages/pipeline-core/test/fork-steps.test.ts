@@ -412,6 +412,34 @@ describe("t40 steps: what is handed out", () => {
     expect(runningOf(h.next(capped)).queued).toBe(1);
   });
 
+  test("t40_worker_renews_its_second_step_at_the_cap", () => {
+    // one token holds `a` and `b` under a cap of 2: renewing either is a renewal, not a refusal
+    const h = openFork(THREE);
+    const take = (node: string): RunEvent => ({
+      type: "step_claimed",
+      node,
+      token: "T",
+      ttlMs: 60_000,
+      maxParallel: 2,
+    });
+    must(h.send(take("a")));
+    must(h.send(take("b")));
+    h.advance(1_000);
+    const b = must(h.send(take("b")));
+    expect(b.noop).toBeUndefined();
+    expect(h.state.nodes.b?.claim?.at).toBe(h.now);
+    const a = must(h.send(take("a")));
+    expect(a.noop).toBeUndefined();
+    expect(h.state.nodes.a?.claim?.at).toBe(h.now);
+    // a third step is still held back by the cap
+    expect(must(h.send(take("c"))).noop).toBe(true);
+    const saved = JSON.parse(JSON.stringify(h.state)) as RunState;
+    expect(saved.nodes.b?.claim?.token).toBe("T");
+    expect(
+      h.journal.filter((r) => r.event === "step_claimed" && r.renewed).map((r) => r.node),
+    ).toEqual(["b", "a"]);
+  });
+
   test("t40_result_recorded_per_step", () => {
     const h = openFork();
     must(h.send({ type: "agent_completed", node: "b", attempt: 1, summary: "did b" }));

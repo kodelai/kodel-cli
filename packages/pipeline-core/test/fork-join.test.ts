@@ -4,6 +4,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  branchRegions,
   canonicalNode,
   canonicalPipeline,
   decide,
@@ -710,6 +711,58 @@ describe("t40 parse and validate", () => {
       ),
       '"restart_failed" is reserved for a join',
     );
+  });
+
+  test("t40_restart_failed_not_an_on_fail_label", () => {
+    refused(
+      FORK.replace(
+        "checks: [{ kind: command, command: merge-check }]",
+        "checks: [{ kind: command, command: merge-check, on_fail: restart_failed }]",
+      ),
+      'check 1: "restart_failed" is reserved for the outcome a join declares',
+    );
+    // nor as a node's own failure label
+    refused(
+      FORK.replace(
+        "  - { slug: b-test, kind: command, command: b-test }",
+        "  - { slug: b-test, kind: command, command: b-test, on_fail: restart_failed }",
+      ),
+      'node "b-test": "restart_failed" is reserved for the outcome a join declares',
+    );
+  });
+
+  test("t40_red_join_check_never_restarts_branches", () => {
+    // a pipeline that got the label past the validator (built by hand here): two branches pass and
+    // the join's check is red; that failure neither runs the branches again nor ends the run as a
+    // `restart_failed` with no failed branch
+    const spec = structuredClone(fork);
+    const merge = spec.nodes.find((n) => n.slug === "merge") as PipelineSpec["nodes"][number];
+    (merge.checks[0] as { on_fail: string }).on_fail = RESTART_FAILED;
+    const h = host(spec, (effect) =>
+      effect.type === "run_check" && effect.node === "merge"
+        ? {
+            type: "check_finished",
+            node: effect.node,
+            attempt: effect.attempt,
+            index: effect.index,
+            passed: false,
+            reason: "merge is red",
+          }
+        : answer(effect),
+    );
+    h.hold("a", "b", "merge");
+    h.send(START);
+    h.send(complete("plan", 1));
+    h.release("a");
+    h.release("b");
+    must(h.send(complete("merge", 1)));
+    const told = JSON.stringify(h.journal);
+    expect(told).not.toContain("no branch of its fork had failed");
+    const entered = h.journal.filter(
+      (r) => r.event === "node_entered" && (r.node === "a" || r.node === "b"),
+    );
+    expect(entered).toHaveLength(2);
+    expect(h.state.status).not.toBe("failed");
   });
 
   test("t40_labels_of_is_single_source", () => {
@@ -2385,6 +2438,40 @@ function forkInvariants(
       );
     }
   }
+  // (l) a step that stands in a branch of a fork of the pipeline stands in an instance of that fork,
+  // and one at its join has an instance to join: a change never puts a fork around where a run stands
+  const joins = new Set(spec.nodes.filter((n) => n.join !== undefined).map((n) => n.slug));
+  const groups = new Map<string, { from: string; heads: string[] }>();
+  for (const edge of spec.edges) {
+    const key = JSON.stringify([edge.from, edge.when]);
+    const group = groups.get(key) ?? { from: edge.from, heads: [] };
+    group.heads.push(edge.to);
+    groups.set(key, group);
+  }
+  for (const { from, heads } of groups.values()) {
+    if (heads.length < 2) continue;
+    for (const join of joins) {
+      const { branches } = branchRegions(spec.edges, joins, from, heads, join);
+      const meets = heads.every(
+        (head, i) =>
+          head === join || spec.edges.some((e) => e.to === join && branches[i]?.has(e.from)),
+      );
+      if (!meets) continue;
+      for (const visit of state.active) {
+        if (visit.node === join) {
+          expect(
+            Object.values(state.forks ?? {}).some((f) => f.join === join),
+            `${where}: ${join} stands as a join with no instance`,
+          ).toBe(true);
+        } else if (branches.some((b) => b.has(visit.node))) {
+          expect(
+            visit.fork && state.forks?.[visit.fork.id]?.join,
+            `${where}: ${visit.node} stands in a branch of "${from}" outside its instances`,
+          ).toBe(join);
+        }
+      }
+    }
+  }
   // (h) what stands, stands in the pipeline the run is on: a change that took the node away was refused
   const slugs = new Set(spec.nodes.map((n) => n.slug));
   for (const visit of state.active)
@@ -2458,6 +2545,7 @@ function simulate(
   let shapeRefused = 0;
   let shapeAccepted = 0;
   let moveRefused = 0;
+  let wrapRefused = 0;
   const accepted: PipelineSpec[] = [];
   const hashOf = (version: PipelineSpec) =>
     version === spec ? "h" : `h${variants.indexOf(version) + 2}`;
@@ -2522,6 +2610,7 @@ function simulate(
       } else {
         if (shape && result.error.message.includes("is open")) shapeRefused += 1;
         if (result.error.message.includes("the place of a step of an open fork")) moveRefused += 1;
+        if (result.error.message.includes("a fork cannot be put around")) wrapRefused += 1;
         current = was;
       }
     } else if (pending.length > 0 && roll < 0.8) {
@@ -2591,6 +2680,7 @@ function simulate(
     shapeRefused,
     shapeAccepted,
     moveRefused,
+    wrapRefused,
     accepted,
   };
 }
@@ -2638,6 +2728,16 @@ describe("t40 random schedules", () => {
     ).replace("  - { from: b, to: b-test }\n", "  - { from: b, to: merge }\n"),
   );
   const forkVariants = [forkVariant, forkThreeBranches, forkJoinLimit];
+  /** A second fork after the join: `merge` forks into `ship` and `ship2`, which meet at `done`. */
+  const forkAroundShip = parsePipeline(
+    PAUSING.replace(
+      "  - { slug: ship, kind: command, command: ship }\n",
+      "  - { slug: ship, kind: command, command: ship }\n  - { slug: ship2, kind: command, command: ship2 }\n  - { slug: done, kind: command, command: done, join: all }\n",
+    ).replace(
+      "  - { from: ship, to: plan, when: failed }\n",
+      "  - { from: merge, to: ship2 }\n  - { from: ship, to: done }\n  - { from: ship, to: done, when: failed }\n  - { from: ship2, to: done }\n  - { from: ship2, to: done, when: failed }\n  - { from: done, to: plan, when: failed }\n",
+    ),
+  );
 
   test("t40_random_schedule_keeps_invariants", () => {
     const statuses = new Set<string>();
@@ -2693,6 +2793,23 @@ describe("t40 random schedules", () => {
     }
     expect(moveRefused).toBeGreaterThan(0);
     expect(moveAccepted).toBeGreaterThan(0);
+  }, 60_000);
+
+  test("t40_random_schedule_puts_a_fork_around_a_standing_step", () => {
+    // A change that wraps `ship` in a new fork is refused while `ship` stands, and taken while the
+    // run is elsewhere; either way no step ever stands in a branch outside an instance of its fork
+    // (`forkInvariants`, l).
+    expect(forkTargetsOf(forkAroundShip, "merge")).toEqual(["ship", "ship2"]);
+    let wrapRefused = 0;
+    let wrapAccepted = 0;
+    for (const seed of SEEDS) {
+      const run = simulate(pausing, seed + 4000, 300, true, [forkAroundShip, forkVariant]);
+      wrapRefused += run.wrapRefused;
+      wrapAccepted += run.accepted.filter((v) => v === forkAroundShip).length;
+      expect(run.refusedFollowUps, `seed ${seed}`).toBe(0);
+    }
+    expect(wrapRefused).toBeGreaterThan(0);
+    expect(wrapAccepted).toBeGreaterThan(0);
   }, 60_000);
 
   test("t40_random_schedule_with_pauses_and_restart_failed", () => {
@@ -2936,6 +3053,94 @@ describe("t40 repair in a fork", () => {
     expect(h.state.nodes["b-test"]?.consecutiveFailures).toBe(failures);
     expect(h.state.nodes["a-test"]?.status).toBe("passed");
     expect(h.state.nodes.merge?.lastFailures?.map((f) => f.from)).toEqual(["b-test"]);
+  });
+
+  test("t40_recheck_at_held_join_drops_the_stale_arrival", () => {
+    // b arrives last, failed by its check, and the join is held at its limit. A change lifts the limit
+    // and changes b's check: while b's checks run again, b has not arrived (no stale failed arrival in
+    // the state or the report); when they pass, it arrives anew and the join is entered once.
+    const text = yaml([
+      "name: held-join",
+      "nodes:",
+      "  - { slug: plan, kind: agent, prompt: plan }",
+      "  - { slug: a, kind: agent, prompt: a }",
+      "  - slug: b",
+      "    kind: agent",
+      "    prompt: b",
+      "    checks: [{ kind: command, command: b-check }]",
+      "  - slug: j",
+      "    kind: agent",
+      "    prompt: j",
+      "    join: all",
+      "    max_attempts: 1",
+      "    max_consecutive_failures: 1",
+      "  - { slug: ship, kind: command, command: ship }",
+      "edges:",
+      "  - { from: plan, to: a }",
+      "  - { from: plan, to: b }",
+      "  - { from: a, to: j }",
+      "  - { from: b, to: j }",
+      "  - { from: b, to: j, when: failed }",
+      "  - { from: j, to: ship }",
+      "  - { from: ship, to: plan, when: failed }",
+    ]);
+    const before = parsePipeline(text);
+    const held: Effect[] = [];
+    const h = host(before, (effect, state) => {
+      if (effect.type === "run_command" && effect.node === "ship") return failed(effect, "red");
+      if (effect.type === "run_check" && effect.node === "b" && state.forks?.f2) {
+        if (state.specHash === "h2") {
+          held.push(effect);
+          return undefined;
+        }
+        return {
+          type: "check_finished",
+          node: effect.node,
+          attempt: effect.attempt,
+          index: effect.index,
+          passed: false,
+          reason: "b is red",
+        };
+      }
+      return answer(effect);
+    });
+    h.hold("plan", "j");
+    h.send(START);
+    h.send(complete("plan", 1));
+    must(h.send(complete("j", 1)));
+    must(h.send(complete("plan", 2)));
+    expect(h.state.forks?.f2?.arrived.b).toMatchObject({ label: "failed" });
+    const lifted = parsePipeline(
+      text
+        .replace("command: b-check", "command: b-check-fixed")
+        .replace("    max_attempts: 1\n", "    max_attempts: 2\n"),
+    );
+    h.use(lifted);
+    must(h.send({ type: "pipeline_accepted", from: "h", to: "h2", source: "file", before }));
+    const state = JSON.parse(JSON.stringify(h.state)) as RunState;
+    expect(state.active.map((v) => [v.node, v.phase, v.fork?.branch])).toEqual([
+      ["b", "checks", "b"],
+    ]);
+    expect(state.pauses).toEqual([]);
+    expect(state.forks?.f2?.arrived.b).toBeUndefined();
+    expect(state.forks?.f2?.joined).toBe(0);
+    expect(summarizeRun(state, h.journal).failed_branches).toBe(false);
+    // the checks pass: b arrives passed and the join is entered, counted once
+    const check = held.shift() as Extract<Effect, { type: "run_check" }>;
+    must(
+      h.send({
+        type: "check_finished",
+        node: check.node,
+        attempt: check.attempt,
+        index: check.index,
+        passed: true,
+        reason: "",
+      }),
+    );
+    expect(h.state.forks?.f2?.arrived.b).toMatchObject({ label: "passed" });
+    expect(h.state.forks?.f2?.joined).toBe(1);
+    expect(h.state.active.map((v) => v.node)).toEqual(["j"]);
+    expect(summarizeRun(h.state, h.journal).failed_branches).toBe(false);
   });
 
   test("t40_check_change_of_last_branch_at_held_join_offers_no_recheck", () => {
@@ -4425,5 +4630,93 @@ describe("t40 seventh review", () => {
         ]),
       ),
     ).toEqual([]);
+  });
+});
+
+// ── a fork put around the place a run stands (ninth review) ──
+
+describe("t40 a fork around where the run stands", () => {
+  const WRAP = (join: string, edges: string[]) =>
+    yaml([
+      "name: wrap",
+      "nodes:",
+      "  - { slug: x, kind: agent, prompt: x }",
+      "  - { slug: y, kind: agent, prompt: y }",
+      ...(edges.some((e) => e.includes("to: w"))
+        ? ["  - { slug: w, kind: agent, prompt: w }"]
+        : []),
+      `  - { slug: j, kind: agent, prompt: j${join} }`,
+      "  - { slug: z, kind: agent, prompt: z, outcomes: [again] }",
+      "edges:",
+      "  - { from: j, to: z }",
+      "  - { from: z, to: x, when: again }",
+      ...edges,
+    ]);
+  const plain = parsePipeline(WRAP("", ["  - { from: x, to: y }", "  - { from: y, to: j }"]));
+  const wrapped = parsePipeline(
+    WRAP(", join: all", [
+      "  - { from: x, to: y }",
+      "  - { from: x, to: w }",
+      "  - { from: y, to: j }",
+      "  - { from: w, to: j }",
+    ]),
+  );
+  const accept: RunEvent = {
+    type: "pipeline_accepted",
+    from: "h",
+    to: "h2",
+    source: "file",
+    before: plain,
+  };
+  const standingAt = (...done: string[]) => {
+    const h = host(plain);
+    h.hold("x", "y", "j", "z");
+    h.send(START);
+    for (const node of done) must(h.send(complete(node, 1)));
+    return h;
+  };
+
+  test("t40_change_cannot_put_a_fork_around_the_standing_step", () => {
+    const h = standingAt("x");
+    expect(h.state.active.map((v) => v.node)).toEqual(["y"]);
+    const refused = diffPipelines(plain, wrapped, h.state).refused;
+    expect(refused).toContain('node "y"');
+    expect(refused).toContain('in its branch "y" of the fork at "x"');
+    h.use(wrapped);
+    expect(refusal(h.send(accept)).code).toBe("PIPELINE_CHANGE_REFUSED");
+    h.use(plain);
+    // nothing moved: y completes and j is entered as the plain step it is
+    must(h.send(complete("y", 1)));
+    expect(h.state.active.map((v) => v.node)).toEqual(["j"]);
+    expect(h.state.forks).toBeUndefined();
+  });
+
+  test("t40_change_cannot_put_a_join_on_the_standing_step", () => {
+    const h = standingAt("x", "y");
+    expect(h.state.active.map((v) => v.node)).toEqual(["j"]);
+    expect(diffPipelines(plain, wrapped, h.state).refused).toContain(
+      'node "j" is where the run stands, and the change would put it at its join "j"',
+    );
+  });
+
+  test("t40_change_puts_a_fork_where_the_run_comes_back_to", () => {
+    // standing at z, after the new section: the fork is taken whole when the run comes back to x
+    const h = standingAt("x", "y", "j");
+    expect(h.state.active.map((v) => v.node)).toEqual(["z"]);
+    expect(diffPipelines(plain, wrapped, h.state).refused).toBeUndefined();
+    h.use(wrapped);
+    must(h.send(accept));
+    h.hold("w");
+    must(h.send(complete("z", 1, "again")));
+    must(h.send(complete("x", 2)));
+    expect(h.events()).toContain("fork_started");
+    expect(h.state.active.map((v) => [v.node, v.fork?.branch])).toEqual([
+      ["y", "y"],
+      ["w", "w"],
+    ]);
+    must(h.send(complete("y", 2)));
+    must(h.send(complete("w", 1)));
+    expect(h.events()).toContain("join_reached");
+    expect(h.state.active.map((v) => v.node)).toEqual(["j"]);
   });
 });

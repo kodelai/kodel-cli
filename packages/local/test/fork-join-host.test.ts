@@ -15,6 +15,7 @@ import {
   PipelineService,
   parsePipeline,
   RECORD_VERSION,
+  type RunState,
 } from "@kodel-ai/pipeline-core";
 import {
   hashSource,
@@ -638,6 +639,41 @@ describe("t40 claims on the host", () => {
     expect("node" in none.next).toBe(false);
     const served = (await h.store.readJournal(run.runId)).filter((r) => r.event === "step_served");
     expect(served.map((r) => r.node)).toEqual(["a"]);
+  });
+
+  test("t40_host_worker_renews_its_second_step_at_the_cap", async () => {
+    let now = 1_000_000;
+    const { run } = await openAgents(() => now);
+    await config("agents:\n  subagents: yes\n  max_parallel: 2\n");
+    expect((await run.takeStep({ node: "a", token: "T" })).status).toBe("claimed");
+    expect((await run.takeStep({ node: "b", token: "T" })).status).toBe("claimed");
+    now += 1_000;
+    // the second step held under the token is renewed at the cap, never `taken` from itself
+    expect((await run.takeStep({ node: "b", token: "T" })).status).toBe("renewed");
+    expect((await run.takeStep({ node: "a", token: "T" })).status).toBe("renewed");
+    const state = JSON.parse(JSON.stringify(await run.state())) as RunState;
+    expect([state.nodes.a?.claim?.at, state.nodes.b?.claim?.at]).toEqual([now, now]);
+    // another token still meets the holder
+    expect((await run.takeStep({ node: "b", token: "U" })).status).toBe("taken");
+  });
+
+  test("t40_take_of_a_handed_in_step_or_finished_run_answers_none", async () => {
+    const { run } = await openAgents();
+    await config("agents:\n  subagents: yes\n");
+    expect((await run.takeStep({ node: "a", token: "T" })).status).toBe("claimed");
+    await run.completeStep("a", 1, undefined, undefined, undefined, "T");
+    // `a` was handed in by another worker: nothing to take, said to a worker
+    const gone = await run.takeStep({ node: "a", token: "U" });
+    if (gone.status !== "none") throw new Error(`expected none, got ${gone.status}`);
+    expect(JSON.stringify(gone.next)).toContain("You are a worker");
+    expect(JSON.stringify(gone.next)).not.toContain("call pipeline_next_step");
+    await run.completeStep("b", 1);
+    await run.completeStep("merge", 1);
+    expect((await run.state()).status).toBe("completed");
+    const finished = await run.takeStep({ node: "b" });
+    if (finished.status !== "none") throw new Error(`expected none, got ${finished.status}`);
+    expect("done" in finished.next).toBe(true);
+    expect((await run.takeStep({})).status).toBe("none");
   });
 
   test("t40_served_record_keeps_no_machine_path", async () => {

@@ -15,6 +15,7 @@ import {
   type PipelineHost,
   PipelineService,
   parsePipeline,
+  TELL_CHANGES_NOTE,
 } from "@kodel-ai/pipeline-core";
 import { createLatchRunner, type LatchRunner } from "../../testkit/src/latch-runner";
 import {
@@ -485,7 +486,7 @@ describe("t40 the host runs the branches of a fork at the same time", () => {
     latch.release("a#1#check0");
     const done = await run.completeStep("a", 1);
     expect(done.ok).toBe(true);
-    const own = run.waitForRest(5_000, "a");
+    const own = run.waitForRest(5_000, "a", "step");
     expect(await settlesWithin(own, 3_000)).toBe(true);
     const state = await run.state();
     expect(state.forks?.f1?.arrived.a).toMatchObject({ label: "passed" });
@@ -495,6 +496,46 @@ describe("t40 the host runs the branches of a fork at the same time", () => {
     latch.release("b#1");
     await run.waitForRest(5_000);
     expect((await run.state()).active.map((v) => v.node)).toEqual(["merge"]);
+  });
+
+  test("t40_wait_scope_step_and_chain_differ", async () => {
+    // a's check, then two commands in a row: `step` returns once a's own check is done, `chain`
+    // waits for the commands a led into as well, both of them
+    const chained = parsePipeline(
+      yaml([
+        "name: chained",
+        "nodes:",
+        "  - slug: a",
+        "    kind: agent",
+        "    prompt: a",
+        "    checks: [{ kind: command, command: a-check }]",
+        "  - { slug: c1, kind: command, command: c1 }",
+        "  - { slug: c2, kind: command, command: c2 }",
+        "  - { slug: end, kind: agent, prompt: end }",
+        "edges:",
+        "  - { from: a, to: c1 }",
+        "  - { from: c1, to: c2 }",
+        "  - { from: c2, to: end }",
+        "  - { from: c1, to: end, when: failed }",
+        "  - { from: c2, to: end, when: failed }",
+      ]),
+    );
+    const latch = createLatchRunner();
+    const h = new LocalHost(chained, { root: dir, heartbeatMs: 0, runCommand: latch.runner });
+    const { run } = await h.start("one chain");
+    latch.release("a#1#check0");
+    expect((await run.completeStep("a", 1)).ok).toBe(true);
+    expect(await settlesWithin(run.waitForRest(5_000, "a", "step"), 3_000)).toBe(true);
+    await latch.started("c1#1");
+    const chain = run.waitForRest(10_000, "a", "chain");
+    expect(await settlesWithin(chain, 500)).toBe(false);
+    latch.release("c1#1");
+    await latch.started("c2#1");
+    expect((await run.state()).active.map((v) => v.node)).toEqual(["c2"]);
+    expect(await settlesWithin(chain, 500)).toBe(false);
+    latch.release("c2#1");
+    expect(await settlesWithin(chain, 5_000)).toBe(true);
+    expect((await run.state()).active.map((v) => v.node)).toEqual(["end"]);
   });
 
   test("t40_fork_run_reopens_from_disk_mid_fork", async () => {
@@ -902,6 +943,26 @@ describe("t40 the shared tree at a gate and at a hand-in", () => {
     expect(await run.changesSinceGate("a-gate")).toMatchObject({ note: SHARED_TREE_NOTE });
     const again = await run.nextStep();
     expect("waiting" in again && again.waiting.changes_note).toBe(SHARED_TREE_NOTE);
+  });
+
+  test("t40_worker_answer_gets_no_person_text_from_the_host", async () => {
+    // the gate waits while b runs: the coordinator is told to pass the note on; a worker keeps the
+    // note as data but is told only to report back
+    const { run, latch } = await latched(GATED);
+    await run.completeStep("plan", 1);
+    await latch.started("b#1");
+    await run.completeStep("a", 1);
+    await run.waitForRest(5_000, "a");
+    const coordinator = await run.nextStep();
+    if (!("waiting" in coordinator)) throw new Error("expected a waiting answer");
+    expect(coordinator.waiting.tell_the_person).toContain(TELL_CHANGES_NOTE);
+    const worker = await run.nextStep({ worker: true });
+    if (!("waiting" in worker)) throw new Error("expected a waiting answer");
+    expect(worker.waiting.changes_note).toBe(SHARED_TREE_NOTE);
+    expect(worker.waiting.tell_the_person).toContain("You are a worker");
+    expect(worker.waiting.tell_the_person).not.toContain(TELL_CHANGES_NOTE);
+    latch.release("b#1");
+    await run.waitForRest(5_000);
   });
 
   test("t40_gate_note_uses_the_gate_visits_real_attempt", async () => {

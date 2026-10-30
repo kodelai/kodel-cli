@@ -1128,7 +1128,9 @@ class Machine {
     const run = this.run(node.slug);
     const fork = run.fork;
     const own = failure ? run.lastFailure : undefined;
-    if (node.join !== undefined && label === RESTART_FAILED) {
+    // Only a declared outcome that passed its checks runs the failed branches again; a failure label
+    // of that name (a pipeline written before it was refused) is routed like any other failure.
+    if (node.join !== undefined && label === RESTART_FAILED && !failure) {
       this.restartFailed(node);
       return;
     }
@@ -1896,12 +1898,16 @@ class Machine {
     if (this.s.status !== "running") throw fail("NODE_NOT_RUNNING", `the run is ${this.s.status}`);
     const open = this.s.active.filter((v) => v.phase === "agent");
     const held = open.filter((v) => liveClaim(this.s.nodes[v.node], this.now) !== undefined);
-    const own = held.find((v) => liveClaim(this.s.nodes[v.node], this.now)?.token === event.token);
+    // Judged against the requested step's own claim: a worker holding two steps renews either.
+    const own = held.find(
+      (v) =>
+        liveClaim(this.s.nodes[v.node], this.now)?.token === event.token &&
+        (event.node === undefined || v.node === event.node),
+    );
     // The cap `pipeline_next_step` hands steps out under caps the steps in flight: a take meets it
     // whether it names a step or asks for the next free one, so a worker that knows a slug cannot
     // get past it; only the holder of a step renews it under the cap.
-    const renewing = own !== undefined && (event.node === undefined || own.node === event.node);
-    if (!renewing && event.maxParallel !== undefined && held.length >= event.maxParallel) {
+    if (own === undefined && event.maxParallel !== undefined && held.length >= event.maxParallel) {
       throw new Repeat();
     }
     const slug = event.node ?? own?.node ?? open.find((v) => !held.includes(v))?.node;
@@ -2198,6 +2204,14 @@ class Machine {
       const run = this.run(effect.node);
       run.status = "running";
       run.consecutiveFailures = Math.max(0, run.consecutiveFailures - 1);
+      // A branch that arrived by this attempt runs again: its arrival is gone until it arrives anew,
+      // as with `restart_failed`. The join was not entered on it (a held route into the join counts
+      // only when taken), so `joined` stays.
+      if (run.fork !== undefined) {
+        const fork = this.s.forks?.[run.fork.id];
+        if (fork?.arrived[run.fork.branch]?.node === effect.node)
+          delete fork.arrived[run.fork.branch];
+      }
       const reopened: Visit = {
         node: effect.node,
         attempt: run.attempt,

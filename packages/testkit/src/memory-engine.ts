@@ -173,8 +173,15 @@ export class MemoryEngine implements ScenarioEngine {
           ttlMs: this.claimTtlMs,
           maxParallel: this.maxParallel,
         });
-        if (!result.ok)
+        const none = (state: RunState) => ({
+          ok: true as const,
+          status: "none",
+          next: nextStep(this.spec, state, this.clock, undefined, { worker: true }),
+        });
+        if (!result.ok) {
+          if (result.error.code === "NODE_NOT_RUNNING") return none(before);
           return { ok: false, code: result.error.code, message: result.error.message };
+        }
         const after = this.state ?? result.state;
         const ours = (n: RunState["nodes"][string] | undefined) =>
           liveClaim(n, this.clock)?.token === hash;
@@ -184,17 +191,10 @@ export class MemoryEngine implements ScenarioEngine {
             : ours(after.nodes[node])
               ? after.nodes[node]
               : undefined;
-        const none = () => ({
-          ok: true as const,
-          status: "none",
-          next: nextStep(this.spec, after, this.clock, undefined, { worker: true }),
-        });
         if (mine === undefined) {
-          if (node === undefined) return none();
+          if (node === undefined) return none(after);
           const visit = after.active.find((v) => v.node === node && v.phase === "agent");
-          if (!visit) {
-            return { ok: false, code: "NODE_NOT_RUNNING", message: `node "${node}" is not open` };
-          }
+          if (!visit) return none(after);
           const live = liveClaim(after.nodes[node], this.clock);
           if (live === undefined) {
             return {
@@ -217,9 +217,10 @@ export class MemoryEngine implements ScenarioEngine {
           };
         }
         const visit = after.active.find((v) => v.node === mine.slug && v.phase === "agent");
-        if (!visit) return none();
-        // The machine's word on the claim, as the local host reads it.
-        const renewed = result.claimed?.renewed === true;
+        if (!visit) return none(after);
+        // The machine's word on the claim, as the local host reads it; a quiet no-op on a claim the
+        // caller holds is a renewal there too, never a fresh claim.
+        const renewed = result.claimed === undefined || result.claimed.renewed;
         return {
           ok: true,
           status: renewed ? "renewed" : "claimed",

@@ -9,7 +9,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalPipelineHost } from "@kodel-ai/local";
+import { LocalPipelineHost, LocalRun } from "@kodel-ai/local";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -39,6 +39,23 @@ const FORK_GATES = yaml([
   "  - { from: b, to: b-gate }",
   "  - { from: b-gate, to: merge, when: approved }",
   "  - { from: b-gate, to: b, when: rejected }",
+]);
+
+/** Two gates open at once, each its own branch: neither writes to the tree. */
+const TWO_GATES = yaml([
+  "name: twogates",
+  "nodes:",
+  "  - { slug: plan, kind: agent, prompt: plan }",
+  "  - { slug: a-gate, kind: human, prompt: a? }",
+  "  - { slug: b-gate, kind: human, prompt: b? }",
+  "  - { slug: merge, kind: agent, prompt: merge, join: all }",
+  "edges:",
+  "  - { from: plan, to: a-gate }",
+  "  - { from: plan, to: b-gate }",
+  "  - { from: a-gate, to: merge, when: approved }",
+  "  - { from: a-gate, to: merge, when: rejected }",
+  "  - { from: b-gate, to: merge, when: approved }",
+  "  - { from: b-gate, to: merge, when: rejected }",
 ]);
 
 /** One gate, no fork. */
@@ -123,6 +140,7 @@ beforeEach(async () => {
     ["slow", SLOW],
     ["pauses", PAUSES],
     ["single", SINGLE],
+    ["twogates", TWO_GATES],
   ]) {
     await writeFile(join(dir, ".kodel", "pipelines", `${name}.yaml`), text as string);
   }
@@ -332,6 +350,52 @@ describe("t40 the dialog on a run with a fork", () => {
     ).toBe(true);
     await (await s.host.open(runId))?.waitForRest(10_000);
     await s.close();
+  });
+
+  test("t40_two_open_gates_share_nothing_and_keep_the_refusal", async () => {
+    // a sibling gate only waits for a person: it writes nothing, so the question has no note and
+    // files that change while the dialog is open still make the decision stale
+    const s = await connect(async () => {
+      await writeFile(join(dir, "late.txt"), "written while the dialog was open\n");
+      return approve;
+    });
+    const runId = await start(s, "twogates");
+    const run = await s.host.open(runId);
+    const done = await complete(s, runId, "plan");
+    expect(s.forms.length).toBeGreaterThan(0);
+    expect(s.forms[0]?.message).not.toContain(SHARED_TREE_TEXT);
+    expect(done.body.dialog.answer).toBe("stale");
+    const state = await run?.state();
+    expect(state?.active.map((v) => [v.node, v.phase])).toEqual([
+      ["a-gate", "human"],
+      ["b-gate", "human"],
+    ]);
+    expect(await run?.changesSinceGate("a-gate")).not.toHaveProperty("note");
+    await s.close();
+  });
+
+  test("t40_dialog_refuses_when_the_shown_changes_can_no_longer_be_listed", async () => {
+    // the question had the list (with the note: b runs); when the person answers, the list cannot be
+    // made any more: nothing is compared, so nothing is decided
+    const original = LocalRun.prototype.changesSinceGate;
+    const s = await connect(async () => {
+      LocalRun.prototype.changesSinceGate = async () => ({ kind: "unavailable", reason: "gone" });
+      return approve;
+    });
+    try {
+      const runId = await start(s, "slow");
+      await complete(s, runId, "plan");
+      const next = await complete(s, runId, "a");
+      expect(s.forms).toHaveLength(1);
+      expect(s.forms[0]?.message).toContain(SHARED_TREE_TEXT);
+      expect(next.body.dialog.answer).toBe("stale");
+      expect(await journalOf(runId)).not.toContain('"event":"gate_decided"');
+      LocalRun.prototype.changesSinceGate = original;
+      await (await s.host.open(runId))?.waitForRest(10_000);
+    } finally {
+      LocalRun.prototype.changesSinceGate = original;
+      await s.close();
+    }
   });
 
   test("t40_dialog_gate_question_without_note_when_alone", async () => {

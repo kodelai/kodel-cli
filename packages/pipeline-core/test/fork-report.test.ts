@@ -395,5 +395,11 @@ test("t40_report_recheck_opens_a_span_of_its_own", () => {
   }
   expect(journal.map((r) => r.event)).toContain("checks_rerun");
   expect(state.status).toBe("completed");
-  expect(summarizeRun(state, journal).busy_wall_s).toBe(12 + 5);
+  const report = summarizeRun(JSON.parse(JSON.stringify(state)) as RunState, journal);
+  expect(report.busy_wall_s).toBe(12 + 5);
+  // the attempt's own seconds leave the held time out too: the nodes add up to `work_s`
+  expect(report.work_s).toBe(12 + 5);
+  expect(report.nodes.find((n) => n.node === "a")?.attempts[0]?.seconds).toBe(12 + 5);
+  const nodes = report.nodes.filter((n) => !n.gate).reduce((sum, n) => sum + n.seconds, 0);
+  expect(nodes).toBe(report.work_s);
 });

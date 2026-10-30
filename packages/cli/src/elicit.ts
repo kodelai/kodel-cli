@@ -532,6 +532,10 @@ async function gateQuestion(
       // limit recorded in T-40). The host judges that from the journal and says so with a note on
       // the report, so a sibling that arrived at the join while the dialog was open counts too.
       const now = await run.changesSinceGate(node);
+      // Fail closed: what was shown can no longer be compared with anything, note or not.
+      if (found.kind === "changes" && now.kind !== "changes") {
+        return stale("the files could no longer be listed to compare with what was shown");
+      }
       const shared = (report: ChangeReport) =>
         report.kind === "changes" && report.note !== undefined;
       const moved = changesFingerprint(now) !== changesFingerprint(found);

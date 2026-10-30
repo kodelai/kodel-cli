@@ -423,6 +423,24 @@ const MOVING_EVENTS = new Set([
   "check_finished",
 ]);
 
+/**
+ * Whether a node other than `node` is active and can write to the tree: an agent step, a command or
+ * its checks. A gate that waits for a person writes nothing, so two gates open at once share nothing.
+ */
+function writingElsewhere(state: RunState, node: string): boolean {
+  return state.active.some((v) => v.node !== node && v.phase !== "human");
+}
+
+/** Which nodes of the journal can write: every node but a gate (a node that waited for a person). */
+function writerOf(
+  journal: readonly { event: string; node?: unknown }[],
+): (node: string) => boolean {
+  const gates = new Set(
+    journal.filter((r) => r.event === "gate_waiting").map((r) => String(r.node)),
+  );
+  return (node) => !gates.has(node);
+}
+
 export class LocalHost {
   readonly store: FileStore;
   readonly snapshotter: GitSnapshotter;
@@ -1756,18 +1774,20 @@ export class LocalRun {
     node: string,
     attempt: number,
   ): Promise<boolean> {
-    if (state.active.some((v) => v.node !== node)) return true;
+    if (writingElsewhere(state, node)) return true;
     const journal = await this.host.store.readJournal(this.runId).catch(() => []);
     const reached = journal.find(
       (r) => r.event === "gate_waiting" && r.node === node && r.attempt === attempt,
     );
     if (!reached) return false;
+    const writes = writerOf(journal);
     return journal.some(
       (r) =>
         r.seq > reached.seq &&
         MOVING_EVENTS.has(r.event) &&
-        r.node !== undefined &&
-        r.node !== node,
+        typeof r.node === "string" &&
+        r.node !== node &&
+        writes(r.node),
     );
   }
 
@@ -1776,14 +1796,16 @@ export class LocalRun {
    * run: the window of `changesSinceStart`, the list a gate's answer gives the agent.
    */
   private async otherBranchesMovedInRun(state: RunState, node: string): Promise<boolean> {
-    if (state.active.some((v) => v.node !== node)) return true;
+    if (writingElsewhere(state, node)) return true;
     if (state.forks === undefined) return false;
     const journal = await this.host.store.readJournal(this.runId).catch(() => []);
+    const writes = writerOf(journal);
     return journal.some(
       (r) =>
         MOVING_EVENTS.has(r.event) &&
         typeof r.node === "string" &&
         r.node !== node &&
+        writes(r.node) &&
         !inOwnBranch(state, node, r.node),
     );
   }
@@ -1798,19 +1820,21 @@ export class LocalRun {
     node: string,
     attempt: number,
   ): Promise<boolean> {
-    if (state.active.some((v) => v.node !== node)) return true;
+    if (writingElsewhere(state, node)) return true;
     if (state.forks === undefined) return false;
     const journal = await this.host.store.readJournal(this.runId).catch(() => []);
     const entered = journal.findLast(
       (r) => r.event === "node_entered" && r.node === node && r.attempt === attempt,
     );
     if (!entered) return false;
+    const writes = writerOf(journal);
     return journal.some(
       (r) =>
         r.seq > entered.seq &&
         MOVING_EVENTS.has(r.event) &&
         typeof r.node === "string" &&
         r.node !== node &&
+        writes(r.node) &&
         !inOwnBranch(state, node, r.node),
     );
   }
@@ -2268,7 +2292,9 @@ export class LocalRun {
         ...(pending ? { pending: pending.info } : {}),
       },
     );
-    if ("done" in step && step.run_status === "completed") {
+    // A worker is told only to report back (`forWorker`): what is for the person is the coordinator's.
+    const worker = options.worker === true;
+    if (!worker && "done" in step && step.run_status === "completed") {
       const where = await this.locationForDisplay();
       // Only a run with a worktree of its own has something to protect: the end tree is read from it,
       // and removing it now would lose the patch.
@@ -2296,7 +2322,7 @@ export class LocalRun {
       // The note qualifies the list it stands by, so it is judged on the same window: the whole run.
       if (await this.otherBranchesMovedInRun(state, step.waiting.node_slug)) {
         step.waiting.changes_note = SHARED_TREE_NOTE;
-        step.waiting.tell_the_person += TELL_CHANGES_NOTE;
+        if (!worker) step.waiting.tell_the_person += TELL_CHANGES_NOTE;
       }
     }
     if (options.serve !== undefined && "node" in step) {
@@ -2331,28 +2357,29 @@ export class LocalRun {
       ttlMs: hints.agents.claim_ttl_s * 1000,
       maxParallel: hints.agents.max_parallel,
     });
+    // The caller is a worker: when there is nothing to take (the step was handed in by another
+    // worker, the run finished or stopped) it is told so and to report back, never the coordinator's
+    // advice to call pipeline_next_step.
+    const none = async (): Promise<TakeOutcome> => ({
+      status: "none",
+      next: await this.nextStep({ serve, worker: true }),
+    });
     if (!decision.ok) {
       await this.recordRefusal("take_step", input.node, undefined, decision.error);
+      if (decision.error.code === "NODE_NOT_RUNNING") return none();
       throw decision.error;
     }
     const after = decision.state;
     const now = this.host.clock();
     // What was claimed, and whether it was a renewal, is the machine's word under the lock: a state
     // read around it may be another take's.
-    const claimed = decision.noop ? undefined : decision.claimed;
+    let claimed = decision.noop ? undefined : decision.claimed;
     if (claimed === undefined) {
-      if (input.node === undefined) {
-        // The caller is a worker: it is told to report back, never the coordinator's answer.
-        return { status: "none", next: await this.nextStep({ serve, worker: true }) };
-      }
-      const visit = after.active.find((v) => v.node === input.node && v.phase === "agent");
-      if (!visit) {
-        throw new KodelError(
-          "NODE_NOT_RUNNING",
-          `node "${input.node}" is not an open agent step; call pipeline_next_step to see what is open`,
-        );
-      }
-      const live = liveClaim(after.nodes[input.node], now);
+      const node = input.node;
+      if (node === undefined) return none();
+      const visit = after.active.find((v) => v.node === node && v.phase === "agent");
+      if (!visit) return none();
+      const live = liveClaim(after.nodes[node], now);
       if (live === undefined) {
         // Held back by the cap, not by a holder: the machine left the step as it was.
         const held = after.active.filter(
@@ -2360,18 +2387,17 @@ export class LocalRun {
         ).length;
         return {
           status: "queued",
-          node_slug: input.node,
+          node_slug: node,
           attempt: visit.attempt,
           held,
           max_parallel: hints.agents.max_parallel,
         };
       }
-      return {
-        status: "taken",
-        node_slug: input.node,
-        attempt: visit.attempt,
-        taken_by: live.by,
-      };
+      // The caller's own live claim is never "taken" from itself: it is a renewal.
+      if (live.token !== hash) {
+        return { status: "taken", node_slug: node, attempt: visit.attempt, taken_by: live.by };
+      }
+      claimed = { node, renewed: true };
     }
     // Only the step taken is recorded as served to this caller, not the siblings the answer lists.
     const answer = await this.nextStep(

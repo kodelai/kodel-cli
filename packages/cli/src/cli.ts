@@ -72,6 +72,8 @@ export interface CliEnv {
   readStdin?(): Promise<string>;
   /** For `wait`: how often it looks at the run, in milliseconds (a second if none). */
   pollMs?: number;
+  /** For `wait`: in place of the pause of `pollMs` between two looks (a test says when it looks again). */
+  betweenLooks?(): Promise<void>;
   /** For `wait`: called once, when it is watching a run that waits (so a test knows when to decide). */
   onWatching?(): void;
 }
@@ -147,7 +149,7 @@ function failedBranches(state: RunState): boolean {
 const describePauses = (state: RunState): string[] =>
   state.pauses.map((p) => `${plain(p.reason)} at ${plain(p.node)}`);
 
-/** Every visit of a run, as "node#attempt (phase)"; a run with a fork has several. */
+/** Every visit of a run, as "node#attempt", with " [branch]" in a fork; a run with a fork has several. */
 const describeVisits = (state: RunState): string[] =>
   state.active.map(
     (v) =>
@@ -621,7 +623,8 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         return;
       }
       const pollMs = env.pollMs ?? 1000;
-      const pause = () => new Promise((resolve) => setTimeout(resolve, pollMs));
+      const pause =
+        env.betweenLooks ?? (() => new Promise<void>((resolve) => setTimeout(resolve, pollMs)));
       env.onWatching?.();
       const started = Date.now();
       let now = first;

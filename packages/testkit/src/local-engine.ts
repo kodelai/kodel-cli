@@ -6,7 +6,7 @@
  * picks the run up from the files on disk.
  */
 import { execFileSync } from "node:child_process";
-import { appendFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -47,6 +47,8 @@ function scenarioHistory(): HistoryConfig {
 
 export class LocalScenarioEngine implements ScenarioEngine {
   readonly name = "local";
+  /** `agents.max_parallel` of the project, written to its config when set. */
+  maxParallel: number | undefined;
 
   private dir = "";
   private host!: LocalHost;
@@ -97,6 +99,13 @@ export class LocalScenarioEngine implements ScenarioEngine {
     git("config", "user.email", "scenario@example.com");
     git("config", "user.name", "Scenario");
     git("commit", "-q", "--allow-empty", "-m", "initial");
+    if (this.maxParallel !== undefined) {
+      await mkdir(join(this.dir, ".kodel"), { recursive: true });
+      await writeFile(
+        join(this.dir, ".kodel", "config.yaml"),
+        `agents:\n  max_parallel: ${this.maxParallel}\n`,
+      );
+    }
 
     this.host = new LocalHost(context.spec, {
       root: this.dir,

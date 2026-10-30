@@ -104,6 +104,60 @@ test("t40_memory_engine_take_follows_the_core_cap", async () => {
   expect(report.ok, formatReport(report)).toBe(true);
 });
 
+/** One worker holds both steps at the cap and renews either of them; a handed-in step is `none`. */
+const renewAtCap = defineScenario("t40-renew-at-cap")
+  .pipeline({ inline: FORK })
+  .task("split the work")
+  .agent("manual")
+  .call("pipeline_complete_step", { run_id: "$run", node_slug: "plan", attempt: 1 }, expectOk())
+  .call(
+    "pipeline_take_step",
+    { run_id: "$run", node_slug: "a", claim_token: "T" },
+    expectOk({ status: "claimed" }),
+  )
+  .call(
+    "pipeline_take_step",
+    { run_id: "$run", node_slug: "b", claim_token: "T" },
+    expectOk({ status: "claimed" }),
+  )
+  .call(
+    "pipeline_take_step",
+    { run_id: "$run", node_slug: "b", claim_token: "T" },
+    expectOk({ status: "renewed", node_slug: "b" }),
+  )
+  .call(
+    "pipeline_take_step",
+    { run_id: "$run", node_slug: "a", claim_token: "T" },
+    expectOk({ status: "renewed", node_slug: "a" }),
+  )
+  .call(
+    "pipeline_complete_step",
+    { run_id: "$run", node_slug: "a", attempt: 1, claim_token: "T" },
+    expectOk(),
+  )
+  .call(
+    "pipeline_take_step",
+    { run_id: "$run", node_slug: "a", claim_token: "U" },
+    expectOk({ status: "none" }),
+  )
+  .expect([matcher("nodeStatus", { a: "passed", b: "running" })])
+  .build();
+
+describe("t40 renewal at the cap in both test engines", () => {
+  test("t40_renew_second_step_at_the_cap_in_both_test_engines (core-memory)", async () => {
+    const engine = new MemoryEngine();
+    engine.maxParallel = 2;
+    const report = await runScenario(renewAtCap, engine);
+    expect(report.ok, formatReport(report)).toBe(true);
+  });
+  test("t40_renew_second_step_at_the_cap_in_both_test_engines (local)", async () => {
+    const engine = new LocalScenarioEngine();
+    engine.maxParallel = 2;
+    const report = await runScenario(renewAtCap, engine);
+    expect(report.ok, formatReport(report)).toBe(true);
+  }, 60_000);
+});
+
 const engines: { name: string; make: () => ScenarioEngine }[] = [
   { name: "core-memory", make: () => new MemoryEngine() },
   { name: "local", make: () => new LocalScenarioEngine() },

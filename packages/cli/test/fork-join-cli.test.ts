@@ -77,7 +77,7 @@ const GATE_AND_LATCHED = [
   "",
 ].join("\n");
 
-/** A gate in one branch; in the other an agent step that leads into a command that takes a while. */
+/** A gate in one branch; in the other an agent step that leads into a command that runs until `release.flag`. */
 const GATE_AND_MOVING = [
   "name: moving",
   "nodes:",
@@ -85,7 +85,7 @@ const GATE_AND_MOVING = [
   "  - { slug: a, kind: agent, prompt: a }",
   "  - { slug: a-gate, kind: human, prompt: a looks fine? }",
   "  - { slug: b, kind: agent, prompt: b }",
-  `  - { slug: b-slow, kind: command, command: "node -e \\"setTimeout(() => {}, 3000)\\"" }`,
+  `  - { slug: b-slow, kind: command, command: "node -e \\"setInterval(() => { if (require('fs').existsSync('release.flag')) process.exit(0) }, 20); setTimeout(() => process.exit(1), 60000)\\"" }`,
   "  - { slug: merge, kind: agent, prompt: merge, join: all }",
   "edges:",
   "  - { from: plan, to: a }",
@@ -99,7 +99,7 @@ const GATE_AND_MOVING = [
   "",
 ].join("\n");
 
-/** A gate in one branch that leads into two commands in a row; a command that takes a while in the other. */
+/** A gate in one branch that leads into two commands in a row; in the other a command that runs until `release.flag`. */
 const GATE_CHAIN_AND_SLOW = [
   "name: chain-slow",
   "nodes:",
@@ -108,7 +108,7 @@ const GATE_CHAIN_AND_SLOW = [
   "  - { slug: a-gate, kind: human, prompt: a looks fine? }",
   `  - { slug: a-build, kind: command, command: "node -e \\"setTimeout(() => {}, 600)\\"" }`,
   `  - { slug: a-test, kind: command, command: "node -e \\"setTimeout(() => {}, 600)\\"" }`,
-  `  - { slug: b, kind: command, command: "node -e \\"setTimeout(() => {}, 4000)\\"" }`,
+  `  - { slug: b, kind: command, command: "node -e \\"setInterval(() => { if (require('fs').existsSync('release.flag')) process.exit(0) }, 20); setTimeout(() => process.exit(1), 60000)\\"" }`,
   "  - { slug: merge, kind: agent, prompt: merge, join: all }",
   "edges:",
   "  - { from: plan, to: a }",
@@ -580,8 +580,9 @@ describe("t40 several gates at once", () => {
 
   test("t40_after_decision_ignores_a_sibling_that_moved_on_while_the_person_read", async () => {
     // While the person reads the question, the other branch hands its step in and enters a command
-    // that runs for 3 s. That node was not entered by the decision, so the decision does not wait
-    // for it: the standing the decision is judged against is read right before it is made.
+    // that runs until the test releases it. That node was not entered by the decision, so the
+    // decision does not wait for it (if it did, the command would not return before the test's
+    // timeout): the standing the decision is judged against is read right before it is made.
     const h = host();
     const run = (await h.start({ pipeline: "moving", task: "t", restart: false })).run as LocalRun;
     await run.completeStep("plan", 1);
@@ -591,7 +592,6 @@ describe("t40 several gates at once", () => {
       ["a-gate", "human"],
       ["b", "agent"],
     ]);
-    const begun = Date.now();
     const decided = await cliAs(
       {
         onAsk: async () => {
@@ -610,8 +610,13 @@ describe("t40 several gates at once", () => {
     );
     expect(decided.code).toBe(0);
     expect(decided.asked).toHaveLength(1);
-    expect(Date.now() - begun).toBeLessThan(2_500);
     expect(decided.out).toContain("running at b-slow#1 [b]");
+    const after = JSON.parse(JSON.stringify(await run.state())) as Awaited<
+      ReturnType<typeof run.state>
+    >;
+    expect(after.active.map((v) => [v.node, v.phase])).toEqual([["b-slow", "engine"]]);
+    expect(after.nodes["a-gate"]?.status).toBe("passed");
+    await writeFile(join(dir, "release.flag"), "");
     await run.waitForRest(10_000);
     expect((await run.state()).active.map((v) => v.node)).toEqual(["merge"]);
   });
@@ -699,18 +704,16 @@ describe("t40 a decision waits for the chain it leads into", () => {
       ["a-gate", "human"],
       ["b", "engine"],
     ]);
-    // a-build and a-test (about 1.2 s together) are waited for; b (4 s) is not
-    const begun = Date.now();
+    // a-build and a-test are waited for (both finished when the command returns); b runs until the
+    // test releases it, so a decision that waited for it would not return before the timeout
     const decided = await cli("gate", "approve", run.runId, "--node", "a-gate");
     expect(decided.code).toBe(0);
-    const took = Date.now() - begun;
-    expect(took).toBeGreaterThanOrEqual(1_000);
-    expect(took).toBeLessThan(3_500);
     expect(decided.out).toContain("running at b#1 [b]");
     const state = await run.state();
     expect(state.forks?.f1?.arrived.a).toMatchObject({ node: "a-test", label: "passed" });
     expect(state.active.map((v) => [v.node, v.phase])).toEqual([["b", "engine"]]);
     expect(await commandsFinished(run.runId)).toEqual(["a-build", "a-test"]);
+    await writeFile(join(dir, "release.flag"), "");
     await run.waitForRest(10_000);
     expect((await run.state()).active.map((v) => v.node)).toEqual(["merge"]);
   });

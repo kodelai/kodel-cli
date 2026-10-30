@@ -814,6 +814,20 @@ function validateGraph(c: Collector, nodes: NodeSpec[], edges: EdgeSpec[], regis
         `node "${node.slug}": "${RESTART_FAILED}" is reserved for a join (it is there on every \`join: all\` step of this kind); do not list it in outcomes`,
       );
     }
+    // A failure is never a decision to run the failed branches again: only the join's agent declares it.
+    if (node.on_fail === RESTART_FAILED) {
+      c.add(
+        ["nodes", i, "on_fail"],
+        `node "${node.slug}": "${RESTART_FAILED}" is reserved for the outcome a join declares; it cannot be an \`on_fail\` label`,
+      );
+    }
+    node.checks.forEach((check, k) => {
+      if (check.on_fail !== RESTART_FAILED) return;
+      c.add(
+        ["nodes", i, "checks", k, "on_fail"],
+        `node "${node.slug}", check ${k + 1}: "${RESTART_FAILED}" is reserved for the outcome a join declares; it cannot be an \`on_fail\` label`,
+      );
+    });
     const { success, failure } = labelsOf(registry, node) ?? handler.labels(node);
     for (const label of success.slice(1)) {
       if (label === RESTART_FAILED) continue;
