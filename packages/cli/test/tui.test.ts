@@ -663,7 +663,8 @@ describe("tui card of a run waiting for approval", () => {
     expect(impl).toContain("The agent says (not verified):");
     expect(impl).toContain("Split the change: the table printer stays as it was.");
     const human = text(press(base, SIZE, ...toTab(TAB.steps), "down", "enter"));
-    expect(human).toContain("You: rejected — “no tests in the plan”");
+    expect(human).toContain("You: rejected");
+    expect(human).toContain("no tests in the plan");
   });
 
   test("a step that has not started says so", () => {
@@ -1216,5 +1217,139 @@ describe("tui durations", () => {
     expect(duration(3_600_000)).toBe("1h00");
     expect(duration(1344 * 60_000)).toBe("22h");
     expect(duration(3 * 24 * 3_600_000)).toBe("3d");
+  });
+});
+
+describe("tui readable reasons", () => {
+  const SIZE = { cols: 120, rows: 60 };
+  const gate = () => demoSessions(NOW).sessions.find((s) => s.need === "approve") as Session;
+  const FINDINGS = [
+    '{"severity":"critical","location":"plan Risks 8, Step 1; canonical.ts:89, pipeline-host.ts:707-716, and a very long place that goes on and on until it has to be wrapped onto the next line of the screen","description":"[invariants] The plan says an old run is parsed by its own reader. It is not."}',
+    '{"severity":"major","location":"plan Step 5","description":"[gaps] The guard must accept gate decisions while paused."}',
+  ].join("; ");
+  const withVisits = (extra: GateDetail["visits"]) => {
+    const d = demoGateDetail(gate().id, NOW) as GateDetail;
+    const m = withDetail({ ...demo(), selected: gate().id }, detailKey(gate()), {
+      ...d,
+      visits: [...extra, ...d.visits],
+    });
+    return m;
+  };
+  const failed: GateDetail["visits"][number] = {
+    slug: "plan-critique",
+    kind: "agent",
+    human: false,
+    state: "failed",
+    rework: false,
+    attempt: {
+      n: 1,
+      outcome: "blocking_findings",
+      ok: false,
+      ms: 669_000,
+      reason: `2 blocking findings: ${FINDINGS}`,
+      checks: [{ node: "plan-critique", label: "plan-critique result", passed: false, ms: 58 }],
+      log: [],
+    },
+  };
+  const rejected: GateDetail["visits"][number] = {
+    slug: "plan-approval",
+    kind: "human",
+    human: true,
+    state: "failed",
+    rework: false,
+    attempt: {
+      n: 1,
+      outcome: "rejected",
+      ok: false,
+      ms: 22 * 3_600_000,
+      checks: [],
+      decision: {
+        decision: "rejected",
+        reason:
+          'Fix the plan first.\n\nComments (CSV):\nseverity,location,description\nmajor,plan Step 5,"Why not ""movable""?"',
+      },
+      review: {
+        completeness: "complete",
+        findings: [{ severity: "major", location: "plan Step 5", description: "Why not movable?" }],
+      },
+      log: [],
+    },
+  };
+  const press = (m: ReturnType<typeof demo>, ...keys: string[]) =>
+    keys.reduce((a, k) => update(a, k, SIZE), m);
+  const text = (m: ReturnType<typeof demo>) => plain(render(m, SIZE)).join("\n");
+
+  test("in the list a failure is told in a few words, never as the JSON the engine sends", () => {
+    const out = text(press(withVisits([failed, rejected]), "enter", "right", "right"));
+    expect(out).toMatch(/plan-critique\s+agent\s+11m09\s+2 blocking findings/);
+    expect(out).not.toContain('{"severity"');
+    expect(out).not.toContain("blocking_findings");
+  });
+
+  test("a rejection is told once, and what was recorded at a human step is comments", () => {
+    const out = text(press(withVisits([failed, rejected]), "enter", "right", "right"));
+    expect(out).toMatch(/plan-approval\s+human\s+22h\s+rejected · 1 comment/);
+    expect(out).not.toContain("rejected · rejected");
+  });
+
+  test("inside the try, the findings are laid out: how serious, where, and what", () => {
+    const out = text(
+      press(withVisits([failed]), "enter", "right", "right", "pageup", "pageup", "enter"),
+    );
+    expect(out).toContain("2 blocking findings");
+    expect(out).toMatch(/critical\s+plan Risks 8, Step 1;/);
+    expect(out).toMatch(/major\s+plan Step 5/);
+    expect(out).toContain("[invariants] The plan says an old run");
+    expect(out).toContain("It is not.");
+    expect(out).not.toContain('{"severity"');
+    expect(out).not.toContain("…plan");
+  });
+
+  test("a severity as long as the column still has a space before the place", () => {
+    const out = text(
+      press(withVisits([failed]), "enter", "right", "right", "pageup", "pageup", "enter"),
+    );
+    expect(out).not.toMatch(/criticalplan/);
+    expect(out).toMatch(/critical plan Risks/);
+  });
+
+  test("a long place wraps under its severity, and is never cut", () => {
+    const m = press(withVisits([failed]), "enter", "right", "right", "enter", "z");
+    const lines = plain(render(m, SIZE));
+    const at = lines.findIndex((l) => l.includes("critical"));
+    const place = lines.slice(at, at + 4).join(" ");
+    expect(place).toContain("plan Risks 8, Step 1; canonical.ts:89");
+    expect(place).toContain("screen");
+    expect(lines[at]).not.toContain("…");
+  });
+
+  test("a rejection shows what the person wrote and the comments they made, as comments", () => {
+    const out = text(
+      press(withVisits([rejected]), "enter", "right", "right", "pageup", "pageup", "enter"),
+    );
+    expect(out).toContain("You: rejected");
+    expect(out).toContain("Fix the plan first.");
+    expect(out).toContain("Comments you made: 1 major");
+    expect(out).toContain('Why not "movable"?');
+    expect(out).not.toContain("Comments (CSV)");
+    expect(out).toContain("Comments recorded at this step (complete): 1 major");
+    expect(out).not.toContain("Findings (the agent's");
+  });
+
+  test("a reason that is plain text is shown as written, but a very long one is cut", () => {
+    const long = {
+      ...failed,
+      attempt: {
+        ...failed.attempt,
+        reason: Array.from({ length: 40 }, (_, i) => `line ${i} of the test output`).join("\n"),
+      },
+    };
+    const out = text(
+      press(withVisits([long]), "enter", "right", "right", "pageup", "pageup", "enter"),
+    );
+    expect(out).toContain("line 0 of the test output");
+    expect(out).toContain("line 11 of the test output");
+    expect(out).not.toContain("line 12 of the test output");
+    expect(out).toContain("… 28 more lines");
   });
 });

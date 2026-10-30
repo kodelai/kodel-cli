@@ -14,9 +14,11 @@ import {
   yellow,
 } from "./ansi";
 import { firstCode, prepare, viewDiff } from "./diffview";
+import { capLines, headOf, parseBlocking, parseCommentsCsv } from "./reasons";
 import {
   type Attempt,
   type DiffState,
+  type Finding,
   formatAge,
   type GateDetail,
   type LogEntry,
@@ -458,12 +460,15 @@ function code(d: GateDetail, st: TabState, ctx: Context): Content {
 function visitNote(v: Visit): string {
   const a = v.attempt;
   const parts: string[] = [];
-  if (a.ok === false && a.reason) parts.push(a.reason.split("\n")[0] ?? "");
-  else if (a.ok === false) parts.push(a.outcome ?? "failed");
+  if (a.ok === false) parts.push(a.reason ? headOf(a.reason) : (a.outcome ?? "failed"));
   if (a.decision) parts.push(a.decision.decision);
-  if (a.review) parts.push(`${a.review.findings.length} findings`);
+  if (a.review) {
+    const n = a.review.findings.length;
+    parts.push(`${n} ${v.human ? "comment" : "finding"}${n === 1 ? "" : "s"}`);
+  }
   if (v.state === "waiting") parts.push("waiting for you");
-  return parts.join(" · ");
+  // A rejection is both the outcome of the step and the person's decision.
+  return [...new Set(parts)].join(" · ");
 }
 
 function steps(d: GateDetail, st: TabState, ctx: Context): Content {
@@ -480,14 +485,73 @@ function steps(d: GateDetail, st: TabState, ctx: Context): Content {
   return { lines: out, anchor: first + st.cursor };
 }
 
-function attemptResult(a: Attempt, width: number): string[] {
+/** A finding: how serious, where, and what; the place wraps, since it can be a sentence. */
+function findingLines(f: Finding, width: number): string[] {
+  const place = wrapText(f.location, Math.max(10, width - 12));
+  const out = place.map(
+    (l, i) => `  ${i === 0 ? severityStyle(f.severity, fit(f.severity, 9)) : " ".repeat(9)}${l}`,
+  );
+  if (out.length === 0) out.push(`  ${severityStyle(f.severity, f.severity)}`);
+  for (const line of wrapText(f.description, width - 4)) out.push(`    ${dim(line)}`);
+  return out;
+}
+
+function findingsBlock(label: string, findings: Finding[], width: number): string[] {
+  const rows = [...findings].sort(
+    (x, y) => (SEVERITY_RANK[x.severity] ?? 9) - (SEVERITY_RANK[y.severity] ?? 9),
+  );
+  const counts = new Map<string, number>();
+  for (const f of rows) counts.set(f.severity, (counts.get(f.severity) ?? 0) + 1);
+  const summary = [...counts.entries()]
+    .map(([sev, n]) => severityStyle(sev, `${n} ${sev}`))
+    .join(dim(" · "));
+  return [
+    "",
+    `${dim(label)} ${rows.length === 0 ? green("none") : summary}`,
+    ...rows.flatMap((f) => findingLines(f, width)),
+  ];
+}
+
+/** Why a try failed: the findings a result check found, laid out; anything else as it was written, cut if very long. */
+function reasonLines(reason: string | undefined, width: number): string[] {
+  if (!reason) return [];
+  const blocking = parseBlocking(reason);
+  if (blocking) {
+    const cut = blocking.cut ? [`  ${dim("… and more, which the engine cut off")}`] : [];
+    return [
+      `  ${red(blocking.head)}`,
+      ...[...blocking.findings]
+        .sort((x, y) => (SEVERITY_RANK[x.severity] ?? 9) - (SEVERITY_RANK[y.severity] ?? 9))
+        .flatMap((f) => findingLines(f, width)),
+      ...cut,
+    ];
+  }
+  // The lines of a command's output stay lines: only a line too long for the screen is wrapped.
+  const lines = reason
+    .split("\n")
+    .flatMap((l) => (l.trim() === "" ? [""] : wrapText(l, width - 2)))
+    .map((l) => `  ${red(l)}`);
+  return capLines(lines, 12, (n) => dim(`  … ${n} more lines`));
+}
+
+function decisionLines(d: NonNullable<Attempt["decision"]>, width: number): string[] {
+  const out = ["", `You: ${d.decision}`];
+  if (!d.reason) return out;
+  const csv = parseCommentsCsv(d.reason);
+  const said = csv ? csv.text : d.reason;
+  if (said) out.push(...prose(said, width - 2).map((l) => `  ${l}`));
+  if (csv && csv.rows.length > 0) out.push(...findingsBlock("Comments you made:", csv.rows, width));
+  return out;
+}
+
+function attemptResult(a: Attempt, width: number, human: boolean): string[] {
   const out: string[] = [];
   const mark = a.ok === true ? MARK.ok : a.ok === false ? MARK.bad : MARK.open;
   const bits = [a.outcome ?? "in progress"];
   if (a.ms !== undefined) bits.push(duration(a.ms));
   if (a.exit !== undefined) bits.push(`exit ${a.exit}`);
   out.push(`${mark} ${bits.join(" · ")}`);
-  for (const line of wrapText(a.reason ?? "", width - 2)) out.push(`  ${red(line)}`);
+  out.push(...reasonLines(a.reason, width));
   for (const c of a.checks) {
     out.push(
       `  ${c.passed ? MARK.ok : MARK.bad} ${c.label}${c.ms === undefined ? "" : dim(` ${duration(c.ms)}`)}`,
@@ -497,29 +561,12 @@ function attemptResult(a: Attempt, width: number): string[] {
     out.push("", dim("The agent says (not verified):"));
     out.push(...prose(a.summary, width));
   }
-  if (a.decision) {
-    const why = a.decision.reason ? ` — “${a.decision.reason}”` : "";
-    out.push("", `You: ${a.decision.decision}${why}`);
-  }
+  if (a.decision) out.push(...decisionLines(a.decision, width));
   if (a.review) {
-    const rows = [...a.review.findings].sort(
-      (x, y) => (SEVERITY_RANK[x.severity] ?? 9) - (SEVERITY_RANK[y.severity] ?? 9),
-    );
-    const counts = new Map<string, number>();
-    for (const f of rows) counts.set(f.severity, (counts.get(f.severity) ?? 0) + 1);
-    const summary = [...counts.entries()]
-      .map(([sev, n]) => severityStyle(sev, `${n} ${sev}`))
-      .join(dim(" · "));
-    out.push(
-      "",
-      `${dim(`Findings (the agent's, ${a.review.completeness}):`)} ${rows.length === 0 ? green("none") : summary}`,
-    );
-    for (const f of rows) {
-      out.push(
-        `  ${severityStyle(f.severity, fit(f.severity, 8))}${tailFit(f.location, width - 12)}`,
-      );
-      for (const line of wrapText(f.description, width - 4)) out.push(`    ${dim(line)}`);
-    }
+    const label = human
+      ? `Comments recorded at this step (${a.review.completeness}):`
+      : `Findings (the agent's, ${a.review.completeness}):`;
+    out.push(...findingsBlock(label, a.review.findings, width));
   }
   return out;
 }
@@ -537,7 +584,7 @@ function openVisit(d: GateDetail, st: TabState, ctx: Context): Content {
   if (v.attempt.n === 0) {
     out.push(dim("This step has not started yet."));
   } else if (st.sub === 0) {
-    out.push(...attemptResult(v.attempt, width));
+    out.push(...attemptResult(v.attempt, width, v.human));
   } else if (st.sub === 1) {
     out.push(
       ...wrapText(
