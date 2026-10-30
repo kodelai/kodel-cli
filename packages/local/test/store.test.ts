@@ -338,3 +338,22 @@ describe("newRunId", () => {
     expect(isRunId(newRunId())).toBe(true);
   });
 });
+
+describe("a state that is not an object", () => {
+  test("t40_state_json_that_is_not_an_object_reads_as_modified", async () => {
+    const store = new FileStore({ root: dir });
+    const id = "r_000000001_aaaa";
+    await store.createRun(meta(id));
+    await store.writeState(id, state());
+    const path = join(store.runDir(id), "state.json");
+    for (const text of ["null", "42", '"text"', "[1, 2]"]) {
+      await writeFile(path, text);
+      const error = await store.readStateRaw(id).then(
+        () => undefined,
+        (e: unknown) => e as { code?: string; message?: string },
+      );
+      expect(error?.code, text).toBe("STATE_MODIFIED_EXTERNALLY");
+      expect(error?.message, text).toContain("not a JSON object");
+    }
+  });
+});

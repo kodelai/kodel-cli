@@ -101,9 +101,11 @@ format 2 as written by a newer kodel, which is the right answer, and must not be
 
 Each run worked in a worktree of its own, so `meta.json` carries the placeholder workdir and the
 branch `kodel/<run id>`. The placeholder is put wherever the worktree's path was: `meta.json`,
-`state.json`, the journal (whose redacted `run_started.workdir` is handled by `placeholderInJournal`)
-and the `served/` files, whose `answer.workdir` named the step's directory; a served file's
-`prompt_hash` is of the answer as it was served and is not recomputed. `history.executor` is on in
+`state.json` and the journal (whose redacted `run_started.workdir` is handled by `placeholderInJournal`).
+The `served/` files are not touched by it: the scratch directory's random name read as a secret when
+the answer was stored, so their `answer.workdir` reads `[REDACTED:high-entropy].kodel/worktrees/<run
+id>`, as it was written, and holds no path of the machine; a served file's `prompt_hash` is of that
+stored answer and is not recomputed. `history.executor` is on in
 the scratch project (it is what stamps the engine version and the client): the script ran with no
 `CLAUDE*` variable in its environment and no agent hook index in the scratch repository, so no
 `executor` record carries a session or a model, and `history.agent_log` is off (no agent ran, so

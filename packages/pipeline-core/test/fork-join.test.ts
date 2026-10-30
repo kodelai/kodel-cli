@@ -8,6 +8,7 @@ import {
   canonicalPipeline,
   decide,
   defaultRegistry,
+  describeEffects,
   diffPipelines,
   type Effect,
   type EngineOptions,
@@ -2296,10 +2297,21 @@ function forkInvariants(
       `${where}: paused with something movable`,
     ).toBe(false);
   }
-  if (state.status === "running") {
+  if (state.status === "running" || state.status === "paused") {
+    // (j) no visit and no pause means the run has ended: never `paused` with nothing to resume
     expect(
       state.active.length > 0 || state.pauses.length > 0,
-      `${where}: running with nothing`,
+      `${where}: ${state.status} with nothing active and no pause`,
+    ).toBe(true);
+    expect(state.finishedAt, `${where}: finishedAt of a run that goes on`).toBeUndefined();
+  } else {
+    expect(state.finishedAt, `${where}: an ended run without finishedAt`).toBeDefined();
+  }
+  // (k) a `restarts` pause has its suspended work behind it, which `resume` issues again
+  for (const pause of state.pauses.filter((p) => p.reason === "restarts")) {
+    expect(
+      state.active.some((v) => v.suspended && v.node === pause.node),
+      `${where}: restarts pause of ${pause.node} without suspended work`,
     ).toBe(true);
   }
   expect(state.trail[0]).toBe(spec.entry);
@@ -2323,6 +2335,7 @@ function simulate(
   steps = 300,
   withRestart = false,
   variants: PipelineSpec[] = [],
+  options: EngineOptions = {},
 ) {
   const random = mulberry32(seed);
   let state: RunState | undefined;
@@ -2336,10 +2349,11 @@ function simulate(
   const pending: Effect[] = [];
   const journal: JournalRecord[] = [];
   const seen = new Set<string>();
+  const replayed = new Set<Effect>();
   let refusedFollowUps = 0;
   const send = (event: RunEvent) => {
     const before = state === undefined ? undefined : structuredClone(state);
-    const result = decide(current, state, event, now);
+    const result = decide(current, state, event, now, options);
     if (!result.ok) {
       expect(state).toEqual(before);
       // A result for the attempt a visit is on, in the phase it is in, refused while the run goes
@@ -2396,6 +2410,15 @@ function simulate(
     } else if (pending.length > 0 && roll < 0.8) {
       const [effect] = pending.splice(Math.floor(random() * pending.length), 1);
       if (!effect) continue;
+      // Work that was restarted or suspended may still answer: its effect comes back later, once.
+      if (
+        (effect.type === "run_command" || effect.type === "run_check") &&
+        !replayed.has(effect) &&
+        random() < 0.15
+      ) {
+        replayed.add(effect);
+        pending.push(effect);
+      }
       if (effect.type === "need_agent") {
         const restart = withRestart && effect.node === "merge" && random() < 0.5;
         send(complete(effect.node, effect.attempt, restart ? RESTART_FAILED : undefined));
@@ -2426,6 +2449,13 @@ function simulate(
       }
     } else if (roll < 0.88) {
       now += Math.floor(random() * 60_000);
+      const engine = (state?.active ?? []).filter(
+        (v) => v.phase === "engine" || v.phase === "checks",
+      );
+      const alive = engine[Math.floor(random() * engine.length)];
+      // a sign of life of one piece of work, so a tick restarts or suspends only some of it
+      if (alive && random() < 0.5)
+        send({ type: "heartbeat", node: alive.node, attempt: alive.attempt });
       send({ type: "tick" });
     } else if (roll < 0.96) {
       const pauses = state?.pauses ?? [];
@@ -2517,7 +2547,7 @@ describe("t40 random schedules", () => {
     const ends = new Set<string>();
     for (const seed of SEEDS.slice(0, 40)) ends.add(simulate(doomed, seed).state.status);
     expect(ends.has("failed")).toBe(true);
-  });
+  }, 60_000);
 
   test("t40_random_schedule_with_pauses_and_restart_failed", () => {
     let restarted = 0;
@@ -2534,7 +2564,33 @@ describe("t40 random schedules", () => {
     }
     expect(restarted).toBeGreaterThan(0);
     expect(resumedInFork).toBeGreaterThan(0);
-  });
+  }, 60_000);
+
+  test("t40_random_schedule_with_suspended_work_and_late_results", () => {
+    // Work goes stale fast and is suspended at its first restart, so a branch's work is often
+    // suspended while its sibling goes on, and its late result comes back.
+    let suspended = 0;
+    let ended = 0;
+    for (const seed of SEEDS) {
+      const runs: [PipelineSpec, PipelineSpec[]][] = [
+        [pausing, forkVariants],
+        [gated, [gatedVariant]],
+      ];
+      for (const [spec, variants] of runs) {
+        const run = simulate(spec, seed + 2000, 300, true, variants, {
+          staleMs: 20_000,
+          maxRestarts: 0,
+        });
+        suspended += run.journal.filter(
+          (r) => r.event === "run_paused" && r.reason === "restarts",
+        ).length;
+        if (run.state.status !== "running" && run.state.status !== "paused") ended += 1;
+        expect(run.refusedFollowUps, `seed ${seed}`).toBe(0);
+      }
+    }
+    expect(suspended).toBeGreaterThan(SEEDS.length / 4);
+    expect(ended).toBeGreaterThan(SEEDS.length / 4);
+  }, 60_000);
 
   test("t40_random_schedule_self_test_catches_an_injected_bug", () => {
     const h = openFork();
@@ -2542,6 +2598,12 @@ describe("t40 random schedules", () => {
     // a second visit of a node
     state.active.push({ ...(state.active[0] as RunState["active"][number]) });
     expect(() => forkInvariants(fork, state, h.journal, 0)).toThrow();
+    // a run paused with nothing active and no pause
+    const stuck = structuredClone(h.state);
+    stuck.status = "paused";
+    stuck.active = [];
+    stuck.pauses = [];
+    expect(() => forkInvariants(fork, stuck, h.journal, 0)).toThrow();
     // a completed run with an unsettled branch
     const done = structuredClone(h.state);
     done.status = "completed";
@@ -2654,7 +2716,7 @@ describe("t40 repair in a fork", () => {
     const diff = diffPipelines(before, after, h.state);
     expect(diff.refused).toBeUndefined();
     expect(diff.nodes).toEqual([{ slug: "a", changes: ["routing"] }]);
-    expect(diff.effects).toEqual([{ kind: "reroute", node: "a-test" }]);
+    expect(diff.effects).toEqual([{ kind: "reroute", node: "a-test", to: "a", branch: "a" }]);
     h.use(after);
     must(h.send(accepted(before)));
     // the way on was worked out again: `a` got its second attempt, inside its branch
@@ -2695,7 +2757,7 @@ describe("t40 repair in a fork", () => {
     const diff = diffPipelines(before, after, h.state);
     expect(diff.refused).toBeUndefined();
     // a-test arrived last (a has a check to pass first): the effect names it, and it passed
-    expect(diff.effects).toEqual([{ kind: "reroute", node: "a-test" }]);
+    expect(diff.effects).toEqual([{ kind: "reroute", node: "a-test", to: "merge" }]);
     expect(h.state.nodes["a-test"]?.status).toBe("passed");
     h.use(after);
     must(h.send(accepted(before)));
@@ -2777,7 +2839,7 @@ describe("t40 repair in a fork", () => {
     expect(h.state.nodes.a?.attempt).toBe(3);
 
     const diff = diffPipelines(before, after, h.state);
-    expect(diff.effects).toEqual([{ kind: "reroute", node: "a-test" }]);
+    expect(diff.effects).toEqual([{ kind: "reroute", node: "a-test", to: "a", branch: "a" }]);
     h.use(after);
     must(h.send(accepted(before)));
     // the repaired loop runs: a once more, a-test with the new command, and the branch arrives
@@ -2856,7 +2918,7 @@ describe("t40 repair in a fork", () => {
     // the standing visits first, then the pauses
     expect(diff.effects).toEqual([
       { kind: "restart", node: "b" },
-      { kind: "reroute", node: "a-test" },
+      { kind: "reroute", node: "a-test", to: "a", branch: "a" },
     ]);
     h.use(after);
     const result = must(h.send(accepted(before)));
@@ -3113,7 +3175,7 @@ describe("t40 repair in a fork", () => {
     const after = parsePipeline(text.replace("max_attempts: 1", "max_attempts: 3"));
     const diff = diffPipelines(before, after, h.state);
     expect(diff.refused).toBeUndefined();
-    expect(diff.effects).toEqual([{ kind: "reroute", node: "plan" }]);
+    expect(diff.effects).toEqual([{ kind: "reroute", node: "plan", to: "a", branch: "a" }]);
     h.use(after);
     must(h.send(accepted(before)));
     expect(h.state.status).toBe("running");
@@ -3220,7 +3282,7 @@ describe("t40 repair in a fork", () => {
     const after = parsePipeline(FIXERS.replace("command: build", "command: build-fixed"));
     const diff = diffPipelines(before, after, h.state);
     expect(diff.refused).toBeUndefined();
-    expect(diff.effects).toEqual([{ kind: "reroute", node: "build" }]);
+    expect(diff.effects).toEqual([{ kind: "reroute", node: "build", to: "fix-a" }]);
     h.use(after);
     must(h.send(accepted(before)));
     underF2(h);
@@ -3581,7 +3643,7 @@ describe("t40 repair in a fork", () => {
         .replace("max_attempts: 1", "max_attempts: 2"),
     );
     const lifted = diffPipelines(prompt, raised, h.state);
-    expect(lifted.effects).toEqual([{ kind: "reroute", node: "b" }]);
+    expect(lifted.effects).toEqual([{ kind: "reroute", node: "b", to: "merge" }]);
     h.use(raised);
     must(
       h.send({ type: "pipeline_accepted", from: "h2", to: "h3", source: "file", before: prompt }),
@@ -3602,5 +3664,224 @@ describe("t40 repair in a fork", () => {
     expect(nextStep(before, h.state, 0)).toEqual({ done: true, run_status: "canceled" });
     expect(refusal(h.send({ type: "resume" })).code).toBe("NODE_NOT_RUNNING");
     expect(refusal(h.send({ type: "resume", node: "merge" })).code).toBe("NODE_NOT_RUNNING");
+  });
+});
+
+// ── sixth review ────────────────────────────────────────────────────────────
+
+describe("t40 suspended work in a fork", () => {
+  const SUSPEND = parsePipeline(
+    yaml([
+      "name: suspend",
+      "nodes:",
+      "  - { slug: plan, kind: agent, prompt: plan }",
+      "  - { slug: a, kind: command, command: a }",
+      "  - { slug: b, kind: command, command: b }",
+      "  - { slug: m, kind: agent, prompt: m, join: all }",
+      "edges:",
+      "  - { from: plan, to: a }",
+      "  - { from: plan, to: b }",
+      "  - { from: a, to: m }",
+      "  - { from: a, to: m, when: failed }",
+      "  - { from: b, to: m }",
+      "  - { from: b, to: m, when: failed }",
+    ]),
+  );
+  const finished = (node: string, attempt = 1): RunEvent => ({
+    type: "work_finished",
+    node,
+    attempt,
+    passed: true,
+    reason: "",
+  });
+
+  function suspendedA() {
+    const h = host(SUSPEND, answer, { staleMs: 100, maxRestarts: 0 });
+    h.hold("a", "b", "m");
+    h.send(START);
+    h.send(complete("plan", 1));
+    h.advance(150);
+    h.send({ type: "heartbeat", node: "b", attempt: 1 });
+    h.send({ type: "tick" });
+    expect(h.state.pauses.map((p) => [p.reason, p.node])).toEqual([["restarts", "a"]]);
+    expect(h.state.active.find((v) => v.node === "a")?.suspended).toBe(true);
+    expect(h.state.status).toBe("running");
+    return h;
+  }
+
+  test("t40_late_result_of_suspended_visit_is_a_repeat", () => {
+    const h = suspendedA();
+    const late = must(h.send(finished("a")));
+    expect(late.noop).toBe(true);
+    expect(h.state.active.find((v) => v.node === "a")?.suspended).toBe(true);
+    // a heartbeat of the work given up on is a repeat too: it must not look alive
+    expect(must(h.send({ type: "heartbeat", node: "a", attempt: 1 })).noop).toBe(true);
+    must(h.send(finished("b")));
+    expect(h.state.forks?.f1?.arrived.b).toBeDefined();
+    expect(h.state.forks?.f1?.arrived.a).toBeUndefined();
+    expect(h.state.status).toBe("paused");
+    // resume issues the work again, and the run goes on to its end
+    h.send({ type: "resume" });
+    expect(h.effects.at(-1)).toMatchObject({ type: "run_command", node: "a", restart: true });
+    must(h.send(finished("a")));
+    expect(h.state.active.map((v) => v.node)).toEqual(["m"]);
+    must(h.send(complete("m", 1)));
+    expect(h.state.status).toBe("completed");
+    expect(h.state.finishedAt).toBeDefined();
+  });
+
+  test("t40_run_with_nothing_left_ends_instead_of_staying_paused", () => {
+    // A state written by the engine before the fix: a's late result was taken, its `restarts` pause
+    // stayed with no visit behind it, and the join finished. The next event ends the run.
+    const h = suspendedA();
+    must(h.send(finished("b")));
+    const stranded = JSON.parse(JSON.stringify(h.state)) as RunState;
+    stranded.active = [];
+    stranded.status = "paused";
+    stranded.nodes.a = { ...(stranded.nodes.a as RunState["nodes"][string]), status: "passed" };
+    const forkState = stranded.forks?.f1;
+    if (forkState) forkState.arrived.a = { node: "a", label: "passed" };
+    const result = must(decide(SUSPEND, stranded, { type: "resume" }, 500));
+    expect(result.state.status).toBe("completed");
+    expect(result.state.pauses).toEqual([]);
+    expect(result.state.finishedAt).toBe(500);
+  });
+
+  test("t40_run_with_an_unarrived_branch_and_nothing_left_ends_failed", () => {
+    const h = suspendedA();
+    const stranded = JSON.parse(JSON.stringify(h.state)) as RunState;
+    stranded.active = [];
+    stranded.pauses = [];
+    const result = must(decide(SUSPEND, stranded, { type: "tick" }, 500));
+    expect(result.state.status).toBe("failed");
+    expect(result.journal.at(-1)?.reason).toContain('branch "a"');
+  });
+});
+
+describe("t40 reroute names its pause", () => {
+  const TWO = yaml([
+    "name: two",
+    "nodes:",
+    "  - { slug: plan, kind: agent, prompt: plan }",
+    "  - { slug: a, kind: command, command: a, max_attempts: 1, max_consecutive_failures: 1 }",
+    "  - { slug: b, kind: command, command: b, max_attempts: 1, max_consecutive_failures: 1 }",
+    "  - { slug: m, kind: agent, prompt: m, join: all }",
+    "edges:",
+    "  - { from: plan, to: a }",
+    "  - { from: plan, to: b }",
+    "  - { from: a, to: m }",
+    "  - { from: a, to: m, when: failed }",
+    "  - { from: b, to: m }",
+    "  - { from: b, to: m, when: failed }",
+  ]);
+
+  test("t40_reroute_lifts_the_pause_the_diff_judged", () => {
+    const before = parsePipeline(TWO);
+    const h = host(before, (effect, state) =>
+      effect.type === "run_command" && (effect.node === "a" || effect.node === "b")
+        ? state.nodes[effect.node]?.attempt === 1
+          ? fails(effect.node)(effect)
+          : answer(effect)
+        : answer(effect),
+    );
+    h.hold("m");
+    h.send(START);
+    h.send(complete("plan", 1));
+    must(h.send(complete("m", 1, RESTART_FAILED)));
+    expect(h.state.pauses.map((p) => [p.node, p.reason, p.blocked?.from])).toEqual([
+      ["a", "total", "m"],
+      ["b", "total", "m"],
+    ]);
+    const pausedBefore = h.events().filter((e) => e === "run_paused").length;
+    const after = parsePipeline(
+      TWO.replace("command: b, max_attempts: 1", "command: b, max_attempts: 2"),
+    );
+    const diff = diffPipelines(before, after, h.state);
+    expect(diff.refused).toBeUndefined();
+    expect(diff.effects).toEqual([{ kind: "reroute", node: "m", to: "b", branch: "b" }]);
+    expect(describeEffects(diff.effects)).toEqual([
+      'branch "b" goes on from step "m", where it was held back on its way to step "b", under the new pipeline',
+    ]);
+    h.use(after);
+    must(h.send({ type: "pipeline_accepted", from: "h", to: "h2", source: "file", before }));
+    // b ran once more and arrived; a stays held back, and nothing paused again
+    expect(h.state.nodes.b?.attempt).toBe(2);
+    expect(h.state.nodes.a?.attempt).toBe(1);
+    expect(h.state.pauses.map((p) => [p.node, p.reason])).toEqual([["a", "total"]]);
+    expect(h.events().filter((e) => e === "run_paused")).toHaveLength(pausedBefore);
+    expect(h.state.forks?.f1?.arrived.b).toMatchObject({ label: "passed" });
+  });
+});
+
+describe("t40 a passed join is not an open fork", () => {
+  const LOOP = yaml([
+    "name: loop",
+    "nodes:",
+    "  - { slug: plan, kind: agent, prompt: plan }",
+    "  - { slug: a, kind: command, command: a }",
+    "  - { slug: b, kind: command, command: b }",
+    "  - { slug: m, kind: agent, prompt: m, join: all }",
+    "  - { slug: ship, kind: command, command: ship, max_attempts: 1, max_consecutive_failures: 1 }",
+    "  - { slug: x, kind: command, command: x }",
+    "edges:",
+    "  - { from: plan, to: a }",
+    "  - { from: plan, to: b }",
+    "  - { from: a, to: m }",
+    "  - { from: a, to: m, when: failed }",
+    "  - { from: b, to: m }",
+    "  - { from: b, to: m, when: failed }",
+    "  - { from: m, to: ship }",
+    "  - { from: ship, to: x }",
+    "  - { from: ship, to: x, when: failed }",
+    "  - { from: x, to: plan, when: failed }",
+  ]);
+
+  test("t40_join_that_passed_and_is_held_at_the_next_limit_does_not_hold_the_fork_open", () => {
+    const before = parsePipeline(LOOP);
+    const h = host(before, (effect) =>
+      effect.type === "run_command" && effect.node === "x" ? fails("x")(effect) : answer(effect),
+    );
+    h.send(START);
+    expect(h.state.pauses.map((p) => [p.reason, p.node, p.blocked?.from])).toEqual([
+      ["total", "ship", "m"],
+    ]);
+    expect(h.state.nodes.m?.status).toBe("passed");
+    expect(Object.keys(h.state.forks ?? {})).toEqual(["f1", "f2"]);
+    const third = parsePipeline(
+      LOOP.replace(
+        "  - { slug: x, kind: command, command: x }\n",
+        "  - { slug: x, kind: command, command: x }\n  - { slug: c, kind: command, command: c }\n",
+      ).replace(
+        "  - { from: m, to: ship }\n",
+        "  - { from: plan, to: c }\n  - { from: c, to: m }\n  - { from: c, to: m, when: failed }\n  - { from: m, to: ship }\n",
+      ),
+    );
+    // the join passed and the run is held back after it: the fork is left, its shape may change
+    // (a join held back on its own failure route is `t40_fork_whose_join_is_paused_on_its_own_check_is_open`)
+    const diff = diffPipelines(before, third, h.state);
+    expect(diff.refused).toBeUndefined();
+  });
+});
+
+describe("t40 a restarted join keeps its branches' failures", () => {
+  test("t40_restart_of_join_keeps_the_failed_branches_list", () => {
+    const h = host(fork, fails("b-test", "b is red"));
+    h.hold("merge");
+    h.send(START);
+    h.send(complete("plan", 1));
+    expect(h.state.active.map((v) => v.node)).toEqual(["merge"]);
+    const fresh = nextStep(fork, h.state, 0);
+    expect("node" in fresh && fresh.node.reentry_feedback).toContain("Branches of the fork failed");
+    const after = parsePipeline(FORK.replace("prompt: merge", "prompt: merge again"));
+    const diff = diffPipelines(fork, after, h.state);
+    expect(diff.effects).toEqual([{ kind: "restart", node: "merge" }]);
+    h.use(after);
+    must(h.send({ type: "pipeline_accepted", from: "h", to: "h2", source: "file", before: fork }));
+    const restarted = nextStep(after, h.state, 0);
+    if (!("node" in restarted)) throw new Error("expected the join's step");
+    expect(restarted.node).toMatchObject({ slug: "merge", attempt: 2 });
+    expect(restarted.node.reentry_feedback).toContain("The pipeline was changed under this run");
+    expect(restarted.node.reentry_feedback).toContain("Branches of the fork failed");
+    expect(restarted.node.reentry_feedback).toContain("b is red");
   });
 });

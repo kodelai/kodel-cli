@@ -2,8 +2,9 @@
 //
 //   node scripts/take-format-fixture.mjs <format> <run-dir> [<run-dir> ...]
 //
-// The only changes: the run's absolute workdir becomes a placeholder in every file of the run
-// (meta.json, state.json, the journal, and the served answers, which name the step's workdir), and
+// The only changes: the run's absolute workdir becomes a placeholder wherever it is written as it is
+// (meta.json, state.json, the journal; a served answer whose workdir the redaction already replaced,
+// `[REDACTED:high-entropy]...`, keeps that text, which holds no path of the machine), and
 // seal.json is left out (it holds hashes of state.json and journal.jsonl, which the edit changes; a
 // fixture reads as unsealed). Then hashes.json is rewritten for the whole format directory.
 import { createHash } from "node:crypto";

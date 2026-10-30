@@ -391,6 +391,15 @@ export function hashSpec(spec: PipelineSpec): string {
   return createHash("sha256").update(JSON.stringify(spec)).digest("hex").slice(0, 16);
 }
 
+/** The journal events that say a node did work (and may have written to the tree). */
+const MOVING_EVENTS = new Set([
+  "node_entered",
+  "node_finished",
+  "agent_completed",
+  "command_finished",
+  "check_finished",
+]);
+
 export class LocalHost {
   readonly store: FileStore;
   readonly snapshotter: GitSnapshotter;
@@ -819,19 +828,10 @@ export class LocalRun {
   }
 
   /**
-   * Whether waiting answers offer the agent `kodel wait`: on unless the project's config turns it
-   * off. Read at each answer, so an edit of the config applies to the next one. A config that cannot
-   * be read leaves the default: this is a hint, and the commands that need the config say what is wrong.
-   */
-  private async waitHint(): Promise<boolean> {
-    return (await this.hints()).wait;
-  }
-
-  /**
-   * The hints and the `agents` block of the project config, read at each answer like `waitHint` and
-   * for the same reason: a config that cannot be read leaves the defaults, so a bad value never
-   * fails `pipeline_next_step` or a worker's claim for a run that is going; the commands that need
-   * the config say what is wrong.
+   * The hints (whether waiting answers offer the agent `kodel wait`) and the `agents` block of the
+   * project config, read at each answer so an edit of the config applies to the next one. A config
+   * that cannot be read leaves the defaults, so a bad value never fails `pipeline_next_step` or a
+   * worker's claim for a run that is going; the commands that need the config say what is wrong.
    */
   private async hints(): Promise<{ wait: boolean; agents: AgentsConfig }> {
     const { options } = this.host;
@@ -1395,7 +1395,7 @@ export class LocalRun {
       const state = await this.state();
       const visit = state.active.find((v) => v.node === node && v.attempt === attempt);
       if (visit?.phase !== "agent") return {};
-      shared = state.active.some((v) => v.node !== node);
+      shared = await this.otherBranchesMovedSinceEntry(state, node, attempt);
     } catch {
       return {};
     }
@@ -1653,8 +1653,9 @@ export class LocalRun {
       this.host.clock(),
       this.host.engine.registry ?? defaultRegistry(),
       {
-        waitHint: await this.waitHint(),
-        agentDecisions: this.agentDecisions(),
+        // As the agent is answered (`nextStep`): the same cap and mode, so `kodel status` and
+        // `kodel wait` say what the agent is handed.
+        ...(await this.answerOptions({}, state)),
         ...(pending ? { pending: pending.info } : {}),
       },
     );
@@ -1721,15 +1722,39 @@ export class LocalRun {
       (r) => r.event === "gate_waiting" && r.node === node && r.attempt === attempt,
     );
     if (!reached) return false;
-    const moving = new Set([
-      "node_entered",
-      "node_finished",
-      "agent_completed",
-      "command_finished",
-      "check_finished",
-    ]);
     return journal.some(
-      (r) => r.seq > reached.seq && moving.has(r.event) && r.node !== undefined && r.node !== node,
+      (r) =>
+        r.seq > reached.seq &&
+        MOVING_EVENTS.has(r.event) &&
+        r.node !== undefined &&
+        r.node !== node,
+    );
+  }
+
+  /**
+   * Whether another node is active now, or a node of another branch moved since this attempt of the
+   * step was entered: a command branch that wrote files and arrived before this hand-in left its
+   * writes in the shared tree, so in this step's patch, though nothing else is active any more.
+   */
+  private async otherBranchesMovedSinceEntry(
+    state: RunState,
+    node: string,
+    attempt: number,
+  ): Promise<boolean> {
+    if (state.active.some((v) => v.node !== node)) return true;
+    if (state.forks === undefined) return false;
+    const journal = await this.host.store.readJournal(this.runId).catch(() => []);
+    const entered = journal.findLast(
+      (r) => r.event === "node_entered" && r.node === node && r.attempt === attempt,
+    );
+    if (!entered) return false;
+    return journal.some(
+      (r) =>
+        r.seq > entered.seq &&
+        MOVING_EVENTS.has(r.event) &&
+        typeof r.node === "string" &&
+        r.node !== node &&
+        !inOwnBranch(state, node, r.node),
     );
   }
 
@@ -2109,7 +2134,9 @@ export class LocalRun {
     let rounds = 0;
     while (Date.now() < deadline && (await this.engineBusy(node, scope))) {
       await new Promise((resolve) => setTimeout(resolve, Math.min(300, deadline - Date.now())));
-      if (++rounds % 4 === 0) await this.tick().catch(() => undefined);
+      // Only the caller's own work is taken over: a sibling's command started here would be left
+      // out of the wait, and lost when the process that waits exits right after.
+      if (++rounds % 4 === 0) await this.tick(node, scope).catch(() => undefined);
       // a tick may have started work in this process
       await this.settle(() => 0, deadline, node, scope);
     }
@@ -2239,9 +2266,6 @@ export class LocalRun {
     const token = input.token ?? randomBytes(16).toString("hex");
     const hash = hashSource(token);
     const before = await this.state();
-    const renewed = Object.values(before.nodes).some(
-      (n) => liveClaim(n, this.host.clock())?.token === hash,
-    );
     // Which step is free is decided by the machine under the lock, with the claim itself.
     const decision = await this.apply({
       type: "step_claimed",
@@ -2256,7 +2280,17 @@ export class LocalRun {
     }
     const after = decision.state;
     const now = this.host.clock();
-    const mine = Object.values(after.nodes).find((n) => liveClaim(n, now)?.token === hash);
+    // The step asked for, when one was: a worker that holds a step and takes another with the same
+    // token is answered with the one it asked for, not the first it holds.
+    const ours = (n: RunState["nodes"][string] | undefined) => liveClaim(n, now)?.token === hash;
+    const mine =
+      input.node === undefined
+        ? Object.values(after.nodes).find(ours)
+        : ours(after.nodes[input.node])
+          ? after.nodes[input.node]
+          : undefined;
+    const renewed =
+      mine !== undefined && liveClaim(before.nodes[mine.slug], this.host.clock())?.token === hash;
     if (mine === undefined) {
       if (input.node === undefined) return { status: "none", next: await this.nextStep({ serve }) };
       const visit = after.active.find((v) => v.node === input.node && v.phase === "agent");
@@ -2412,9 +2446,20 @@ export class LocalRun {
     return [...owners].filter((owner) => !this.host.isOwnerAlive(owner));
   }
 
-  async tick() {
+  /** Restart stale or orphaned engine work; with `node`, only the work that is the caller's (`WaitScope`). */
+  async tick(node?: string, scope: WaitScope = "chain") {
     const deadOwners = await this.deadOwners();
-    return this.apply(deadOwners.length > 0 ? { type: "tick", deadOwners } : { type: "tick" });
+    let nodes: string[] | undefined;
+    if (node !== undefined) {
+      const own = await this.ownWork(node, scope);
+      const state = await this.state().catch(() => undefined);
+      nodes = (state?.active ?? []).map((v) => v.node).filter(own);
+    }
+    return this.apply({
+      type: "tick",
+      ...(deadOwners.length > 0 ? { deadOwners } : {}),
+      ...(nodes === undefined ? {} : { nodes }),
+    });
   }
 
   async completeStep(

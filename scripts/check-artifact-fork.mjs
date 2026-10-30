@@ -50,14 +50,18 @@ export function commandsValidInCmd(pipeline = FORK_PIPELINE) {
 /**
  * Drives the fork on the artifact and returns what it saw; `fail(message)` is called (and expected
  * to throw or exit) when something is not as it should be. `Client` and `StdioClientTransport` are
- * the MCP SDK's, given by the caller so this file resolves nothing itself.
+ * the MCP SDK's, given by the caller so this file resolves nothing itself. `runtime` runs the
+ * artifact: the caller's own by default (plain Node in `check-artifact.mjs`).
  */
-export async function checkForkRun(artifact, { Client, StdioClientTransport, fail }) {
+export async function checkForkRun(
+  artifact,
+  { Client, StdioClientTransport, fail, runtime = process.execPath },
+) {
   const dir = mkdtempSync(join(tmpdir(), "kodel-artifact-fork-"));
   // The trusted hashes of the run go into the scratch folder too, not into the home of whoever runs this.
   const env = { ...process.env, KODEL_STATE_DIR: join(dir, "state") };
   const transport = new StdioClientTransport({
-    command: process.execPath,
+    command: runtime,
     args: [artifact, "--root", dir, "mcp"],
     cwd: dir,
     env,
@@ -149,7 +153,7 @@ export async function checkForkRun(artifact, { Client, StdioClientTransport, fai
     }
     // the commands a person uses open the run: status and the report with the fork's numbers
     const cli = (...args) =>
-      execFileSync(process.execPath, [artifact, "--root", dir, ...args], {
+      execFileSync(runtime, [artifact, "--root", dir, ...args], {
         encoding: "utf8",
         cwd: dir,
         env,

@@ -19,5 +19,11 @@ export interface ForkRunSeen {
 export function checkForkRun(
   artifact: string,
   /** The MCP SDK's `Client` and `StdioClientTransport` classes, as the caller resolved them. */
-  deps: { Client: unknown; StdioClientTransport: unknown; fail: (message: string) => never },
+  deps: {
+    Client: unknown;
+    StdioClientTransport: unknown;
+    fail: (message: string) => never;
+    /** The executable that runs the artifact; the caller's own runtime by default. */
+    runtime?: string;
+  },
 ): Promise<ForkRunSeen>;

@@ -1110,3 +1110,55 @@ describe("t40 what waits besides", () => {
     expect(h.next()).toMatchObject({ done: true, run_status: "failed" });
   });
 });
+
+// ── sixth review ────────────────────────────────────────────────────────────
+
+describe("t40 workers and the cap after a completion", () => {
+  test("t40_running_answer_to_a_worker_says_report_back", () => {
+    // a's command is still running and b's branch has arrived: the run is only `running`
+    const h = openFork(FORK, (e) =>
+      e.type === "run_command" && e.node === "a-test" ? undefined : answer(e),
+    );
+    must(h.send(complete("b", 1)));
+    must(h.send(claim("a", "wa")));
+    must(h.send(complete("a", 1, "wa")));
+    expect(h.state.active.map((v) => v.node)).toEqual(["a-test"]);
+    const plain = runningOf(h.next({ ...PARALLEL, completionOf: "a" }));
+    expect(plain.hint).toContain("wait_s");
+    const worker = runningOf(h.next({ ...PARALLEL, completionOf: "a", worker: true }));
+    expect(worker.hint).toContain("Report this answer");
+    expect(worker.hint).toContain("do not write to the person");
+    expect(worker.hint).not.toContain("wait_s");
+  });
+
+  test("t40_completion_answer_counts_sibling_held_steps_against_the_cap", () => {
+    // branch a has two agent steps; b's step is held by a worker; cap 1: a1's completion opens a2,
+    // but one step is already in flight, so a2 is queued, not handed out
+    const LONG = parsePipeline(
+      yaml([
+        "name: long",
+        "nodes:",
+        "  - { slug: plan, kind: agent, prompt: plan }",
+        "  - { slug: a1, kind: agent, prompt: a1 }",
+        "  - { slug: a2, kind: agent, prompt: a2 }",
+        "  - { slug: b, kind: agent, prompt: b }",
+        "  - { slug: merge, kind: agent, prompt: merge, join: all }",
+        "edges:",
+        "  - { from: plan, to: a1 }",
+        "  - { from: plan, to: b }",
+        "  - { from: a1, to: a2 }",
+        "  - { from: a2, to: merge }",
+        "  - { from: b, to: merge }",
+      ]),
+    );
+    const capped = { agents: { mode: "parallel" as const, maxParallel: 1 } };
+    const h = openFork(LONG);
+    must(h.send(claim("b", "wb")));
+    must(h.send(complete("a1", 1)));
+    const answer = runningOf(h.next({ ...capped, completionOf: "a1" }));
+    expect(answer.queued).toBe(1);
+    expect(answer.hint).toContain("max_parallel");
+    // with room under the cap, a2 is handed out
+    expect(nodeOf(h.next({ ...PARALLEL, completionOf: "a1" })).slug).toBe("a2");
+  });
+});

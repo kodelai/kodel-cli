@@ -301,3 +301,31 @@ describe("isSubset", () => {
     expect(isSubset([1, 2], [1, 2])).toBe(true);
   });
 });
+
+describe("refused follow-ups", () => {
+  const engineWith = (afterEnd: boolean): ScenarioEngine => ({
+    name: "refusing",
+    start: async () => ({ runId: "r" }),
+    applyEvent: async () => {},
+    readState: async () => state(),
+    refusedFollowUps: () => [
+      { event: "work_finished", code: "NODE_NOT_RUNNING", message: "no", afterEnd },
+    ],
+  });
+
+  test("t40_scenario_fails_on_a_follow_up_refused_while_the_run_goes", async () => {
+    const report = await runScenario(simple(), engineWith(false));
+    expect(report.ok).toBe(false);
+    expect(report.divergence?.kind).toBe("engine");
+    expect(report.divergence?.detail).toContain("work_finished refused: NODE_NOT_RUNNING");
+    // one refused after the end is the end, not a stall
+    expect((await runScenario(simple(), engineWith(true))).ok).toBe(true);
+    // and a scenario that expects one says so
+    const allowed = defineScenario("t/allowed")
+      .pipeline(PIPELINE)
+      .allowRefusedFollowUps()
+      .expect([])
+      .build();
+    expect((await runScenario(allowed, engineWith(false))).ok).toBe(true);
+  });
+});

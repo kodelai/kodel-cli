@@ -549,15 +549,22 @@ export class FileStore {
       if (isMissing(error)) return undefined;
       throw error;
     }
-    let state: RunState;
+    let parsed: unknown;
     try {
-      state = JSON.parse(text) as RunState;
+      parsed = JSON.parse(text);
     } catch {
       throw new KodelError(
         "STATE_MODIFIED_EXTERNALLY",
         `the state of run ${runId} is not valid JSON; it was changed outside kodel`,
       );
     }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new KodelError(
+        "STATE_MODIFIED_EXTERNALLY",
+        `the state of run ${runId} is not a JSON object; it was changed outside kodel`,
+      );
+    }
+    const state = parsed as RunState;
     // The format comes first, before anything reads a field: this is the one place a run of another
     // run-state format is refused, and it is refused as such, never as a modified state. "Run-state
     // format" so it is not taken for the format of `meta.json`, which has its own number.

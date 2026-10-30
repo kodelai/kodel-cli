@@ -20,8 +20,13 @@ export type AcceptEffect =
   | { kind: "restart"; node: string }
   /** The checks of the node run again on the work that is there. */
   | { kind: "recheck"; node: string }
-  /** The run was held back at a node's failure; the way on is worked out again from the new pipeline. */
-  | { kind: "reroute"; node: string };
+  /**
+   * The run (or a branch) was held back on a route from `node`; the route is taken again under the new
+   * pipeline. `to` is where the held route was going and `branch` the branch it stands in: several
+   * pauses may share `node` (a join's `restart_failed` into several branches), and the effect lifts
+   * exactly one. Both are absent from effects journaled before they were recorded.
+   */
+  | { kind: "reroute"; node: string; to?: string; branch?: string };
 
 export interface PipelineDiff {
   nodes: NodeDiff[];
@@ -95,7 +100,7 @@ export function standingOf(state: RunState): string {
  * any more: every branch has arrived, no attempt or pause stands in a branch, and none stands at the
  * join. The join's attempt counts until it has been routed on: held back at a limit (a `total` pause
  * of the join, which carries the route into it; a `consecutive` pause of its own rework or of its way
- * out), a repair can still open it again and judge it anew, and `restart_failed` would then enter
+ * out; a pause at a limit on a route the join failed by), a repair can still open it again and judge it anew, and `restart_failed` would then enter
  * the branches as the instance names them. The join is shared by every instance of a fork in a loop,
  * so what stands at it belongs to the latest instance.
  */
@@ -105,10 +110,17 @@ function isOpen(fork: ForkState, state: RunState): boolean {
   if (state.pauses.some((p) => p.fork?.id === fork.id || p.blocked?.join === fork.id)) return true;
   const instances = Object.values(state.forks ?? {}).filter((f) => f.join === fork.join);
   if (instances.at(-1)?.id !== fork.id) return false;
+  // A pause on a route out of the join stands at the join only when the join failed (its rework or
+  // failure route, which a repair may reopen); a join that passed has been judged, and a pause at the
+  // next node's limit is the run's, after the fork.
+  const joinFailed = state.nodes[fork.join]?.status === "failed";
   return (
     state.active.some((v) => v.node === fork.join) ||
     state.pauses.some(
-      (p) => p.node === fork.join || p.blocked?.from === fork.join || p.blocked?.to === fork.join,
+      (p) =>
+        p.node === fork.join ||
+        p.blocked?.to === fork.join ||
+        (joinFailed && p.blocked?.from === fork.join),
     )
   );
 }
@@ -249,22 +261,35 @@ export function diffPipelines(
     const takenAsIs = blocked.join !== undefined || routeEntersBranch(state, blocked);
     if (takenAsIs && pause.reason === "total" && !limitLifted(after, state, blocked.to)) continue;
     if (from.length > 0 || ahead.some((to) => changesOf(to).length > 0)) {
-      effects.push({ kind: "reroute", node: blocked.from });
+      effects.push({
+        kind: "reroute",
+        node: blocked.from,
+        to: blocked.to,
+        ...(blocked.fork === undefined ? {} : { branch: blocked.fork.branch }),
+      });
     }
   }
   return { nodes, effects };
 }
 
-const EFFECT_WORDS: Record<AcceptEffect["kind"], (node: string) => string> = {
-  restart: (node) =>
-    `step "${node}" starts again on its new definition (a new attempt; the work already done stays in the working directory)`,
-  recheck: (node) =>
-    `the checks of step "${node}" run again on the work that is there; the work is not redone`,
-  reroute: (node) =>
-    `the run goes on from the failure of step "${node}", with the way on worked out again from the new pipeline`,
-};
+function describeEffect(effect: AcceptEffect): string {
+  switch (effect.kind) {
+    case "restart":
+      return `step "${effect.node}" starts again on its new definition (a new attempt; the work already done stays in the working directory)`;
+    case "recheck":
+      return `the checks of step "${effect.node}" run again on the work that is there; the work is not redone`;
+    case "reroute": {
+      const who = effect.branch === undefined ? "the run" : `branch "${effect.branch}"`;
+      const held =
+        effect.to === undefined || effect.to === effect.node
+          ? ""
+          : `, where it was held back on its way to step "${effect.to}",`;
+      return `${who} goes on from step "${effect.node}"${held} under the new pipeline`;
+    }
+  }
+}
 
 /** What the run will do about a change, in words for a person; one line per effect. */
 export function describeEffects(effects: AcceptEffect[]): string[] {
-  return effects.map((effect) => EFFECT_WORDS[effect.kind](effect.node));
+  return effects.map(describeEffect);
 }

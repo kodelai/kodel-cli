@@ -326,8 +326,8 @@ if (withoutChanges.after.length > 0) {
   fail(`history.changes.enabled false still wrote: ${withoutChanges.after.join()}`);
 }
 
-// A run with a fork on plain Node (T-40): two command branches at the same time, one failing once, a
-// join that restarts it; `status` and `report` open the run and show the fork.
+// A run with a fork on plain Node (T-40): two command branches at the same time, both failing once, a
+// join told of both that restarts them; `status` and `report` open the run and show the fork.
 const fork = await checkForkRun(artifact, { Client, StdioClientTransport, fail });
 console.log(
   `fork run ${fork.runId}: ${fork.events.length} journal records, critical path ${fork.report.critical_path[0].branch} ${fork.report.critical_path[0].seconds} s`,

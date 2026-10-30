@@ -639,7 +639,15 @@ export type RunEvent =
    * Look for engine work that was interrupted. `deadOwners` are the owners (see `Visit.owner`) the
    * host knows to be gone, so their work restarts at once instead of after `staleMs`.
    */
-  | { type: "tick"; deadOwners?: string[] }
+  | {
+      type: "tick";
+      deadOwners?: string[];
+      /**
+       * Only these nodes' work is looked at: a caller that waits for its own chain must not take
+       * over (and start in its own process) work of a sibling branch it will not wait for.
+       */
+      nodes?: string[];
+    }
   /** Carry a paused branch on; `node` picks the pause when more than one branch is paused. */
   | { type: "resume"; node?: string }
   | { type: "cancel" }
@@ -1412,6 +1420,12 @@ class Machine {
    */
   settle() {
     if (this.ended) return;
+    // A `restarts` pause is lifted by issuing its suspended work again; one whose work is gone (a state
+    // written before late results of suspended work were refused) has nothing to resume and would
+    // hold the run for good.
+    this.s.pauses = this.s.pauses.filter(
+      (p) => p.reason !== "restarts" || this.s.active.some((v) => v.suspended && v.node === p.node),
+    );
     const { active, pauses } = this.s;
     if (active.length === 0 && pauses.length === 0) {
       const dead = this.deadBranches();
@@ -1425,6 +1439,22 @@ class Machine {
             })
             .join("; "),
         );
+        return;
+      }
+      // Nothing is left to move and nothing waits: the run ends here, not `paused` with nothing to
+      // resume. A branch that never arrived has nothing to bring it to its join.
+      const stranded = Object.values(this.s.forks ?? {}).flatMap((fork) =>
+        fork.branches.filter((branch) => fork.arrived[branch] === undefined),
+      );
+      if (stranded.length > 0) {
+        this.end(
+          "failed",
+          stranded
+            .map((branch) => `branch "${branch}" stopped with nothing running and nothing paused`)
+            .join("; "),
+        );
+      } else {
+        this.end("completed");
       }
       return;
     }
@@ -1650,6 +1680,9 @@ class Machine {
       case "work_finished": {
         if (this.staleResult(event)) throw new Repeat();
         const visit = this.visitFor(event.node, event.attempt, ["engine"]);
+        // Work suspended after too many restarts waits for `resume`, which issues it again; a late
+        // result of the run given up on is a repeat, as it was when a suspension paused the whole run.
+        if (visit.suspended) throw new Repeat();
         const node = this.node(event.node);
         this.log("command_finished", {
           node: event.node,
@@ -1668,7 +1701,7 @@ class Machine {
       case "check_finished": {
         if (this.staleResult(event)) throw new Repeat();
         const visit = this.visitFor(event.node, event.attempt, ["checks"]);
-        if (event.index !== visit.checkIndex) throw new Repeat();
+        if (visit.suspended || event.index !== visit.checkIndex) throw new Repeat();
         const check = this.node(event.node).checks[event.index];
         if (!check) throw new Repeat();
         const checkId = checkIdOf(this.node(event.node), event.index);
@@ -1723,7 +1756,9 @@ class Machine {
         const visit = this.s.active.find(
           (v) => v.node === event.node && v.attempt === event.attempt,
         );
-        if (!visit || (visit.phase !== "engine" && visit.phase !== "checks")) throw new Repeat();
+        if (!visit || visit.suspended || (visit.phase !== "engine" && visit.phase !== "checks")) {
+          throw new Repeat();
+        }
         // Only the process that owns the work may say it is alive. One that stalled, was replaced
         // and woke up again must not take the work back, or its later exit would look like the
         // death of work another process is running.
@@ -1737,6 +1772,7 @@ class Machine {
       case "tick": {
         const dead = new Set(event.deadOwners ?? []);
         for (const visit of [...this.s.active]) {
+          if (event.nodes !== undefined && !event.nodes.includes(visit.node)) continue;
           const engineWork = visit.phase === "engine" || visit.phase === "checks";
           if (!engineWork || visit.suspended || visit.heartbeatAt === undefined) continue;
           const gone = visit.owner !== undefined && dead.has(visit.owner);
@@ -2148,7 +2184,11 @@ class Machine {
       this.log("checks_rerun", { node: effect.node, attempt: run.attempt });
       this.emitCheck(reopened, false);
     } else {
-      const pause = this.takePause((p) => p.blocked?.from === effect.node);
+      const pause = this.takePause(
+        (p) =>
+          p.blocked?.from === effect.node &&
+          (effect.to === undefined || p.blocked.to === effect.to),
+      );
       const blocked = pause?.blocked;
       if (!blocked) return;
       if (blocked.join !== undefined || routeEntersBranch(this.s, blocked)) {

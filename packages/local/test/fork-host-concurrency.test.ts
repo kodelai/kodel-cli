@@ -574,6 +574,37 @@ describe("t40 the host runs the branches of a fork at the same time", () => {
     expect((await run.takeStep({ node: "b" })).status).toBe("claimed");
   });
 
+  test("t40_inspect_answers_with_the_agents_config_like_next_step", async () => {
+    await mkdir(join(dir, ".kodel"), { recursive: true });
+    await writeFile(
+      join(dir, ".kodel", "config.yaml"),
+      "worktree:\n  mode: off\nagents:\n  subagents: yes\n  max_parallel: 1\n",
+    );
+    const h = new LocalHost(AGENT_FORK, { root: dir, heartbeatMs: 0 });
+    const { run } = await h.start("split the work");
+    await run.completeStep("plan", 1);
+    const seen = await run.inspect();
+    const handed = await run.nextStep();
+    if (!("node" in seen) || !("node" in handed)) throw new Error("expected node answers");
+    expect(seen.node.steps?.map((s) => s.slug)).toEqual(handed.node.steps?.map((s) => s.slug));
+    expect(seen.node.queued).toBe(1);
+    expect(seen.node.execution?.mode).toBe(handed.node.execution?.mode);
+  });
+
+  test("t40_take_of_a_second_step_with_the_same_token_answers_that_step", async () => {
+    const h = new LocalHost(AGENT_FORK, { root: dir, heartbeatMs: 0 });
+    const { run } = await h.start("split the work");
+    await run.completeStep("plan", 1);
+    const took = await run.takeStep({ node: "a" });
+    if (took.status !== "claimed") throw new Error(`expected claimed, got ${took.status}`);
+    expect(took.step.slug).toBe("a");
+    const second = await run.takeStep({ node: "b", token: took.claim_token });
+    if (second.status !== "claimed") throw new Error(`expected claimed, got ${second.status}`);
+    expect(second.step.slug).toBe("b");
+    const again = await run.takeStep({ node: "b", token: took.claim_token });
+    expect(again.status === "renewed" && again.step.slug).toBe("b");
+  });
+
   test("t40_agent_log_prefers_agent_visit", async () => {
     const { run, latch } = await forkWith(CHECKED);
     await latch.started("b#1");
@@ -954,10 +985,40 @@ describe("t40 the shared tree at a gate and at a hand-in", () => {
       error: expect.stringMatching(/^deadline:/),
       note: SHARED_TREE_NOTE,
     });
-    // the last branch stands alone: the back-off applies as it does without a fork, and no note
-    const last = await handIn("c");
+    // the last branch is alone now, but its siblings worked in the tree since it was entered: still
+    // tried, with the note (their writes are in its patch)
+    expect(await handIn("c")).toMatchObject({
+      error: expect.stringMatching(/^deadline:/),
+      note: SHARED_TREE_NOTE,
+    });
+    // the join stands alone and nothing of another branch moved since it was entered: the back-off
+    // applies as it does without a fork, and no note
+    const last = await handIn("merge");
     expect(last.error).toMatch(/^skipped:/);
     expect(last.note).toBeUndefined();
+  });
+
+  test("t40_hand_in_note_when_a_sibling_wrote_and_arrived_before_it", async () => {
+    // b writes a file and arrives while a's step is open; when a hands in, nothing else is active,
+    // but b's write is in a's patch all the same: the record says the tree was shared
+    const { h, run, latch } = await latched(GATED);
+    await run.completeStep("plan", 1);
+    await latch.started("b#1");
+    await writeFile(join(dir, "b.txt"), "written by b\n");
+    latch.release("b#1");
+    await run.waitForRest(5_000, "b");
+    expect((await run.state()).active.map((v) => v.node)).toEqual(["a"]);
+    await run.completeStep("a", 1);
+    await run.waitForRest(5_000, "a");
+    const record = (await h.store.readJournal(run.runId)).findLast(
+      (r) => r.event === "agent_completed" && r.node === "a",
+    );
+    expect(record?.changes_note).toBe(SHARED_TREE_NOTE);
+    // a step alone in its run has no note: plan was handed in with nothing else going on
+    const plan = (await h.store.readJournal(run.runId)).find(
+      (r) => r.event === "agent_completed" && r.node === "plan",
+    );
+    expect(plan?.changes_note).toBeUndefined();
   });
 
   test("t40_redact_also_waiting_text", async () => {
@@ -1151,4 +1212,70 @@ describe("t40 the shared tree at a gate and at a hand-in", () => {
     expect(String(finished?.reason)).toContain('branch "c" failed at "c"');
     expect(String(finished?.reason)).toContain("[REDACTED");
   });
+});
+
+describe("t40 a scoped wait takes over only its own work", () => {
+  /** Branch a: an agent step, then a command; branch b: a command. */
+  const OWN_CHAIN = parsePipeline(
+    yaml([
+      "name: own-chain",
+      "nodes:",
+      "  - { slug: plan, kind: agent, prompt: plan }",
+      "  - { slug: a, kind: agent, prompt: a }",
+      "  - { slug: a-slow, kind: command, command: a-slow }",
+      "  - { slug: b, kind: command, command: b }",
+      "  - { slug: merge, kind: agent, prompt: merge, join: all }",
+      "edges:",
+      "  - { from: plan, to: a }",
+      "  - { from: plan, to: b }",
+      "  - { from: a, to: a-slow }",
+      "  - { from: a-slow, to: merge }",
+      "  - { from: a-slow, to: merge, when: failed }",
+      "  - { from: b, to: merge }",
+      "  - { from: b, to: merge, when: failed }",
+    ]),
+  );
+
+  test("t40_scoped_wait_never_takes_over_a_sibling_command", async () => {
+    // b was started by a process that is gone; a-slow, in a's chain, runs in another live process.
+    // A wait scoped to a (what `kodel gate` and the others do) watches a-slow on disk and ticks now
+    // and then; the tick must not take b over: b would start in the waiting process, be left out of
+    // its wait, and be lost with the exit that follows.
+    const alive = (owner: string) => owner !== "gone";
+    const hostAs = (ownerId: string, latch: LatchRunner) =>
+      new LocalHost(OWN_CHAIN, {
+        root: dir,
+        heartbeatMs: 0,
+        ownerId,
+        isOwnerAlive: alive,
+        runCommand: latch.runner,
+      });
+    const latch0 = createLatchRunner();
+    const { run: run0 } = await hostAs("gone", latch0).start("split the work");
+    await run0.completeStep("plan", 1);
+    await latch0.started("b#1");
+    run0.stop();
+    const latch1 = createLatchRunner();
+    const run1 = hostAs("other", latch1).open(run0.runId);
+    await run1.completeStep("a", 1);
+    await latch1.started("a-slow#1");
+    const latch2 = createLatchRunner();
+    const run2 = hostAs("waiter", latch2).open(run0.runId);
+    // longer than the rounds after which the wait ticks
+    await run2.waitForRest(1_800, "a");
+    expect(latch2.seen()).toEqual([]);
+    const state = await run2.state();
+    expect(state.active.map((v) => [v.node, v.owner]).sort()).toEqual([
+      ["a-slow", "other"],
+      ["b", "gone"],
+    ]);
+    expect((await run2.journal()).filter((r) => r.event === "node_restarted")).toEqual([]);
+    // an unscoped wait (nobody's in particular) takes the orphan over, as before
+    await run2.tick();
+    await latch2.started("b#1");
+    latch2.release("b#1");
+    latch1.release("a-slow#1");
+    await run1.waitForRest(5_000);
+    await run2.waitForRest(5_000);
+  }, 20_000);
 });

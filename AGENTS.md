@@ -48,7 +48,9 @@ This repository adds these rules:
 - A pipeline may fork: a `node` answer then lists every open step in `steps`, and `execution.mode` says how
   this project works them. In `parallel` mode start one subagent (a worker) per step that has no `taken_by`
   and give it these rules: call `pipeline_take_step` with the run id and its step's slug and keep the
-  `claim_token`; if the answer is `taken`, stop; do the step where its `workdir` says; call
+  `claim_token`; if the answer is `taken` (another worker holds it), `queued` (the project's
+  `agents.max_parallel` steps are already being worked) or `none` (no free step), stop and report that
+  answer back without doing anything; do the step where its `workdir` says; call
   `pipeline_complete_step` with `node_slug`, `attempt` and that `claim_token`; report the answer back to the
   agent that started you as it is (one of `node`, `waiting`, `running` or `done`, with the `also_waiting` list
   it may carry), never write to the person, and never start `kodel wait` as a worker. In `sequential` mode

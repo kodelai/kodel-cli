@@ -17,6 +17,7 @@ import {
   type Decision,
   KodelError,
   type NewTask,
+  RECORD_VERSION,
   type RunState,
   type RunTaskLink,
   redactText,
@@ -283,6 +284,9 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
   async function afterDecision(run: Awaited<ReturnType<typeof openRun>>, nodes: string[]) {
     const until = Date.now() + WORK_WAIT_MS;
     for (const node of nodes) await run.waitForRest(until - Date.now(), node);
+    // Defensively, whatever else this process started is waited for too: the exit that follows would
+    // leave it running unseen, to be started a second time by the next caller.
+    await run.settle(() => 0, until);
     const state = await run.state();
     env.out(`${run.runId}: ${describeRun(state)}\n`);
   }
@@ -1014,9 +1018,25 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .action(async (runId: string | undefined, opts: { json?: boolean }) => {
       const h = await host();
       // The latest run whose state this kodel reads: one of an older format is skipped, not reported.
-      const id =
-        runId ?? (await h.runSummaries()).filter((r) => r.state !== undefined).at(-1)?.meta.runId;
-      if (!id) throw new UserError("there are no runs yet");
+      const summaries = runId === undefined ? await h.runSummaries() : [];
+      const id = runId ?? summaries.filter((r) => r.state !== undefined).at(-1)?.meta.runId;
+      if (!id) {
+        if (summaries.length === 0) throw new UserError("there are no runs yet");
+        const formats = [
+          ...new Set(
+            summaries.flatMap((r) =>
+              r.unreadable?.format === undefined ? [] : [r.unreadable.format],
+            ),
+          ),
+        ];
+        throw new UserError(
+          `no run this kodel can read: ${summaries.length === 1 ? "the one run is" : `all ${summaries.length} runs are`} ${
+            formats.length > 0
+              ? `in run-state format ${formats.join(", ")} (this kodel reads ${RECORD_VERSION}); report on them with the kodel that started them`
+              : "unreadable (see kodel status)"
+          }`,
+        );
+      }
       const run = await openRun(h, id);
       const report = await run.report();
       // The report is read from the run's own files, so it is only as good as they are: whether they

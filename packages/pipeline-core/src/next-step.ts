@@ -286,7 +286,8 @@ const parallelRules = (waitHint: boolean) =>
   "Several steps of this run are open at once (`steps`) and this project works them in parallel: " +
   "start one subagent per step in `steps` that has no `taken_by`, and give each worker these rules. " +
   "A worker calls pipeline_take_step with the run_id and its step's slug (node_slug) and keeps the " +
-  "`claim_token` it gets; if the answer is `taken`, the step is another worker's: it stops. It does " +
+  "`claim_token` it gets; if the answer is `taken` (the step is another worker's) or `queued` (the " +
+  "project's cap on steps worked at once is reached), it stops and reports that answer back. It does " +
   "the step where the step's `workdir` says (or where you work, if the step has none), then calls " +
   "pipeline_complete_step with node_slug, attempt and that claim_token, and reports the answer back " +
   "to you as it is, whether it says `node` (its own step again), `waiting`, `running`, `done` or " +
@@ -429,6 +430,15 @@ function forWorker(
   const tell = tellWorker(options.waitHint !== false);
   if ("waiting" in step) return { waiting: { ...step.waiting, tell_the_person: tell } };
   if ("done" in step) return { ...step, tell_the_person: tell };
+  if ("running" in step) {
+    // The plain hint tells whoever asked to wait or to talk to the person: neither is a worker's.
+    return {
+      running: {
+        ...step.running,
+        hint: `Your step is handed in; the engine is still working on this run (\`active\`), and that is not yours to wait for. ${tell}`,
+      },
+    };
+  }
   if (!("node" in step)) return step;
   const { slug, steps, pipeline_change, also_waiting, note } = step.node;
   if (slug === options.completionOf && steps === undefined) return step;
@@ -645,19 +655,22 @@ function baseStep(
       );
     }
     const maxParallel = Math.max(1, options.agents?.maxParallel ?? DEFAULT_AGENTS.max_parallel);
-    if (taken.length >= maxParallel) {
+    // The cap counts every step in flight, a sibling's too: after a completion only `visible` is
+    // handed out, but the steps held in other branches are worked all the same.
+    const held = open.filter((v) => liveClaim(state.nodes[v.node], now) !== undefined).length;
+    if (held >= maxParallel) {
       // The cap is on the steps in flight, not on the size of the answer: nothing is handed out
       // (and `pipeline_take_step` refuses a take by slug the same way) until a step is handed in.
       const capped = summary(
         `Every step this project lets be worked at once is held by a worker (agents.max_parallel is ${maxParallel}; ` +
-          `${taken.length} held, ${free.length} more open and queued). Call pipeline_next_step again with wait_s (up to ${MAX_WAIT_S}) ` +
+          `${held} held, ${free.length} more open and queued). Call pipeline_next_step again with wait_s (up to ${MAX_WAIT_S}) ` +
           "to wait for a hand-in, or wait for your workers to report. A step you hold yourself is handed to you " +
           "again when you ask for it with node_slug.",
       );
       if ("running" in capped) capped.running.queued = free.length;
       return capped;
     }
-    const handed = free.slice(0, maxParallel - taken.length);
+    const handed = free.slice(0, maxParallel - held);
     const first = handed[0] as Visit;
     const out = stepOf(first);
     if (visible.length > 1) {
@@ -793,8 +806,16 @@ function agentStep(
   // between the entry and this answer, so two objects say nothing about being the same failure.
   const branches = run?.lastFailures ?? [];
   const first = branches[0];
-  if (spec_.join !== undefined && first && failure && sameFeedback(failure, first)) {
-    out.reentry_feedback = `Branches of the fork failed: ${branches.map(describeFailure).join("; ")}`;
+  const branchList =
+    spec_.join !== undefined && first
+      ? `Branches of the fork failed: ${branches.map(describeFailure).join("; ")}`
+      : undefined;
+  if (branchList !== undefined && failure && sameFeedback(failure, first as Feedback)) {
+    out.reentry_feedback = branchList;
+  } else if (branchList !== undefined && failure?.source === "pipeline") {
+    // An accepted change started the join again on its new definition: the new attempt starts over,
+    // so it is told again what the branches it joins left to handle.
+    out.reentry_feedback = `The pipeline was changed under this run: ${failure.reason}. ${branchList}`;
   } else if (failure) {
     out.reentry_feedback =
       failure.source === "human"

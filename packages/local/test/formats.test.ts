@@ -713,6 +713,8 @@ describe("every stored format against the current engine", () => {
     expect(error?.code).toBe("UNSUPPORTED_FORMAT");
     expect(error?.message ?? "").toContain("meta format 1");
     expect(error?.message ?? "").not.toContain("run-state format");
+    // the engine never advises deleting history (decision 1 of T-40)
+    expect(error?.message ?? "").not.toContain("remove");
     // and the other way round the message names the run-state format, not the meta format
     const other = V1_RUNS[1] as string;
     const stateError = await refusal(hostFor().open(other));

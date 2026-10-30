@@ -1513,7 +1513,8 @@ describe("a store made from the golden runs of the stored formats", () => {
     // with only runs of format 1 there is nothing to report on
     const none = await cli("report");
     expect(none.code).not.toBe(0);
-    expect(none.err).toContain("there are no runs yet");
+    expect(none.err).not.toContain("no runs yet");
+    expect(none.err).toContain("no run this kodel can read: all 2 runs are in run-state format 1");
     // a run of this kodel beside them is the one `report` picks
     const id = await runAtGate();
     const report = await cli("report");

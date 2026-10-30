@@ -92,6 +92,19 @@ export interface Scenario {
   agentMode: AgentMode;
   injects: Inject[];
   steps: Step[];
+  /**
+   * A follow-up the engine refused while the run was going (a result the host built from an effect,
+   * which a correct engine never refuses) fails the scenario, unless the scenario says it expects one.
+   */
+  allowRefusedFollowUps?: boolean;
+}
+
+/** A follow-up event the engine refused, and whether the run had ended by then. */
+export interface RefusedFollowUp {
+  event: string;
+  code: string;
+  message: string;
+  afterEnd: boolean;
 }
 
 // ── what the engine shows back ──────────────────────────────────────────────
@@ -142,5 +155,7 @@ export interface ScenarioEngine {
   /** Optional: engines that cannot take tool calls leave it out; such steps are reported. */
   callTool?(tool: string, args: Record<string, unknown>): Promise<ToolResponse>;
   readState(): Promise<ScenarioState>;
+  /** Optional: the follow-ups the engine refused so far; the runner fails on one before the end. */
+  refusedFollowUps?(): RefusedFollowUp[];
   dispose?(): Promise<void>;
 }

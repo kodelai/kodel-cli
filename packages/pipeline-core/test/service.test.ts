@@ -732,6 +732,20 @@ describe("the tool surface", () => {
       "pipeline_feedback",
       "pipeline_propose_change",
     ]);
+    // what a client may retry on its own: a take without a token is a new take, so it is not
+    expect(Object.fromEntries(TOOLS.map((t) => [t.name, [t.readOnly, t.idempotent]]))).toEqual({
+      pipeline_list: [true, true],
+      pipeline_docs: [true, true],
+      pipeline_resolve: [true, true],
+      pipeline_plan: [true, true],
+      pipeline_start: [false, true],
+      pipeline_next_step: [true, true],
+      pipeline_take_step: [false, false],
+      pipeline_report_result: [false, false],
+      pipeline_complete_step: [false, true],
+      pipeline_feedback: [false, false],
+      pipeline_propose_change: [false, true],
+    });
   });
 
   test("the instructions the server gives on connecting name only tools that exist", () => {

@@ -1,8 +1,10 @@
 /**
  * A fork run on the built binary (T-40). CI runs `bun test` before `bun run build`, so this test
  * builds `packages/cli/dist/kodel.js` itself, then drives the fork of `scripts/check-artifact-fork.mjs`
- * on it under plain Node: two command branches at the same time, both failing once, the join told of
- * both and restarting them, and `status`/`report` opening the run. The commands are valid in cmd.exe too.
+ * on it: two command branches at the same time, both failing once, the join told of both and
+ * restarting them, and `status`/`report` opening the run. The artifact runs under plain Node when a
+ * `node` is on the PATH, else under the Bun running the test (CI's `check-artifact.mjs` runs the same
+ * fork under Node in any case). The commands are valid in cmd.exe too.
  */
 import { beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
@@ -13,6 +15,10 @@ import { pathToFileURL } from "node:url";
 import { checkForkRun, commandsValidInCmd } from "../../scripts/check-artifact-fork.mjs";
 
 const REPO = resolve(import.meta.dir, "..", "..");
+
+/** Plain Node when one is on the PATH: the artifact is shipped for Node, not only for Bun. */
+const NODE =
+  spawnSync("node", ["--version"], { encoding: "utf8" }).status === 0 ? "node" : undefined;
 const ARTIFACT = join(REPO, "packages", "cli", "dist", "kodel.js");
 
 /** The MCP SDK as the CLI package has it (this folder has no dependencies of its own). */
@@ -47,7 +53,12 @@ describe("t40 a fork run on the built binary", () => {
       throw new Error(message);
     };
     const { Client, StdioClientTransport } = await sdk();
-    const seen = await checkForkRun(ARTIFACT, { Client, StdioClientTransport, fail });
+    const seen = await checkForkRun(ARTIFACT, {
+      Client,
+      StdioClientTransport,
+      fail,
+      ...(NODE === undefined ? {} : { runtime: NODE }),
+    });
     expect(problems).toEqual([]);
     // the journal of the real run shows the fork, the overlap and the join entered after a failure
     expect(seen.events).toContain("fork_started");

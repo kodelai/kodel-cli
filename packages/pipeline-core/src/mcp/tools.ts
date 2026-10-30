@@ -288,7 +288,8 @@ export const TOOLS: ToolDescriptor[] = [
       "keep it, and pass it to pipeline_complete_step when the step is done. `taken` means another worker " +
       "holds the step: leave it. `queued` means nobody holds it but the project's cap on steps worked at once " +
       "(agents.max_parallel) is reached: wait for a hand-in. Calling again with your claim_token renews the hold, and after the step was " +
-      "restarted it gives you the new attempt. The hold is advice to the workers, not a verdict on the step: " +
+      "restarted it gives you the new attempt; a call again without a claim_token is a new take (a new token, and without " +
+      "node_slug another step), so keep the token of the first answer. The hold is advice to the workers, not a verdict on the step: " +
       "the engine's checks decide whether the step is done, and a person is never asked anything here.",
     shape: {
       run_id: runId,
@@ -305,7 +306,8 @@ export const TOOLS: ToolDescriptor[] = [
         ),
     },
     readOnly: false,
-    idempotent: true,
+    // A take without a token claims another step with a new token: a client must not retry it on its own.
+    idempotent: false,
     run: (service, input) => service.takeStep(input as Parameters<PipelineService["takeStep"]>[0]),
   },
   {

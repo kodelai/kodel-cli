@@ -31,6 +31,7 @@ const hashToken = (token: string) => createHash("sha256").update(token).digest("
 
 import type {
   Production,
+  RefusedFollowUp,
   ScenarioEngine,
   ScenarioEvent,
   ScenarioState,
@@ -55,11 +56,35 @@ export class MemoryEngine implements ScenarioEngine {
   private journal: string[] = [];
   private feedbackCount = 0;
   /** Follow-ups the engine refused (a result that came after the run had moved on), as decisions. */
-  readonly refused: { event: RunEvent; code: string; message: string }[] = [];
+  readonly refused: { event: RunEvent; code: string; message: string; afterEnd: boolean }[] = [];
   /** How long a worker's hold on a step lasts; a scenario about lapsing claims sets it short. */
   claimTtlMs = DEFAULT_CLAIM_TTL_S * 1000;
 
   constructor(private readonly options: EngineOptions = {}) {}
+
+  refusedFollowUps(): RefusedFollowUp[] {
+    return this.refused.map(({ event, code, message, afterEnd }) => ({
+      event: event.type,
+      code,
+      message,
+      afterEnd,
+    }));
+  }
+
+  /**
+   * Throws when a follow-up was refused while the run was going: a result of work the run asked for
+   * must never be refused then. A test that expects one says so by not calling this.
+   */
+  assertNoRefusedFollowUps(): void {
+    const early = this.refused.filter((r) => !r.afterEnd);
+    if (early.length > 0) {
+      throw new Error(
+        `follow-ups refused while the run was going: ${early
+          .map((r) => `${r.event.type} ${r.code} ${r.message}`)
+          .join("; ")}`,
+      );
+    }
+  }
 
   async start(context: StartContext): Promise<{ runId: string }> {
     this.spec = context.spec;
@@ -245,7 +270,13 @@ export class MemoryEngine implements ScenarioEngine {
         // A follow-up the host built from an effect can be refused once the run has moved on (a
         // branch that died ended the run before a sibling's result came in). It is a decision like
         // any other: kept for the test to look at, and the rest of the queue goes on.
-        this.refused.push({ event, code: result.error.code, message: result.error.message });
+        const status = this.state?.status;
+        this.refused.push({
+          event,
+          code: result.error.code,
+          message: result.error.message,
+          afterEnd: status !== "running" && status !== "paused",
+        });
         this.journal.push(`refused:${result.error.code}`);
         continue;
       }
