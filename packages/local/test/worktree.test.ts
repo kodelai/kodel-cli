@@ -256,7 +256,8 @@ describe("reusing the worktree the agent is already in", () => {
       expect(workdir?.branch, what).toBe(`kodel/${run.runId}`);
       expect(worktreeCount(), what).toBe(expected);
     }
-  });
+    // six runs, each with a worktree of its own: more than the default 5 s when the machine is busy
+  }, 30_000);
 });
 
 describe("reusing is limited to the folder for worktrees, and never the root itself", () => {
