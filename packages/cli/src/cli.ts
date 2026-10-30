@@ -7,6 +7,7 @@
 
 import {
   findProjectRoot,
+  hashSource,
   LocalPipelineHost,
   loadConfig,
   openTaskService,
@@ -495,12 +496,15 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           loadDiff: (_runId, path) => demoDiff(path),
           addComment: (runId, _node, _attempt, comment) => demoAddComment(runId, comment),
           deleteComment: (runId, _node, _attempt, index) => demoDeleteComment(runId, index),
+          loadStats: async (pipeline) => (await import("./tui/demo-stats")).demoStats(pipeline),
         });
         return;
       }
       const { loadSessions } = await import("./tui/load");
       const { addComment, loadDiff, loadRunDetail, removeComment } = await import("./tui/gate");
+      const { createStatsLoader } = await import("./tui/stats-load");
       const h = await host();
+      const loadStats = createStatsLoader(h, hashSource);
       await runTui(process.stdin, process.stdout, () => loadSessions(h, Date.now()), "project", {
         mouse: opts.mouse === true,
         loadDetail: (runId) => loadRunDetail(h, runId),
@@ -508,6 +512,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         addComment: (runId, node, attempt, comment) => addComment(h, runId, node, attempt, comment),
         deleteComment: (runId, node, attempt, index) =>
           removeComment(h, runId, node, attempt, index),
+        loadStats: (pipeline) => loadStats(pipeline),
       });
     });
 

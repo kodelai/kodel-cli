@@ -2,6 +2,7 @@
 import { MOUSE_OFF, MOUSE_ON, parseInput } from "./input";
 import type { Loaded } from "./load";
 import type { Comment, DiffState, GateDetail } from "./session";
+import type { StatsData } from "./stats-load";
 import { diffKey } from "./tabs";
 import {
   detailKey,
@@ -17,12 +18,15 @@ import {
   withData,
   withDetail,
   withDiff,
+  withStats,
 } from "./view";
 
 const FRAME_MS = 100;
 const REFRESH_MS = 2000;
 /** How often the card of a run that is going on is read again. */
 const DETAIL_REFRESH_MS = 4000;
+/** How often the pipeline on the Report screen is read again: it only changes when a run ends. */
+const STATS_REFRESH_MS = 60_000;
 
 export interface TuiOptions {
   /** Start with mouse events on; `m` turns them on and off while the screen is open. */
@@ -34,6 +38,8 @@ export interface TuiOptions {
   /** Records a comment at the gate of a run, or takes one out. A person's act, never an agent's. */
   addComment?: (runId: string, node: string, attempt: number, comment: Comment) => Promise<void>;
   deleteComment?: (runId: string, node: string, attempt: number, index: number) => Promise<void>;
+  /** Sums up the runs of a pipeline for the Report screen. */
+  loadStats?: (pipeline: string) => Promise<StatsData>;
 }
 
 export async function runTui(
@@ -82,6 +88,30 @@ export async function runTui(
         notice: `${what}: ${error instanceof Error ? error.message : String(error)}`,
       };
     };
+    if (effect.type === "load_stats") {
+      const read = options.loadStats?.(effect.pipeline);
+      if (!read) {
+        model = withStats(model, effect.pipeline, {
+          status: "failed",
+          error: "not available here",
+        });
+        return;
+      }
+      read
+        .then((data) => {
+          model = withStats(model, effect.pipeline, { status: "ready", data });
+        })
+        .catch((error: unknown) => {
+          // A report that was read stays on the screen when the next read fails.
+          if (model.stats[effect.pipeline]?.status === "ready") return;
+          model = withStats(model, effect.pipeline, {
+            status: "failed",
+            error: error instanceof Error ? error.message : String(error),
+          });
+        })
+        .finally(draw);
+      return;
+    }
     if (effect.type === "load_diff") {
       const read = options.loadDiff?.(effect.runId, effect.path);
       if (!read) return;
@@ -164,9 +194,16 @@ export async function runTui(
         });
     }, REFRESH_MS);
 
+    const statsRefresh = setInterval(() => {
+      if (model.section === 3 && model.rep.selected !== "") {
+        perform({ type: "load_stats", pipeline: model.rep.selected });
+      }
+    }, STATS_REFRESH_MS);
+
     const finish = () => {
       clearInterval(frames);
       clearInterval(refresh);
+      clearInterval(statsRefresh);
       stdin.off("data", onData);
       stdout.off("resize", onResize);
       stdin.pause();

@@ -42,6 +42,19 @@ import {
   sortSessions,
 } from "./session";
 import {
+  emptyReport,
+  headHeight,
+  initialRepState,
+  type RepState,
+  repCard,
+  repHints,
+  repKey,
+  repList,
+  repNames,
+  type StatsSlot,
+  withNames,
+} from "./stats";
+import {
   CODE,
   COMMENTS,
   commentPlace,
@@ -71,6 +84,9 @@ export interface Model {
   /** What the Pipeline screen shows, and where it is. */
   pipelines: PipeEntry[];
   pipe: PipeState;
+  /** The Report screen: where it is, and what has been read for it, by pipeline. */
+  rep: RepState;
+  stats: Record<string, StatsSlot>;
   /** Id of the selected session, so the selection follows it when the list reorders. */
   selected: string;
   /** On a narrow terminal the list and the card take turns. */
@@ -119,7 +135,8 @@ export interface Input {
 export type Effect =
   | { type: "add_comment"; runId: string; node: string; attempt: number; comment: Comment }
   | { type: "delete_comment"; runId: string; node: string; attempt: number; index: number }
-  | { type: "load_diff"; runId: string; path: string };
+  | { type: "load_diff"; runId: string; path: string }
+  | { type: "load_stats"; pipeline: string };
 
 /** A run's gate detail is good for the wait it was read for: a new wait is a new key. */
 export function detailKey(s: Session): string {
@@ -166,6 +183,8 @@ export function initialModel(
     proposals: loaded.proposals,
     pipelines: sortEntries(loaded.pipelines ?? []),
     pipe: initialPipeState(sortEntries(loaded.pipelines ?? [])),
+    rep: initialRepState(repNames(sortEntries(loaded.pipelines ?? []))),
+    stats: {},
     selected: ordered(loaded.sessions)[0]?.id ?? "",
     focus: "list",
     confirm: null,
@@ -217,6 +236,7 @@ export function withData(m: Model, loaded: Loaded, now: number): Model {
     proposals: loaded.proposals,
     pipelines,
     pipe: withEntries(m.pipe, pipelines),
+    rep: withNames(m.rep, repNames(pipelines)),
     selected,
     confirm,
     now,
@@ -241,7 +261,26 @@ function selectedSession(m: Model): Session | undefined {
   return m.sessions.find((s) => s.id === m.selected) ?? m.sessions[0];
 }
 
+/** What has been read for the Report screen: a pipeline is read when it is first looked at. */
+export function withStats(m: Model, pipeline: string, slot: StatsSlot): Model {
+  return { ...m, stats: { ...m.stats, [pipeline]: slot } };
+}
+
+/** On the Report screen a pipeline that has not been read is asked for, once. */
+function wanting(m: Model): Model {
+  const name = m.rep.selected;
+  if (m.section !== 3 || name === "" || m.stats[name]) return m;
+  return {
+    ...withStats(m, name, { status: "loading" }),
+    effects: [...m.effects, { type: "load_stats", pipeline: name }],
+  };
+}
+
 export function update(input: Model, key: string, size: Size = DEFAULT_SIZE): Model {
+  return wanting(updateKey(input, key, size));
+}
+
+function updateKey(input: Model, key: string, size: Size): Model {
   const m = normalized(input);
   if (key === "ctrl-c") return { ...m, quit: true };
   if (m.input) return typing(m, key);
@@ -251,6 +290,7 @@ export function update(input: Model, key: string, size: Size = DEFAULT_SIZE): Mo
     return { ...m, confirm: null, notice: "Cancelled." };
   }
   if (m.section === 1 && !SHARED_KEYS.has(key)) return pipesUpdate(m, key, size);
+  if (m.section === 3 && !SHARED_KEYS.has(key)) return reportUpdate(m, key, size);
   if (m.focus === "card" && m.section === 0) {
     const moved = cardKey(m, key, size);
     if (moved) return moved;
@@ -278,10 +318,9 @@ export function update(input: Model, key: string, size: Size = DEFAULT_SIZE): Mo
     case "b":
       return scrollCard(m, size, -PAGE);
     case "z":
-      if (m.section === 1) {
-        return m.pipelines.length === 0
-          ? m
-          : { ...m, zoom: !m.zoom, focus: m.zoom ? m.focus : "card" };
+      if (m.section === 1 || m.section === 3) {
+        const any = m.section === 1 ? m.pipelines.length > 0 : m.rep.selected !== "";
+        return any ? { ...m, zoom: !m.zoom, focus: m.zoom ? m.focus : "card" } : m;
       }
       if (m.section !== 0 || m.sessions.length === 0) return m;
       return { ...m, zoom: !m.zoom, focus: m.zoom ? m.focus : "card" };
@@ -315,6 +354,23 @@ export function update(input: Model, key: string, size: Size = DEFAULT_SIZE): Mo
 
 /** The keys every screen reads the same way. */
 const SHARED_KEYS = new Set(["q", "tab", "1", "2", "3", "4", "m", "z"]);
+
+/** A key on the Report screen. */
+function reportUpdate(m: Model, key: string, size: Size): Model {
+  const layout = layoutOf(m, size.cols);
+  const slot = m.stats[m.rep.selected];
+  const r = repKey(m.rep, key, {
+    names: repNames(m.pipelines),
+    slot,
+    focus: m.focus,
+    width: layout.cardWidth,
+    room: Math.max(1, size.rows - 3 - headHeight(m.rep, slot, layout.cardWidth)),
+  });
+  if (!r) return key === "escape" ? { ...m, zoom: false } : m;
+  let next: Model = { ...m, rep: r.rep, notice: r.notice ?? "" };
+  if (r.focus) next = { ...next, focus: r.focus, zoom: r.focus === "list" ? false : next.zoom };
+  return next;
+}
 
 /** A key on the Pipeline screen. */
 function pipesUpdate(m: Model, key: string, size: Size): Model {
@@ -909,6 +965,19 @@ function panes(
   return (layout.showCard ? right : left).map((l) => ` ${l}`);
 }
 
+function reportBody(m: Model, cols: number, height: number): string[] {
+  const names = repNames(m.pipelines);
+  if (names.length === 0) return emptyReport();
+  const layout = layoutOf(m, cols);
+  const left = layout.showList
+    ? repList(names, m.rep, m.stats, layout.listWidth, height, m.focus === "list")
+    : [];
+  const right = layout.showCard
+    ? repCard(m.rep, m.stats[m.rep.selected], layout.cardWidth, height, m.focus === "card")
+    : [];
+  return panes(m, layout, left, right, height);
+}
+
 function pipesBody(m: Model, cols: number, height: number): string[] {
   const entry = entryOf(m.pipelines, m.pipe);
   if (!entry) return emptyPipes();
@@ -937,6 +1006,7 @@ function menuLine(m: Model, cols: number): string {
 
 function hints(m: Model): string {
   if (m.section === 1) return pipeHints(entryOf(m.pipelines, m.pipe), m.pipe, m.focus === "card");
+  if (m.section === 3) return repHints(m.rep, m.focus === "card");
   const current = selectedSession(m);
   if (m.confirm === "d")
     return `${bold("Delete this comment?")}  ${bold("y")} yes   ${bold("n")} no`;
@@ -1004,12 +1074,14 @@ export function render(model: Model, { cols, rows }: Size): string[] {
   const out: string[] = [menuLine(m, cols), rule];
 
   let body: string[];
-  if (m.section >= 2) {
+  if (m.section === 2) {
     body = [
       "",
       `  ${bold(SECTIONS[m.section] ?? "")}`,
       dim("  Not in this prototype yet. The layout under test is menu, session list and card."),
     ];
+  } else if (m.section === 3) {
+    body = reportBody(m, cols, bodyHeight);
   } else if (m.section === 1) {
     body = pipesBody(m, cols, bodyHeight);
   } else if (m.sessions.length === 0) {
@@ -1077,6 +1149,14 @@ export function hitTest(model: Model, { cols, rows }: Size, x: number, y: number
  * nothing else. A decision is never made with the mouse: it takes a key and a confirmation.
  */
 export function mouseUpdate(
+  input: Model,
+  size: Size,
+  event: Extract<InputEvent, { type: "mouse" }>,
+): Model {
+  return wanting(mouseEvent(input, size, event));
+}
+
+function mouseEvent(
   input: Model,
   size: Size,
   event: Extract<InputEvent, { type: "mouse" }>,

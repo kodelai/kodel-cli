@@ -1,0 +1,298 @@
+import { describe, expect, test } from "bun:test";
+import {
+  type AttemptReport,
+  canonicalNode,
+  type NodeReport,
+  type PipelineSpec,
+  parsePipeline,
+  type RunReport,
+  type RunState,
+} from "@kodel-ai/pipeline-core";
+import { stripAnsi, visibleLength } from "../src/tui/ansi";
+import { demoSessions } from "../src/tui/demo";
+import { demoStats } from "../src/tui/demo-stats";
+import { createStatsLoader, type StatsSource } from "../src/tui/stats-load";
+import { initialModel, type Model, render, takeEffects, update, withStats } from "../src/tui/view";
+
+const SIZE = { cols: 130, rows: 34 };
+const NARROW = { cols: 72, rows: 24 };
+
+const screen = (m: Model, size = SIZE) => render(m, size).map(stripAnsi).join("\n");
+
+function press(m: Model, keys: string[], size = SIZE): Model {
+  return keys.reduce((acc, k) => update(acc, k, size), m);
+}
+
+/** The Report screen with the sample numbers already read. */
+function reading(keys: string[] = [], size = SIZE): Model {
+  let m = initialModel(demoSessions(Date.now()), "demo", Date.now());
+  m = press(m, ["4"], size);
+  m = takeEffects(m)[0];
+  m = withStats(m, "dev", { status: "ready", data: demoStats("dev") });
+  return press(m, keys, size);
+}
+
+describe("the Report screen asks for what it shows", () => {
+  test("entering it asks for the selected pipeline, once", () => {
+    const m = press(initialModel(demoSessions(Date.now()), "demo", Date.now()), ["4"]);
+    expect(m.effects).toEqual([{ type: "load_stats", pipeline: "dev" }]);
+    expect(screen(m)).toContain("Reading the runs");
+    const [clean] = takeEffects(m);
+    expect(press(clean, ["up"]).effects).toEqual([]);
+  });
+
+  test("another pipeline is asked for when it is selected", () => {
+    const m = reading(["down"]);
+    expect(m.rep.selected).toBe("docs");
+    expect(m.effects).toEqual([{ type: "load_stats", pipeline: "docs" }]);
+  });
+
+  test("a pipeline that is only proposed has no runs to report on", () => {
+    const text = screen(reading());
+    expect(text).toContain("dev");
+    expect(text).toContain("docs");
+    expect(text).not.toContain("release");
+  });
+
+  test("a read that failed says so", () => {
+    let m = reading();
+    m = withStats(m, "dev", { status: "failed", error: "disk is gone" });
+    expect(screen(m)).toContain("Cannot read the runs: disk is gone");
+  });
+});
+
+describe("the Steps tab", () => {
+  test("a row for each step, with the numbers a person looks at", () => {
+    const text = screen(reading(["enter"]));
+    for (const word of ["tries", "time", "back", "plan-approval", "impl", "final-approval"]) {
+      expect(text).toContain(word);
+    }
+    expect(text).toContain("◆ plan-approval");
+  });
+
+  test("it says what was counted, and that the cost is known only for some attempts", () => {
+    const text = screen(reading());
+    expect(text).toContain("present definitions");
+    expect(text).toMatch(/The cost is known for \d+ of \d+ attempts/);
+  });
+
+  test("a on the card counts every attempt, and a again goes back", () => {
+    const all = reading(["enter", "a"]);
+    expect(screen(all)).toContain("every attempt");
+    expect(screen(press(all, ["a"]))).toContain("present definitions");
+  });
+
+  test("Enter reads a step: how its attempts ended and why they failed", () => {
+    // impl is the third step
+    const m = reading(["enter", "down", "down", "enter"]);
+    const text = screen(m);
+    expect(text).toContain("HOW ATTEMPTS ENDED");
+    expect(text).toContain("WHY THEY FAILED");
+    expect(m.rep.open).toBe(true);
+  });
+
+  test("a gate shows what people decided and the words they gave, once", () => {
+    const text = screen(reading(["enter", "down", "enter"]));
+    expect(text).toContain("WHAT PEOPLE DECIDED");
+    expect(text).toContain("rejected");
+    expect(text).not.toContain("WHY THEY FAILED");
+  });
+
+  test("n and p move between steps, Esc comes back to the table", () => {
+    let m = reading(["enter", "enter"]);
+    expect(screen(m)).toContain("1 of 7");
+    m = press(m, ["n"]);
+    expect(screen(m)).toContain("2 of 7");
+    m = press(m, ["escape"]);
+    expect(m.rep.open).toBe(false);
+    expect(m.focus).toBe("card");
+    expect(press(m, ["escape"]).focus).toBe("list");
+  });
+
+  test("a step the present definition has never run says so, and a shows the older attempts", () => {
+    const data = demoStats("dev");
+    const only = {
+      ...data,
+      current: {
+        ...data.current,
+        nodes: data.current.nodes.map((n) =>
+          n.node === "impl" ? { ...n, runs: 0, attempts: 0, elsewhere: 30 } : n,
+        ),
+      },
+    };
+    let m = reading();
+    m = withStats(m, "dev", { status: "ready", data: only });
+    const text = screen(press(m, ["enter"]));
+    expect(text).toContain("none on the present definition yet (30 on older ones)");
+  });
+});
+
+describe("the Versions tab", () => {
+  test("a step that changed shows its versions, which one is the present, and the change", () => {
+    const text = screen(reading(["enter", "right"]));
+    expect(text).toContain("impl");
+    expect(text).toContain("v1");
+    expect(text).toContain("v2");
+    expect(text).toContain("now");
+    expect(text).toContain("vs before");
+  });
+
+  test("a step that never changed is not listed", () => {
+    expect(screen(reading(["enter", "right"]))).not.toContain("final-approval");
+  });
+});
+
+describe("keys", () => {
+  test("the left key goes back from the first tab to the list", () => {
+    expect(reading(["enter", "left"]).focus).toBe("list");
+  });
+
+  test("the keys of the other screens do not move anything here", () => {
+    const before = reading();
+    const m = press(before, ["down", "up"]);
+    expect(m.selected).toBe(before.selected);
+  });
+
+  test("on a narrow terminal no line is wider than the screen", () => {
+    let m = reading(["enter"], NARROW);
+    for (const keys of [[], ["down", "down", "enter"], ["escape", "right"]]) {
+      m = press(m, keys, NARROW);
+      for (const line of render(m, NARROW)) {
+        expect(visibleLength(line)).toBeLessThanOrEqual(NARROW.cols);
+      }
+    }
+  });
+});
+
+describe("createStatsLoader", () => {
+  const spec: PipelineSpec = parsePipeline(
+    [
+      "name: p",
+      "nodes:",
+      "  - slug: work",
+      "    kind: agent",
+      "    prompt: do it",
+      "edges: []",
+      "",
+    ].join("\n"),
+  );
+  const fingerprint = (text: string) => `h:${text}`;
+  const forms = canonicalNode(spec, spec.nodes[0] as PipelineSpec["nodes"][number]);
+  const nowDefinition = {
+    work: fingerprint(forms.work),
+    checks: fingerprint(forms.checks),
+    routing: fingerprint(forms.routing),
+  };
+
+  const attempt = (n: number, definition: AttemptReport["definition"]): AttemptReport => ({
+    attempt: n,
+    seconds: 10,
+    outcome: "passed",
+    ...(definition ? { definition } : {}),
+  });
+
+  function report(id: string, definition: AttemptReport["definition"], status = "completed") {
+    const node: NodeReport = {
+      node: "work",
+      gate: false,
+      attempts: [attempt(1, definition)],
+      seconds: 10,
+    };
+    return {
+      runId: id,
+      task: id,
+      slug: id,
+      status,
+      total_s: 10,
+      work_s: 10,
+      waiting_s: 0,
+      nodes: [node],
+      restarts: 0,
+      pauses: 0,
+      feedback: 0,
+      refused: 0,
+      refusals: [],
+      extra_attempts: 0,
+      pipeline_changes: [],
+      agent_decisions: [],
+      checks: [],
+      prompts: { not_collected: true },
+    } satisfies RunReport;
+  }
+
+  function source(over: { missingSpec?: boolean; broken?: string[] } = {}) {
+    const opened: string[] = [];
+    const runs: [string, string, RunReport, string][] = [
+      ["r1", "p", report("r1", nowDefinition), "completed"],
+      ["r2", "p", report("r2", { work: "old", checks: "old", routing: "old" }), "completed"],
+      ["r3", "p", report("r3", nowDefinition, "running"), "running"],
+      ["r4", "other", report("r4", nowDefinition), "completed"],
+      ["r5", "p", report("r5", nowDefinition), "completed"],
+    ];
+    const fake: StatsSource = {
+      runSummaries: async () =>
+        runs.map(([runId, pipeline, , status]) => ({
+          meta: { runId, pipeline, createdAt: Number(runId.slice(1)) },
+          state: { status } as RunState,
+        })),
+      open: async (runId) => {
+        opened.push(runId);
+        const found = runs.find(([id]) => id === runId);
+        if (!found || over.broken?.includes(runId)) {
+          return {
+            report: async () => {
+              throw new Error("damaged");
+            },
+          };
+        }
+        return { report: async () => found[2] };
+      },
+      resolveSource: async () => (over.missingSpec ? undefined : { spec }),
+    };
+    return { fake, opened };
+  }
+
+  test("only the runs of the pipeline are read, and the unreadable ones are counted", async () => {
+    const { fake, opened } = source({ broken: ["r5"] });
+    const data = await createStatsLoader(fake, fingerprint)("p");
+    expect(opened.sort()).toEqual(["r1", "r2", "r3", "r5"]);
+    expect(data.runs).toBe(3);
+    expect(data.unreadable).toBe(1);
+  });
+
+  test("the present scope keeps what ran on the definition the file has now", async () => {
+    const { fake } = source();
+    const data = await createStatsLoader(fake, fingerprint)("p");
+    expect(data.definitionsKnown).toBe(true);
+    expect(data.all.attempts.inScope).toBe(4);
+    expect(data.current.attempts.inScope).toBe(3);
+  });
+
+  test("a run that is over is read once, one that is going again", async () => {
+    const { fake, opened } = source();
+    const load = createStatsLoader(fake, fingerprint);
+    await load("p");
+    opened.length = 0;
+    await load("p");
+    expect(opened).toEqual(["r3"]);
+  });
+
+  test("a pipeline whose file cannot be read is counted whole, and says so", async () => {
+    const { fake } = source({ missingSpec: true });
+    const data = await createStatsLoader(fake, fingerprint)("p");
+    expect(data.definitionsKnown).toBe(false);
+    expect(data.current.attempts.inScope).toBe(data.all.attempts.inScope);
+  });
+
+  test("the a key tells a person when the scope cannot change", () => {
+    const m = reading(["enter"]);
+    const data = demoStats("dev");
+    const blind = withStats(m, "dev", {
+      status: "ready",
+      data: { ...data, definitionsKnown: false },
+    });
+    const pressed = press(blind, ["a"]);
+    expect(pressed.notice).toContain("cannot be read");
+    expect(pressed.rep.scope).toBe("current");
+  });
+});
