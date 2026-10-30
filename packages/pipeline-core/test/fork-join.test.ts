@@ -3009,6 +3009,26 @@ describe("t40 repair in a fork", () => {
     expect(h.state.active.map((v) => v.node)).toEqual(["b"]);
   });
 
+  test("t40_no_reroute_for_a_route_still_held_at_its_limit", () => {
+    // a (max_attempts 1) -> a-test, a-test failed -> a: a new prompt for a leaves a's limit where it
+    // is, so going on would pause at once; no effect is promised and the pause stays
+    const { text, before, h } = totalA(failsUntilRepaired("a-test"));
+    const after = parsePipeline(text.replace("    prompt: a\n", "    prompt: a, better\n"));
+    const diff = diffPipelines(before, after, h.state);
+    expect(diff.refused).toBeUndefined();
+    expect(diff.nodes).toEqual([{ slug: "a", changes: ["work"] }]);
+    expect(diff.effects).toEqual([]);
+    h.use(after);
+    must(h.send(accepted(before)));
+    expect(h.state.pauses).toEqual([
+      expect.objectContaining({
+        reason: "total",
+        node: "a",
+        blocked: expect.objectContaining({ to: "a" }),
+      }),
+    ]);
+  });
+
   test("t40_reroute_of_join_pause_reenters_join_without_rearriving", () => {
     // The join is held back at its attempt limit (`t40_join_reached_only_when_join_entered`); the
     // person raises the limit. The way into the join is taken again: the last branch does not

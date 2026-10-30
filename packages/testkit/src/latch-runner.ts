@@ -71,6 +71,8 @@ export function createLatchRunner(
     const begun = Date.now();
     // An abort (the run was cancelled, the host stopped) ends the command like a killed process.
     const aborted = new Promise<{ exit: number; tail: string; aborted: true }>((resolve) => {
+      // A signal aborted before the command started never fires `abort` again.
+      if (options.signal?.aborted) resolve({ exit: 137, tail: "", aborted: true });
       options.signal?.addEventListener(
         "abort",
         () => resolve({ exit: 137, tail: "", aborted: true }),

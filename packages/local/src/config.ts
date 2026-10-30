@@ -178,6 +178,12 @@ export const HISTORY_SECTION_KEYS = Object.keys(historySchema.shape);
 
 // Unknown keys are refused, not ignored: a misspelled `mode` must not leave the default in force
 // without the person noticing.
+const agentHintsSchema = z
+  .object({
+    wait: z.boolean().optional(),
+  })
+  .strict();
+
 const configSchema = z
   .object({
     version: z.union([z.number(), z.string()]).optional(),
@@ -194,12 +200,7 @@ const configSchema = z
       })
       .strict()
       .optional(),
-    agent_hints: z
-      .object({
-        wait: z.boolean().optional(),
-      })
-      .strict()
-      .optional(),
+    agent_hints: agentHintsSchema.optional(),
     decisions: z
       .object({
         dialog: z.boolean().optional(),
@@ -240,6 +241,23 @@ const configSchema = z
 
 const invalid = (file: string, message: string) =>
   new KodelError("CONFIG_INVALID", `${file}: ${message}`);
+
+/**
+ * Only the `agent_hints` block of the config in `storeRoot`, for a reader that keeps going on a config
+ * that does not load: a bad value elsewhere must not undo a valid `wait: false`. The defaults when the
+ * block itself cannot be read.
+ */
+export async function loadAgentHints(storeRoot: string): Promise<AgentHintsConfig> {
+  try {
+    const raw: unknown = parse(await readFile(join(storeRoot, CONFIG_FILE), "utf8"));
+    const block =
+      raw !== null && typeof raw === "object" ? Reflect.get(raw, "agent_hints") : undefined;
+    const parsed = agentHintsSchema.safeParse(block ?? {});
+    return { wait: (parsed.success ? parsed.data.wait : undefined) ?? DEFAULT_AGENT_HINTS.wait };
+  } catch {
+    return { ...DEFAULT_AGENT_HINTS };
+  }
+}
 
 /** Read the config in `storeRoot`; the defaults when there is no file. */
 export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {

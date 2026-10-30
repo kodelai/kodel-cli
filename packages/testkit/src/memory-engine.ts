@@ -185,11 +185,14 @@ export class MemoryEngine implements ScenarioEngine {
         const after = this.state ?? result.state;
         const ours = (n: RunState["nodes"][string] | undefined) =>
           liveClaim(n, this.clock)?.token === hash;
+        // Without a slug the step is the one the machine renewed or claimed, not the first held in
+        // node order: a worker holding two steps renews the one the machine picked.
+        const picked = node ?? result.claimed?.node;
         const mine =
-          node === undefined
-            ? Object.values(after.nodes).find(ours)
-            : ours(after.nodes[node])
-              ? after.nodes[node]
+          picked === undefined
+            ? undefined
+            : ours(after.nodes[picked])
+              ? after.nodes[picked]
               : undefined;
         if (mine === undefined) {
           if (node === undefined) return none(after);

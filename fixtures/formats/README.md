@@ -23,16 +23,20 @@ has `meta.json`, `state.json`, `journal.jsonl`, `snapshots.json`, `specs/` and `
 format 1 is shipped (AGENTS.md, "Stored data and compatibility", the exception under rule 4). The
 runs stay here untouched to prove that the refusal is clear: `status`, `report`, `resume`,
 `pipeline_next_step`, `gate`, `ack`, `seal`, `wait` and `pipeline changes` say "run-state format 1
-by an older kodel; finish or cancel it with the kodel that started it", never "modified"; the run
+by an older kodel; finish it with the kodel that started it", never "modified"; the run
 list shows them as `format 1`; `pipeline_start` passes a finished one over and refuses to start
-beside an open one. `v1/history/` holds golden event streams of the agent's log, not runs.
+beside an open one (naming it: it must be finished before a new run starts for that task). An open
+one nobody wants to finish can be left: kodel has no command that cancels a run, and such a run
+blocks only a new run of its pipeline and task. `v1/history/` holds golden event streams of the agent's log, not runs.
 
 They were taken with `node scripts/take-format-fixture.mjs v1 <run dir> ...`, from the run
 directories under `.kodel/runs`. Two things differ from the originals:
 
 - The absolute workdir of the run (`meta.json`, `state.json` and the journal) is the placeholder
   `/kodel-fixture/workdir/<run id>`. It does not exist, so a test that needs the workdir of a
-  finished run fails.
+  finished run fails. Only those files and `served/*.json` are rewritten; every other file
+  (artifacts, patches, specs) is copied byte for byte, and the script refuses a run that holds a
+  path of the machine there.
 - `seal.json` is left out. It holds the hashes of `state.json` and `journal.jsonl`, which the
   placeholder changes, and a copied seal would read as "modified". A fixture reads as `unsealed`.
 

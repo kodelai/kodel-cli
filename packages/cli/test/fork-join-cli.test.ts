@@ -9,7 +9,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalPipelineHost, type LocalRun } from "@kodel-ai/local";
+import { type LocalHost, LocalPipelineHost, type LocalRun } from "@kodel-ai/local";
 import { runCli } from "../src/cli";
 import { SHARED_TREE_TEXT } from "../src/decide-text";
 
@@ -224,6 +224,22 @@ const FAILED_BRANCH = [
   "",
 ].join("\n");
 
+/** Two agent branches meeting at a join; the test makes branch b dead (a valid pipeline cannot). */
+const DOOMED = [
+  "name: doomed",
+  "nodes:",
+  "  - { slug: plan, kind: agent, prompt: plan }",
+  "  - { slug: a, kind: agent, prompt: a }",
+  "  - { slug: b, kind: agent, prompt: b }",
+  "  - { slug: merge, kind: agent, prompt: merge, join: all }",
+  "edges:",
+  "  - { from: plan, to: a }",
+  "  - { from: plan, to: b }",
+  "  - { from: a, to: merge }",
+  "  - { from: b, to: merge }",
+  "",
+].join("\n");
+
 /** Two steps: the person's approval ends the run. */
 const ENDS = [
   "name: ends",
@@ -282,6 +298,7 @@ beforeEach(async () => {
     ["apply-chain", APPLY_CHAIN],
     ["pauses", PAUSES],
     ["failed-branch", FAILED_BRANCH],
+    ["doomed", DOOMED],
     ["ends", ENDS],
     ["resume-ends", RESUME_ENDS],
     ["apply-ends", APPLY_ENDS],
@@ -477,6 +494,37 @@ describe("t40 several gates at once", () => {
     expect(parsed.failed_branches).toBe(true);
     expect(parsed.critical_path).toEqual([expect.objectContaining({ fork: "f1" })]);
     expect(typeof parsed.busy_wall_s).toBe("number");
+  });
+
+  test("t40_status_prints_the_note_of_a_doomed_fork", async () => {
+    const h = host();
+    const run = (await h.start({ pipeline: "doomed", task: "t", restart: false })).run as LocalRun;
+    await run.completeStep("plan", 1);
+    await run.completeStep("b", 1);
+    await run.waitForRest(10_000);
+    // A branch dies only on a pipeline the validator refuses (or one changed under the run), so the
+    // state is written the way the engine writes a dead arrival, and trusted the way the engine does.
+    const state = await run.state();
+    const fork = state.forks?.f1;
+    const arrival = fork?.arrived.b;
+    if (!fork || !arrival) throw new Error("expected b to have arrived");
+    fork.arrived.b = {
+      ...arrival,
+      label: "failed",
+      failure: { source: "pipeline", reason: "red", from: "b" },
+      dead: true,
+    };
+    const inner = (run as unknown as { host: LocalHost }).host;
+    const hash = await inner.store.writeState(run.runId, state, (next) =>
+      inner.integrity.stage(run.runId, next),
+    );
+    await inner.integrity.set(run.runId, hash);
+    expect((await run.state()).status).toBe("running");
+    const one = await cli("status", run.runId);
+    expect(one.code).toBe(0);
+    expect(one.out).toContain('note:      A branch of the fork is dead (branch "b" failed at "b"');
+    expect(one.out).toContain("the run ends failed when the others have settled");
+    expect(one.out).toContain("waits for: a\n");
   });
 
   test("t40_resume_works_from_cli_with_running_sibling", async () => {

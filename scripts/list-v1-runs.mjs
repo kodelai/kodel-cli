@@ -2,8 +2,8 @@
 //
 //   node scripts/list-v1-runs.mjs [<project root>] [--format <N>]
 //
-// The current kodel refuses to read a run written in run-state format 1; such a run is finished or
-// cancelled with the kodel that started it. This prints one line per open run of that format
+// The current kodel refuses to read a run written in run-state format 1; such a run is finished with
+// the kodel that started it, or left (it then blocks only a new run of its pipeline and task). This prints one line per open run of that format
 // (`<run id>  <status>  <pipeline>  <task>`), so they can be found before a merge. Exit code 0 when
 // there are none, 1 when there are some, 2 for a usage error. Runs that cannot be read at all are
 // listed as `unreadable`.

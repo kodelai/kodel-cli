@@ -136,6 +136,26 @@ describe("a pipeline file edited under a run in the repository root", () => {
     expect(await offered()).toBe(true);
   });
 
+  test("t40_bad_agents_block_keeps_wait_false", async () => {
+    const run = await startRun();
+    await run.completeStep("write", 1);
+    await run.waitForRest(5_000);
+    const offered = async () => JSON.stringify(await run.nextStep()).includes("kodel wait");
+    expect(await offered()).toBe(true);
+    // the config does not load (agents.max_parallel is out of range), yet its valid hint holds
+    await writeFile(
+      join(dir, ".kodel", "config.yaml"),
+      "worktree:\n  mode: off\nagent_hints:\n  wait: false\nagents:\n  max_parallel: 0\n",
+    );
+    expect(await offered()).toBe(false);
+    // and with a bad hint as well the default comes back
+    await writeFile(
+      join(dir, ".kodel", "config.yaml"),
+      "agent_hints:\n  wait: never\nagents:\n  max_parallel: 0\n",
+    );
+    expect(await offered()).toBe(true);
+  });
+
   test("tNN_kodel_wait_is_not_offered_behind_a_step", async () => {
     // Behind a step the run still reads as the agent's step to a command that only looks, so such a
     // command would return at once and the agent would go round again.

@@ -403,3 +403,47 @@ test("t40_report_recheck_opens_a_span_of_its_own", () => {
   const nodes = report.nodes.filter((n) => !n.gate).reduce((sum, n) => sum + n.seconds, 0);
   expect(nodes).toBe(report.work_s);
 });
+
+test("t40_report_reopened_attempt_drops_its_stale_outcome", () => {
+  // the check fails at 20 s and pauses the run; it is run again at 1000 s and the run is canceled
+  // at 1060 s while it is still open: the attempt is not "failed", and it ran 20 + 60 s
+  const text = yaml([
+    "name: recheck",
+    "nodes:",
+    "  - slug: a",
+    "    kind: agent",
+    "    prompt: a",
+    "    max_consecutive_failures: 1",
+    "    checks: [{ kind: command, command: c }]",
+    "edges: []",
+  ]);
+  const before = parsePipeline(text);
+  const after = parsePipeline(text.replace("command: c }", "command: c-fixed }"));
+  const played = play(before, [
+    [0, START],
+    [10, done("a")],
+    [20, { type: "check_finished", node: "a", attempt: 1, index: 0, passed: false, reason: "red" }],
+  ]);
+  let state = played.state;
+  const journal = [...played.journal];
+  for (const [at, spec, event] of [
+    [
+      1000,
+      after,
+      { type: "pipeline_accepted", from: "h", to: "h2", source: "file", before } as RunEvent,
+    ],
+    [1060, after, { type: "cancel" } as RunEvent],
+  ] as [number, PipelineSpec, RunEvent][]) {
+    const result = decide(spec, state, event, at * 1000);
+    if (!result.ok) throw result.error;
+    state = result.state;
+    journal.push(...result.journal);
+  }
+  expect(journal.map((r) => r.event)).toContain("checks_rerun");
+  expect(state.status).toBe("canceled");
+  const report = summarizeRun(JSON.parse(JSON.stringify(state)) as RunState, journal);
+  const attempt = report.nodes.find((n) => n.node === "a")?.attempts[0];
+  expect(attempt?.outcome).toBeUndefined();
+  expect(attempt?.seconds).toBe(80);
+  expect(report.work_s).toBe(80);
+});

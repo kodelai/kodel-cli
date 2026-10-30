@@ -81,7 +81,7 @@ import {
 import { type AgentLogRun, AgentLogWriter } from "./agent-log";
 import type { AgentLogTickers } from "./agent-log-ticker";
 import { type CommandOptions, type CommandResult, runCommand } from "./command";
-import { loadConfig, type WorktreeConfig } from "./config";
+import { loadAgentHints, loadConfig, type WorktreeConfig } from "./config";
 import {
   type BuildInfo,
   type ExecutorContext,
@@ -881,11 +881,13 @@ export class LocalRun {
    */
   private async hints(): Promise<{ wait: boolean; agents: AgentsConfig }> {
     const { options } = this.host;
+    const storeRoot = options.storeRoot ?? `${options.root}/.kodel`;
     try {
-      const config = await loadConfig(options.storeRoot ?? `${options.root}/.kodel`);
+      const config = await loadConfig(storeRoot);
       return { wait: config.agent_hints.wait, agents: config.agents };
     } catch {
-      return { wait: true, agents: { ...DEFAULT_AGENTS } };
+      // Only what failed falls back: a valid `agent_hints` block is kept beside a bad `agents` value.
+      return { wait: (await loadAgentHints(storeRoot)).wait, agents: { ...DEFAULT_AGENTS } };
     }
   }
 
@@ -1907,7 +1909,8 @@ export class LocalRun {
           tree = await snapshotter.snapshot(deadlineIn(Math.min(each, left)));
         }
       } catch (error) {
-        failure = error instanceof Error ? error.message : String(error);
+        // Kept in snapshots.json and shown at the gate: git's text is history, so it is redacted.
+        failure = this.changesErrorText(error);
       }
       for (const { key, gate } of keys) {
         // A gate in a directory without git keeps nothing: it says so (`no_repo`), not "unavailable".
@@ -2320,7 +2323,11 @@ export class LocalRun {
         if (omitted > 0) step.waiting.changes_omitted = omitted;
       }
       // The note qualifies the list it stands by, so it is judged on the same window: the whole run.
-      if (await this.otherBranchesMovedInRun(state, step.waiting.node_slug)) {
+      // Only a list has something to qualify: no repository, no record or no file changed has none.
+      if (
+        step.waiting.changes !== undefined &&
+        (await this.otherBranchesMovedInRun(state, step.waiting.node_slug))
+      ) {
         step.waiting.changes_note = SHARED_TREE_NOTE;
         if (!worker) step.waiting.tell_the_person += TELL_CHANGES_NOTE;
       }

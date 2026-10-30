@@ -428,6 +428,15 @@ export function diffPipelines(
       continue;
     }
     if (held) continue;
+    // An ordinary route held at its target's attempt limit is taken again with the same label: unless
+    // the way out of its node changed, it reaches the same step at the same limit and pauses at once.
+    if (
+      pause.reason === "total" &&
+      !from.includes("routing") &&
+      !limitLifted(after, state, blocked.to)
+    ) {
+      continue;
+    }
     if (from.length > 0 || ahead.some((to) => changesOf(to).length > 0)) {
       effects.push({
         kind: "reroute",

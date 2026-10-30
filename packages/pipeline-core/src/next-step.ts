@@ -290,8 +290,9 @@ const parallelRules = (waitHint: boolean) =>
   "Several steps of this run are open at once (`steps`) and this project works them in parallel: " +
   "start one subagent per step in `steps` that has no `taken_by`, and give each worker these rules. " +
   "A worker calls pipeline_take_step with the run_id and its step's slug (node_slug) and keeps the " +
-  "`claim_token` it gets; if the answer is `taken` (the step is another worker's) or `queued` (the " +
-  "project's cap on steps worked at once is reached), it stops and reports that answer back. It does " +
+  "`claim_token` it gets; if the answer is `taken` (the step is another worker's), `queued` (the " +
+  "project's cap on steps worked at once is reached) or `none` (no step is free to take), it stops " +
+  "and reports that answer back without doing anything. It does " +
   "the step where the step's `workdir` says (or where you work, if the step has none), then calls " +
   "pipeline_complete_step with node_slug, attempt and that claim_token, and reports the answer back " +
   "to you as it is, whether it says `node` (its own step again), `waiting`, `running`, `done` or " +
@@ -578,9 +579,12 @@ function baseStep(
     return list.length === 0 ? undefined : list;
   };
   const noteOf = (also: AlsoWaiting[] | undefined): string | undefined => {
-    const parts = [deadBranchNote(state.forks), alsoWaitingNote(also)].filter(
-      (part): part is string => part !== undefined,
-    );
+    // A worker never watches the run: the offer of `kodel wait` is the coordinator's.
+    const offerWait = waitHint && options.worker !== true;
+    const parts = [
+      deadBranchNote(state.forks),
+      alsoWaitingNote(also, offerWait ? state.runId : undefined),
+    ].filter((part): part is string => part !== undefined);
     return parts.length === 0 ? undefined : parts.join(" ");
   };
 
@@ -876,9 +880,17 @@ function deadBranchNote(forks: Record<string, ForkState> | undefined): string | 
   return `A branch of the fork is dead (${dead.join("; ")}): finish the open steps; the run ends failed when the others have settled.`;
 }
 
-function alsoWaitingNote(also: AlsoWaiting[] | undefined): string | undefined {
+/** `waitFor` is the run to offer `kodel wait` for, when the project's hint is on and the caller is no worker. */
+function alsoWaitingNote(
+  also: AlsoWaiting[] | undefined,
+  waitFor: string | undefined,
+): string | undefined {
   if (also === undefined) return undefined;
-  return `Besides this, the run waits for a person: ${describeAlso(also)}. Tell them when you report; do not run those commands.`;
+  const wait =
+    waitFor === undefined
+      ? ""
+      : ` Once you have told them and nothing else is left for you to do, start \`kodel wait ${waitFor}\` in the background and end your turn: it prints one line when they have decided.`;
+  return `Besides this, the run waits for a person: ${describeAlso(also)}. Tell them when you report; do not run those commands.${wait}`;
 }
 
 /** The addition to a waiting answer's text: the other decisions are named too. */

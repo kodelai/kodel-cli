@@ -545,6 +545,19 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         for (const other of also ?? []) {
           env.out(`waiting:   ${plain(other.node_slug)} (${other.reason})\n`);
         }
+        // A doomed fork is still worked: say why the run cannot end well and what it still waits for.
+        const note =
+          "node" in next ? next.node.note : "running" in next ? next.running.note : undefined;
+        if (note !== undefined) {
+          env.out(`note:      ${plain(note)}\n`);
+          const open =
+            "node" in next
+              ? (next.node.steps ?? [next.node]).map((s) => s.slug)
+              : "running" in next
+                ? next.running.active.map((a) => a.node_slug)
+                : [];
+          if (open.length > 0) env.out(`waits for: ${open.map(plain).join(", ")}\n`);
+        }
       } catch {
         env.out("next:      cannot be worked out from this state (it is not readable as a run)\n");
       }

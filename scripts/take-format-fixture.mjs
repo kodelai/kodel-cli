@@ -3,8 +3,11 @@
 //   node scripts/take-format-fixture.mjs <format> <run-dir> [<run-dir> ...]
 //
 // The only changes: the run's absolute workdir becomes a placeholder wherever it is written as it is
-// (meta.json, state.json, the journal; a served answer whose workdir the redaction already replaced,
-// `[REDACTED:high-entropy]...`, keeps that text, which holds no path of the machine), and
+// in the files that carry it (meta.json, state.json, the journal and served/*.json; a served answer
+// whose workdir the redaction already replaced, `[REDACTED:high-entropy]...`, keeps that text, which
+// holds no path of the machine); every other file (artifacts, patches, specs) is copied byte for byte,
+// as the journal records the size and hash of some of them, and a run that still holds a path of the
+// machine there is refused; and
 // seal.json is left out (it holds hashes of state.json and journal.jsonl, which the edit changes; a
 // fixture reads as unsealed). Then hashes.json is rewritten for the whole format directory.
 import { createHash } from "node:crypto";
@@ -20,6 +23,9 @@ if (!format || runDirs.length === 0) {
 }
 
 const target = join(root, "fixtures", "formats", format);
+/** The files of a run that hold its workdir, as text; the only ones rewritten. */
+const CARRY_WORKDIR = /^(meta\.json|state\.json|journal\.jsonl|served\/[^/]+\.json)$/;
+const MACHINE_PATH = /\/Users\/|\/home\/|[A-Za-z]:\\{1,2}Users/;
 
 async function files(dir, prefix = "") {
   const found = [];
@@ -45,6 +51,12 @@ for (const source of runDirs) {
   });
   for (const name of await files(out)) {
     const path = join(out, name);
+    if (!CARRY_WORKDIR.test(name)) {
+      if (MACHINE_PATH.test(await readFile(path, "latin1"))) {
+        throw new Error(`${runId}/${name}: holds a path of this machine and is copied as it is`);
+      }
+      continue;
+    }
     // A Windows path is written with doubled backslashes inside JSON, so both spellings are replaced.
     const escaped = JSON.stringify(meta.workdir).slice(1, -1);
     let text = (await readFile(path, "utf8"))
@@ -53,7 +65,7 @@ for (const source of runDirs) {
       .split(escaped)
       .join(placeholder);
     if (name === "journal.jsonl") text = placeholderInJournal(text, placeholder);
-    if (/\/Users\/|\/home\/|[A-Za-z]:\\{1,2}Users/.test(text)) {
+    if (MACHINE_PATH.test(text)) {
       throw new Error(`${runId}/${name}: a path of this machine is left after the replacement`);
     }
     await writeFile(path, text);

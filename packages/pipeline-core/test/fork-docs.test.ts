@@ -150,6 +150,12 @@ describe("t40 the docs of forks", () => {
     }
   });
 
+  test("t40_worker_rules_stop_at_none", () => {
+    const take = TOOLS.find((t) => t.name === "pipeline_take_step")?.description ?? "";
+    expect(take).toContain("`none` means there is no step to take");
+    expect(take).toContain("A worker stops at `taken`, `queued` or `none`");
+  });
+
   test("t40_feedback_description_says_node_slug", () => {
     const feedback = TOOLS.find((t) => t.name === "pipeline_feedback");
     expect(feedback?.description).toContain("node_slug");

@@ -4,7 +4,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { LocalRun } from "@kodel-ai/local";
-import { parsePipeline } from "@kodel-ai/pipeline-core";
+import { parsePipeline, type RunState } from "@kodel-ai/pipeline-core";
 import {
   defineScenario,
   expectError,
@@ -198,3 +198,36 @@ test("t40_local_engine_keeps_refused_follow_ups", async () => {
     await engine.dispose();
   }
 }, 60_000);
+
+test("t40_memory_engine_take_without_slug_answers_the_step_the_machine_renewed", async () => {
+  // one worker holds a and b; the machine renews the first it holds in the order of the open visits,
+  // which here is b (the visits are put in another order than the nodes); the answer names b too
+  const engine = new MemoryEngine();
+  await engine.start({
+    spec: parsePipeline(FORK),
+    task: "split the work",
+    injects: [],
+    agentMode: "manual",
+  });
+  await engine.callTool("pipeline_complete_step", {
+    run_id: "run-1",
+    node_slug: "plan",
+    attempt: 1,
+  });
+  for (const slug of ["a", "b"]) {
+    const took = await engine.callTool("pipeline_take_step", {
+      run_id: "run-1",
+      node_slug: slug,
+      claim_token: "T",
+    });
+    expect(took).toMatchObject({ ok: true, status: "claimed", node_slug: slug });
+  }
+  const inner = engine as unknown as { state: RunState };
+  inner.state = { ...inner.state, active: [...inner.state.active].reverse() };
+  expect(inner.state.active.map((v) => v.node)).toEqual(["b", "a"]);
+  const renewed = await engine.callTool("pipeline_take_step", {
+    run_id: "run-1",
+    claim_token: "T",
+  });
+  expect(renewed).toMatchObject({ ok: true, status: "renewed", node_slug: "b" });
+});

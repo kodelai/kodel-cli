@@ -321,6 +321,13 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
             const { to: _ended, ...rest } = span;
             spans.push({ ...rest, from: record.ts });
           }
+          // The attempt is open again: its old verdict is not its outcome, and its seconds run on
+          // until it ends again (or until the journal's last record).
+          const found = attemptOf(name, attempt);
+          if (found) {
+            delete found.outcome;
+            delete found.failure;
+          }
         }
         break;
       case "fork_started":

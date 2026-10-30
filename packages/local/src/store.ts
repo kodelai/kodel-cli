@@ -523,7 +523,7 @@ export class FileStore {
         if (peek?.status === "running" || peek?.status === "paused") {
           throw new KodelError(
             error.code,
-            `${error.message}; no new run for this task starts while it is open`,
+            `${error.message}; run ${meta.runId} must be finished before a new run starts for this task`,
           );
         }
         continue;
@@ -584,7 +584,7 @@ export class FileStore {
     if (v < RECORD_VERSION) {
       throw new KodelError(
         "UNSUPPORTED_FORMAT",
-        `run ${runId} was written in run-state format ${v} by an older kodel (this kodel reads ${RECORD_VERSION}); finish or cancel it with the kodel that started it${await this.olderKodelNote()}`,
+        `run ${runId} was written in run-state format ${v} by an older kodel (this kodel reads ${RECORD_VERSION}); finish it with the kodel that started it, or leave it as it is (lists and reports pass it over)${await this.olderKodelNote()}`,
       );
     }
     return { state, hash: sha256(text) };

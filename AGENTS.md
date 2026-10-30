@@ -141,7 +141,10 @@ One exception was made under rule 4, before the first release (decision T-40, fo
 engine): run-state format 1 (`state.json` and the journal records with `v: 1`, written by
 `@kodel-ai/kodel@0.1.0-beta.0` and earlier; a beta is pre-release) was replaced by format 2 without
 a reader. The engine refuses a format-1 run with `UNSUPPORTED_FORMAT`, names the format and says to
-finish or cancel it with the kodel that started it; it never guesses from the shape and never calls
+finish it with the kodel that started it. A run nobody wants to finish can be left as it is: it is
+refused, the run lists and `findLatest` pass it over, and it only blocks `pipeline_start` for the same
+pipeline and task (the refusal names the run and says it must be finished before a new run starts for
+that task). kodel has no command that cancels a run. The engine never guesses from the shape and never calls
 such a run modified, and `fixtures/formats/v1/` keeps the real runs that prove the refusal. The
 decision is refuted if a user outside this repository reports history lost to it.
 

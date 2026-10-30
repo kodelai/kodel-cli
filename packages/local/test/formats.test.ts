@@ -148,7 +148,7 @@ function expectRefusedClearly(
   const message = error?.message ?? "";
   expect(message).toContain("run-state format 1");
   expect(message).toContain("older kodel");
-  expect(message).toContain("finish or cancel it with the kodel that started it");
+  expect(message).toContain("finish it with the kodel that started it");
   expect(message).not.toContain("modified");
   expect(message).not.toContain("changed outside");
 }
@@ -613,7 +613,9 @@ describe("every stored format against the current engine", () => {
     expectRefusedClearly(await refusal(host.open(id).then((run) => run?.history())));
   });
 
-  test("t40_cancel_of_v1_run_gives_clear_message", async () => {
+  test("t40_host_api_cancel_of_v1_run_gives_clear_refusal", async () => {
+    // kodel has no cancel command for a person; `run.cancel()` of the host API (the testkit's way
+    // to end a run) is the path tested here, and it refuses a v1 run without touching it
     await copyRuns("v1");
     const id = V1_RUNS[0] as string;
     const before = await hashTree(runsDir());
@@ -644,7 +646,9 @@ describe("every stored format against the current engine", () => {
     await writeState(id, { ...(await readState(id)), status: "running" });
     const error = await refusal(store.findActive(pipeline, task));
     expectRefusedClearly(error);
-    expect(error?.message ?? "").toContain("no new run for this task starts while it is open");
+    expect(error?.message ?? "").toContain(
+      `run ${id} must be finished before a new run starts for this task`,
+    );
     // and `findLatest` still passes it over: it is not a run this kodel can report on
     expect(await store.findLatest(pipeline, task)).toBeUndefined();
   });

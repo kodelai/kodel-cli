@@ -12,6 +12,18 @@ const context = (node: string, attempt = 1, check?: number): CommandContext => (
 });
 
 describe("t40 the latch runner of the testkit", () => {
+  test("t40_latch_runner_releases_at_once_on_an_aborted_signal", async () => {
+    const latch = createLatchRunner();
+    const controller = new AbortController();
+    controller.abort();
+    const options = { cwd: ".", signal: controller.signal } as Parameters<typeof latch.runner>[1];
+    expect(await latch.runner("a", options, context("a"))).toMatchObject({
+      exit: 137,
+      aborted: true,
+    });
+    expect(latch.running()).toEqual([]);
+  });
+
   test("t40_testkit_latch_runner_blocks_until_released", async () => {
     const latch = createLatchRunner();
     const options = { cwd: ".", signal: new AbortController().signal } as Parameters<

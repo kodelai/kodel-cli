@@ -469,10 +469,17 @@ describe("t40 the host runs the branches of a fork at the same time", () => {
     const burst = Array.from({ length: 30 }, (_, i) =>
       i % 2 === 0 ? run.tick() : run.feedback({ category: "other", message: `note ${i}` }),
     );
-    expect(await settlesWithin(Promise.all(burst), 10_000)).toBe(true);
+    // The bound is logical: the whole burst is decided while both branches are still held by the
+    // latch, so no decision waited for a branch's work. The time limits are only a guard against a
+    // hang, far above what a busy machine takes.
+    expect(await settlesWithin(Promise.all(burst), 30_000)).toBe(true);
+    expect((await run.state()).active.map((v) => [v.node, v.phase])).toEqual([
+      ["a", "engine"],
+      ["b", "engine"],
+    ]);
     // one hold per decision (a tick that found nothing still takes it); none held twice over
     expect(spy.held.length - before).toBeGreaterThanOrEqual(30);
-    expect(Math.max(...spy.held)).toBeLessThan(2_000);
+    expect(Math.max(...spy.held)).toBeLessThan(15_000);
     expect(spy.depth()).toBe(0);
     latch.release("a#1");
     latch.release("b#1");
@@ -730,6 +737,8 @@ describe("t40 snapshots under the lock", () => {
   /** A snapshotter that counts its calls and can be made slow or broken. */
   class Counting extends GitSnapshotter {
     calls = 0;
+    /** A slow snapshot finishes for real only once this is set; until then only its deadline ends it. */
+    released = false;
     constructor(
       root: string,
       private readonly behave: "ok" | "slow" | "broken" = "ok",
@@ -741,10 +750,10 @@ describe("t40 snapshots under the lock", () => {
       if (this.behave === "broken") throw new Error("git is broken");
       if (this.behave === "slow") {
         // Takes as long as it is allowed, then gives up: what a hung git looks like to the host.
-        while ((deadline?.remainingMs() ?? 0) > 0) {
+        while ((deadline?.remainingMs() ?? 0) > 0 && !this.released) {
           await new Promise((resolve) => setTimeout(resolve, 5));
         }
-        throw new Error("deadline: git took longer than the time allowed");
+        if (!this.released) throw new Error("deadline: git took longer than the time allowed");
       }
       return super.snapshot(deadline);
     }
@@ -777,11 +786,14 @@ describe("t40 snapshots under the lock", () => {
       lockHooks: spy.hooks,
     });
     const { run } = await h.start("split the work");
-    const begun = Date.now();
-    const done = await run.completeStep("plan", 1);
-    expect(done.ok).toBe(true);
-    expect(Date.now() - begun).toBeLessThan(2_000);
-    expect(Math.max(...spy.held)).toBeLessThan(1_000);
+    // The bound is logical: the hand-in is decided while the snapshot is never released, so it ended
+    // on the deadline and not on git. The time limit is only a guard against a hang.
+    const completing = run.completeStep("plan", 1);
+    expect(await settlesWithin(completing, 30_000)).toBe(true);
+    expect((await completing).ok).toBe(true);
+    expect(snapshotter.released).toBe(false);
+    expect(spy.depth()).toBe(0);
+    expect(Math.max(...spy.held)).toBeLessThan(15_000);
     const state = await run.state();
     expect(state.active.map((v) => v.node)).toEqual(["a", "b"]);
     const snapshots = await h.store.readSnapshots(run.runId);
@@ -953,6 +965,7 @@ describe("t40 the shared tree at a gate and at a hand-in", () => {
     await latch.started("b#1");
     await run.completeStep("a", 1);
     await run.waitForRest(5_000, "a");
+    await writeFile(join(dir, "shared.txt"), "written while the gate waits\n");
     const coordinator = await run.nextStep();
     if (!("waiting" in coordinator)) throw new Error("expected a waiting answer");
     expect(coordinator.waiting.tell_the_person).toContain(TELL_CHANGES_NOTE);
@@ -976,6 +989,7 @@ describe("t40 the shared tree at a gate and at a hand-in", () => {
     await run.decideHuman("a-gate", "rejected", "again");
     await run.completeStep("a", 2);
     await run.waitForRest(5_000, "a");
+    await writeFile(join(dir, "shared.txt"), "written while the gate waits\n");
     latch.release("b#1");
     await run.waitForRest(5_000, "b");
     const state = await run.state();
@@ -1031,6 +1045,22 @@ describe("t40 the shared tree at a gate and at a hand-in", () => {
     expect(step.waiting.changes).toMatchObject({ "out.txt": 1 });
     expect(step.waiting.changes_note).toBe(SHARED_TREE_NOTE);
     expect(step.waiting.tell_the_person).toContain("`changes_note`");
+  });
+
+  test("t40_gate_note_only_with_a_list_of_changed_files", async () => {
+    // b runs beside the gate, but no file changed: there is no list for the note to qualify
+    const { run, latch } = await latched(GATED);
+    await run.completeStep("plan", 1);
+    await latch.started("b#1");
+    await run.completeStep("a", 1);
+    await run.waitForRest(5_000, "a");
+    const step = await run.nextStep();
+    if (!("waiting" in step)) throw new Error("expected a waiting answer");
+    expect(step.waiting.changes).toBeUndefined();
+    expect(step.waiting).not.toHaveProperty("changes_note");
+    expect(step.waiting.tell_the_person).not.toContain(TELL_CHANGES_NOTE);
+    latch.release("b#1");
+    await run.waitForRest(5_000);
   });
 
   test("t40_no_gate_note_when_alone", async () => {

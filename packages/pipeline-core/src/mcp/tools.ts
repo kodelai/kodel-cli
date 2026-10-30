@@ -287,7 +287,8 @@ export const TOOLS: ToolDescriptor[] = [
       "work them: with node_slug that step, without it the next free one. The answer carries a `claim_token`: " +
       "keep it, and pass it to pipeline_complete_step when the step is done. `taken` means another worker " +
       "holds the step: leave it. `queued` means nobody holds it but the project's cap on steps worked at once " +
-      "(agents.max_parallel) is reached: wait for a hand-in. Calling again with your claim_token renews the hold, and after the step was " +
+      "(agents.max_parallel) is reached: wait for a hand-in. `none` means there is no step to take (it was handed in, " +
+      "or the run finished or stopped). A worker stops at `taken`, `queued` or `none` and reports that answer back without doing anything. Calling again with your claim_token renews the hold, and after the step was " +
       "restarted it gives you the new attempt; a call again without a claim_token is a new take (a new token, and without " +
       "node_slug another step), so keep the token of the first answer. The hold is advice to the workers, not a verdict on the step: " +
       "the engine's checks decide whether the step is done, and a person is never asked anything here.",

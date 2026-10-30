@@ -482,6 +482,8 @@ describe("t40 modes", () => {
       "reports the answer back",
       "`waiting`, `running`, `done` or `also_waiting`",
       "never starts `kodel wait`",
+      "`taken` (the step is another worker's), `queued`",
+      "or `none` (no step is free to take), it stops and reports that answer back",
     ]) {
       expect(text, part).toContain(part);
     }
@@ -1065,7 +1067,7 @@ describe("t40 what waits besides", () => {
     expect(one.also_waiting).toBeUndefined();
   });
 
-  test("t40_node_answer_names_a_paused_branch", () => {
+  test("t40_node_answer_names_a_paused_branch_and_offers_kodel_wait", () => {
     // b's failure goes back to b, so that branch runs out of attempts and pauses on its own
     const pausing: PipelineSpec = {
       ...FORK,
@@ -1102,6 +1104,13 @@ describe("t40 what waits besides", () => {
       },
     ]);
     expect(node.note).toContain('pause "b-test"');
+    // the coordinator is offered `kodel wait` while a
+    // decision waits besides; not with the project's hint off, and never a worker
+    expect(node.note).toContain("start `kodel wait r1` in the background");
+    expect(nodeOf(h.next({ waitHint: false })).note).not.toContain("kodel wait");
+    const worker = nodeOf(h.next({ worker: true, nodeSlug: "a" }));
+    expect(worker.note).toContain('pause "b-test"');
+    expect(worker.note).not.toContain("kodel wait");
   });
 
   test("t40_doomed_fork_text_on_node_answer", () => {
