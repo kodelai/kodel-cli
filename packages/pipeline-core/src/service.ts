@@ -90,7 +90,6 @@ export interface NextStepRequest {
   serve?: { caller?: Caller };
 }
 
-/** What came of a worker taking a step. */
 /**
  * What a wait with a node covers. `chain`: the node's branch and what comes after the fork, as it
  * grows while it is waited for; a command that exits right after would lose work it left running, so
@@ -100,6 +99,7 @@ export interface NextStepRequest {
  */
 export type WaitScope = "step" | "chain";
 
+/** What came of a worker taking a step. */
 export type TakeOutcome =
   | {
       /** `claimed`: the step is the caller's now. `renewed`: it was already, and the hold is fresh. */
@@ -160,7 +160,6 @@ export interface RunHandle {
    * changes nothing about the run: a person decides.
    */
   proposeChange(input: { yaml: string; summary: string }): Promise<ProposeOutcome>;
-  /** Wait until the engine's work has come to rest, but no longer than `ms`; with `node`, only that node's work. */
   /**
    * Wait for the engine's work to come to rest, no longer than `ms`. With `node`, only the work that
    * is the caller's: the node's own (`step`), or the chain its branch leads into (`chain`, the

@@ -4,7 +4,7 @@
  * the person is shown is what the engine does.
  */
 import { canonicalNode } from "./canonical";
-import type { PipelineSpec } from "./pipeline";
+import { branchRegions, type PipelineSpec } from "./pipeline";
 import { type ForkState, type RunState, routeEntersBranch } from "./run";
 
 export type NodeChange = "added" | "removed" | "work" | "checks" | "routing";
@@ -141,6 +141,63 @@ function forkTargets(spec: PipelineSpec, fork: ForkState): string[] {
   return spec.edges.filter((e) => e.from === fork.from && e.when === fork.label).map((e) => e.to);
 }
 
+/**
+ * Where a node lies in a fork under `spec`, in words: in one of its branches, at its join, or outside
+ * every branch. The regions are the validator's (`branchRegions`).
+ */
+function regionsOf(spec: PipelineSpec, fork: ForkState): (slug: string) => string {
+  const joins = new Set(spec.nodes.filter((n) => n.join !== undefined).map((n) => n.slug));
+  const heads = forkTargets(spec, fork);
+  const { branches } = branchRegions(spec.edges, joins, fork.from, heads, fork.join);
+  return (slug) => {
+    if (slug === fork.join) return `at its join "${fork.join}"`;
+    const i = branches.findIndex((b) => b.has(slug));
+    return i < 0 ? "outside its branches" : `in its branch "${heads[i]}"`;
+  };
+}
+
+/** Whether every branch of the fork still reaches `fork.join` under `spec` (a valid pipeline has one join per fork). */
+function meetsAt(spec: PipelineSpec, fork: ForkState): boolean {
+  const joins = new Set(spec.nodes.filter((n) => n.join !== undefined).map((n) => n.slug));
+  const heads = forkTargets(spec, fork);
+  const { branches } = branchRegions(spec.edges, joins, fork.from, heads, fork.join);
+  return heads.every(
+    (head, i) =>
+      head === fork.join ||
+      spec.edges.some((e) => e.to === fork.join && branches[i]?.has(e.from) === true),
+  );
+}
+
+/**
+ * The nodes of an open fork instance whose place in the fork must not change: where an attempt of it
+ * stands, what a pause of it holds or is about to enter, and the steps of a branch that arrived failed
+ * and that the join's `restart_failed` may run again. A step of the instance carries its branch with
+ * it (the visit, the pause, the node); moved to another branch, it would be entered in the wrong one
+ * or collide with that branch's own attempt.
+ */
+function heldInFork(fork: ForkState, state: RunState, before: PipelineSpec): Set<string> {
+  const held = new Set<string>();
+  for (const visit of state.active) if (visit.fork?.id === fork.id) held.add(visit.node);
+  for (const pause of state.pauses) {
+    if (pause.fork?.id !== fork.id && pause.blocked?.join !== fork.id) continue;
+    held.add(pause.node);
+    const blocked = pause.blocked;
+    if (!blocked) continue;
+    // A route into the join is taken as it is; its `from` is never entered again by it.
+    if (blocked.join === undefined) held.add(blocked.from);
+    for (const to of blocked.heads ?? [blocked.to]) held.add(to);
+  }
+  const joins = new Set(before.nodes.filter((n) => n.join !== undefined).map((n) => n.slug));
+  const heads = forkTargets(before, fork);
+  const { branches } = branchRegions(before.edges, joins, fork.from, heads, fork.join);
+  heads.forEach((head, i) => {
+    const failure = fork.arrived[head]?.failure;
+    if (failure === undefined || failure.source === "human") return;
+    for (const slug of branches[i] ?? []) held.add(slug);
+  });
+  return held;
+}
+
 export function diffPipelines(
   before: PipelineSpec,
   after: PipelineSpec,
@@ -171,11 +228,16 @@ export function diffPipelines(
   for (const pause of state.pauses) {
     if (!pause.blocked) continue;
     const ahead = pause.blocked.heads ?? [pause.blocked.to];
-    standing.push(pause.blocked.from, ...ahead);
-    if (changesOf(pause.blocked.from).includes("removed")) {
-      return refuse(
-        `node "${pause.blocked.from}" is where the run is held back, so it cannot be removed`,
-      );
+    standing.push(...ahead);
+    // A route into the join is taken as it is when the run goes on (`applyEffect`): the branch node
+    // it came from is never entered again by it, so it is not where the run stands.
+    if (pause.blocked.join === undefined) {
+      standing.push(pause.blocked.from);
+      if (changesOf(pause.blocked.from).includes("removed")) {
+        return refuse(
+          `node "${pause.blocked.from}" is where the run is held back, so it cannot be removed`,
+        );
+      }
     }
     for (const to of ahead) {
       if (changesOf(to).includes("removed")) {
@@ -206,6 +268,23 @@ export function diffPipelines(
       return refuse(
         `node "${fork.join}" is the join of an open fork, so its \`join\` cannot change now`,
       );
+    }
+    if (!meetsAt(after, fork)) {
+      return refuse(
+        `the branches of the open fork at "${fork.from}" would no longer meet at "${fork.join}", so where they meet cannot change now`,
+      );
+    }
+    const regionBefore = regionsOf(before, fork);
+    const regionAfter = regionsOf(after, fork);
+    for (const slug of heldInFork(fork, state, before)) {
+      if (changesOf(slug).includes("removed")) continue;
+      const was = regionBefore(slug);
+      const now = regionAfter(slug);
+      if (was !== now) {
+        return refuse(
+          `node "${slug}" belongs to the open fork at "${fork.from}" ${was}, and the change would put it ${now}; the place of a step of an open fork cannot change now`,
+        );
+      }
     }
     for (const slug of reachable(after, fork.branches)) {
       if (slug !== fork.join) ahead.add(slug);

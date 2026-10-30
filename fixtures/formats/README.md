@@ -105,7 +105,9 @@ branch `kodel/<run id>`. The placeholder is put wherever the worktree's path was
 The `served/` files are not touched by it: the scratch directory's random name read as a secret when
 the answer was stored, so their `answer.workdir` reads `[REDACTED:high-entropy].kodel/worktrees/<run
 id>`, as it was written, and holds no path of the machine; a served file's `prompt_hash` is of that
-stored answer and is not recomputed. `history.executor` is on in
+stored answer and is not recomputed. A served file written since leaves `answer.workdir` out (the
+run's directory is in `meta.json`); the fixtures keep it as they were written, and a reader takes a
+served answer with or without it, so the fixtures were not taken again. `history.executor` is on in
 the scratch project (it is what stamps the engine version and the client): the script ran with no
 `CLAUDE*` variable in its environment and no agent hook index in the scratch repository, so no
 `executor` record carries a session or a model, and `history.agent_log` is off (no agent ran, so

@@ -567,6 +567,33 @@ function reachFrom(start: string[], edges: EdgeSpec[], stop: (slug: string) => b
 }
 
 /**
+ * Where the branches of a fork lie: what lies after its join (up to the heads and the fork node: a
+ * loop from after the join back to the fork is the normal way to run a fork again), and each branch,
+ * which is what its head reaches without passing a join, the fork node or anything after the join.
+ * A branch whose head is the join itself has no steps. The validator judges a pipeline by these
+ * regions, and a change of a run's pipeline compares them (pipeline-diff.ts), so both read one shape.
+ */
+export function branchRegions(
+  edges: EdgeSpec[],
+  joins: ReadonlySet<string>,
+  from: string,
+  heads: string[],
+  join: string,
+): { after: Set<string>; branches: Set<string>[] } {
+  const after = reachFrom(
+    [join],
+    edges,
+    (slug) => slug !== join && (heads.includes(slug) || slug === from),
+  );
+  const branches = heads.map((head) =>
+    joins.has(head)
+      ? new Set<string>()
+      : reachFrom([head], edges, (slug) => joins.has(slug) || after.has(slug) || slug === from),
+  );
+  return { after, branches };
+}
+
+/**
  * Forks and joins. Two or more edges with the same `from` and `when` start their targets together;
  * the branches must all lead to one `join: all` node, stay apart from each other and from the rest
  * of the pipeline, and not fork again. The rules are static so a run can never leave a branch open
@@ -652,23 +679,22 @@ function validateParallel(c: Collector, nodes: NodeSpec[], edges: EdgeSpec[], re
       continue;
     }
     usedJoins.set(join, from);
-    // What lies after the join, up to the heads and the fork node (a loop from after the join back
-    // to the fork is the normal way to run a fork again). A branch is what its head reaches without
-    // passing the join, the fork node or anything after the join; an edge out of that is a branch
-    // leaving, said below with the edge.
-    const after = reachFrom(
-      [join],
-      edges,
-      (slug) => slug !== join && (heads.includes(slug) || slug === from),
-    );
-    // A branch whose head is the join itself has no steps: it arrives as soon as the fork starts.
-    const branches = heads.map((head) =>
-      joins.has(head)
-        ? new Set<string>()
-        : reachFrom([head], edges, (slug) => joins.has(slug) || after.has(slug) || slug === from),
-    );
+    // An edge out of a branch is a branch leaving, said below with the edge.
+    const { after, branches } = branchRegions(edges, joins, from, heads, join);
     const inside = (slug: string) => branches.some((b) => b.has(slug));
     const region = new Set(branches.flatMap((b) => [...b]));
+    // The edges alone do not say where a run starts: a run that started in a branch or at the join
+    // would reach the join with no instance of the fork and a branch never run.
+    const entry = nodes[0]?.slug;
+    if (entry !== undefined && (entry === join || region.has(entry))) {
+      const head = heads[branches.findIndex((b) => b.has(entry))];
+      c.add(
+        atNode(entry),
+        entry === join
+          ? `node "${entry}" is the first node of the pipeline and the join of ${where}; a run must start before the fork`
+          : `node "${entry}" is the first node of the pipeline and is in the branch "${head}" of ${where}; a run must start before the fork`,
+      );
+    }
     const forkNode = nodes[index.get(from) ?? -1];
     const onFailure = forkNode ? labelsOf(registry, forkNode)?.failure.includes(when) : false;
 

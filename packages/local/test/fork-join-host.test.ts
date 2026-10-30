@@ -565,4 +565,68 @@ describe("t40 claims on the host", () => {
     if (!("node" in sequential)) throw new Error("expected a node");
     expect(sequential.node.execution?.mode).toBe("sequential");
   });
+
+  test("t40_take_none_answers_as_to_a_worker", async () => {
+    const { h, run } = await openAgents();
+    await config("agents:\n  subagents: yes\n  max_parallel: 1\n");
+    const took = await run.takeStep({ node: "a" });
+    expect(took.status).toBe("claimed");
+    // b is free but the cap is reached: nothing to take, and the answer is a worker's, not the
+    // coordinator's step list (which would also be recorded as served to this worker)
+    const none = await run.takeStep({});
+    if (none.status !== "none") throw new Error(`expected none, got ${none.status}`);
+    expect(JSON.stringify(none.next)).toContain("You are a worker");
+    expect("node" in none.next).toBe(false);
+    const served = (await h.store.readJournal(run.runId)).filter((r) => r.event === "step_served");
+    expect(served.map((r) => r.node)).toEqual(["a"]);
+  });
+
+  test("t40_served_record_keeps_no_machine_path", async () => {
+    await mkdir(join(dir, ".kodel"), { recursive: true });
+    const workdir = join(dir, "elsewhere");
+    await mkdir(workdir, { recursive: true });
+    const h = new LocalHost(AGENT_FORK, {
+      root: dir,
+      heartbeatMs: 0,
+      workdirs: {
+        prepare: async () => ({ path: workdir, created: false }),
+        verify: async () => {},
+        discard: async () => {},
+      },
+    });
+    const history = defaultHistory();
+    history.changes.enabled = false;
+    history.executor.enabled = false;
+    const { run } = await h.start("split the work", { history });
+    const answer = await run.nextStep({ serve: {} });
+    if (!("node" in answer)) throw new Error("expected a node");
+    // the agent is told where to work; the record of what it was shown does not keep the path
+    expect(answer.node.workdir).toBe(workdir);
+    const record = (await h.store.readJournal(run.runId)).find((r) => r.event === "step_served");
+    const file = (await h.store.readServed(run.runId, String(record?.ref))) as {
+      answer: Record<string, unknown>;
+    };
+    expect(file.answer).toMatchObject({ slug: "plan", attempt: 1 });
+    expect(file.answer).not.toHaveProperty("workdir");
+    expect(JSON.stringify(file)).not.toContain(dir);
+  });
+
+  test("t40_subagents_declaration_sticks_for_the_run", async () => {
+    const { h, run } = await openAgents();
+    const declared = await run.nextStep({ serve: {}, subagents: { can: true } });
+    if (!("node" in declared)) throw new Error("expected a node");
+    expect(declared.node.execution?.mode).toBe("parallel");
+    // a later answer without the declaration (a completion's, a take's) keeps the mode, on another
+    // handle of the same run too
+    for (const handle of [run, h.open(run.runId)]) {
+      const later = await handle.nextStep({ serve: {} });
+      if (!("node" in later)) throw new Error("expected a node");
+      expect(later.node.execution?.mode).toBe("parallel");
+    }
+    // the agent says otherwise: the last word counts
+    await run.nextStep({ serve: {}, subagents: { can: false } });
+    const after = await run.nextStep({ serve: {} });
+    if (!("node" in after)) throw new Error("expected a node");
+    expect(after.node.execution?.mode).toBe("sequential");
+  });
 });

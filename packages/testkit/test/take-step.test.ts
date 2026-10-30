@@ -74,6 +74,29 @@ const unknownSlug = defineScenario("t40-unknown-slug")
   .expect([matcher("nodeStatus", { a: "running", b: "running" })])
   .build();
 
+/** With `agents.max_parallel` 1, a second step waits its turn and a take without a slug finds none. */
+const capped = defineScenario("t40-take-step-capped")
+  .pipeline({ inline: FORK })
+  .task("split the work")
+  .agent("manual")
+  .call("pipeline_complete_step", { run_id: "$run", node_slug: "plan", attempt: 1 }, expectOk())
+  .call("pipeline_take_step", { run_id: "$run", node_slug: "a" }, expectOk({ status: "claimed" }))
+  .call(
+    "pipeline_take_step",
+    { run_id: "$run", node_slug: "b" },
+    expectOk({ status: "queued", node_slug: "b", held: 1, max_parallel: 1 }),
+  )
+  .call("pipeline_take_step", { run_id: "$run" }, expectOk({ status: "none" }))
+  .expect([matcher("nodeStatus", { a: "running", b: "running" })])
+  .build();
+
+test("t40_memory_engine_take_follows_the_core_cap", async () => {
+  const engine = new MemoryEngine();
+  engine.maxParallel = 1;
+  const report = await runScenario(capped, engine);
+  expect(report.ok, formatReport(report)).toBe(true);
+});
+
 const engines: { name: string; make: () => ScenarioEngine }[] = [
   { name: "core-memory", make: () => new MemoryEngine() },
   { name: "local", make: () => new LocalScenarioEngine() },

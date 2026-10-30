@@ -505,7 +505,8 @@ describe("t40 modes", () => {
 
   test("t40_wrong_mode_costs_speed_only", () => {
     // The same fork worked two ways: all steps taken then completed in any order (parallel), and one
-    // step at a time (sequential). The engine ends in the same place either way.
+    // step at a time, handed in without a claim as SEQUENTIAL_RULES say (sequential). The engine
+    // ends in the same place either way.
     const parallel = openFork();
     must(parallel.send(claim("a", "pa")));
     must(parallel.send(claim("b", "pb")));
@@ -514,10 +515,8 @@ describe("t40 modes", () => {
     must(parallel.send(complete("merge", 1)));
 
     const sequential = openFork();
-    must(sequential.send(claim("a", "sa")));
-    must(sequential.send(complete("a", 1, "sa")));
-    must(sequential.send(claim("b", "sb")));
-    must(sequential.send(complete("b", 1, "sb")));
+    must(sequential.send(complete("a", 1)));
+    must(sequential.send(complete("b", 1)));
     must(sequential.send(complete("merge", 1)));
 
     const outcome = (s: RunState) => ({

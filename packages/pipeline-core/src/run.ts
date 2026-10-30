@@ -1168,25 +1168,26 @@ class Machine {
 
   /** Take a route unless a limit forbids the next attempt; then the branch (or the run) pauses. */
   private proceed(route: BlockedRoute) {
-    const from = this.node(route.from);
     const fromRun = this.run(route.from);
     if (route.heads !== undefined) {
       // A fork held back before it fired: it fires now, once, into every head.
-      this.fork(from, route.label, route.heads, fromRun.lastFailure);
+      this.fork(this.node(route.from), route.label, route.heads, fromRun.lastFailure);
       return;
     }
-    const automatic = this.handler(from).automaticFailures;
     const pauseFields = route.fork === undefined ? {} : { fork: route.fork };
     // A route into a join comes from arrivals that are settled; a branch that failed too often in a
-    // row paused itself before it arrived, or arrived by a failure label the join is told about.
-    if (
-      route.join === undefined &&
-      fromRun.status === "failed" &&
-      automatic &&
-      fromRun.consecutiveFailures >= from.max_consecutive_failures
-    ) {
-      this.pause({ reason: "consecutive", node: route.from, blocked: route, ...pauseFields });
-      return;
+    // row paused itself before it arrived, or arrived by a failure label the join is told about. Its
+    // `from` is not looked up: a change may have removed that branch node meanwhile.
+    if (route.join === undefined) {
+      const from = this.node(route.from);
+      if (
+        fromRun.status === "failed" &&
+        this.handler(from).automaticFailures &&
+        fromRun.consecutiveFailures >= from.max_consecutive_failures
+      ) {
+        this.pause({ reason: "consecutive", node: route.from, blocked: route, ...pauseFields });
+        return;
+      }
     }
     const to = this.nodes.get(route.to);
     if (to === undefined) {

@@ -1256,6 +1256,44 @@ describe("wait", () => {
     expect((await wait.result).out).toBe(LINE(run.runId, "resumed"));
   });
 
+  test("t40_wait_ends_when_a_run_is_resumed_and_pauses_again_at_the_same_step", async () => {
+    await writeFile(
+      join(dir, ".kodel", "pipelines", "stuck.yaml"),
+      [
+        "name: stuck",
+        "nodes:",
+        "  - slug: write",
+        "    kind: agent",
+        "    prompt: write it",
+        "  - slug: build",
+        "    kind: command",
+        `    command: node -e "process.exit(1)"`,
+        "edges:",
+        "  - { from: write, to: build }",
+        "  - { from: build, to: write, when: failed }",
+        "",
+      ].join("\n"),
+    );
+    const { run } = await hostOf().start({ pipeline: "stuck", task: "t", restart: false });
+    const toPause = async () => {
+      for (let i = 0; i < 10 && (await run.state()).status !== "paused"; i++) {
+        const attempt = (await run.state()).active.find((v) => v.node === "write")?.attempt ?? 1;
+        await run.completeStep("write", attempt);
+        await run.waitForRest(5_000);
+      }
+      expect((await run.state()).status).toBe("paused");
+    };
+    await toPause();
+    const before = JSON.stringify((await run.state()).pauses);
+    // Slow rounds: the resume and the pause after it both happen before wait looks again.
+    const wait = started({ pollMs: 4_000 }, "wait", run.runId, "--timeout", "12");
+    await wait.ready();
+    await cli("resume", run.runId);
+    await toPause();
+    expect(JSON.stringify((await run.state()).pauses)).toBe(before);
+    expect((await wait.result).out).toBe(LINE(run.runId, "resumed"));
+  }, 30_000);
+
   test("tNN_wait_still_names_the_decision_when_the_journal_is_written_after_the_state", async () => {
     const id = await runAtGate();
     const wait = started(FAST, "wait", id);

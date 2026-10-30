@@ -570,9 +570,15 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
        * Every decision a person has to make, as one key: the answer's own, and the others it names
        * (`also_waiting`: the gates and pauses of the other branches of a fork). Any decision changes
        * the key, so a decision about any branch ends the wait; a new wait at the same step (a gate
-       * reached again after a rejection) counts as an end too, by the attempt.
+       * reached again after a rejection) counts as an end too, by the attempt. A pause has no
+       * attempt of its own: a branch resumed and paused again at the same step between two looks
+       * is told apart by the last `run_resumed` of the journal.
        */
       const look = async () => {
+        const resumed = (await run.journal()).reduce(
+          (last, r) => (r.event === "run_resumed" ? Math.max(last, r.seq) : last),
+          0,
+        );
         const step = await run.inspect();
         const state = await run.state();
         const attemptOf = (node: string) => state.active.find((v) => v.node === node)?.attempt;
@@ -592,7 +598,8 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         for (const other of also ?? []) {
           parts.push([other.reason, other.node_slug, attemptOf(other.node_slug)].join("|"));
         }
-        return { step, state, key: parts.length === 0 ? undefined : parts.sort().join(";") };
+        const key = parts.length === 0 ? undefined : `${parts.sort().join(";")};resumed|${resumed}`;
+        return { step, state, key };
       };
       /** The step a `waiting` answer is about, or the first other decision an answer names. */
       const where = (now: Awaited<ReturnType<typeof look>>) =>

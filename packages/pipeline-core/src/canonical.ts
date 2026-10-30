@@ -56,9 +56,12 @@ const routingOf = (spec: PipelineSpec, node: NodeSpec) => ({
     .filter((e) => e.from === node.slug)
     .map((e) => ({ when: e.when, to: e.to }))
     // By label, then by target: the edges of a fork share a label, and their order must not depend
-    // on the order they were written in.
+    // on the order they were written in. The sort used to be on label and target run together, so
+    // a node with two labels one of which starts the other ("pass", "passed") may have its edges
+    // in another order than before format 2, and its hashes differ with it: nothing stored in
+    // format 2 is compared with a hash taken before.
     .sort((a, b) => compare(a.when, b.when) || compare(a.to, b.to)),
-  // Only a join carries the field, so the form of every other node is what it was.
+  // Only a join carries the field: no other node's form gains a key.
   ...(node.join === undefined ? {} : { join: node.join }),
   max_attempts: node.max_attempts,
   max_consecutive_failures: node.max_consecutive_failures,

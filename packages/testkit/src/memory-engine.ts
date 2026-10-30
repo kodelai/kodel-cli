@@ -8,6 +8,7 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   type ChangeSet,
   checkIdOf,
+  DEFAULT_AGENTS,
   DEFAULT_CLAIM_TTL_S,
   DEFAULT_STALE_MS,
   type Decision,
@@ -59,6 +60,8 @@ export class MemoryEngine implements ScenarioEngine {
   readonly refused: { event: RunEvent; code: string; message: string; afterEnd: boolean }[] = [];
   /** How long a worker's hold on a step lasts; a scenario about lapsing claims sets it short. */
   claimTtlMs = DEFAULT_CLAIM_TTL_S * 1000;
+  /** How many steps may be held at once (`agents.max_parallel`). */
+  maxParallel = DEFAULT_AGENTS.max_parallel;
 
   constructor(private readonly options: EngineOptions = {}) {}
 
@@ -154,45 +157,72 @@ export class MemoryEngine implements ScenarioEngine {
         return { ok: true, advanced: run?.status === "passed", outcome: run?.outcome ?? null };
       }
       case "pipeline_take_step": {
-        const state = this.state;
-        if (!state)
+        // As the local host does it: the machine picks the free step and judges the cap under one
+        // event, and the answer is read off the state it leaves.
+        const before = this.state;
+        if (!before)
           return { ok: false, code: "NODE_NOT_RUNNING", message: "the run has not started" };
-        const slug =
-          typeof args.node_slug === "string"
-            ? args.node_slug
-            : state.active.find(
-                (v) =>
-                  v.phase === "agent" && liveClaim(state.nodes[v.node], this.clock) === undefined,
-              )?.node;
-        if (slug === undefined) return { ok: true, status: "none" };
+        const node = typeof args.node_slug === "string" ? args.node_slug : undefined;
         const token =
           typeof args.claim_token === "string" ? args.claim_token : randomBytes(16).toString("hex");
         const hash = hashToken(token);
         const result = await this.process({
           type: "step_claimed",
-          node: slug,
+          ...(node === undefined ? {} : { node }),
           token: hash,
           ttlMs: this.claimTtlMs,
+          maxParallel: this.maxParallel,
         });
         if (!result.ok)
           return { ok: false, code: result.error.code, message: result.error.message };
-        const visit = result.state.active.find((v) => v.node === slug && v.phase === "agent");
-        if (!visit)
-          return { ok: false, code: "NODE_NOT_RUNNING", message: `node "${slug}" is not open` };
-        const claim = liveClaim(result.state.nodes[slug], this.clock);
-        if (claim === undefined || claim.token !== hash) {
+        const after = this.state ?? result.state;
+        const ours = (n: RunState["nodes"][string] | undefined) =>
+          liveClaim(n, this.clock)?.token === hash;
+        const mine =
+          node === undefined
+            ? Object.values(after.nodes).find(ours)
+            : ours(after.nodes[node])
+              ? after.nodes[node]
+              : undefined;
+        const none = () => ({
+          ok: true as const,
+          status: "none",
+          next: nextStep(this.spec, after, this.clock, undefined, { worker: true }),
+        });
+        if (mine === undefined) {
+          if (node === undefined) return none();
+          const visit = after.active.find((v) => v.node === node && v.phase === "agent");
+          if (!visit) {
+            return { ok: false, code: "NODE_NOT_RUNNING", message: `node "${node}" is not open` };
+          }
+          const live = liveClaim(after.nodes[node], this.clock);
+          if (live === undefined) {
+            return {
+              ok: true,
+              status: "queued",
+              node_slug: node,
+              attempt: visit.attempt,
+              held: after.active.filter(
+                (v) => v.phase === "agent" && liveClaim(after.nodes[v.node], this.clock),
+              ).length,
+              max_parallel: this.maxParallel,
+            };
+          }
           return {
             ok: true,
             status: "taken",
-            node_slug: slug,
+            node_slug: node,
             attempt: visit.attempt,
-            taken_by: claim?.by ?? "?",
+            taken_by: live.by,
           };
         }
+        const visit = after.active.find((v) => v.node === mine.slug && v.phase === "agent");
+        if (!visit) return none();
+        const renewed = liveClaim(before.nodes[mine.slug], this.clock)?.token === hash;
         return {
           ok: true,
-          status: "claimed",
-          node_slug: slug,
+          status: renewed ? "renewed" : "claimed",
+          node_slug: mine.slug,
           attempt: visit.attempt,
           claim_token: token,
         };

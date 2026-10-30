@@ -2201,9 +2201,17 @@ function forkInvariants(
   seed: number,
 ) {
   const where = `seed ${seed}`;
-  // (a) one visit per node
+  // (a) one visit per node. The machine ends the run rather than open a second visit (`enter`), so
+  // the state alone never shows one: what shows it is the reason the run ended with. A branch of a
+  // valid pipeline never stops with no way on either; a change that moved a step of an open fork
+  // would make it (a step moved past the join), and such a change is refused.
   const visited = state.active.map((v) => v.node);
   expect(new Set(visited).size, `${where}: two visits of one node`).toBe(visited.length);
+  const told = JSON.stringify(journal);
+  expect(told, `${where}: a node entered twice`).not.toContain(
+    "was entered while an attempt of it was still going",
+  );
+  expect(told, `${where}: a branch with no way on`).not.toContain("has no way on");
   for (const fork of Object.values(state.forks ?? {})) {
     // (b) the join enters once per time all branches arrived
     const reached = journal.filter((r) => r.event === "join_reached" && r.fork === fork.id).length;
@@ -2344,6 +2352,8 @@ function simulate(
   let changes = 0;
   let shapeRefused = 0;
   let shapeAccepted = 0;
+  let moveRefused = 0;
+  const accepted: PipelineSpec[] = [];
   const hashOf = (version: PipelineSpec) =>
     version === spec ? "h" : `h${variants.indexOf(version) + 2}`;
   const pending: Effect[] = [];
@@ -2402,9 +2412,11 @@ function simulate(
       });
       if (result.ok) {
         changes += 1;
+        accepted.push(was === spec ? current : was);
         if (shape) shapeAccepted += 1;
       } else {
         if (shape && result.error.message.includes("is open")) shapeRefused += 1;
+        if (result.error.message.includes("the place of a step of an open fork")) moveRefused += 1;
         current = was;
       }
     } else if (pending.length > 0 && roll < 0.8) {
@@ -2473,6 +2485,8 @@ function simulate(
     changes,
     shapeRefused,
     shapeAccepted,
+    moveRefused,
+    accepted,
   };
 }
 
@@ -2511,6 +2525,13 @@ describe("t40 random schedules", () => {
       "max_attempts: 3\n    max_consecutive_failures: 2\n",
     ),
   );
+  /** `b-test` moved from branch `b` to the end of branch `a`. */
+  const forkMoved = parsePipeline(
+    PAUSING.replace(
+      "  - { from: a-test, to: merge }\n",
+      "  - { from: a-test, to: b-test }\n",
+    ).replace("  - { from: b, to: b-test }\n", "  - { from: b, to: merge }\n"),
+  );
   const forkVariants = [forkVariant, forkThreeBranches, forkJoinLimit];
 
   test("t40_random_schedule_keeps_invariants", () => {
@@ -2547,6 +2568,26 @@ describe("t40 random schedules", () => {
     const ends = new Set<string>();
     for (const seed of SEEDS.slice(0, 40)) ends.add(simulate(doomed, seed).state.status);
     expect(ends.has("failed")).toBe(true);
+  }, 60_000);
+
+  test("t40_random_schedule_moves_a_step_between_branches", () => {
+    // A step of an open instance (standing, held by a pause, or in a branch that arrived failed and
+    // may run again) cannot move to another branch or past the join; once the instance is left, or
+    // while the step is not yet the run's, it can. Either way the run never ends by entering a node
+    // twice or by a branch with no way on (`forkInvariants`).
+    expect(forkMoved.edges).toContainEqual({ from: "a-test", to: "b-test", when: "passed" });
+    let moveRefused = 0;
+    let moveAccepted = 0;
+    for (const seed of SEEDS) {
+      for (const withRestart of [false, true]) {
+        const run = simulate(pausing, seed + 3000, 300, withRestart, [forkMoved, forkVariant]);
+        moveRefused += run.moveRefused;
+        moveAccepted += run.accepted.filter((v) => v === forkMoved).length;
+        expect(run.refusedFollowUps, `seed ${seed}`).toBe(0);
+      }
+    }
+    expect(moveRefused).toBeGreaterThan(0);
+    expect(moveAccepted).toBeGreaterThan(0);
   }, 60_000);
 
   test("t40_random_schedule_with_pauses_and_restart_failed", () => {
@@ -2615,6 +2656,24 @@ describe("t40 random schedules", () => {
       { v: 2, seq: 99, ts: 0, event: "join_reached", fork: "f1", join: "merge", failed: ["b"] },
     ];
     expect(() => forkInvariants(fork, h.state, journal, 0)).toThrow();
+    // a run that ended because a node was entered twice
+    const twice = structuredClone(h.state);
+    twice.status = "failed";
+    twice.active = [];
+    twice.pauses = [];
+    twice.finishedAt = 1;
+    const collided: JournalRecord[] = [
+      ...h.journal,
+      {
+        v: 2,
+        seq: 99,
+        ts: 0,
+        event: "run_finished",
+        status: "failed",
+        reason: 'node "a" was entered while an attempt of it was still going',
+      },
+    ];
+    expect(() => forkInvariants(fork, twice, collided, 0)).toThrow("entered twice");
   });
 });
 
@@ -3883,5 +3942,312 @@ describe("t40 a restarted join keeps its branches' failures", () => {
     expect(restarted.node.reentry_feedback).toContain("The pipeline was changed under this run");
     expect(restarted.node.reentry_feedback).toContain("Branches of the fork failed");
     expect(restarted.node.reentry_feedback).toContain("b is red");
+  });
+});
+
+// ── the place of a step in an open fork; where a run starts (seventh review) ──
+
+describe("t40 seventh review", () => {
+  /** a1 -> a2 in branch a1, b1 alone in branch b1, z after the join (and back to the fork). */
+  const MOVE = (edges: string[]) =>
+    yaml([
+      "name: move",
+      "nodes:",
+      "  - { slug: f, kind: agent, prompt: f }",
+      "  - { slug: a1, kind: agent, prompt: a1 }",
+      "  - { slug: a2, kind: agent, prompt: a2 }",
+      "  - { slug: b1, kind: agent, prompt: b1 }",
+      "  - { slug: j, kind: agent, prompt: j, join: all }",
+      "  - { slug: z, kind: agent, prompt: z, outcomes: [again] }",
+      "edges:",
+      "  - { from: f, to: a1 }",
+      "  - { from: f, to: b1 }",
+      "  - { from: z, to: f, when: again }",
+      ...edges,
+    ]);
+  const moveBefore = parsePipeline(
+    MOVE([
+      "  - { from: a1, to: a2 }",
+      "  - { from: a2, to: j }",
+      "  - { from: b1, to: j }",
+      "  - { from: j, to: z }",
+    ]),
+  );
+  /** a2 moved from branch a1 to the end of branch b1. */
+  const moveToB = parsePipeline(
+    MOVE([
+      "  - { from: a1, to: j }",
+      "  - { from: b1, to: a2 }",
+      "  - { from: a2, to: j }",
+      "  - { from: j, to: z }",
+    ]),
+  );
+  /** a2 moved past the join. */
+  const movePast = parsePipeline(
+    MOVE([
+      "  - { from: a1, to: j }",
+      "  - { from: b1, to: j }",
+      "  - { from: j, to: a2 }",
+      "  - { from: a2, to: z }",
+    ]),
+  );
+  const accept = (before: PipelineSpec): RunEvent => ({
+    type: "pipeline_accepted",
+    from: "h",
+    to: "h2",
+    source: "file",
+    before,
+  });
+
+  test("t40_change_cannot_move_a_standing_step_to_another_branch", () => {
+    const h = host(moveBefore);
+    h.hold("a1", "a2", "b1", "j", "z");
+    h.send(START);
+    h.send(complete("f", 1));
+    h.send(complete("a1", 1));
+    expect(h.state.active.map((v) => [v.node, v.fork?.branch])).toEqual([
+      ["b1", "b1"],
+      ["a2", "a1"],
+    ]);
+    for (const [after, place] of [
+      [moveToB, 'put it in its branch "b1"'],
+      [movePast, "put it outside its branches"],
+    ] as const) {
+      const refused = diffPipelines(moveBefore, after, h.state).refused;
+      expect(refused).toContain('node "a2"');
+      expect(refused).toContain('in its branch "a1"');
+      expect(refused).toContain(place);
+      h.use(after);
+      expect(refusal(h.send(accept(moveBefore))).code).toBe("PIPELINE_CHANGE_REFUSED");
+      h.use(moveBefore);
+    }
+    // the run goes on as it was, and once the fork is left the same change is taken
+    h.send(complete("b1", 1));
+    h.send(complete("a2", 1));
+    h.send(complete("j", 1));
+    expect(h.state.active.map((v) => v.node)).toEqual(["z"]);
+    expect(diffPipelines(moveBefore, moveToB, h.state).refused).toBeUndefined();
+    h.use(moveToB);
+    must(h.send(accept(moveBefore)));
+    must(h.send(complete("z", 1)));
+    expect(h.state.status).toBe("completed");
+  });
+
+  test("t40_change_may_move_a_step_the_open_fork_has_not_reached", () => {
+    const h = host(moveBefore);
+    h.hold("a1", "a2", "b1", "j", "z");
+    h.send(START);
+    h.send(complete("f", 1));
+    // a2 has not been entered: moving it is taken, and the branches run on the new shape
+    h.use(moveToB);
+    must(h.send(accept(moveBefore)));
+    h.send(complete("a1", 1));
+    h.send(complete("b1", 1));
+    expect(h.state.active.map((v) => [v.node, v.fork?.branch])).toEqual([["a2", "b1"]]);
+    h.send(complete("a2", 1));
+    expect(h.state.active.map((v) => v.node)).toEqual(["j"]);
+  });
+
+  test("t40_change_cannot_move_a_step_of_a_branch_that_may_run_again", () => {
+    // Both branches fail into the join; restart_failed may run them again, so their steps keep
+    // their place while the join stands.
+    const text = yaml([
+      "name: again",
+      "nodes:",
+      "  - { slug: f, kind: agent, prompt: f }",
+      "  - { slug: a1, kind: command, command: a1 }",
+      "  - { slug: a2, kind: command, command: a2 }",
+      "  - { slug: b1, kind: command, command: b1 }",
+      "  - { slug: j, kind: agent, prompt: j, join: all }",
+      "edges:",
+      "  - { from: f, to: a1 }",
+      "  - { from: f, to: b1 }",
+      "  - { from: a1, to: a2 }",
+      "  - { from: a1, to: j, when: failed }",
+      "  - { from: a2, to: j }",
+      "  - { from: a2, to: j, when: failed }",
+      "  - { from: b1, to: j }",
+      "  - { from: b1, to: j, when: failed }",
+    ]);
+    const before = parsePipeline(text);
+    const h = host(before, (effect) =>
+      effect.type === "run_command" && effect.node === "a2"
+        ? {
+            type: "work_finished",
+            node: "a2",
+            attempt: effect.attempt,
+            passed: false,
+            reason: "red",
+          }
+        : answer(effect),
+    );
+    h.hold("j");
+    h.send(START);
+    h.send(complete("f", 1));
+    expect(h.state.active.map((v) => v.node)).toEqual(["j"]);
+    const after = parsePipeline(
+      text
+        .replace("  - { from: a1, to: a2 }\n", "  - { from: a1, to: j }\n")
+        .replace("  - { from: b1, to: j }\n", "  - { from: b1, to: a2 }\n"),
+    );
+    expect(diffPipelines(before, after, h.state).refused).toContain(
+      'node "a2" belongs to the open fork at "f" in its branch "a1", and the change would put it in its branch "b1"',
+    );
+  });
+
+  /** A join of one attempt; branch a has two steps, a2 arriving last; every command fails but a1. */
+  const LIMIT2 = yaml([
+    "name: limit2",
+    "nodes:",
+    "  - { slug: plan, kind: agent, prompt: plan }",
+    "  - { slug: a1, kind: command, command: a1 }",
+    "  - { slug: a2, kind: command, command: a2 }",
+    "  - { slug: b, kind: command, command: b }",
+    "  - slug: merge",
+    "    kind: agent",
+    "    prompt: merge",
+    "    join: all",
+    "    max_attempts: 1",
+    "    max_consecutive_failures: 1",
+    "edges:",
+    "  - { from: plan, to: a1 }",
+    "  - { from: plan, to: b }",
+    "  - { from: a1, to: a2 }",
+    "  - { from: a1, to: merge, when: failed }",
+    "  - { from: a2, to: merge }",
+    "  - { from: a2, to: merge, when: failed }",
+    "  - { from: b, to: merge }",
+    "  - { from: b, to: merge, when: failed }",
+  ]);
+
+  test("t40_join_held_at_its_limit_does_not_hold_the_last_branch_node", () => {
+    const before = parsePipeline(LIMIT2);
+    const h = host(before, (effect) =>
+      effect.type === "run_command" && effect.node !== "a1"
+        ? {
+            type: "work_finished",
+            node: effect.node,
+            attempt: effect.attempt,
+            passed: false,
+            reason: "red",
+          }
+        : answer(effect),
+    );
+    h.hold("plan", "merge");
+    h.send(START);
+    h.send(complete("plan", 1));
+    must(h.send(complete("merge", 1, RESTART_FAILED)));
+    expect(h.state.pauses).toEqual([
+      expect.objectContaining({
+        reason: "total",
+        node: "merge",
+        blocked: expect.objectContaining({ from: "a2", to: "merge", join: "f1" }),
+      }),
+    ]);
+    // a2 is removed (a1 now leads to the join): the route into the join is taken as it is
+    const after = parsePipeline(
+      LIMIT2.replace("  - { slug: a2, kind: command, command: a2 }\n", "")
+        .replace("  - { from: a1, to: a2 }\n", "  - { from: a1, to: merge }\n")
+        .replace("  - { from: a2, to: merge }\n  - { from: a2, to: merge, when: failed }\n", ""),
+    );
+    expect(diffPipelines(before, after, h.state).refused).toBeUndefined();
+    h.use(after);
+    must(h.send({ type: "pipeline_accepted", from: "h", to: "h2", source: "file", before }));
+    expect(h.state.pauses.map((p) => p.node)).toEqual(["merge"]);
+    must(h.send({ type: "resume" }));
+    expect(h.state.active.map((v) => v.node)).toEqual(["merge"]);
+    must(h.send(complete("merge", 2)));
+    expect(h.state.status).toBe("completed");
+  });
+
+  test("t40_entry_inside_a_branch_or_at_the_join_is_refused", () => {
+    const message = "is the first node of the pipeline";
+    // the entry is a branch head, the fork run again from after the join
+    refused(
+      yaml([
+        "name: p",
+        "nodes:",
+        "  - { slug: a, kind: agent, prompt: a }",
+        "  - { slug: f, kind: agent, prompt: f }",
+        "  - { slug: b, kind: agent, prompt: b }",
+        "  - { slug: j, kind: agent, prompt: j, join: all, outcomes: [again] }",
+        "  - { slug: z, kind: agent, prompt: z }",
+        "edges:",
+        "  - { from: f, to: a }",
+        "  - { from: f, to: b }",
+        "  - { from: a, to: j }",
+        "  - { from: b, to: j }",
+        "  - { from: j, to: f, when: again }",
+        "  - { from: j, to: z }",
+      ]),
+      message,
+      'in the branch "a"',
+    );
+    // the entry is the join
+    refused(
+      yaml([
+        "name: p",
+        "nodes:",
+        "  - { slug: j, kind: agent, prompt: j, join: all }",
+        "  - { slug: f, kind: agent, prompt: f }",
+        "  - { slug: a, kind: agent, prompt: a }",
+        "  - { slug: b, kind: agent, prompt: b }",
+        "edges:",
+        "  - { from: j, to: f }",
+        "  - { from: f, to: a }",
+        "  - { from: f, to: b }",
+        "  - { from: a, to: j }",
+        "  - { from: b, to: j }",
+      ]),
+      message,
+      "the join of",
+    );
+    // the entry is the second step of a branch
+    refused(
+      yaml([
+        "name: p",
+        "nodes:",
+        "  - { slug: a2, kind: agent, prompt: a2 }",
+        "  - { slug: f, kind: agent, prompt: f }",
+        "  - { slug: a1, kind: agent, prompt: a1 }",
+        "  - { slug: b, kind: agent, prompt: b }",
+        "  - { slug: j, kind: agent, prompt: j, join: all, outcomes: [again] }",
+        "edges:",
+        "  - { from: f, to: a1 }",
+        "  - { from: f, to: b }",
+        "  - { from: a1, to: a2 }",
+        "  - { from: a2, to: j }",
+        "  - { from: b, to: j }",
+        "  - { from: j, to: f, when: again }",
+      ]),
+      message,
+      'in the branch "a1"',
+    );
+    // the fork node first, or a step before it: valid
+    const body = [
+      "  - { slug: a, kind: agent, prompt: a }",
+      "  - { slug: b, kind: agent, prompt: b }",
+      "  - { slug: j, kind: agent, prompt: j, join: all }",
+      "edges:",
+      "  - { from: f, to: a }",
+      "  - { from: f, to: b }",
+      "  - { from: a, to: j }",
+      "  - { from: b, to: j }",
+    ];
+    expect(
+      problems(yaml(["name: p", "nodes:", "  - { slug: f, kind: agent, prompt: f }", ...body])),
+    ).toEqual([]);
+    expect(
+      problems(
+        yaml([
+          "name: p",
+          "nodes:",
+          "  - { slug: p, kind: agent, prompt: p }",
+          "  - { slug: f, kind: agent, prompt: f }",
+          ...body,
+          "  - { from: p, to: f }",
+        ]),
+      ),
+    ).toEqual([]);
   });
 });

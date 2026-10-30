@@ -70,6 +70,7 @@ import {
   runSlug,
   type ServedSurface,
   type StepResult,
+  type SubagentsDeclaration,
   standingOf,
   summarizeRun,
   type TakeOutcome,
@@ -90,6 +91,7 @@ import {
 } from "./executor";
 import {
   checkTreeId,
+  DeadlineError,
   deadlineIn,
   GitSnapshotter,
   readHead,
@@ -208,6 +210,8 @@ export interface HostOptions {
   snapshotDeadlineMs?: number;
   /** How long all the snapshots of one decision may take together; `DISPATCH_DEADLINE_MS` by default. */
   dispatchDeadlineMs?: number;
+  /** The bound of the git facts read when a run ends (`RUN_FACTS_DEADLINE_MS`); tests make it short. */
+  runFactsDeadlineMs?: number;
 }
 
 /**
@@ -301,6 +305,24 @@ const DEADLINE_BACKOFF = 2;
  */
 export const SNAPSHOT_DEADLINE_MS = 10_000;
 export const DISPATCH_DEADLINE_MS = 20_000;
+/** How long the git facts of a run's end (HEAD, the commits) may take; they are read under the lock. */
+export const RUN_FACTS_DEADLINE_MS = 10_000;
+
+/**
+ * `work`, unless `ms` pass first: then what `late` makes is thrown. The work is not stopped (the git
+ * calls under it carry deadlines of their own); the caller only stops waiting for it.
+ */
+async function within<T>(work: Promise<T>, ms: number, late: () => Error): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(late()), Math.max(ms, 0));
+  });
+  try {
+    return await Promise.race([work, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** What the record says when other branches of a fork wrote to the same tree. */
 export const SHARED_TREE_NOTE =
@@ -418,6 +440,11 @@ export class LocalHost {
   readonly ownerId: string;
   readonly isOwnerAlive: (owner: string) => boolean;
   readonly agentLog: AgentLogWriter;
+  /**
+   * What the agent last said of itself (`subagents`) per run. Only `pipeline_next_step` carries it;
+   * the answers of a completion or a take are worked out without it, and must not flip the mode.
+   */
+  readonly declaredSubagents = new Map<string, SubagentsDeclaration>();
 
   constructor(
     readonly spec: PipelineSpec,
@@ -846,7 +873,13 @@ export class LocalRun {
   /** The options of an answer that depend on the config and on the request. */
   private async answerOptions(request: NextStepRequest, state: RunState): Promise<NextStepOptions> {
     const hints = await this.hints();
-    const mode = resolveMode(hints.agents, request.subagents);
+    if (request.subagents !== undefined) {
+      this.host.declaredSubagents.set(this.runId, request.subagents);
+    }
+    const mode = resolveMode(
+      hints.agents,
+      request.subagents ?? this.host.declaredSubagents.get(this.runId),
+    );
     const where = state.workdir === undefined ? undefined : await this.inProject(state.workdir);
     return {
       waitHint: hints.wait,
@@ -1458,19 +1491,25 @@ export class LocalRun {
 
   /** HEAD and the commits of the run, from its directory; whatever cannot be read is left out. */
   private async runFacts(state: RunState): Promise<RunFacts> {
-    try {
+    // Read under the run's lock: a hung git must not hold it, so the whole read has a bound, and
+    // a read that does not fit leaves the facts out as one that failed does.
+    const deadline = deadlineIn(this.host.options.runFactsDeadlineMs ?? RUN_FACTS_DEADLINE_MS);
+    const read = async (): Promise<RunFacts> => {
       const dir =
         state.workdir === undefined ? this.host.options.root : await this.inProject(state.workdir);
       const started = (await this.host.store.readJournal(this.runId)).find(
         (r) => r.event === "run_started",
       );
       const base = typeof started?.base_commit === "string" ? started.base_commit : undefined;
-      const found = await readRunCommits(dir, base, Math.floor(state.startedAt / 1000));
+      const found = await readRunCommits(dir, base, Math.floor(state.startedAt / 1000), deadline);
       return {
         ...(found.head === undefined ? {} : { head: found.head }),
         ...(found.commits === undefined ? {} : { commits: found.commits }),
         ...(found.truncated === true ? { commitsTruncated: true } : {}),
       };
+    };
+    try {
+      return await within(read(), deadline.remainingMs(), () => new DeadlineError());
     } catch {
       return {};
     }
@@ -1806,17 +1845,21 @@ export class LocalRun {
     if (keys.length > 0) {
       let tree: string | undefined;
       let failure: string | undefined;
+      // Where the files stood when the person was asked, or where a check starts from: a gate in a
+      // directory without git has nothing to record and nothing to say, a check has. A gate beside
+      // a check is still asked about git on its own: a tree is only the gate's when it has one.
+      let repo: boolean | undefined;
       try {
-        const snapshotter = await this.snapshotter();
-        // Where the files stood when the person was asked, or where a check starts from: a gate in a
-        // directory without git has nothing to record and nothing to say, a check has. The question
-        // itself is under the bound: a hung git must not hold the lock past it.
+        // Finding the directory (and the worktree check behind it) is under the bound too: a hung
+        // git must not hold the lock past it, whatever it was asked.
         const ranOut = () => new Error("the time for recording the files of this decision ran out");
         if (total.remainingMs() <= 0) throw ranOut();
-        if (
-          keys.some((k) => !k.gate) ||
-          (await snapshotter.isRepo(Math.max(total.remainingMs(), 1)))
-        ) {
+        const snapshotter = await within(this.snapshotter(), total.remainingMs(), ranOut);
+        if (keys.some((k) => k.gate)) {
+          if (total.remainingMs() <= 0) throw ranOut();
+          repo = await snapshotter.isRepo(Math.max(total.remainingMs(), 1));
+        }
+        if (keys.some((k) => !k.gate) || repo === true) {
           const left = total.remainingMs();
           if (left <= 0) throw ranOut();
           tree = await snapshotter.snapshot(deadlineIn(Math.min(each, left)));
@@ -1824,7 +1867,9 @@ export class LocalRun {
       } catch (error) {
         failure = error instanceof Error ? error.message : String(error);
       }
-      for (const { key } of keys) {
+      for (const { key, gate } of keys) {
+        // A gate in a directory without git keeps nothing: it says so (`no_repo`), not "unavailable".
+        if (gate && repo === false) continue;
         if (tree !== undefined) {
           await store.writeSnapshot(this.runId, key, tree).catch(() => undefined);
         } else if (failure !== undefined) {
@@ -2245,11 +2290,10 @@ export class LocalRun {
       // Every step handed out is recorded, each on its own: what a step says does not depend on its
       // siblings, so the record of one is the same whoever else is working the run.
       for (const handed of step.node.steps ?? [step.node]) {
-        await this.recordServed(
-          servedPart(handed, step.node.pipeline_change),
-          options.serve.caller,
-          state,
-        );
+        // The directory is the run's (its `meta.json` has it), not the step's: an absolute path of
+        // this machine is kept out of the record of what the agent was shown.
+        const { workdir: _where, ...own } = servedPart(handed, step.node.pipeline_change);
+        await this.recordServed(own, options.serve.caller, state);
       }
     }
     return step;
@@ -2292,7 +2336,10 @@ export class LocalRun {
     const renewed =
       mine !== undefined && liveClaim(before.nodes[mine.slug], this.host.clock())?.token === hash;
     if (mine === undefined) {
-      if (input.node === undefined) return { status: "none", next: await this.nextStep({ serve }) };
+      if (input.node === undefined) {
+        // The caller is a worker: it is told to report back, never the coordinator's answer.
+        return { status: "none", next: await this.nextStep({ serve, worker: true }) };
+      }
       const visit = after.active.find((v) => v.node === input.node && v.phase === "agent");
       if (!visit) {
         throw new KodelError(

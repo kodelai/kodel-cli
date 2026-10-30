@@ -24,6 +24,7 @@ import {
   logVisitOf,
   SHARED_TREE_NOTE,
   SNAPSHOT_DEADLINE_MS,
+  type WorkdirProvider,
 } from "../src";
 import type { CommandResult } from "../src/command";
 
@@ -1278,4 +1279,117 @@ describe("t40 a scoped wait takes over only its own work", () => {
     await run1.waitForRest(5_000);
     await run2.waitForRest(5_000);
   }, 20_000);
+});
+
+describe("t40 git under the lock is bounded (seventh review)", () => {
+  /** A worktree provider whose check of the directory hangs once armed: a hung git behind `cwd`. */
+  class HangingWorkdirs implements WorkdirProvider {
+    armed = false;
+    async prepare() {
+      return { path: dir, created: false };
+    }
+    async verify() {
+      if (this.armed) await new Promise((resolve) => setTimeout(resolve, 1_500));
+    }
+    async discard() {}
+  }
+
+  test("t40_dispatch_bounds_finding_the_directory", async () => {
+    const workdirs = new HangingWorkdirs();
+    const spy = lockSpy();
+    const h = new LocalHost(DIFFS, {
+      root: dir,
+      heartbeatMs: 0,
+      workdirs,
+      snapshotter: new GitSnapshotter(dir),
+      dispatchDeadlineMs: 250,
+      lockHooks: spy.hooks,
+    });
+    const history = defaultHistory();
+    history.changes.enabled = false;
+    history.executor.enabled = false;
+    const { run } = await h.start("split the work", { history });
+    workdirs.armed = true;
+    spy.held.length = 0;
+    expect((await run.completeStep("plan", 1)).ok).toBe(true);
+    // the check of the directory hangs, under the lock and before it alike: the lock is not held
+    // past the bound of the decision
+    expect(Math.max(...spy.held)).toBeLessThan(1_000);
+    const snapshots = await h.store.readSnapshots(run.runId);
+    expect(String(snapshots["visit:2!"])).toContain("ran out");
+    expect(String(snapshots["visit:3!"])).toContain("ran out");
+  });
+
+  test("t40_run_facts_bounded_and_left_out_when_late", async () => {
+    const one = parsePipeline(
+      yaml(["name: one", "nodes:", "  - { slug: plan, kind: agent, prompt: plan }", "edges: []"]),
+    );
+    const finish = async (runFactsDeadlineMs?: number) => {
+      const h = new LocalHost(one, {
+        root: dir,
+        heartbeatMs: 0,
+        ...(runFactsDeadlineMs === undefined ? {} : { runFactsDeadlineMs }),
+      });
+      const { run } = await h.start(`finish ${runFactsDeadlineMs ?? "default"}`);
+      expect((await run.completeStep("plan", 1)).ok).toBe(true);
+      await run.waitForRest(5_000);
+      const journal = await h.store.readJournal(run.runId);
+      return journal.find((r) => r.event === "run_finished");
+    };
+    // with time to read it, the run's end names HEAD; with none, the facts are left out and the
+    // run still ends
+    expect((await finish())?.head).toBeString();
+    const late = await finish(0);
+    expect(late).toMatchObject({ status: "completed" });
+    expect(late?.head).toBeUndefined();
+  });
+
+  test("t40_gate_beside_a_check_without_git_is_no_repo", async () => {
+    // One decision enters a node with a `diff` baseline and reaches a gate, in a directory without
+    // git: the check's baseline is recorded as missing, the gate has nothing to compare and says so.
+    const bare = await mkdtemp(join(tmpdir(), "kodel-no-git-"));
+    try {
+      const spec = parsePipeline(
+        yaml([
+          "name: both",
+          "nodes:",
+          "  - { slug: plan, kind: agent, prompt: plan }",
+          "  - { slug: g, kind: human, prompt: g? }",
+          "  - slug: c",
+          "    kind: agent",
+          "    prompt: c",
+          '    checks: [{ kind: diff, paths: ["c.txt"], mode: changed_only }]',
+          "  - { slug: merge, kind: agent, prompt: merge, join: all }",
+          "edges:",
+          "  - { from: plan, to: g }",
+          "  - { from: plan, to: c }",
+          "  - { from: g, to: merge, when: approved }",
+          "  - { from: g, to: merge, when: rejected }",
+          "  - { from: c, to: merge }",
+          "  - { from: c, to: merge, when: failed }",
+        ]),
+      );
+      // git answers "a repository" once, to let the run start (a change of its pipeline could add
+      // the check later just the same), and "none" from then on
+      class Gone extends GitSnapshotter {
+        asked = 0;
+        override async isRepo(): Promise<boolean> {
+          this.asked += 1;
+          return this.asked === 1;
+        }
+      }
+      const h = new LocalHost(spec, { root: bare, heartbeatMs: 0, snapshotter: new Gone(bare) });
+      const { run } = await h.start("both at once");
+      await run.completeStep("plan", 1);
+      expect((await run.state()).active.map((v) => v.node).sort()).toEqual(["c", "g"]);
+      const snapshots = await h.store.readSnapshots(run.runId);
+      expect(Object.keys(snapshots).filter((k) => k.startsWith("gate:"))).toEqual([]);
+      expect(Object.keys(snapshots).some((k) => k.startsWith("visit:") && k.endsWith("!"))).toBe(
+        true,
+      );
+      expect(await run.changesSinceGate("g")).toEqual({ kind: "no_repo" });
+    } finally {
+      await rm(bare, { recursive: true, force: true });
+    }
+  });
 });
