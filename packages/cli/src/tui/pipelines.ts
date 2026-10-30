@@ -1,4 +1,4 @@
-/** The Pipeline screen: the pipelines of a project, what waits for a person, and how each one runs. */
+/** The Pipeline screen: the pipelines of a project, how each one runs, and what waits for a person. */
 import type { PipelineSpec } from "@kodel-ai/pipeline-core";
 import { bold, cyan, dim, fit, green, red, stripAnsi, wrapText, yellow } from "./ansi";
 import type { Session } from "./session";
@@ -24,72 +24,78 @@ export interface PipeStep {
   checks: { kind: string; detail: string }[];
 }
 
-/**
- * `proposal`: a pipeline the agent proposed outside a run. `change`: a change of the pipeline of a
- * run that is going. Both wait for a person. `pipeline`: a pipeline of the project.
- */
-export type PipeGroup = "proposal" | "change" | "pipeline";
+/** Something the agent proposed that waits for a person. */
+export interface Pending {
+  id: string;
+  /** `proposal`: outside a run. `run`: a change of the pipeline of a run that is going. */
+  source: "proposal" | "run";
+  /** A pipeline that does not exist yet, or a change of one that does. */
+  kind: "new" | "change";
+  title: string;
+  /** What accepting does, in words. */
+  note: string[];
+  /** Why it cannot be accepted. */
+  problem?: string;
+  /** Unified diff against the pipeline as it is now. */
+  diff: string[];
+  /** Shell commands it would run on this machine; `isNew` marks the ones the pipeline has not had. */
+  commands: { where: string; command: string; isNew: boolean }[];
+  /** The commands that accept and drop it. */
+  accept: string;
+  discard: string;
+  /** For a change of a run: the run. */
+  runId?: string;
+}
 
 export interface PipeEntry {
   id: string;
-  group: PipeGroup;
   name: string;
   description?: string;
   steps: PipeStep[];
-  /** Unified diff against the pipeline as it is now; a proposal and a change have one. */
-  diff?: string[];
-  /** Why it cannot be accepted, or why the file cannot be read. */
+  /** Why the file cannot be read. */
   problem?: string;
-  /** What accepting does, in words. */
-  note?: string[];
-  /** The commands that accept and drop it. */
-  accept?: string;
-  discard?: string;
-  /** Shell commands it would run on this machine; `isNew` marks the ones the pipeline has not had. */
-  commands?: { where: string; command: string; isNew: boolean }[];
-  /** For a change of a run: the run. */
-  runId?: string;
-  /** For a proposal: whether it is a new pipeline or a change of one. */
-  kind?: "new" | "change";
+  /** The pipeline is only proposed so far: there is no file yet. */
+  fresh?: boolean;
+  pending: Pending[];
 }
 
 export interface PipeState {
   selected: string;
   /** An index into `PIPE_TABS`. */
   tab: number;
-  /** The step the Flow and the Prompt are on. */
+  /** The step the Flow is on. */
   step: number;
-  /** The run the Runs tab is on. */
-  run: number;
+  /** The step is opened and what it is told is read. */
+  open: boolean;
+  /** Which of the pending proposals the Proposed tab shows. */
+  pend: number;
   scroll: number;
 }
 
-export const PIPE_TABS = ["Flow", "Prompt", "Runs", "Diff"] as const;
+export const PIPE_TABS = ["Flow", "Proposed"] as const;
 const FLOW = 0;
-const PROMPT = 1;
-const RUNS = 2;
-const DIFF = 3;
+const PROPOSED = 1;
 
 export function initialPipeState(entries: PipeEntry[]): PipeState {
-  return { selected: entries[0]?.id ?? "", tab: FLOW, step: 0, run: 0, scroll: 0 };
+  return { selected: entries[0]?.id ?? "", tab: FLOW, step: 0, open: false, pend: 0, scroll: 0 };
 }
 
-const GROUP_ORDER: Record<PipeGroup, number> = { change: 0, proposal: 1, pipeline: 2 };
-
+/** What waits for a person comes first. */
 export function sortEntries(entries: PipeEntry[]): PipeEntry[] {
   return [...entries].sort(
-    (a, b) => GROUP_ORDER[a.group] - GROUP_ORDER[b.group] || a.name.localeCompare(b.name),
+    (a, b) =>
+      Number(b.pending.length > 0) - Number(a.pending.length > 0) || a.name.localeCompare(b.name),
   );
 }
 
-/** How many entries wait for a person. */
-export function waitingEntries(entries: PipeEntry[]): number {
-  return entries.filter((e) => e.group !== "pipeline").length;
+/** How many proposals wait for a person. */
+export function pendingCount(entries: PipeEntry[]): number {
+  return entries.reduce((n, e) => n + e.pending.length, 0);
 }
 
 /** The new list keeps the selection when the entry is still there. */
 export function withEntries(p: PipeState, entries: PipeEntry[]): PipeState {
-  return entries.some((e) => e.id === p.selected) ? p : { ...initialPipeState(entries), tab: FLOW };
+  return entries.some((e) => e.id === p.selected) ? p : initialPipeState(entries);
 }
 
 // ── from a pipeline file to what is shown ───────────────────────────────────
@@ -223,7 +229,6 @@ export function unifiedDiff(before: string, after: string, context = 3): string[
 
 export interface PipeView {
   entries: PipeEntry[];
-  sessions: Session[];
   focus: "list" | "card";
   source: "demo" | "project";
   /** The width of the card and the lines it has room for below its head. */
@@ -243,21 +248,21 @@ export function entryOf(entries: PipeEntry[], p: PipeState): PipeEntry | undefin
   return entries.find((e) => e.id === p.selected) ?? entries[0];
 }
 
-export function runsOf(entry: PipeEntry | undefined, sessions: Session[]): Session[] {
-  if (!entry) return [];
-  if (entry.group === "change") return sessions.filter((s) => s.id === entry.runId);
-  if (entry.group === "proposal") {
-    return entry.kind === "change" ? sessions.filter((s) => s.pipeline === entry.name) : [];
-  }
-  return sessions.filter((s) => s.pipeline === entry.name);
+/** The runs of the pipeline, for the counts in the list. */
+export function runsOf(entry: PipeEntry, sessions: Session[]): Session[] {
+  return entry.fresh ? [] : sessions.filter((s) => s.pipeline === entry.name);
 }
 
 export function tabsOf(entry: PipeEntry | undefined): number[] {
-  return entry?.diff ? [FLOW, PROMPT, RUNS, DIFF] : [FLOW, PROMPT, RUNS];
+  return entry && entry.pending.length > 0 ? [FLOW, PROPOSED] : [FLOW];
 }
 
 function clamp(n: number, max: number): number {
   return Math.min(Math.max(0, max), Math.max(0, n));
+}
+
+export function pendingOf(entry: PipeEntry, p: PipeState): Pending | undefined {
+  return entry.pending[clamp(p.pend, entry.pending.length - 1)];
 }
 
 export function pipeKey(p: PipeState, key: string, v: PipeView): PipeResult | undefined {
@@ -271,9 +276,7 @@ export function pipeKey(p: PipeState, key: string, v: PipeView): PipeResult | un
         v.entries.findIndex((e) => e.id === entry?.id),
       );
       const next = v.entries[clamp(at + (down ? 1 : -1), v.entries.length - 1)];
-      return next
-        ? { p: { ...p, selected: next.id, tab: FLOW, step: 0, run: 0, scroll: 0 } }
-        : { p };
+      return next ? { p: initialPipeState([next]) } : { p };
     }
     if ((key === "enter" || key === "right") && entry) return { p, focus: "card" };
     return undefined;
@@ -281,78 +284,56 @@ export function pipeKey(p: PipeState, key: string, v: PipeView): PipeResult | un
   if (!entry) return { p, focus: "list" };
   const tabs = tabsOf(entry);
   const at = Math.max(0, tabs.indexOf(p.tab));
-  const switchTo = (tab: number): PipeResult => ({ p: { ...p, tab, scroll: 0 } });
+  const switchTo = (tab: number): PipeResult => ({ p: { ...p, tab, open: false, scroll: 0 } });
+  const pending = pendingOf(entry, p);
   switch (key) {
     case "escape":
-      return { p, focus: "list" };
+      return p.open ? { p: { ...p, open: false, scroll: 0 } } : { p, focus: "list" };
     case "left":
+      if (p.open) return { p: { ...p, open: false, scroll: 0 } };
       return at === 0 ? { p, focus: "list" } : switchTo(tabs[at - 1] ?? FLOW);
     case "right":
-      return switchTo(tabs[Math.min(tabs.length - 1, at + 1)] ?? FLOW);
-    case "s": {
-      const run = runsOf(entry, v.sessions)[0];
-      return run ? { p, open: run.id } : { p, notice: "No run to show." };
-    }
+      return p.open ? { p } : switchTo(tabs[Math.min(tabs.length - 1, at + 1)] ?? FLOW);
+    case "s":
+      if (p.tab !== PROPOSED) return undefined;
+      return pending?.runId ? { p, open: pending.runId } : { p, notice: "No run to show." };
     case "a":
     case "r": {
-      if (entry.group === "pipeline") return undefined;
-      const command = key === "a" ? entry.accept : entry.discard;
+      if (p.tab !== PROPOSED || !pending) return undefined;
+      const command = key === "a" ? pending.accept : pending.discard;
       const what = key === "a" ? "accept" : "drop";
       if (v.source === "demo") return { p, notice: `Sample data: nothing to ${what}.` };
-      return { p, notice: `To ${what} it, in a terminal: ${command ?? "see the card"}` };
+      return { p, notice: `To ${what} it, in a terminal: ${command}` };
     }
     default:
   }
-  const body = bodyOf(entry, p, v.sessions, v.width).lines.length;
-  const scrolling = p.tab === PROMPT || p.tab === DIFF;
+  const lines = bodyOf(entry, p, v.width).lines.length;
   const page = Math.max(1, v.room - 1);
   const moveScroll = (by: number): PipeResult => ({
-    p: { ...p, scroll: clamp(p.scroll + by, body - v.room) },
+    p: { ...p, scroll: clamp(p.scroll + by, lines - v.room) },
   });
-  if (key === "pagedown" || key === " ") return moveScroll(page);
-  if (key === "pageup" || key === "b") return moveScroll(-page);
-  if (p.tab === PROMPT && (key === "n" || key === "p")) {
+  const scrolling = p.tab === PROPOSED || p.open;
+  if (key === "pagedown" || key === " ") return scrolling ? moveScroll(page) : undefined;
+  if (key === "pageup" || key === "b") return scrolling ? moveScroll(-page) : undefined;
+  if ((key === "n" || key === "p") && p.tab === FLOW && p.open) {
     const step = clamp(p.step + (key === "n" ? 1 : -1), entry.steps.length - 1);
     return { p: { ...p, step, scroll: 0 } };
   }
-  if (p.tab === FLOW) {
+  if ((key === "n" || key === "p") && p.tab === PROPOSED) {
+    const pend = clamp(p.pend + (key === "n" ? 1 : -1), entry.pending.length - 1);
+    return { p: { ...p, pend, scroll: 0 } };
+  }
+  if (p.tab === FLOW && !p.open) {
     if (up || down) {
       return { p: { ...p, step: clamp(p.step + (down ? 1 : -1), entry.steps.length - 1) } };
     }
-    if (key === "enter" && entry.steps.length > 0) return switchTo(PROMPT);
-  }
-  if (p.tab === RUNS) {
-    const runs = runsOf(entry, v.sessions);
-    if (up || down) return { p: { ...p, run: clamp(p.run + (down ? 1 : -1), runs.length - 1) } };
-    const run = runs[clamp(p.run, runs.length - 1)];
-    if (key === "enter" && run) return { p, open: run.id };
+    if (key === "enter" && entry.steps.length > 0) return { p: { ...p, open: true, scroll: 0 } };
   }
   if (scrolling && (up || down)) return moveScroll(down ? 1 : -1);
   return undefined;
 }
 
 // ── drawing ─────────────────────────────────────────────────────────────────
-
-const SESSION_MARK: Record<Session["status"], string> = {
-  waiting: yellow("◆"),
-  running: green("●"),
-  failed: red("✗"),
-  done: dim("✓"),
-  canceled: dim("–"),
-  unreadable: red("?"),
-};
-
-const GROUP_TITLE: Record<PipeGroup, string> = {
-  change: "WAITING FOR YOU · CHANGES OF A RUN",
-  proposal: "WAITING FOR YOU · PROPOSED",
-  pipeline: "PIPELINES",
-};
-
-function tagOf(e: PipeEntry): string {
-  if (e.group === "change") return "run change";
-  if (e.group === "proposal") return e.kind === "new" ? "new" : "change";
-  return "";
-}
 
 function runCounts(entry: PipeEntry, sessions: Session[]): string {
   const runs = runsOf(entry, sessions);
@@ -377,6 +358,12 @@ function summaryOf(e: PipeEntry): string {
   return `${plural(e.steps.length, "step")} · ${plural(gates, "gate")}`;
 }
 
+/** What the list says at the right of a pipeline: that something waits, and how its runs are. */
+function tagOf(e: PipeEntry, sessions: Session[]): string {
+  const waiting = e.pending.length === 0 ? "" : yellow(e.fresh ? "new" : "proposed");
+  return [waiting, runCounts(e, sessions)].filter((x) => x !== "").join(" ");
+}
+
 export function pipeList(
   entries: PipeEntry[],
   p: PipeState,
@@ -387,26 +374,24 @@ export function pipeList(
 ): string[] {
   const lines: string[] = [];
   let selectedAt = 0;
-  let group: PipeGroup | undefined;
+  let waiting: boolean | undefined;
   const selected = entryOf(entries, p)?.id;
   for (const e of entries) {
-    if (e.group !== group) {
-      if (group !== undefined) lines.push("");
-      lines.push(dim(GROUP_TITLE[e.group]));
-      group = e.group;
+    const isWaiting = e.pending.length > 0;
+    if (isWaiting !== waiting) {
+      if (waiting !== undefined) lines.push("");
+      lines.push(dim(isWaiting ? "WAITING FOR YOU" : "PIPELINES"));
+      waiting = isWaiting;
     }
     const on = e.id === selected;
     if (on) selectedAt = lines.length;
     const mark = on ? (focused ? cyan("▸") : bold("▸")) : " ";
-    const tag = tagOf(e);
-    const right = e.group === "pipeline" ? runCounts(e, sessions) : yellow(tag);
+    const right = tagOf(e, sessions);
     const head = `${mark} ${on ? bold(e.name) : e.name}`;
     const gap = Math.max(1, width - stripAnsi(head).length - stripAnsi(right).length - 1);
     lines.push(fit(`${head}${" ".repeat(gap)}${right}`, width));
     const note = e.problem !== undefined ? red(oneLine(e.problem, width)) : dim(summaryOf(e));
-    const about =
-      e.group === "pipeline" && e.description ? dim(` · ${oneLine(e.description)}`) : "";
-    lines.push(fit(`  ${e.problem !== undefined ? note : `${note}${about}`}`, width));
+    lines.push(fit(`  ${note}`, width));
   }
   const start =
     lines.length <= height
@@ -423,7 +408,7 @@ export function emptyPipes(): string[] {
   ];
 }
 
-/** The head of the card: what the entry is, what is wrong with it, and the tabs. */
+/** The head of the card: what the pipeline is, what is wrong with it, and the tabs. */
 export function pipeHead(
   entry: PipeEntry,
   p: PipeState,
@@ -431,8 +416,7 @@ export function pipeHead(
   focused: boolean,
 ): string[] {
   const out: string[] = [];
-  const tag = tagOf(entry);
-  out.push(fit(`${bold(entry.name)}${tag ? ` ${yellow(`· ${tag}`)}` : ""}`, width));
+  out.push(fit(bold(entry.name), width));
   if (entry.description) {
     const lines = wrapText(entry.description, Math.max(10, width - 1));
     for (const l of lines.slice(0, 3)) out.push(dim(l));
@@ -441,10 +425,23 @@ export function pipeHead(
   if (entry.problem !== undefined) {
     for (const l of wrapText(entry.problem, width - 2)) out.push(red(l));
   }
+  if (entry.pending.length > 0 && p.tab !== PROPOSED) {
+    out.push(
+      fit(
+        yellow(
+          `◆ ${plural(entry.pending.length, "proposal")} ${entry.pending.length === 1 ? "waits" : "wait"} for you: the Proposed tab`,
+        ),
+        width,
+      ),
+    );
+  }
   const tabs = tabsOf(entry);
   out.push(
     strip(
-      tabs.map((t) => ({ text: PIPE_TABS[t] ?? "", styled: PIPE_TABS[t] ?? "" })),
+      tabs.map((t) => ({
+        text: PIPE_TABS[t] ?? "",
+        styled: t === PROPOSED ? yellow(PIPE_TABS[t]) : (PIPE_TABS[t] ?? ""),
+      })),
       Math.max(0, tabs.indexOf(p.tab)),
       width,
       focused,
@@ -459,31 +456,14 @@ export interface PipeBody {
   anchor?: number;
 }
 
-export function bodyOf(
-  entry: PipeEntry,
-  p: PipeState,
-  sessions: Session[],
-  width: number,
-): PipeBody {
-  if (p.tab === PROMPT) return promptBody(entry, p, width);
-  if (p.tab === RUNS) return runsBody(entry, p, sessions, width);
-  if (p.tab === DIFF) return diffBody(entry);
-  return flowBody(entry, p, width);
+export function bodyOf(entry: PipeEntry, p: PipeState, width: number): PipeBody {
+  if (p.tab === PROPOSED) return proposedBody(entry, p, width);
+  return p.open ? stepBody(entry, p, width) : flowBody(entry, p, width);
 }
 
 function flowBody(entry: PipeEntry, p: PipeState, width: number): PipeBody {
   const out: string[] = [];
   let anchor = 0;
-  if (entry.note && entry.note.length > 0) {
-    for (const n of entry.note) for (const l of wrapText(n, width - 2)) out.push(l);
-    out.push("");
-  }
-  const news = (entry.commands ?? []).filter((c) => c.isNew);
-  if (news.length > 0) {
-    out.push(yellow("NEW COMMANDS IT WOULD RUN ON THIS MACHINE"));
-    for (const c of news) out.push(`${dim(c.where)} ${fit(c.command, Math.max(10, width - 2))}`);
-    out.push("");
-  }
   if (entry.steps.length === 0) out.push(dim("No steps."));
   const pad = String(entry.steps.length).length;
   for (const [i, step] of entry.steps.entries()) {
@@ -537,7 +517,8 @@ export function reflow(text: string, width: number): string[] {
   return out;
 }
 
-function promptBody(entry: PipeEntry, p: PipeState, width: number): PipeBody {
+/** One step opened: what it is told or runs, its checks, and where it goes on. */
+function stepBody(entry: PipeEntry, p: PipeState, width: number): PipeBody {
   const step = entry.steps[clamp(p.step, entry.steps.length - 1)];
   if (!step) return { lines: [dim("No steps.")] };
   const out: string[] = [];
@@ -550,53 +531,54 @@ function promptBody(entry: PipeEntry, p: PipeState, width: number): PipeBody {
   }
   if (step.checks.length > 0) {
     out.push("", dim("CHECKS"));
-    for (const c of step.checks) {
-      out.push(fit(`${bold(c.kind)} ${dim(c.detail)}`, width));
-    }
+    for (const c of step.checks) out.push(fit(`${bold(c.kind)} ${dim(c.detail)}`, width));
   }
+  out.push("", dim("THEN"));
+  for (const r of step.routes) {
+    out.push(`${r.back ? "↩" : "→"} ${r.to}${r.when ? dim(`  ${r.when}`) : ""}`);
+  }
+  if (step.routes.length === 0) out.push(dim("■ the end"));
   return { lines: out };
 }
 
-function runsBody(entry: PipeEntry, p: PipeState, sessions: Session[], width: number): PipeBody {
-  const runs = runsOf(entry, sessions);
-  if (runs.length === 0) {
-    return {
-      lines: [
-        dim(entry.group === "proposal" ? "Nothing runs it until it is accepted." : "No runs yet."),
-      ],
-    };
+function proposedBody(entry: PipeEntry, p: PipeState, width: number): PipeBody {
+  const item = pendingOf(entry, p);
+  if (!item) return { lines: [dim("Nothing waits.")] };
+  const out: string[] = [];
+  const at = entry.pending.indexOf(item) + 1;
+  const count = entry.pending.length > 1 ? dim(` · ${at} of ${entry.pending.length}`) : "";
+  out.push(`${bold(item.title)}${count}`);
+  for (const n of item.note) out.push(...wrapText(n, width - 1));
+  if (item.problem !== undefined) {
+    out.push("", ...wrapText(`It cannot be accepted: ${item.problem}`, width - 1).map(red));
   }
-  const at = clamp(p.run, runs.length - 1);
-  const lines = runs.map((s, i) => {
-    const mark = i === at ? cyan("❯") : " ";
-    const title = i === at ? bold(s.title) : s.title;
-    return fit(`${mark} ${SESSION_MARK[s.status]} ${title}  ${dim(s.step)}`, width);
-  });
-  return { lines, anchor: at };
-}
-
-function diffBody(entry: PipeEntry): PipeBody {
-  const lines = (entry.diff ?? []).map((l) => {
+  const news = item.commands.filter((c) => c.isNew);
+  if (news.length > 0) {
+    out.push("", yellow("NEW COMMANDS IT WOULD RUN ON THIS MACHINE"));
+    for (const c of news) out.push(`${dim(c.where)} ${fit(c.command, Math.max(10, width - 2))}`);
+  }
+  out.push("", dim("WHAT CHANGES"));
+  const diff = item.diff.map((l) => {
     if (l.startsWith("@@")) return cyan(l);
     if (l.startsWith("+")) return green(l);
     if (l.startsWith("-")) return red(l);
     return dim(l);
   });
-  return { lines: lines.length > 0 ? lines : [dim("Nothing differs.")] };
+  out.push(...(diff.length > 0 ? diff : [dim("Nothing differs.")]));
+  return { lines: out };
 }
 
 /** The part of the body that is in view, keeping the anchor in the middle when there is one. */
 export function pipeCard(
   entry: PipeEntry,
   p: PipeState,
-  sessions: Session[],
   width: number,
   height: number,
   focused: boolean,
 ): string[] {
   const head = pipeHead(entry, p, width, focused);
   const room = Math.max(1, height - head.length);
-  const body = bodyOf(entry, p, sessions, width);
+  const body = bodyOf(entry, p, width);
   const scroll =
     body.anchor !== undefined
       ? clamp(body.anchor - Math.floor(room / 2), body.lines.length - room)
@@ -605,17 +587,16 @@ export function pipeCard(
 }
 
 export function pipeHints(entry: PipeEntry | undefined, p: PipeState, card: boolean): string {
-  const decide =
-    entry && entry.group !== "pipeline" ? `   ${bold("a")} accept   ${bold("r")} drop` : "";
-  const go = entry?.group === "change" ? `   ${bold("s")} go to the run` : "";
   if (!card) {
-    return `${bold("↑↓")} select   ${bold("Enter")} open${decide}${go}   ${bold("Tab")} menu   ${bold("q")} quit`;
+    return `${bold("↑↓")} select   ${bold("Enter")} open   ${bold("Tab")} menu   ${bold("q")} quit`;
   }
-  const keys: Record<number, string> = {
-    [FLOW]: `${bold("↑↓")} step   ${bold("Enter")} its prompt`,
-    [PROMPT]: `${bold("↑↓")} scroll   ${bold("n/p")} next/prev step`,
-    [RUNS]: `${bold("↑↓")} select   ${bold("Enter")} open the run`,
-    [DIFF]: `${bold("↑↓")} scroll`,
-  };
-  return `${bold("←→")} tabs   ${keys[p.tab] ?? ""}${decide}${go}   ${bold("z")} zoom   ${bold("Esc")} list`;
+  const tail = `   ${bold("z")} zoom   ${bold("Esc")} ${p.open ? "back" : "list"}`;
+  if (p.tab === PROPOSED) {
+    const item = entry ? pendingOf(entry, p) : undefined;
+    const several = entry && entry.pending.length > 1 ? `   ${bold("n/p")} next/prev` : "";
+    const go = item?.runId ? `   ${bold("s")} go to the run` : "";
+    return `${bold("←→")} tabs   ${bold("↑↓")} scroll${several}   ${bold("a")} accept   ${bold("r")} drop${go}${tail}`;
+  }
+  if (p.open) return `${bold("↑↓")} scroll   ${bold("n/p")} next/prev step${tail}`;
+  return `${bold("←→")} tabs   ${bold("↑↓")} step   ${bold("Enter")} open the step${tail}`;
 }

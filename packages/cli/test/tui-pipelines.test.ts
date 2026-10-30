@@ -4,7 +4,7 @@ import { stripAnsi, visibleLength } from "../src/tui/ansi";
 import { demoSessions } from "../src/tui/demo";
 import { loadSessions, type SessionSource } from "../src/tui/load";
 import { reflow, stepsOf, unifiedDiff } from "../src/tui/pipelines";
-import type { PipelineSource } from "../src/tui/pipes-load";
+import { loadPipelines, type PipelineSource } from "../src/tui/pipes-load";
 import { initialModel, type Model, render, update } from "../src/tui/view";
 
 const SIZE = { cols: 110, rows: 30 };
@@ -41,8 +41,8 @@ function press(m: Model, keys: string[], size = SIZE): Model {
   return keys.reduce((acc, k) => update(acc, k, size), m);
 }
 
-function demo(): Model {
-  return initialModel(demoSessions(Date.now()), "demo", Date.now());
+function demo(source: Model["source"] = "demo"): Model {
+  return initialModel(demoSessions(Date.now()), source, Date.now());
 }
 
 describe("unifiedDiff", () => {
@@ -113,74 +113,103 @@ describe("reflow", () => {
 });
 
 describe("the Pipeline screen", () => {
-  test("it lists what waits for a person before the pipelines", () => {
+  // In the sample the first pipeline has a change of a run waiting, the second one is a new
+  // pipeline that is only proposed, the third is a plain pipeline.
+  test("what waits for a person comes before the other pipelines", () => {
     const text = screen(press(demo(), ["2"]));
-    expect(text.indexOf("CHANGES OF A RUN")).toBeLessThan(text.indexOf("PROPOSED"));
-    expect(text.indexOf("PROPOSED")).toBeLessThan(text.indexOf("PIPELINES"));
+    expect(text.indexOf("WAITING FOR YOU")).toBeLessThan(text.indexOf("PIPELINES"));
+    expect(text.indexOf("dev")).toBeLessThan(text.indexOf("docs"));
     expect(text).toContain("release");
-    expect(text).toContain("docs");
   });
 
-  test("the menu counts what waits", () => {
+  test("the list says a pipeline is proposed and does not repeat its description", () => {
+    const list = render(press(demo(), ["2"]), SIZE)
+      .map((l) => stripAnsi(l).slice(0, 46))
+      .join("\n");
+    expect(list).toContain("proposed");
+    expect(list).toContain("new");
+    expect(list).not.toContain("Plan, implement and verify");
+  });
+
+  test("the menu counts the proposals that wait", () => {
     expect(screen(demo())).toMatch(/2 Pipeline 2/);
   });
 
   test("the keys of the list select, and Enter moves into the card", () => {
     let m = press(demo(), ["2", "down"]);
-    expect(m.pipe.selected).toBe("proposal:release");
+    expect(m.pipe.selected).toBe("pipeline:release");
     m = press(m, ["enter"]);
     expect(m.focus).toBe("card");
     expect(screen(m)).toContain("approve-release");
   });
 
   test("Flow shows a way back and the end of the pipeline", () => {
-    const text = screen(press(demo(), ["2", "down", "down", "enter"]));
+    const text = screen(press(demo(), ["2", "enter"]));
     expect(text).toContain("↩ plan");
     expect(text).toContain("the end");
   });
 
-  test("a proposal shows the commands it would run before anything else", () => {
-    const text = screen(press(demo(), ["2", "down", "enter"]));
-    expect(text).toContain("NEW COMMANDS");
-    expect(text).toContain("tag-release.sh");
+  test("a pipeline has only a Flow tab unless something waits", () => {
+    const plain = screen(press(demo(), ["2", "down", "down", "enter"]));
+    expect(plain).toContain("Flow");
+    expect(plain).not.toContain("Proposed");
+    expect(screen(press(demo(), ["2", "enter"]))).toContain("Proposed");
   });
 
-  test("Enter on a step opens its prompt, and n and p move between steps", () => {
-    let m = press(demo(), ["2", "down", "down", "enter", "enter"]);
+  test("there is no tab of the prompt or of the runs", () => {
+    const text = screen(press(demo(), ["2", "enter"]));
+    expect(text).not.toContain(" Prompt ");
+    expect(text).not.toContain(" Runs ");
+  });
+
+  test("Enter on a step opens it, n and p move between steps, Esc comes back", () => {
+    let m = press(demo(), ["2", "enter", "enter"]);
+    expect(m.pipe.open).toBe(true);
     expect(screen(m)).toContain("PROMPT");
     expect(screen(m)).toContain("step 1 of 7");
     m = press(m, ["n"]);
     expect(screen(m)).toContain("step 2 of 7");
-  });
-
-  test("only a proposal or a change has a Diff tab", () => {
-    expect(screen(press(demo(), ["2", "down", "down", "enter"]))).not.toContain("Diff");
-    const m = press(demo(), ["2", "enter", "right", "right", "right"]);
-    expect(screen(m)).toContain("+  - slug: lint");
-  });
-
-  test("a run of the pipeline is opened on the Sessions screen", () => {
-    const m = press(demo(), ["2", "down", "down", "enter", "right", "right", "enter"]);
-    expect(m.section).toBe(0);
+    m = press(m, ["escape"]);
+    expect(m.pipe.open).toBe(false);
     expect(m.focus).toBe("card");
-    expect(m.sessions.find((s) => s.id === m.selected)?.pipeline).toBe("dev");
+    expect(screen(m)).toContain("plan-approval");
+    expect(press(m, ["escape"]).focus).toBe("list");
+  });
+
+  test("an opened step says where it goes on", () => {
+    const text = screen(press(demo(), ["2", "enter", "down", "enter"]));
+    expect(text).toContain("THEN");
+    expect(text).toContain("↩ plan");
+  });
+
+  test("the Proposed tab shows the change, and a new pipeline's commands before it", () => {
+    const change = screen(press(demo(), ["2", "enter", "right"]));
+    expect(change).toContain("+  - slug: lint");
+    const fresh = screen(press(demo(), ["2", "down", "enter", "right"]));
+    expect(fresh.indexOf("NEW COMMANDS")).toBeLessThan(fresh.indexOf("WHAT CHANGES"));
+    expect(fresh).toContain("tag-release.sh");
   });
 
   test("a change of a run goes to its session with s", () => {
-    const m = press(demo(), ["2", "enter", "s"]);
+    const m = press(demo(), ["2", "enter", "right", "s"]);
     expect(m.section).toBe(0);
+    expect(m.focus).toBe("card");
     expect(m.sessions.find((s) => s.id === m.selected)?.need).toBe("pipeline_edit");
   });
 
+  test("a proposal that is not about a run has no s", () => {
+    const m = press(demo(), ["2", "down", "enter", "right", "s"]);
+    expect(m.section).toBe(1);
+  });
+
   test("accept and drop show the command when the data is a project's", () => {
-    const loaded = demoSessions(Date.now());
-    const m = press(initialModel(loaded, "project", Date.now()), ["2", "down", "enter", "a"]);
+    const m = press(demo("project"), ["2", "down", "enter", "right", "a"]);
     expect(m.notice).toContain("kodel pipeline proposals apply release");
     expect(press(m, ["r"]).notice).toContain("kodel pipeline proposals discard release");
   });
 
-  test("a pipeline has nothing to accept", () => {
-    const m = press(demo(), ["2", "down", "down", "enter", "a"]);
+  test("a and r do nothing outside the Proposed tab", () => {
+    const m = press(demo("project"), ["2", "enter", "a"]);
     expect(m.notice).toBe("");
   });
 
@@ -197,7 +226,7 @@ describe("the Pipeline screen", () => {
 
   test("on a narrow terminal no line is wider than the screen", () => {
     let m = press(demo(), ["2"], NARROW);
-    for (const keys of [[], ["enter"], ["right"], ["right"], ["right"]]) {
+    for (const keys of [[], ["enter"], ["enter"], ["escape", "right"]]) {
       m = press(m, keys, NARROW);
       for (const line of render(m, NARROW)) {
         expect(visibleLength(line)).toBeLessThanOrEqual(NARROW.cols);
@@ -225,42 +254,80 @@ describe("loadPipelines", () => {
           state: undefined,
         })),
       open: async () => undefined,
-      pipelineProposals: async () => [{ name: "dev" }],
+      pipelineProposals: async () => [{ name: "dev" }, { name: "ship" }],
       list: async () => ({
         pipelines: [{ name: "dev", description: "Plan,\nthen build." }],
         problems: [{ file: "broken.yaml", message: "line 3: not a pipeline" }],
       }),
       resolveSource: async () => ({ spec, yaml: YAML }),
-      pipelineProposal: async () => ({
+      pipelineProposal: async (name: string) => ({
         record: {
-          name: "dev",
-          kind: "change",
+          name,
+          kind: name === "dev" ? "change" : "new",
           yaml: YAML.replace("bun test", "bun test --bail"),
           summary: "bail",
         },
         spec: changed,
-        current: spec,
+        ...(name === "dev" ? { current: spec } : {}),
         commands: [{ where: "build", command: "bun test --bail", isNew: true }],
       }),
       ...over,
     } as SessionSource & PipelineSource;
   }
 
-  test("the pipelines, the broken files and the proposals each get an entry", async () => {
+  test("a proposal of a pipeline that exists waits in that pipeline", async () => {
     const { pipelines } = await loadSessions(source(), Date.now());
-    expect(pipelines?.map((p) => `${p.group}:${p.name}`)).toEqual([
-      "proposal:dev",
-      "pipeline:broken.yaml",
-      "pipeline:dev",
-    ]);
+    const dev = pipelines?.find((p) => p.name === "dev");
+    expect(dev?.pending.map((x) => x.id)).toEqual(["proposal:dev"]);
+    expect(dev?.fresh).toBeUndefined();
   });
 
-  test("a proposal that changes a pipeline carries the diff against the file", async () => {
+  test("a proposal of a pipeline that does not exist is a pipeline of its own", async () => {
     const { pipelines } = await loadSessions(source(), Date.now());
-    const proposal = pipelines?.find((p) => p.group === "proposal");
-    expect(proposal?.diff).toContain('-    command: "bun test"');
-    expect(proposal?.diff).toContain('+    command: "bun test --bail"');
-    expect(proposal?.accept).toBe("kodel pipeline proposals apply dev");
+    const ship = pipelines?.find((p) => p.name === "ship");
+    expect(ship?.fresh).toBe(true);
+    expect(ship?.pending[0]?.kind).toBe("new");
+    expect(ship?.steps.length).toBeGreaterThan(0);
+  });
+
+  test("what waits is listed first, the broken files among the pipelines", async () => {
+    const { pipelines } = await loadSessions(source(), Date.now());
+    expect(pipelines?.map((p) => p.name)).toEqual(["dev", "ship", "broken.yaml"]);
+  });
+
+  test("a change carries the diff against the file and the commands to decide it", async () => {
+    const { pipelines } = await loadSessions(source(), Date.now());
+    const item = pipelines?.find((p) => p.name === "dev")?.pending[0];
+    expect(item?.diff).toContain('-    command: "bun test"');
+    expect(item?.diff).toContain('+    command: "bun test --bail"');
+    expect(item?.accept).toBe("kodel pipeline proposals apply dev");
+    expect(item?.discard).toBe("kodel pipeline proposals discard dev");
+  });
+
+  test("a change of a run waits in the pipeline of the run, with the run to go to", async () => {
+    const sessions = demoSessions(Date.now()).sessions;
+    const run = sessions.find((s) => s.need === "pipeline_edit");
+    const pipelines = await loadPipelines(
+      source({
+        open: async () => ({
+          pendingChange: async () => ({
+            text: YAML,
+            spec,
+            info: {
+              redo: ["nothing runs again"],
+              apply: "kodel pipeline changes apply r_1",
+              source: "proposal",
+            },
+          }),
+          pinnedPipeline: async () => ({ yaml: YAML }),
+        }),
+      }),
+      sessions,
+    );
+    const item = pipelines?.find((p) => p.name === run?.pipeline)?.pending.find((x) => x.runId);
+    expect(item?.source).toBe("run");
+    expect(item?.runId).toBe(run?.id);
+    expect(item?.discard).toBe("kodel pipeline changes discard r_1");
   });
 
   test("a file that cannot be read says why, and has no steps", async () => {
@@ -272,9 +339,7 @@ describe("loadPipelines", () => {
 
   test("a description is one line", async () => {
     const { pipelines } = await loadSessions(source(), Date.now());
-    expect(pipelines?.find((p) => p.group === "pipeline" && p.name === "dev")?.description).toBe(
-      "Plan, then build.",
-    );
+    expect(pipelines?.find((p) => p.name === "dev")?.description).toBe("Plan, then build.");
   });
 
   test("a proposal that cannot be read does not stop the screen", async () => {
@@ -286,7 +351,7 @@ describe("loadPipelines", () => {
       }),
       Date.now(),
     );
-    expect(pipelines?.some((p) => p.group === "proposal")).toBe(false);
+    expect(pipelines?.flatMap((p) => p.pending)).toEqual([]);
     expect(pipelines?.some((p) => p.name === "dev")).toBe(true);
   });
 

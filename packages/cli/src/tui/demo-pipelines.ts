@@ -108,57 +108,68 @@ edges:
 export function demoPipelines(sessions: Session[]): PipeEntry[] {
   const dev = parsePipeline(DEV_YAML);
   const docs = parsePipeline(DOCS_YAML);
-  const withLint = parsePipeline(DEV_WITH_LINT_YAML);
   const release = parsePipeline(RELEASE_YAML);
   const editing = sessions.find((s) => s.need === "pipeline_edit");
-  const entries: PipeEntry[] = [
-    {
-      id: "pipeline:dev",
-      group: "pipeline",
-      name: "dev",
-      ...(dev.description === undefined ? {} : { description: dev.description }),
-      steps: stepsOf(dev),
-    },
+  const devEntry: PipeEntry = {
+    id: "pipeline:dev",
+    name: "dev",
+    ...(dev.description === undefined ? {} : { description: dev.description }),
+    steps: stepsOf(dev),
+    pending: editing
+      ? [
+          {
+            id: `run:${editing.id}`,
+            source: "run",
+            kind: "change",
+            title: `A change of the pipeline of the run «${editing.title}»`,
+            note: [
+              "The agent proposes to change the pipeline of this run.",
+              "A new step «lint» runs before «test». Nothing runs again.",
+            ],
+            diff: unifiedDiff(DEV_YAML, DEV_WITH_LINT_YAML),
+            commands: [],
+            accept: editing.command ?? `kodel pipeline changes apply ${editing.id}`,
+            discard: `kodel pipeline changes discard ${editing.id}`,
+            runId: editing.id,
+          },
+        ]
+      : [],
+  };
+  return sortEntries([
+    devEntry,
     {
       id: "pipeline:docs",
-      group: "pipeline",
       name: "docs",
       ...(docs.description === undefined ? {} : { description: docs.description }),
       steps: stepsOf(docs),
+      pending: [],
     },
     {
-      id: "proposal:release",
-      group: "proposal",
+      id: "pipeline:release",
       name: "release",
-      kind: "new",
-      description: "A release pipeline: checks, a human gate, then the tag.",
+      ...(release.description === undefined ? {} : { description: release.description }),
       steps: stepsOf(release),
-      diff: unifiedDiff("", RELEASE_YAML),
-      commands: [
-        { where: "checks", command: "bun run typecheck && bun test && bun run build", isNew: true },
-        { where: "tag", command: "./scripts/tag-release.sh", isNew: true },
+      fresh: true,
+      pending: [
+        {
+          id: "proposal:release",
+          source: "proposal",
+          kind: "new",
+          title: "A new pipeline",
+          note: ["The agent proposes this pipeline. Nothing runs it until it is accepted."],
+          diff: unifiedDiff("", RELEASE_YAML),
+          commands: [
+            {
+              where: "checks",
+              command: "bun run typecheck && bun test && bun run build",
+              isNew: true,
+            },
+            { where: "tag", command: "./scripts/tag-release.sh", isNew: true },
+          ],
+          accept: "kodel pipeline proposals apply release",
+          discard: "kodel pipeline proposals discard release",
+        },
       ],
-      note: ["The agent proposes a new pipeline."],
-      accept: "kodel pipeline proposals apply release",
-      discard: "kodel pipeline proposals discard release",
     },
-  ];
-  if (editing) {
-    entries.push({
-      id: `change:${editing.id}`,
-      group: "change",
-      name: `dev · ${editing.title}`,
-      kind: "change",
-      runId: editing.id,
-      steps: stepsOf(withLint),
-      diff: unifiedDiff(DEV_YAML, DEV_WITH_LINT_YAML),
-      note: [
-        "The agent proposes to change the pipeline of this run.",
-        "A new step «lint» runs before «test». Nothing runs again.",
-      ],
-      accept: editing.command ?? `kodel pipeline changes apply ${editing.id}`,
-      discard: `kodel pipeline changes discard ${editing.id}`,
-    });
-  }
-  return sortEntries(entries);
+  ]);
 }

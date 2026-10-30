@@ -21,13 +21,13 @@ import {
   initialPipeState,
   type PipeEntry,
   type PipeState,
+  pendingCount,
   pipeCard,
   pipeHead,
   pipeHints,
   pipeKey,
   pipeList,
   sortEntries,
-  waitingEntries,
   withEntries,
 } from "./pipelines";
 import {
@@ -323,7 +323,6 @@ function pipesUpdate(m: Model, key: string, size: Size): Model {
   const head = entry ? pipeHead(entry, m.pipe, layout.cardWidth, true).length : 0;
   const r = pipeKey(m.pipe, key, {
     entries: m.pipelines,
-    sessions: m.sessions,
     focus: m.focus,
     source: m.source,
     width: layout.cardWidth,
@@ -888,7 +887,7 @@ const MENU_BRAND = " kodel ";
 function menuCount(m: Model, i: number): number {
   if (i === 0) return m.sessions.filter((s) => s.status === "waiting").length;
   if (i !== 1) return 0;
-  return m.pipelines.length > 0 ? waitingEntries(m.pipelines) : m.proposals;
+  return m.pipelines.length > 0 ? pendingCount(m.pipelines) : m.proposals;
 }
 
 /** The list and the card side by side, or whichever one has the room. */
@@ -918,7 +917,7 @@ function pipesBody(m: Model, cols: number, height: number): string[] {
     ? pipeList(m.pipelines, m.pipe, m.sessions, layout.listWidth, height, m.focus === "list")
     : [];
   const right = layout.showCard
-    ? pipeCard(entry, m.pipe, m.sessions, layout.cardWidth, height, m.focus === "card")
+    ? pipeCard(entry, m.pipe, layout.cardWidth, height, m.focus === "card")
     : [];
   return panes(m, layout, left, right, height);
 }

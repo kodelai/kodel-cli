@@ -1,6 +1,6 @@
 /** Reads the pipelines of a project for the Pipeline screen. Read-only. */
 import type { PipelineSpec } from "@kodel-ai/pipeline-core";
-import { type PipeEntry, sortEntries, stepsOf, unifiedDiff } from "./pipelines";
+import { type Pending, type PipeEntry, sortEntries, stepsOf, unifiedDiff } from "./pipelines";
 import type { Session } from "./session";
 
 /** The part of the host this screen reads; `LocalPipelineHost` fits it. */
@@ -47,28 +47,42 @@ export async function loadPipelines(
   source: PipelineSource,
   sessions: Session[],
 ): Promise<PipeEntry[]> {
-  const entries: PipeEntry[] = [];
+  const byName = new Map<string, PipeEntry>();
+  const entryFor = (name: string, spec: PipelineSpec | undefined): PipeEntry => {
+    let entry = byName.get(name);
+    if (!entry) {
+      entry = {
+        id: `pipeline:${name}`,
+        name,
+        steps: spec ? stepsOf(spec) : [],
+        fresh: true,
+        pending: [],
+      };
+      byName.set(name, entry);
+    }
+    return entry;
+  };
 
   const { pipelines, problems } = await source
     .list()
     .catch(() => ({ pipelines: [], problems: [] }));
   for (const info of pipelines) {
     const found = await source.resolveSource(info.name).catch(() => undefined);
-    entries.push({
+    byName.set(info.name, {
       id: `pipeline:${info.name}`,
-      group: "pipeline",
       name: info.name,
       ...(info.description === undefined ? {} : { description: flat(info.description) }),
       steps: found ? stepsOf(found.spec) : [],
+      pending: [],
     });
   }
   for (const p of problems) {
-    entries.push({
+    byName.set(p.file, {
       id: `pipeline:${p.file}`,
-      group: "pipeline",
       name: p.file,
       steps: [],
       problem: p.message,
+      pending: [],
     });
   }
 
@@ -79,24 +93,28 @@ export async function loadPipelines(
     const current = view.current
       ? (await source.resolveSource(view.current.name).catch(() => undefined))?.yaml
       : undefined;
-    entries.push({
+    const entry = entryFor(name, view.spec);
+    if (view.record.summary !== "" && entry.description === undefined) {
+      entry.description = flat(view.record.summary);
+    }
+    const item: Pending = {
       id: `proposal:${name}`,
-      group: "proposal",
-      name,
+      source: "proposal",
       kind: view.record.kind,
-      description: flat(view.record.summary),
-      steps: view.spec ? stepsOf(view.spec) : [],
-      diff: unifiedDiff(current ?? "", view.record.yaml),
-      ...(view.refused === undefined ? {} : { problem: view.refused }),
-      commands: view.commands,
+      title: view.record.kind === "new" ? "A new pipeline" : "A change of this pipeline",
       note: [
         view.record.kind === "new"
-          ? "The agent proposes a new pipeline."
-          : "The agent proposes a change of this pipeline.",
+          ? "The agent proposes this pipeline. Nothing runs it until it is accepted."
+          : "The agent proposes to change this pipeline. Runs that are going keep the version they have.",
+        ...(view.record.summary === "" ? [] : [flat(view.record.summary)]),
       ],
+      diff: unifiedDiff(current ?? "", view.record.yaml),
+      commands: view.commands,
       accept: `kodel pipeline proposals apply ${name}`,
       discard: `kodel pipeline proposals discard ${name}`,
-    });
+      ...(view.refused === undefined ? {} : { problem: view.refused }),
+    };
+    entry.pending.push(item);
   }
 
   for (const s of sessions) {
@@ -105,24 +123,24 @@ export async function loadPipelines(
     const found = await run?.pendingChange?.().catch(() => undefined);
     if (!run || !found) continue;
     const pinned = await run.pinnedPipeline?.().catch(() => undefined);
-    entries.push({
-      id: `change:${s.id}`,
-      group: "change",
-      name: `${s.pipeline} · ${s.title}`,
+    entryFor(s.pipeline, found.spec).pending.push({
+      id: `run:${s.id}`,
+      source: "run",
       kind: "change",
-      runId: s.id,
-      steps: stepsOf(found.spec),
-      diff: unifiedDiff(pinned?.yaml ?? "", found.text),
-      ...(found.info.refused === undefined ? {} : { problem: found.info.refused }),
+      title: `A change of the pipeline of the run «${s.title}»`,
       note: [
         found.info.source === "proposal"
           ? "The agent proposes to change the pipeline of this run."
           : "The pipeline file of this run was edited.",
         ...found.info.redo,
       ],
+      diff: unifiedDiff(pinned?.yaml ?? "", found.text),
+      commands: [],
       accept: found.info.apply,
       discard: found.info.apply.replace(" apply ", " discard "),
+      runId: s.id,
+      ...(found.info.refused === undefined ? {} : { problem: found.info.refused }),
     });
   }
-  return sortEntries(entries);
+  return sortEntries([...byName.values()]);
 }
