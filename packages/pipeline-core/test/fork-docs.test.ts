@@ -7,7 +7,13 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { defaultRegistry, docTopics, parsePipeline, validatePipeline } from "../src";
+import {
+  defaultRegistry,
+  docTopics,
+  parsePipeline,
+  TELL_CHANGES_NOTE,
+  validatePipeline,
+} from "../src";
 import { serverInstructions, TOOLS } from "../src/mcp";
 
 const REPO = resolve(fileURLToPath(import.meta.url), "..", "..", "..", "..");
@@ -113,6 +119,16 @@ describe("t40 the docs of forks", () => {
     expect(readme).toContain("r_0mvu1w2tp_ssyf");
     expect(readme).toContain("r_0mvu1w4w6_w0iy");
     expect(readme).toContain("restart_failed");
+  });
+
+  test("t40_server_instructions_and_gate_text_pass_on_changes_note", () => {
+    for (const waitHint of [true, false]) {
+      expect(serverInstructions({ waitHint })).toContain(
+        "if a gate's answer carries `changes_note`, tell them",
+      );
+    }
+    expect(TELL_CHANGES_NOTE).toContain("`changes_note`");
+    expect(TELL_CHANGES_NOTE).toContain("tell the person");
   });
 
   test("t40_server_instructions_cover_steps_workers_and_also_waiting", () => {

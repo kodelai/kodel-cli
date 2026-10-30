@@ -228,6 +228,10 @@ const PAUSE_TEXT = {
   restarts: "engine work kept getting interrupted",
 } as const;
 
+/** Added by the host to a gate's `tell_the_person` when the answer carries `changes_note`. */
+export const TELL_CHANGES_NOTE =
+  " Other branches of the fork were running while this step waited (`changes_note`): tell the person in your message that some of the changed files may be theirs, as the working tree is one.";
+
 const TELL_AT_GATE =
   "Write to the person, in the language they use, before you end your turn: (1) what they are " +
   "asked to decide (the prompt); (2) a short summary of this run so far: what you did, and what " +
@@ -441,7 +445,9 @@ function forWorker(
   }
   if (!("node" in step)) return step;
   const { slug, steps, pipeline_change, also_waiting, note } = step.node;
-  if (slug === options.completionOf && steps === undefined) return step;
+  // Its own step: the one its completion sent back, or, outside a completion, the one it took by name.
+  const own = options.completionOf ?? options.nodeSlug;
+  if (slug === own && steps === undefined) return step;
   return {
     running: {
       ...(pipeline_change === undefined ? {} : { pipeline_change }),

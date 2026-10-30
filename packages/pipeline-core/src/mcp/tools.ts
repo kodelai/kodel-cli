@@ -61,7 +61,7 @@ export function serverInstructions(
     "1. If you do not know the pipeline's name, call pipeline_list. Then call pipeline_start with the task in the user's words and a title for the run: English, 2-5 words, kebab-case (for example fix-login-timeout).",
     "2. Follow each answer. Never pick, reorder or skip steps yourself, and never decide that a step is done: after you do a step, call pipeline_complete_step and let the engine's checks decide. If a check fails you get the reason and the same step again.",
     "3. pipeline_next_step tells you what is next: `node` (do it), `waiting` (a person has to decide), `running` (the engine is working, or every open step is in a worker's hands: pass wait_s to wait, as the hint says), or `done`.",
-    "4. At a `waiting` answer, do what `tell_the_person` says: write the person what they are asked to decide, a summary of what was done and changed, what to look at, and the command to decide with. Then end your turn. " +
+    "4. At a `waiting` answer, do what `tell_the_person` says: write the person what they are asked to decide, a summary of what was done and changed, what to look at, and the command to decide with; if a gate's answer carries `changes_note`, tell them the changed files may hold the writes of other branches of the fork. Then end your turn. " +
       (decides
         ? `Unless rule ${decidesRule} applies, you cannot approve, reject or resume anything yourself, and you must not try: those commands are for the person and refuse to run for an agent.`
         : "You cannot approve, reject or resume anything yourself, and you must not try: those commands are for the person and refuse to run for an agent.") +

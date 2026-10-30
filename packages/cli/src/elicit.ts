@@ -534,7 +534,8 @@ async function gateQuestion(
       const now = await run.changesSinceGate(node);
       const shared = (report: ChangeReport) =>
         report.kind === "changes" && report.note !== undefined;
-      if (!shared(now) && !shared(found) && changesFingerprint(now) !== changesFingerprint(found)) {
+      const moved = changesFingerprint(now) !== changesFingerprint(found);
+      if (!shared(now) && !shared(found) && moved) {
         return stale("the files changed while the dialog was open");
       }
       const done = await run.decideHuman(
@@ -545,11 +546,15 @@ async function gateQuestion(
       if (!done.ok) return refusedBy(done);
       return {
         done: "applied",
-        said: `${decision === "approve" ? "approved" : "rejected"} the step "${plain(node)}"`,
+        said: `${decision === "approve" ? "approved" : "rejected"} the step "${plain(node)}"${moved ? MOVED_WHILE_SHARED : ""}`,
       };
     },
   };
 }
+
+/** Said with a gate decision kept although the files changed while the dialog was open. */
+const MOVED_WHILE_SHARED =
+  " (the files changed while the dialog was open; other branches of the fork were running, so the change may be theirs and the decision was kept)";
 
 /**
  * `node`: the paused step the answer named. A pause of one branch of a fork leaves the run `running`,

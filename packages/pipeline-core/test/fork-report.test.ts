@@ -348,3 +348,52 @@ describe("t40 the report of a fork", () => {
     });
   });
 });
+
+test("t40_report_recheck_opens_a_span_of_its_own", () => {
+  // a's check fails and holds the run from 12 s; the check is changed and run again at 100 s and
+  // passes at 105 s: the held time between is not work
+  const text = yaml([
+    "name: recheck",
+    "nodes:",
+    "  - slug: a",
+    "    kind: agent",
+    "    prompt: a",
+    "    max_consecutive_failures: 1",
+    "    checks: [{ kind: command, command: c }]",
+    "edges: []",
+  ]);
+  const before = parsePipeline(text);
+  const after = parsePipeline(text.replace("command: c }", "command: c-fixed }"));
+  const check = (passed: boolean): RunEvent => ({
+    type: "check_finished",
+    node: "a",
+    attempt: 1,
+    index: 0,
+    passed,
+    reason: passed ? "" : "red",
+  });
+  const played = play(before, [
+    [0, START],
+    [10, done("a")],
+    [12, check(false)],
+  ]);
+  let state = played.state;
+  const journal = [...played.journal];
+  expect(state.pauses).toHaveLength(1);
+  for (const [at, spec, event] of [
+    [
+      100,
+      after,
+      { type: "pipeline_accepted", from: "h", to: "h2", source: "file", before } as RunEvent,
+    ],
+    [105, after, check(true)],
+  ] as [number, PipelineSpec, RunEvent][]) {
+    const result = decide(spec, state, event, at * 1000);
+    if (!result.ok) throw result.error;
+    state = result.state;
+    journal.push(...result.journal);
+  }
+  expect(journal.map((r) => r.event)).toContain("checks_rerun");
+  expect(state.status).toBe("completed");
+  expect(summarizeRun(state, journal).busy_wall_s).toBe(12 + 5);
+});

@@ -74,6 +74,7 @@ import {
   standingOf,
   summarizeRun,
   type TakeOutcome,
+  TELL_CHANGES_NOTE,
   validateReport,
   type WaitScope,
 } from "@kodel-ai/pipeline-core";
@@ -1771,6 +1772,23 @@ export class LocalRun {
   }
 
   /**
+   * Whether another node is active now, or a node of another branch of a fork moved at any time in the
+   * run: the window of `changesSinceStart`, the list a gate's answer gives the agent.
+   */
+  private async otherBranchesMovedInRun(state: RunState, node: string): Promise<boolean> {
+    if (state.active.some((v) => v.node !== node)) return true;
+    if (state.forks === undefined) return false;
+    const journal = await this.host.store.readJournal(this.runId).catch(() => []);
+    return journal.some(
+      (r) =>
+        MOVING_EVENTS.has(r.event) &&
+        typeof r.node === "string" &&
+        r.node !== node &&
+        !inOwnBranch(state, node, r.node),
+    );
+  }
+
+  /**
    * Whether another node is active now, or a node of another branch moved since this attempt of the
    * step was entered: a command branch that wrote files and arrived before this hand-in left its
    * writes in the shared tree, so in this step's patch, though nothing else is active any more.
@@ -1994,7 +2012,9 @@ export class LocalRun {
     signal: AbortSignal,
   ): Promise<RunEvent> {
     const cwd = await this.cwd();
-    const { specHash } = await this.state();
+    // The version the work was issued under, not one read now: a change accepted meanwhile that
+    // leaves the node as it is must not make its result look stale.
+    const specHash = effect.spec ?? (await this.state()).specHash;
     const result = await this.host.runner(
       effect.command,
       this.commandOptions(
@@ -2041,7 +2061,7 @@ export class LocalRun {
     const runner = this.host.checkRunners[effect.kind];
     const started = Date.now();
     const cwd = await this.cwd();
-    const { specHash } = await this.state();
+    const specHash = effect.spec ?? (await this.state()).specHash;
     const verdict: CheckVerdict & KeptOutput = runner
       ? await runner(effect, {
           runId: this.runId,
@@ -2221,7 +2241,8 @@ export class LocalRun {
   // what callers do
 
   /** What the agent should do next. Throws `STATE_MODIFIED_EXTERNALLY` if the files were tampered with. */
-  async nextStep(options: NextStepRequest = {}): Promise<NextStep> {
+  /** `only`: of the steps the answer lists, the one slug recorded as served (a worker's take). */
+  async nextStep(options: NextStepRequest = {}, only?: string): Promise<NextStep> {
     // Only a call of the agent through the MCP tools starts the copy of its log; looking at a run does not.
     if (options.serve !== undefined) this.watchAgentLog();
     const tick = await this.tick();
@@ -2272,24 +2293,17 @@ export class LocalRun {
         step.waiting.changes = shown;
         if (omitted > 0) step.waiting.changes_omitted = omitted;
       }
-      // The attempt of the gate's own visit, as `changesSinceGate` reads it, so the two agree.
-      const gate = state.active.find(
-        (v) => v.node === step.waiting.node_slug && v.phase === "human",
-      );
-      if (
-        await this.otherBranchesActiveSince(
-          state,
-          step.waiting.node_slug,
-          gate?.attempt ?? step.waiting.attempt ?? 0,
-        )
-      ) {
+      // The note qualifies the list it stands by, so it is judged on the same window: the whole run.
+      if (await this.otherBranchesMovedInRun(state, step.waiting.node_slug)) {
         step.waiting.changes_note = SHARED_TREE_NOTE;
+        step.waiting.tell_the_person += TELL_CHANGES_NOTE;
       }
     }
     if (options.serve !== undefined && "node" in step) {
       // Every step handed out is recorded, each on its own: what a step says does not depend on its
       // siblings, so the record of one is the same whoever else is working the run.
       for (const handed of step.node.steps ?? [step.node]) {
+        if (only !== undefined && handed.slug !== only) continue;
         // The directory is the run's (its `meta.json` has it), not the step's: an absolute path of
         // this machine is kept out of the record of what the agent was shown.
         const { workdir: _where, ...own } = servedPart(handed, step.node.pipeline_change);
@@ -2309,7 +2323,6 @@ export class LocalRun {
     const serve = { ...(input.caller === undefined ? {} : { caller: input.caller }) };
     const token = input.token ?? randomBytes(16).toString("hex");
     const hash = hashSource(token);
-    const before = await this.state();
     // Which step is free is decided by the machine under the lock, with the claim itself.
     const decision = await this.apply({
       type: "step_claimed",
@@ -2324,18 +2337,10 @@ export class LocalRun {
     }
     const after = decision.state;
     const now = this.host.clock();
-    // The step asked for, when one was: a worker that holds a step and takes another with the same
-    // token is answered with the one it asked for, not the first it holds.
-    const ours = (n: RunState["nodes"][string] | undefined) => liveClaim(n, now)?.token === hash;
-    const mine =
-      input.node === undefined
-        ? Object.values(after.nodes).find(ours)
-        : ours(after.nodes[input.node])
-          ? after.nodes[input.node]
-          : undefined;
-    const renewed =
-      mine !== undefined && liveClaim(before.nodes[mine.slug], this.host.clock())?.token === hash;
-    if (mine === undefined) {
+    // What was claimed, and whether it was a renewal, is the machine's word under the lock: a state
+    // read around it may be another take's.
+    const claimed = decision.noop ? undefined : decision.claimed;
+    if (claimed === undefined) {
       if (input.node === undefined) {
         // The caller is a worker: it is told to report back, never the coordinator's answer.
         return { status: "none", next: await this.nextStep({ serve, worker: true }) };
@@ -2368,13 +2373,17 @@ export class LocalRun {
         taken_by: live.by,
       };
     }
-    const answer = await this.nextStep({ nodeSlug: mine.slug, serve });
+    // Only the step taken is recorded as served to this caller, not the siblings the answer lists.
+    const answer = await this.nextStep(
+      { nodeSlug: claimed.node, serve, worker: true },
+      claimed.node,
+    );
     if (!("node" in answer)) {
       // The step was taken and is gone already (a sibling died and ended the run, say): say what is.
       return { status: "none", next: answer };
     }
     return {
-      status: renewed ? "renewed" : "claimed",
+      status: claimed.renewed ? "renewed" : "claimed",
       step: servedPart(answer.node, answer.node.pipeline_change),
       claim_token: token,
     };

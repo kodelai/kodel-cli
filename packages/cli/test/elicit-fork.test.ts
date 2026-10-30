@@ -13,6 +13,7 @@ import { LocalPipelineHost } from "@kodel-ai/local";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { SHARED_TREE_TEXT } from "../src/decide-text";
 import { createServer } from "../src/mcp-server";
 
 let dir: string;
@@ -38,6 +39,17 @@ const FORK_GATES = yaml([
   "  - { from: b, to: b-gate }",
   "  - { from: b-gate, to: merge, when: approved }",
   "  - { from: b-gate, to: b, when: rejected }",
+]);
+
+/** One gate, no fork. */
+const SINGLE = yaml([
+  "name: single",
+  "nodes:",
+  "  - { slug: write, kind: agent, prompt: write }",
+  "  - { slug: approve, kind: human, prompt: fine? }",
+  "edges:",
+  "  - { from: write, to: approve }",
+  "  - { from: approve, to: write, when: rejected }",
 ]);
 
 /** Two agent branches. */
@@ -110,6 +122,7 @@ beforeEach(async () => {
     ["forksteps", FORK_STEPS],
     ["slow", SLOW],
     ["pauses", PAUSES],
+    ["single", SINGLE],
   ]) {
     await writeFile(join(dir, ".kodel", "pipelines", `${name}.yaml`), text as string);
   }
@@ -310,11 +323,32 @@ describe("t40 the dialog on a run with a fork", () => {
     expect(next.body.dialog).toMatchObject({ answer: "decided" });
     expect(await journalOf(runId)).toContain('"event":"gate_decided","node":"a-gate"');
     expect(next.body.dialog.what).toContain("a-gate");
+    // the person was told the tree is shared, in the question and with what was done
+    expect(s.forms[0]?.message).toContain(SHARED_TREE_TEXT);
+    expect(next.body.dialog.what).toContain("the files changed while the dialog was open");
     // the command of the other branch was still going when the person answered
     expect(
       (await s.host.open(runId).then((r) => r?.state()))?.active.some((v) => v.node === "b"),
     ).toBe(true);
     await (await s.host.open(runId))?.waitForRest(10_000);
+    await s.close();
+  });
+
+  test("t40_dialog_gate_question_without_note_when_alone", async () => {
+    // a gate with no fork: the question lists the agent's file without the note
+    const s = await connect(() => approve);
+    const started = await s.call("pipeline_start", { task: "one gate", pipeline: "single" });
+    const runId = started.body.run_id as string;
+    const run = await s.host.open(runId);
+    await run?.completeStep("write", 1);
+    await run?.waitForRest(5_000);
+    await writeFile(join(dir, "mine.txt"), "the agent's own write\n");
+    const next = await s.call("pipeline_next_step", { run_id: runId });
+    expect(s.forms).toHaveLength(1);
+    expect(s.forms[0]?.message).toContain("mine.txt");
+    expect(s.forms[0]?.message).not.toContain(SHARED_TREE_TEXT);
+    expect(next.body.dialog).toMatchObject({ answer: "decided" });
+    expect(next.body.dialog.what).not.toContain("the files changed while the dialog was open");
     await s.close();
   });
 

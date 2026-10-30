@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   defaultHistory,
+  type Effect,
   type PipelineHost,
   PipelineService,
   parsePipeline,
@@ -922,6 +923,53 @@ describe("t40 the shared tree at a gate and at a hand-in", () => {
     expect("waiting" in step && step.waiting.attempt).toBe(2);
     expect("waiting" in step && step.waiting.changes_note).toBe(SHARED_TREE_NOTE);
     expect(await run.changesSinceGate("a-gate")).toMatchObject({ note: SHARED_TREE_NOTE });
+  });
+
+  test("t40_host_labels_a_result_with_the_effects_spec", async () => {
+    // the label of a result is the version on the effect, not the run's version read when the job
+    // starts: a change accepted in between that leaves the node alone must not make it stale
+    const { run, latch } = await latched(GATED);
+    const inner = run as unknown as { spawn(effect: Effect): void };
+    const spawn = inner.spawn.bind(run);
+    inner.spawn = (effect: Effect) => {
+      spawn(effect.type === "run_command" ? { ...effect, spec: "issued-under" } : effect);
+    };
+    const labels: (string | undefined)[] = [];
+    const apply = run.apply.bind(run);
+    run.apply = (event, options) => {
+      if (event.type === "work_finished") labels.push(event.specHash);
+      return apply(event, options);
+    };
+    await run.completeStep("plan", 1);
+    await latch.started("b#1");
+    latch.release("b#1");
+    for (let i = 0; i < 100 && labels.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(labels).toEqual(["issued-under"]);
+    run.stop();
+  });
+
+  test("t40_gate_answer_note_covers_the_window_of_its_list", async () => {
+    // b writes and arrives at the join before a reaches its gate: the gate's own window holds none
+    // of b's moves, but the answer's list (the whole run) holds b's file, so the note is there too
+    const { run, latch } = await latched(GATED);
+    await run.completeStep("plan", 1);
+    await latch.started("b#1");
+    await writeFile(join(dir, "out.txt"), "written by b\n");
+    latch.release("b#1");
+    await run.waitForRest(5_000, "b");
+    await run.completeStep("a", 1);
+    await run.waitForRest(5_000, "a");
+    const state = JSON.parse(JSON.stringify(await run.state())) as Awaited<
+      ReturnType<typeof run.state>
+    >;
+    expect(state.active.map((v) => v.node)).toEqual(["a-gate"]);
+    const step = await run.nextStep();
+    if (!("waiting" in step)) throw new Error("expected a waiting answer");
+    expect(step.waiting.changes).toMatchObject({ "out.txt": 1 });
+    expect(step.waiting.changes_note).toBe(SHARED_TREE_NOTE);
+    expect(step.waiting.tell_the_person).toContain("`changes_note`");
   });
 
   test("t40_no_gate_note_when_alone", async () => {

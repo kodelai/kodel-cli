@@ -28,6 +28,9 @@ agents:
 ```
 
 The engine still checks every step itself; a worker's hold only keeps two workers off one step.
+With `auto`, what the agent says it can do (`subagents` on `pipeline_next_step`) is kept by the
+running server only, not in the run's files: after the server restarts, the steps are handed out one
+by one until the agent says it again.
 
 ## Repository
 

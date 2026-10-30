@@ -460,6 +460,65 @@ describe("t40 claims on the host", () => {
     expect([x.step.slug, y.step.slug].sort()).toEqual(["a", "b"]);
   });
 
+  test("t40_concurrent_renewal_answer_matches_the_journal", async () => {
+    // Two processes take the same step with the same token at once; both read the state before
+    // either claim is written. The machine says which take claimed and which renewed, so the answers
+    // match the journal, not a state read outside the lock.
+    const { h, run } = await openAgents();
+    const h2 = new LocalHost(AGENT_FORK, { root: dir, heartbeatMs: 0 });
+    const other = h2.open(run.runId);
+    let asked = 0;
+    let secondAsked!: () => void;
+    const second = new Promise<void>((resolve) => {
+      secondAsked = resolve;
+    });
+    for (const store of [h.store, h2.store]) {
+      const real = store.withLock.bind(store);
+      store.withLock = <T>(runId: string, fn: () => Promise<T>) => {
+        asked += 1;
+        if (asked === 2) secondAsked();
+        if (asked > 1) return real(runId, fn);
+        return real(runId, async () => {
+          await second;
+          return fn();
+        });
+      };
+    }
+    const token = "a-token-both-workers-share";
+    const [one, two] = await Promise.all([
+      run.takeStep({ node: "a", token }),
+      other.takeStep({ node: "a", token }),
+    ]);
+    expect([one.status, two.status].sort()).toEqual(["claimed", "renewed"]);
+    const claims = (await h.store.readJournal(run.runId)).filter((r) => r.event === "step_claimed");
+    expect(claims.map((r) => r.renewed === true).sort()).toEqual([false, true]);
+  });
+
+  test("t40_take_answers_and_records_as_a_worker", async () => {
+    const { h, run } = await openAgents();
+    await config("agents:\n  subagents: yes\n");
+    const asked: { worker?: boolean; nodeSlug?: string }[] = [];
+    const real = run.nextStep.bind(run);
+    run.nextStep = (options = {}, only?: string) => {
+      asked.push(options);
+      return real(options, only);
+    };
+    const servedBefore = (await h.store.readJournal(run.runId)).filter(
+      (r) => r.event === "step_served",
+    ).length;
+    const took = await run.takeStep({ node: "a" });
+    if (took.status !== "claimed") throw new Error(`expected claimed, got ${took.status}`);
+    expect(took.step.slug).toBe("a");
+    // every answer of a take is a worker's
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.every((o) => o.worker === true)).toBe(true);
+    // and only the step taken is recorded as served by the take
+    const served = (await h.store.readJournal(run.runId))
+      .filter((r) => r.event === "step_served")
+      .slice(servedBefore);
+    expect(served.map((r) => r.node)).toEqual(["a"]);
+  });
+
   test("t40_wait_s_waits_while_claimed_steps_open", async () => {
     const { h, run } = await openAgents();
     const a = await run.takeStep({ node: "a" });

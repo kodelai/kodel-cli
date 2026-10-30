@@ -24,6 +24,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import type {
   Production,
+  RefusedFollowUp,
   ScenarioEngine,
   ScenarioEvent,
   ScenarioState,
@@ -58,6 +59,34 @@ export class LocalScenarioEngine implements ScenarioEngine {
   private written = 0;
   private reported = new Set<string>();
   private feedbackCount = 0;
+  /** Results of engine work the run refused, as the memory engine keeps them. */
+  private readonly refused: RefusedFollowUp[] = [];
+
+  refusedFollowUps(): RefusedFollowUp[] {
+    return [...this.refused];
+  }
+
+  /**
+   * The host saves the result of a command or a check through `apply`; one it refuses is kept, so
+   * a scenario fails on it as it does on the memory engine.
+   */
+  private watch(run: LocalRun): LocalRun {
+    const apply = run.apply.bind(run);
+    run.apply = async (event, options) => {
+      const decision = await apply(event, options);
+      if (!decision.ok && (event.type === "work_finished" || event.type === "check_finished")) {
+        const status = (await run.state().catch(() => undefined))?.status;
+        this.refused.push({
+          event: event.type,
+          code: decision.error.code,
+          message: decision.error.message,
+          afterEnd: status !== "running" && status !== "paused",
+        });
+      }
+      return decision;
+    };
+    return run;
+  }
 
   async start(context: StartContext): Promise<{ runId: string }> {
     this.context = context;
@@ -77,7 +106,7 @@ export class LocalScenarioEngine implements ScenarioEngine {
       runCommand: (command, options, ctx) => this.scriptedCommand(command, options, ctx),
     });
     const { run } = await this.host.start(context.task, { history: scenarioHistory() });
-    this.run = run;
+    this.run = this.watch(run);
     await this.drive();
     return { runId: run.runId };
   }
@@ -98,7 +127,7 @@ export class LocalScenarioEngine implements ScenarioEngine {
         // The process dies: its work stops silently, and a fresh host starts from the files.
         this.run.stop();
         await this.run.settle();
-        this.run = this.host.open(this.run.runId);
+        this.run = this.watch(this.host.open(this.run.runId));
         this.clock += (this.host.engine.staleMs ?? DEFAULT_STALE_MS) + 1_000;
         await this.run.tick();
         break;
@@ -145,7 +174,7 @@ export class LocalScenarioEngine implements ScenarioEngine {
             ...(typeof args.node_slug === "string" ? { node: args.node_slug } : {}),
             ...(typeof args.claim_token === "string" ? { token: args.claim_token } : {}),
           });
-          if (outcome.status === "none") return { ok: true, status: "none" };
+          if (outcome.status === "none") return { ok: true, status: "none", next: outcome.next };
           if (outcome.status === "taken" || outcome.status === "queued") {
             return { ok: true, ...outcome };
           }

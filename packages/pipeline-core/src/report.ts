@@ -275,7 +275,7 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
   /** Every attempt as an interval, with the branch it ran in; `to` is filled when it ends. */
   const spans: Span[] = [];
   const spanOf = (name: string, attempt: number) =>
-    spans.find((s) => s.node === name && s.attempt === attempt);
+    spans.findLast((s) => s.node === name && s.attempt === attempt);
   const forks = new Map<string, ForkReport>();
   let failedBranches = false;
 
@@ -300,6 +300,16 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
               ? { fork: record.fork, branch: record.branch }
               : {}),
           });
+        }
+        break;
+      case "checks_rerun":
+        // An attempt held back at a failed check is opened again: the time it was held is not work.
+        if (name && attempt !== undefined) {
+          const span = spanOf(name, attempt);
+          if (span?.to !== undefined) {
+            const { to: _ended, ...rest } = span;
+            spans.push({ ...rest, from: record.ts });
+          }
         }
         break;
       case "fork_started":

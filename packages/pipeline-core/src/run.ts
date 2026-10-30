@@ -678,6 +678,8 @@ export type Effect =
       expect: { exit: number };
       timeout?: number;
       restart: boolean;
+      /** The pipeline version the work is issued under: the host labels the result with it. */
+      spec?: string;
     }
   | {
       type: "run_check";
@@ -689,6 +691,8 @@ export type Effect =
       /** The snapshot key to compare against, for checks that need one. */
       baseline?: string;
       restart: boolean;
+      /** The pipeline version the check is issued under: the host labels the result with it. */
+      spec?: string;
     }
   | { type: "await_human"; node: string; attempt: number; prompt: string; instructions?: string };
 
@@ -701,7 +705,18 @@ export interface JournalRecord {
 }
 
 export type Decision =
-  | { ok: true; state: RunState; effects: Effect[]; journal: JournalRecord[]; noop?: true }
+  | {
+      ok: true;
+      state: RunState;
+      effects: Effect[];
+      journal: JournalRecord[];
+      noop?: true;
+      /**
+       * A `step_claimed` that held a step: which, and whether the same token already held it. Said
+       * here, not only in the journal, whose claim records stop at a limit.
+       */
+      claimed?: { node: string; renewed: boolean };
+    }
   | { ok: false; error: KodelError };
 
 /** Thrown inside `decide` for a repeat of something that already happened. */
@@ -714,6 +729,7 @@ const fail = (code: ErrorCode, message: string) => new KodelError(code, message)
 class Machine {
   readonly effects: Effect[] = [];
   readonly journal: JournalRecord[] = [];
+  claimed: { node: string; renewed: boolean } | undefined;
   private readonly nodes: Map<string, NodeSpec>;
   private readonly registry: Registry;
   private readonly staleMs: number;
@@ -1030,6 +1046,8 @@ class Machine {
       expect: begin.expect,
       restart,
     };
+    visit.spec = this.s.specHash;
+    effect.spec = visit.spec;
     if (node.timeout !== undefined) effect.timeout = node.timeout;
     return effect;
   }
@@ -1071,6 +1089,7 @@ class Machine {
       kind: check.kind,
       params,
       restart,
+      spec: visit.spec,
     };
     if (baseline !== undefined) effect.baseline = baseline;
     this.effects.push(effect);
@@ -1580,6 +1599,16 @@ class Machine {
     if (event.type === "tick" || event.type === "heartbeat") {
       if (this.s.status !== "running") throw new Repeat();
     } else if (this.s.status !== "running") {
+      // A late result of suspended work is the same repeat whether a sibling keeps the run going
+      // or the run is paused: only `resume` issues that work again.
+      if (
+        (event.type === "work_finished" || event.type === "check_finished") &&
+        this.s.active.some(
+          (v) => v.node === event.node && v.attempt === event.attempt && v.suspended === true,
+        )
+      ) {
+        throw new Repeat();
+      }
       throw fail("NODE_NOT_RUNNING", `the run is ${this.s.status}`);
     }
 
@@ -1888,6 +1917,7 @@ class Machine {
       until: this.now + ttl,
       by: markOf(event.token),
     };
+    this.claimed = { node: slug, renewed: live !== undefined };
     const events = this.s.claimEvents ?? { claimed: 0, conflicts: 0 };
     this.s.claimEvents = events;
     if (events.claimed >= MAX_LOGGED_CLAIMS) return;
@@ -2322,5 +2352,11 @@ export function decide(
     }
     throw error;
   }
-  return { ok: true, state: draft, effects: machine.effects, journal: machine.journal };
+  return {
+    ok: true,
+    state: draft,
+    effects: machine.effects,
+    journal: machine.journal,
+    ...(machine.claimed === undefined ? {} : { claimed: machine.claimed }),
+  };
 }

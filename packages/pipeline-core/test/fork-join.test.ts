@@ -465,6 +465,30 @@ describe("t40 parse and validate", () => {
     );
   });
 
+  test("t40_validate_no_loop_back_into_the_join_from_after_it", () => {
+    // a repair after the join cannot route back into the join: its edge enters the join from
+    // outside the fork (docs: a check node after the join, or a route back before the fork)
+    refused(
+      yaml([
+        "name: join-loop",
+        "nodes:",
+        "  - { slug: plan, kind: agent, prompt: plan }",
+        "  - { slug: a, kind: agent, prompt: a }",
+        "  - { slug: b, kind: agent, prompt: b }",
+        "  - { slug: j, kind: command, command: j, join: all }",
+        "  - { slug: fix, kind: agent, prompt: fix }",
+        "edges:",
+        "  - { from: plan, to: a }",
+        "  - { from: plan, to: b }",
+        "  - { from: a, to: j }",
+        "  - { from: b, to: j }",
+        "  - { from: j, to: fix, when: failed }",
+        "  - { from: fix, to: j }",
+      ]),
+      'edge from "fix" enters the join "j" from outside the fork at "plan" ("passed"); only its branches arrive there',
+    );
+  });
+
   test("t40_validate_no_exit_but_join", () => {
     refused(
       FORK.replace(
@@ -952,6 +976,47 @@ describe("t40 fork machine", () => {
     must(h.send({ type: "work_finished", node: "b-test", attempt, passed: false, reason: "red" }));
     expect(h.state.forks?.f1?.arrived.b).toMatchObject({ node: "b-test", label: "failed" });
     expect(h.state.active.map((v) => v.node)).toEqual(["merge"]);
+  });
+});
+
+describe("t40 the version a result is labelled with", () => {
+  test("t40_result_labelled_with_issue_spec_survives_unrelated_change", () => {
+    const h = openFork();
+    h.release("a");
+    h.hold("b-test");
+    must(h.send(complete("b", 1)));
+    const issued = h.held.find((e) => e.type === "run_command" && e.node === "b-test");
+    // the work carries the version it was issued under
+    expect(issued).toMatchObject({ type: "run_command", node: "b-test", spec: "h" });
+    // a change that leaves b-test as it is is accepted while the command runs
+    const after = parsePipeline(FORK.replace("prompt: merge", "prompt: merge with care"));
+    h.use(after);
+    must(h.send({ type: "pipeline_accepted", from: "h", to: "h2", source: "file", before: fork }));
+    expect(h.state.specHash).toBe("h2");
+    const attempt = h.state.active.find((v) => v.node === "b-test")?.attempt ?? 0;
+    // labelled with the run's version read now, the result would be dropped as stale
+    const now = h.send({
+      type: "work_finished",
+      node: "b-test",
+      attempt,
+      passed: true,
+      reason: "",
+      specHash: "h2",
+    });
+    expect(now.ok && now.noop).toBe(true);
+    // labelled with the version on the effect, it is kept
+    const kept = must(
+      h.send({
+        type: "work_finished",
+        node: "b-test",
+        attempt,
+        passed: true,
+        reason: "",
+        specHash: issued?.type === "run_command" ? issued.spec : undefined,
+      }),
+    );
+    expect(kept.noop).toBeUndefined();
+    expect(h.journal.some((r) => r.event === "command_finished" && r.node === "b-test")).toBe(true);
   });
 });
 
@@ -1689,6 +1754,46 @@ describe("t40 pauses", () => {
       ["restarts", "b-test"],
     ]);
     expect(h.state.status).toBe("paused");
+  });
+
+  test("t40_late_result_of_suspended_work_is_a_repeat_in_a_paused_run", () => {
+    // a-test's failure pauses its branch; b-test is suspended after its restarts and the run is
+    // paused: b-test's late result is a repeat, as it is while a sibling keeps the run running
+    const h = host(fork, (effect) =>
+      effect.type === "run_command" && effect.node === "b-test"
+        ? undefined
+        : fails("a-test")(effect),
+    );
+    h.send(START);
+    h.send(complete("plan", 1));
+    for (let i = 0; i < 4; i++) {
+      h.advance(31_000);
+      h.send({ type: "tick" });
+    }
+    expect(h.state.status).toBe("paused");
+    const visit = h.state.active.find((v) => v.node === "b-test");
+    expect(visit?.suspended).toBe(true);
+    const late = h.send({
+      type: "work_finished",
+      node: "b-test",
+      attempt: visit?.attempt ?? 1,
+      passed: true,
+      reason: "",
+    });
+    expect(late).toMatchObject({ ok: true, noop: true });
+    const check = h.send({
+      type: "check_finished",
+      node: "b-test",
+      attempt: visit?.attempt ?? 1,
+      index: 0,
+      passed: true,
+      reason: "",
+    });
+    expect(check).toMatchObject({ ok: true, noop: true });
+    // a result for work that is not suspended is still refused while the run is paused
+    expect(
+      h.send({ type: "work_finished", node: "ship", attempt: 1, passed: true, reason: "" }),
+    ).toMatchObject({ ok: false });
   });
 
   test("t40_gate_decidable_while_other_branch_paused", () => {
@@ -2831,6 +2936,77 @@ describe("t40 repair in a fork", () => {
     expect(h.state.nodes["b-test"]?.consecutiveFailures).toBe(failures);
     expect(h.state.nodes["a-test"]?.status).toBe("passed");
     expect(h.state.nodes.merge?.lastFailures?.map((f) => f.from)).toEqual(["b-test"]);
+  });
+
+  test("t40_check_change_of_last_branch_at_held_join_offers_no_recheck", () => {
+    // b arrives last at the join with its check failed, and the join is held at its attempt limit.
+    // A change of b's check alone would recheck b, re-arrive it and pause again at once: the change
+    // says no such effect, unless it also lifts the join's limit.
+    const text = yaml([
+      "name: held-join",
+      "nodes:",
+      "  - { slug: plan, kind: agent, prompt: plan }",
+      "  - { slug: a, kind: agent, prompt: a }",
+      "  - slug: b",
+      "    kind: agent",
+      "    prompt: b",
+      "    checks: [{ kind: command, command: b-check }]",
+      "  - slug: j",
+      "    kind: agent",
+      "    prompt: j",
+      "    join: all",
+      "    max_attempts: 1",
+      "    max_consecutive_failures: 1",
+      "  - { slug: ship, kind: command, command: ship }",
+      "edges:",
+      "  - { from: plan, to: a }",
+      "  - { from: plan, to: b }",
+      "  - { from: a, to: j }",
+      "  - { from: b, to: j }",
+      "  - { from: b, to: j, when: failed }",
+      "  - { from: j, to: ship }",
+      "  - { from: ship, to: plan, when: failed }",
+    ]);
+    const before = parsePipeline(text);
+    const h = host(before, (effect, state) =>
+      effect.type === "run_command" && effect.node === "ship"
+        ? failed(effect, "ship is red")
+        : effect.type === "run_check" && effect.node === "b" && state.forks?.f2
+          ? {
+              type: "check_finished",
+              node: effect.node,
+              attempt: effect.attempt,
+              index: effect.index,
+              passed: false,
+              reason: "b is red",
+            }
+          : answer(effect),
+    );
+    h.hold("plan", "j");
+    h.send(START);
+    h.send(complete("plan", 1));
+    must(h.send(complete("j", 1)));
+    must(h.send(complete("plan", 2)));
+    expect(h.state.pauses).toEqual([
+      expect.objectContaining({
+        reason: "total",
+        node: "j",
+        blocked: expect.objectContaining({ from: "b", join: expect.anything() }),
+      }),
+    ]);
+    const checkChanged = parsePipeline(text.replace("command: b-check", "command: b-check-fixed"));
+    const diff = diffPipelines(before, checkChanged, h.state);
+    expect(diff.refused).toBeUndefined();
+    expect(diff.effects).toEqual([]);
+    // with the join's limit lifted too, the check runs again and the branch re-arrives
+    const lifted = parsePipeline(
+      text
+        .replace("command: b-check", "command: b-check-fixed")
+        .replace("    max_attempts: 1\n", "    max_attempts: 2\n"),
+    );
+    expect(diffPipelines(before, lifted, h.state).effects).toEqual([
+      { kind: "recheck", node: "b" },
+    ]);
   });
 
   test("t40_resume_at_join_tops_up_join_and_nodes_outside_its_branches_only", () => {

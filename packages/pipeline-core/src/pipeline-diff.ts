@@ -326,19 +326,21 @@ export function diffPipelines(
     const ahead = blocked.heads ?? [blocked.to];
     // A head held back at the fork's own edge is not rechecked: the fork fired on that verdict and
     // its other branches are going; the route into the head is taken again instead.
+    // A route into the join, or into a head from outside its branch, is taken as it is when the run
+    // goes on (`applyEffect`), so it enters its node only once that node's attempt limit lets it: a
+    // change that leaves the limit where it is leaves the pause where it is, and says nothing.
+    const takenAsIs = blocked.join !== undefined || routeEntersBranch(state, blocked);
+    const held = takenAsIs && pause.reason === "total" && !limitLifted(after, state, blocked.to);
     if (
       from.includes("checks") &&
       failure?.source.startsWith("check:") &&
       !routeEntersBranch(state, blocked)
     ) {
-      effects.push({ kind: "recheck", node: blocked.from });
+      // At a join held at its limit, a recheck would arrive the branch again and pause at once.
+      if (!held) effects.push({ kind: "recheck", node: blocked.from });
       continue;
     }
-    // A route into the join, or into a head from outside its branch, is taken as it is when the run
-    // goes on (`applyEffect`), so it enters its node only once that node's attempt limit lets it: a
-    // change that leaves the limit where it is leaves the pause where it is, and says nothing.
-    const takenAsIs = blocked.join !== undefined || routeEntersBranch(state, blocked);
-    if (takenAsIs && pause.reason === "total" && !limitLifted(after, state, blocked.to)) continue;
+    if (held) continue;
     if (from.length > 0 || ahead.some((to) => changesOf(to).length > 0)) {
       effects.push({
         kind: "reroute",

@@ -3,6 +3,8 @@
  * a second take answers `taken`, and a completion without the token is accepted and journaled.
  */
 import { describe, expect, test } from "bun:test";
+import type { LocalRun } from "@kodel-ai/local";
+import { parsePipeline } from "@kodel-ai/pipeline-core";
 import {
   defineScenario,
   expectError,
@@ -48,7 +50,12 @@ const scenario = defineScenario("t40-take-step")
   )
   // the next free step is `b`; a step asked for by name is answered exactly
   .call("pipeline_take_step", { run_id: "$run" }, expectOk({ status: "claimed", node_slug: "b" }))
-  .call("pipeline_take_step", { run_id: "$run" }, expectOk({ status: "none" }))
+  // nothing is free: the answer is a worker's, with what is going on in `next`
+  .call(
+    "pipeline_take_step",
+    { run_id: "$run" },
+    expectOk({ status: "none", next: { running: { open_steps: [{ node_slug: "a" }] } } }),
+  )
   .call("pipeline_next_step", { run_id: "$run", node_slug: "b" }, expectOk({ node: { slug: "b" } }))
   // a completion without the token is accepted: the checks decide, the claim is advice
   .call("pipeline_complete_step", { run_id: "$run", node_slug: "a", attempt: 1 }, expectOk())
@@ -115,3 +122,25 @@ describe("t40 take_step in both test engines", () => {
     }, 60_000);
   }
 });
+
+test("t40_local_engine_keeps_refused_follow_ups", async () => {
+  // a result of engine work the run cannot take is kept, as the memory engine keeps it, so the
+  // runner's rule (no follow-up refused while the run goes) holds on the local engine too
+  const engine = new LocalScenarioEngine();
+  try {
+    await engine.start({
+      spec: parsePipeline(FORK),
+      task: "split the work",
+      agentMode: "manual",
+      injects: [],
+    });
+    expect(engine.refusedFollowUps()).toEqual([]);
+    const run = (engine as unknown as { run: LocalRun }).run;
+    await run.apply({ type: "work_finished", node: "plan", attempt: 1, passed: true, reason: "" });
+    expect(engine.refusedFollowUps()).toEqual([
+      expect.objectContaining({ event: "work_finished", afterEnd: false }),
+    ]);
+  } finally {
+    await engine.dispose();
+  }
+}, 60_000);

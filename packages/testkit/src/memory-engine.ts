@@ -218,7 +218,8 @@ export class MemoryEngine implements ScenarioEngine {
         }
         const visit = after.active.find((v) => v.node === mine.slug && v.phase === "agent");
         if (!visit) return none();
-        const renewed = liveClaim(before.nodes[mine.slug], this.clock)?.token === hash;
+        // The machine's word on the claim, as the local host reads it.
+        const renewed = result.claimed?.renewed === true;
         return {
           ok: true,
           status: renewed ? "renewed" : "claimed",

@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalPipelineHost, type LocalRun } from "@kodel-ai/local";
 import { runCli } from "../src/cli";
+import { SHARED_TREE_TEXT } from "../src/decide-text";
 
 let dir: string;
 
@@ -44,6 +45,26 @@ const GATE_AND_SLOW = [
   "  - { slug: a, kind: agent, prompt: a }",
   "  - { slug: a-gate, kind: human, prompt: a looks fine? }",
   `  - { slug: b, kind: command, command: "node -e \\"setTimeout(() => {}, 3000)\\"" }`,
+  "  - { slug: merge, kind: agent, prompt: merge, join: all }",
+  "edges:",
+  "  - { from: plan, to: a }",
+  "  - { from: plan, to: b }",
+  "  - { from: a, to: a-gate }",
+  "  - { from: a-gate, to: merge, when: approved }",
+  "  - { from: a-gate, to: a, when: rejected }",
+  "  - { from: b, to: merge }",
+  "  - { from: b, to: merge, when: failed }",
+  "",
+].join("\n");
+
+/** A gate in one branch; in the other a command that runs until the test writes `release.flag` (a minute at most). */
+const GATE_AND_LATCHED = [
+  "name: latched",
+  "nodes:",
+  "  - { slug: plan, kind: agent, prompt: plan }",
+  "  - { slug: a, kind: agent, prompt: a }",
+  "  - { slug: a-gate, kind: human, prompt: a looks fine? }",
+  `  - { slug: b, kind: command, command: "node -e \\"setInterval(() => { if (require('fs').existsSync('release.flag')) process.exit(0) }, 20); setTimeout(() => process.exit(1), 60000)\\"" }`,
   "  - { slug: merge, kind: agent, prompt: merge, join: all }",
   "edges:",
   "  - { from: plan, to: a }",
@@ -253,6 +274,7 @@ beforeEach(async () => {
   for (const [name, text] of [
     ["gates", GATES],
     ["slow", GATE_AND_SLOW],
+    ["latched", GATE_AND_LATCHED],
     ["moving", GATE_AND_MOVING],
     ["chain-slow", GATE_CHAIN_AND_SLOW],
     ["linear", LINEAR],
@@ -507,7 +529,7 @@ describe("t40 several gates at once", () => {
 
   test("t40_after_decision_waits_only_for_own_node", async () => {
     const h = host();
-    const run = (await h.start({ pipeline: "slow", task: "t", restart: false })).run as LocalRun;
+    const run = (await h.start({ pipeline: "latched", task: "t", restart: false })).run as LocalRun;
     await run.completeStep("plan", 1);
     await run.completeStep("a", 1);
     await run.waitForRest(5_000, "a");
@@ -515,14 +537,45 @@ describe("t40 several gates at once", () => {
       ["a-gate", "human"],
       ["b", "engine"],
     ]);
-    // b runs for 3 s; approving a-gate does not wait for it
-    const begun = Date.now();
+    // b runs until the test releases it; approving a-gate returns while b still runs
     const decided = await cli("gate", "approve", run.runId, "--node", "a-gate");
     expect(decided.code).toBe(0);
-    expect(Date.now() - begun).toBeLessThan(2_500);
     expect(decided.out).toContain("running at b#1 [b]");
+    const after = JSON.parse(JSON.stringify(await run.state())) as Awaited<
+      ReturnType<typeof run.state>
+    >;
+    expect(after.active.map((v) => v.node)).toEqual(["b"]);
+    await writeFile(join(dir, "release.flag"), "");
     await run.waitForRest(10_000);
     expect((await run.state()).active.map((v) => v.node)).toEqual(["merge"]);
+  });
+
+  test("t40_gate_command_shows_the_shared_tree_note", async () => {
+    // b runs while a's gate waits and a file changes: the person is told some of it may be b's
+    const h = host();
+    const run = (await h.start({ pipeline: "latched", task: "t", restart: false })).run as LocalRun;
+    await run.completeStep("plan", 1);
+    await run.completeStep("a", 1);
+    await run.waitForRest(5_000, "a");
+    await writeFile(join(dir, "shared.txt"), "written while the gate waits\n");
+    const decided = await cli("gate", "approve", run.runId, "--node", "a-gate");
+    expect(decided.code).toBe(0);
+    expect(decided.asked[0]).toContain("shared.txt");
+    expect(decided.asked[0]).toContain(SHARED_TREE_TEXT);
+    await writeFile(join(dir, "release.flag"), "");
+    await run.waitForRest(10_000);
+  });
+
+  test("t40_gate_command_without_note_when_alone", async () => {
+    const h = host();
+    const run = (await h.start({ pipeline: "ends", task: "t", restart: false })).run as LocalRun;
+    await run.completeStep("write", 1);
+    await run.waitForRest(5_000);
+    await writeFile(join(dir, "mine.txt"), "the agent's own write\n");
+    const decided = await cli("gate", "approve", run.runId);
+    expect(decided.code).toBe(0);
+    expect(decided.asked[0]).toContain("mine.txt");
+    expect(decided.asked[0]).not.toContain(SHARED_TREE_TEXT);
   });
 
   test("t40_after_decision_ignores_a_sibling_that_moved_on_while_the_person_read", async () => {

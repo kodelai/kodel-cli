@@ -36,6 +36,10 @@ a node with `join: all`, which starts once every branch has arrived. Rules the p
 - Every branch must reach the join, and only the join: no edge leaves a branch to a node outside it, no
   edge enters a branch from outside, the branches share no node, and a branch cannot route a failure to a
   node before the fork. A `human` node in a branch routes `rejected` inside the branch or to the join.
+- Only the branches enter the join: a node after the join cannot route back into it (`j --failed--> fix
+  --> j` is refused, "enters the join from outside the fork"). To repair what the join found, give the
+  repair its own check node after the join (`j --failed--> fix --> verify`), or route back to a node
+  before the fork, which runs the fork again.
 - A branch arrives by any label with an edge to the join, `failed` included: the join then starts with a
   `reentry_feedback` naming every failed branch. A branch with no edge for its label is dead: the run
   ends `failed` once the other branches have settled.
