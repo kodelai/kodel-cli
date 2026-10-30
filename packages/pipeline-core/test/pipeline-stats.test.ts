@@ -215,6 +215,22 @@ describe("the definitions of a step", () => {
     expect(s.runs).toMatchObject({ total: 3, used: 1 });
   });
 
+  test("a step of the pipeline with nothing on its present definition is listed, empty", () => {
+    const s = summarizePipeline(runs, {
+      scope: "current",
+      current: { impl: { work: "w9", checks: "c1", routing: "r1" } },
+      order: ["impl"],
+    });
+    expect(s.nodes).toHaveLength(1);
+    expect(s.nodes[0]).toMatchObject({ node: "impl", runs: 0, attempts: 0, elsewhere: 4 });
+  });
+
+  test("the attempts the scope leaves out are counted for the step", () => {
+    const s = summarizePipeline(runs, { scope: "current", ...options });
+    expect(s.nodes[0]?.elsewhere).toBe(3);
+    expect(summarizePipeline(runs, { scope: "all", ...options }).nodes[0]?.elsewhere).toBe(0);
+  });
+
   test("the all scope keeps every attempt", () => {
     const s = summarizePipeline(runs, { scope: "all", ...options });
     expect(s.nodes[0]?.attempts).toBe(4);

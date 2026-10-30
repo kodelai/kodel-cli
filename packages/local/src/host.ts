@@ -1740,7 +1740,7 @@ export class LocalRun {
   /** Where the time went and what was redone, from the run's own state and journal. */
   async report(): Promise<RunReport> {
     const journal = await this.host.store.readJournal(this.runId);
-    const report = summarizeRun(await this.state(), journal);
+    const report = await this.withFindings(summarizeRun(await this.state(), journal));
     // A run that did not record changes has no patch to measure, whatever file may be lying there.
     const started = journal.find((r) => r.event === "run_started");
     const changesOff =
@@ -1753,6 +1753,31 @@ export class LocalRun {
     };
     const where = await this.locationForDisplay();
     return where ? { ...sized, workdir: where.path } : sized;
+  }
+
+  /** The findings of each attempt's reports counted by severity; the journal only knows how many rows. */
+  private async withFindings(report: RunReport): Promise<RunReport> {
+    const nodes = await Promise.all(
+      report.nodes.map(async (node) => ({
+        ...node,
+        attempts: await Promise.all(
+          node.attempts.map(async (attempt) => {
+            if (!attempt.reports?.length) return attempt;
+            const stored = await this.host.store
+              .readReport(this.runId, node.node, attempt.attempt)
+              .catch(() => undefined);
+            if (!stored) return attempt;
+            const findings: Record<string, number> = {};
+            for (const row of stored.rows) {
+              const severity = typeof row.severity === "string" ? row.severity : "other";
+              findings[severity] = (findings[severity] ?? 0) + 1;
+            }
+            return { ...attempt, findings };
+          }),
+        ),
+      })),
+    );
+    return { ...report, nodes };
   }
 
   /** Files changed since the run started, with the lines changed, or why that cannot be told. */

@@ -59,6 +59,8 @@ export interface NodeStats {
     /** The latest words of a rejection, newest last. */
     reasons: string[];
   };
+  /** Attempts of the step that the scope left out: they ran on another definition. */
+  elsewhere: number;
   /** Over the attempts that recorded their usage. */
   usage: {
     attempts: number;
@@ -162,6 +164,9 @@ export function summarizePipeline(runs: StatsRun[], options: StatsOptions): Pipe
 
   const byNode = new Map<string, { run: StatsRun; gate: boolean; attempts: AttemptReport[] }[]>();
   const met: string[] = [];
+  /** Per step: the attempts the scope left out, and whether a person decides there. */
+  const elsewhere = new Map<string, number>();
+  const gateNodes = new Set<string>();
   const byStatus: Record<string, number> = {};
   let total = 0;
   let withDefinition = 0;
@@ -179,6 +184,8 @@ export function summarizePipeline(runs: StatsRun[], options: StatsOptions): Pipe
       withUsage += attempts.filter((a) => a.usage).length;
       const mine = attempts.filter((a) => inScope(node.node, a));
       scoped += mine.length;
+      if (node.gate) gateNodes.add(node.node);
+      elsewhere.set(node.node, (elsewhere.get(node.node) ?? 0) + attempts.length - mine.length);
       if (mine.length === 0) continue;
       any = true;
       if (!byNode.has(node.node)) {
@@ -193,7 +200,26 @@ export function summarizePipeline(runs: StatsRun[], options: StatsOptions): Pipe
   const order = [...(options.order ?? []), ...met.filter((n) => !options.order?.includes(n))];
   const nodes: NodeStats[] = order.flatMap((name) => {
     const visits = byNode.get(name);
-    if (!visits) return [];
+    if (!visits) {
+      // A step the pipeline has is listed even when nothing has run on its present definition yet.
+      if (!options.order?.includes(name)) return [];
+      return [
+        {
+          node: name,
+          gate: gateNodes.has(name),
+          runs: 0,
+          attempts: 0,
+          perRun: 0,
+          failed: 0,
+          outcomes: {},
+          failures: [],
+          seconds: EMPTY,
+          findings: { attempts: 0, rows: 0, bySeverity: {} },
+          usage: { attempts: 0, usd: 0, input: 0, output: 0, cache_read: 0, cache_write: 0 },
+          elsewhere: elsewhere.get(name) ?? 0,
+        },
+      ];
+    }
     const attempts = visits.flatMap((v) => v.attempts);
     const outcomes: Record<string, number> = {};
     const failures = new Map<string, { source: string; reason: string; n: number }>();
@@ -258,6 +284,7 @@ export function summarizePipeline(runs: StatsRun[], options: StatsOptions): Pipe
         findings,
         ...(gate ? { decisions: { ...decisions, reasons: decisions.reasons.slice(-5) } } : {}),
         usage,
+        elsewhere: elsewhere.get(name) ?? 0,
       },
     ];
   });
