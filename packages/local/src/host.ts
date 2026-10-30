@@ -156,6 +156,8 @@ export interface HostOptions {
   checkRunners?: Record<string, CheckRunner>;
   /** How often running engine work sends a heartbeat; 0 turns the timer off (tests). */
   heartbeatMs?: number;
+  /** How long the end of a step waits for the lock on copying the agent's log; 5 s by default (tests). */
+  agentLogStepWaitMs?: number;
   maxTailBytes?: number;
   /** Where the trusted hash of a run's state is kept; by default a file outside the repository. */
   integrity?: IntegrityStore;
@@ -342,6 +344,7 @@ export class LocalHost {
   readonly rules: RedactRule[];
   readonly checkRunners: Record<string, CheckRunner>;
   readonly heartbeatMs: number;
+  readonly agentLogStepWaitMs: number;
   readonly maxTailBytes: number | undefined;
   private readonly outputSettingsCache = new Map<
     string,
@@ -394,6 +397,7 @@ export class LocalHost {
     this.runner = options.runCommand ?? ((command, opts) => runCommand(command, opts));
     this.heartbeatMs =
       options.heartbeatMs ?? Math.max(1_000, (options.engine?.staleMs ?? 30_000) / 3);
+    this.agentLogStepWaitMs = options.agentLogStepWaitMs ?? 5_000;
     this.maxTailBytes = options.maxTailBytes;
     this.ownerId = options.ownerId ?? processOwnerId();
     this.isOwnerAlive = options.isOwnerAlive ?? processIsAlive;
@@ -2192,7 +2196,7 @@ export class LocalRun {
     const copied = await this.host.agentLog
       .capture(run, {
         why: "step",
-        waitMs: 5_000,
+        waitMs: this.host.agentLogStepWaitMs,
         step: { node, attempt },
         also: async (lock) => {
           counted = true;

@@ -22,7 +22,9 @@ bun test
 bun run build && node scripts/check-artifact.mjs
 ```
 
-These are the commands CI runs on Linux, macOS and Windows.
+These are the commands CI runs on Linux, macOS and Windows. On your own machine `bun run test` does the
+same as `bun test` in several processes at once (`KODEL_TEST_JOBS` sets how many) and is much faster; it
+looks only at `packages/` and `tests/`, so copies of the repository in other folders are not run again.
 
 - Work on a branch and open a pull request. Nobody pushes to `main`.
 - Sign off every commit with `git commit -s`. The project uses the

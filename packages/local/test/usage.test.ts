@@ -92,6 +92,8 @@ interface RigOptions {
   viaLink?: boolean;
   session?: string | null;
   budgetMs?: number;
+  /** How long the end of a step waits for the lock on copying the log. */
+  lockWaitMs?: number;
   now?: () => number;
   /**
    * How the pass sleeps while it waits for the step's call in the log, and for how long it may. By default there is no
@@ -148,6 +150,7 @@ async function rig(options: RigOptions = {}): Promise<Rig> {
   const host = new LocalPipelineHost({
     root,
     heartbeatMs: 0,
+    ...(options.lockWaitMs === undefined ? {} : { agentLogStepWaitMs: options.lockWaitMs }),
     environment: env,
     history: historyOf(options),
     usage: writer,
@@ -635,7 +638,7 @@ describe("usage pass", () => {
 
 describe("usage pass around the step end", () => {
   test("t9jrs_lock_busy_journals_usage_failed_once_and_loses_nothing", async () => {
-    const r = await rig();
+    const r = await rig({ lockWaitMs: 200 });
     const log = sessionLog(r.runId);
     const path = await install(log);
     // somebody else holds the lock on copying for the whole of the step end
