@@ -143,10 +143,24 @@ describe("the Pipeline screen", () => {
     expect(screen(m)).toContain("approve-release");
   });
 
-  test("Flow shows a way back and the end of the pipeline", () => {
-    const text = screen(press(demo(), ["2", "enter"]));
-    expect(text).toContain("↩ plan");
-    expect(text).toContain("the end");
+  test("Flow draws the ways back as rails, and v switches to the list of routes", () => {
+    const rails = press(demo(), ["2", "enter"]);
+    expect(screen(rails)).toContain("◄");
+    expect(screen(rails)).not.toContain("↩ plan");
+    const list = press(rails, ["v"]);
+    expect(screen(list)).toContain("↩ plan");
+    expect(screen(list)).toContain("the end");
+    expect(screen(press(list, ["v"]))).toContain("◄");
+  });
+
+  test("the view stays when another pipeline is selected", () => {
+    const m = press(demo(), ["2", "enter", "v", "escape", "down"]);
+    expect(m.pipe.view).toBe("list");
+  });
+
+  test("v does nothing in an opened step", () => {
+    const m = press(demo(), ["2", "enter", "enter", "v"]);
+    expect(m.pipe.view).toBe("rails");
   });
 
   test("a pipeline has only a Flow tab unless something waits", () => {

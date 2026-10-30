@@ -1,6 +1,7 @@
 /** The Pipeline screen: the pipelines of a project, how each one runs, and what waits for a person. */
 import type { PipelineSpec } from "@kodel-ai/pipeline-core";
 import { bold, cyan, dim, fit, green, red, stripAnsi, wrapText, yellow } from "./ansi";
+import { railLines } from "./rails";
 import type { Session } from "./session";
 import { strip } from "./tabs";
 
@@ -70,6 +71,8 @@ export interface PipeState {
   /** Which of the pending proposals the Proposed tab shows. */
   pend: number;
   scroll: number;
+  /** How the Flow draws the steps: the ways back as rails, or every route under its step. */
+  view: "rails" | "list";
 }
 
 export const PIPE_TABS = ["Flow", "Proposed"] as const;
@@ -77,7 +80,15 @@ const FLOW = 0;
 const PROPOSED = 1;
 
 export function initialPipeState(entries: PipeEntry[]): PipeState {
-  return { selected: entries[0]?.id ?? "", tab: FLOW, step: 0, open: false, pend: 0, scroll: 0 };
+  return {
+    selected: entries[0]?.id ?? "",
+    tab: FLOW,
+    step: 0,
+    open: false,
+    pend: 0,
+    scroll: 0,
+    view: "rails",
+  };
 }
 
 /** What waits for a person comes first. */
@@ -276,7 +287,7 @@ export function pipeKey(p: PipeState, key: string, v: PipeView): PipeResult | un
         v.entries.findIndex((e) => e.id === entry?.id),
       );
       const next = v.entries[clamp(at + (down ? 1 : -1), v.entries.length - 1)];
-      return next ? { p: initialPipeState([next]) } : { p };
+      return next ? { p: { ...initialPipeState([next]), view: p.view } } : { p };
     }
     if ((key === "enter" || key === "right") && entry) return { p, focus: "card" };
     return undefined;
@@ -294,6 +305,9 @@ export function pipeKey(p: PipeState, key: string, v: PipeView): PipeResult | un
       return at === 0 ? { p, focus: "list" } : switchTo(tabs[at - 1] ?? FLOW);
     case "right":
       return p.open ? { p } : switchTo(tabs[Math.min(tabs.length - 1, at + 1)] ?? FLOW);
+    case "v":
+      if (p.tab !== FLOW || p.open) return undefined;
+      return { p: { ...p, view: p.view === "rails" ? "list" : "rails" } };
     case "s":
       if (p.tab !== PROPOSED) return undefined;
       return pending?.runId ? { p, open: pending.runId } : { p, notice: "No run to show." };
@@ -462,6 +476,11 @@ export function bodyOf(entry: PipeEntry, p: PipeState, width: number): PipeBody 
 }
 
 function flowBody(entry: PipeEntry, p: PipeState, width: number): PipeBody {
+  if (p.view === "rails") {
+    // A card too narrow for the rails gets the list.
+    const rails = railLines(entry.steps, p.step, width);
+    if (rails) return rails;
+  }
   const out: string[] = [];
   let anchor = 0;
   if (entry.steps.length === 0) out.push(dim("No steps."));
@@ -598,5 +617,5 @@ export function pipeHints(entry: PipeEntry | undefined, p: PipeState, card: bool
     return `${bold("←→")} tabs   ${bold("↑↓")} scroll${several}   ${bold("a")} accept   ${bold("r")} drop${go}${tail}`;
   }
   if (p.open) return `${bold("↑↓")} scroll   ${bold("n/p")} next/prev step${tail}`;
-  return `${bold("←→")} tabs   ${bold("↑↓")} step   ${bold("Enter")} open the step${tail}`;
+  return `${bold("←→")} tabs   ${bold("↑↓")} step   ${bold("Enter")} open the step   ${bold("v")} ${p.view === "rails" ? "list" : "rails"}${tail}`;
 }
