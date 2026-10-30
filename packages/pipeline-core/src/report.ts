@@ -26,6 +26,25 @@ export interface AttemptReport {
   definition?: { work: string; checks: string; routing: string };
   /** Which parts of the node's definition differ from the attempt before this one. */
   definition_changed?: ("work" | "checks" | "routing")[];
+  /** What the agent used in this attempt, when the run recorded it. */
+  usage?: UsageReport;
+  /** At a gate: what the person decided, and the words they gave with it. */
+  decision?: { outcome: string; reason?: string };
+  /**
+   * The findings of the attempt's reports, counted by severity. Added by a host that can read the
+   * reports; the journal only knows how many rows there were.
+   */
+  findings?: Record<string, number>;
+}
+
+/** The tokens and the money of one attempt, summed over the models that did the work. */
+export interface UsageReport {
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_write: number;
+  calls: number;
+  usd: number;
 }
 
 /** A version of the pipeline a person accepted for the run. */
@@ -221,7 +240,44 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
       case "gate_waiting":
         if (name) gates.add(name);
         break;
+      case "usage_recorded": {
+        const found = name && attempt !== undefined ? attemptOf(name, attempt) : undefined;
+        const models = (
+          record.delta as { models?: Record<string, Record<string, unknown>> } | undefined
+        )?.models;
+        if (!found || !models) break;
+        const usage = found.usage ?? {
+          input: 0,
+          output: 0,
+          cache_read: 0,
+          cache_write: 0,
+          calls: 0,
+          usd: 0,
+        };
+        const num = (value: unknown) => (typeof value === "number" ? value : 0);
+        for (const m of Object.values(models)) {
+          usage.input += num(m.input);
+          usage.output += num(m.output);
+          usage.cache_read += num(m.cache_read);
+          usage.cache_write += num(m.cache_write);
+          usage.calls += num(m.api_calls);
+          usage.usd += num(m.computed_usd) || num(m.reported_usd);
+        }
+        found.usage = usage;
+        break;
+      }
       case "gate_decided":
+        if (name) {
+          const found = nodes.get(name)?.attempts.at(-1);
+          if (found) {
+            found.decision = {
+              outcome: String(record.decision),
+              ...(typeof record.reason === "string" && record.reason.trim() !== ""
+                ? { reason: record.reason }
+                : {}),
+            };
+          }
+        }
         if (record.decided_by === "agent") {
           agentDecisions.push({
             at: record.ts,

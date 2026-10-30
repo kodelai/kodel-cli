@@ -15,6 +15,7 @@ export * from "./new-pipeline";
 export * from "./next-step";
 export * from "./pipeline";
 export * from "./pipeline-diff";
+export * from "./pipeline-stats";
 export * from "./redact";
 export * from "./registry";
 export * from "./render";
