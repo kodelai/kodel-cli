@@ -1270,7 +1270,9 @@ describe("tui readable reasons", () => {
       },
       review: {
         completeness: "complete",
-        findings: [{ severity: "major", location: "plan Step 5", description: "Why not movable?" }],
+        findings: [
+          { severity: "major", location: "plan Step 5", description: 'Why not "movable"?' },
+        ],
       },
       log: [],
     },
@@ -1323,17 +1325,53 @@ describe("tui readable reasons", () => {
     expect(lines[at]).not.toContain("…");
   });
 
-  test("a rejection shows what the person wrote and the comments they made, as comments", () => {
+  test("a rejection shows what the person wrote and their comments, once, when the report and the copy agree", () => {
     const out = text(
       press(withVisits([rejected]), "enter", "right", "right", "pageup", "pageup", "enter"),
     );
     expect(out).toContain("You: rejected");
     expect(out).toContain("Fix the plan first.");
     expect(out).toContain("Comments you made: 1 major");
-    expect(out).toContain('Why not "movable"?');
+    expect(out).toContain('Why not "movable"?'.slice(0, 11));
     expect(out).not.toContain("Comments (CSV)");
-    expect(out).toContain("Comments recorded at this step (complete): 1 major");
+    expect(out).not.toContain("Comments recorded at this step");
     expect(out).not.toContain("Findings (the agent's");
+    expect(out.match(/Why not/g)).toHaveLength(1);
+  });
+
+  test("when the report no longer says what the rejection carried, both are shown and told apart", () => {
+    const changed = {
+      ...rejected,
+      attempt: {
+        ...rejected.attempt,
+        review: {
+          completeness: "complete",
+          findings: [
+            { severity: "info", location: "plan Step 9", description: "A later thought." },
+          ],
+        },
+      },
+    };
+    const out = text(
+      press(withVisits([changed]), "enter", "right", "right", "pageup", "pageup", "enter"),
+    );
+    expect(out).toContain("Comments sent back with the rejection: 1 major");
+    expect(out).toContain("Comments recorded at this step (complete): 1 info");
+    expect(out).toContain("A later thought.");
+  });
+
+  test("a human step that is still waiting has only what is recorded so far", () => {
+    const waiting = {
+      ...rejected,
+      state: "waiting" as const,
+      attempt: { ...rejected.attempt, ok: undefined, outcome: undefined, decision: undefined },
+    };
+    const out = text(
+      press(withVisits([waiting]), "enter", "right", "right", "pageup", "pageup", "enter"),
+    );
+    expect(out).toContain("Comments recorded at this step (complete): 1 major");
+    expect(out).not.toContain("Comments you made");
+    expect(out).not.toContain("You:");
   });
 
   test("a reason that is plain text is shown as written, but a very long one is cut", () => {

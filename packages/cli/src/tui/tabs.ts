@@ -534,14 +534,38 @@ function reasonLines(reason: string | undefined, width: number): string[] {
   return capLines(lines, 12, (n) => dim(`  … ${n} more lines`));
 }
 
-function decisionLines(d: NonNullable<Attempt["decision"]>, width: number): string[] {
+/** What the person decided and wrote; the comments that went with it are told separately. */
+function decisionLines(d: NonNullable<Attempt["decision"]>, said: string, width: number): string[] {
   const out = ["", `You: ${d.decision}`];
-  if (!d.reason) return out;
-  const csv = parseCommentsCsv(d.reason);
-  const said = csv ? csv.text : d.reason;
   if (said) out.push(...prose(said, width - 2).map((l) => `  ${l}`));
-  if (csv && csv.rows.length > 0) out.push(...findingsBlock("Comments you made:", csv.rows, width));
   return out;
+}
+
+const sameRows = (a: Finding[], b: Finding[]): boolean => {
+  const key = (f: Finding) => `${f.severity}\u0000${f.location}\u0000${f.description}`;
+  const left = a.map(key).sort();
+  const right = b.map(key).sort();
+  return left.length === right.length && left.every((k, i) => k === right[i]);
+};
+
+/**
+ * The comments at a human step reach the screen from two places that say the same thing: the report
+ * the step wrote, and the copy a rejection carries to the agent. One block when they agree, and
+ * both, told apart, when they do not.
+ */
+function commentBlocks(a: Attempt, sent: Finding[], width: number): string[] {
+  const recorded = a.review?.findings ?? [];
+  if (sent.length > 0 && sameRows(sent, recorded)) {
+    return findingsBlock("Comments you made:", sent, width);
+  }
+  return [
+    ...(sent.length > 0
+      ? findingsBlock("Comments sent back with the rejection:", sent, width)
+      : []),
+    ...(a.review
+      ? findingsBlock(`Comments recorded at this step (${a.review.completeness}):`, recorded, width)
+      : []),
+  ];
 }
 
 function attemptResult(a: Attempt, width: number, human: boolean): string[] {
@@ -561,12 +585,21 @@ function attemptResult(a: Attempt, width: number, human: boolean): string[] {
     out.push("", dim("The agent says (not verified):"));
     out.push(...prose(a.summary, width));
   }
-  if (a.decision) out.push(...decisionLines(a.decision, width));
-  if (a.review) {
-    const label = human
-      ? `Comments recorded at this step (${a.review.completeness}):`
-      : `Findings (the agent's, ${a.review.completeness}):`;
-    out.push(...findingsBlock(label, a.review.findings, width));
+  const csv = a.decision?.reason ? parseCommentsCsv(a.decision.reason) : undefined;
+  if (a.decision) {
+    const said = csv ? csv.text : (a.decision.reason ?? "");
+    out.push(...decisionLines(a.decision, said, width));
+  }
+  if (human) {
+    out.push(...commentBlocks(a, csv?.rows ?? [], width));
+  } else if (a.review) {
+    out.push(
+      ...findingsBlock(
+        `Findings (the agent's, ${a.review.completeness}):`,
+        a.review.findings,
+        width,
+      ),
+    );
   }
   return out;
 }
