@@ -191,10 +191,13 @@ export interface AgentWords {
 
 /** Everything the card of a run waiting at a human step shows beyond the list row. */
 export interface GateDetail {
+  /** A run waiting at a human step, or one that is going on: the second has no question to answer. */
+  kind: "gate" | "running";
+  /** The step the run waits at, or is at. */
   node: string;
   /** The try the gate is on; comments are kept against it. */
   attempt: number;
-  /** `gate 2 of 2` on the way this run takes. */
+  /** `gate 2 of 2` on the way this run takes, or `step 3 of 7` for a run that is going on. */
   position: string;
   prompt: string;
   instructions?: string;

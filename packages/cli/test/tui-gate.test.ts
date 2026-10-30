@@ -432,8 +432,56 @@ describe("tui gate detail", () => {
       waiting: { reason: "paused", node_slug: "impl", prompt: "p", how_to_decide: { cli: "c" } },
     } as unknown as NextStep;
     expect(await load({ next: paused })).toBeUndefined();
-    expect(await load({ next: { node: { slug: "impl" } } as unknown as NextStep })).toBeUndefined();
+    const over = state({ status: "completed", active: [] } as Partial<RunState>);
+    expect(
+      await load({ state: over, next: { done: true } as unknown as NextStep }),
+    ).toBeUndefined();
     expect(await loadGateDetail({ open: async () => undefined }, "r_1", NOW)).toBeUndefined();
+  });
+
+  test("a run that is going on has a card too: where it is, the same visits, and nothing to answer", async () => {
+    const going = state({
+      active: [{ node: "test", attempt: 2, visitId: 6, phase: "engine", checkIndex: 0 }],
+    } as Partial<RunState>);
+    const journal = JOURNAL.slice(
+      0,
+      JOURNAL.findIndex(
+        (r) => r.node === "test" && r.event === "command_finished" && r.attempt === 2,
+      ),
+    );
+    const d = await load({
+      state: going,
+      journal,
+      next: { running: { active: [] } } as unknown as NextStep,
+      said: { text: "ignored", ts: NOW },
+    });
+    expect(d?.kind).toBe("running");
+    expect(d?.node).toBe("test");
+    expect(d?.attempt).toBe(2);
+    expect(d?.position).toBe("step 4 of 7");
+    expect(d?.prompt).toBe("");
+    expect(d?.report).toBeUndefined();
+    expect(d?.comments).toEqual([]);
+    expect(d?.changedAfterChecks).toEqual([]);
+    expect(d?.visits.map((v) => [v.slug, v.attempt.n, v.state])).toEqual([
+      ["plan", 1, "done"],
+      ["plan-approval", 1, "done"],
+      ["impl", 1, "failed"],
+      ["impl", 2, "done"],
+      ["test", 1, "failed"],
+      ["test", 2, "running"],
+      ["review", 0, "pending"],
+      ["final-approval", 0, "pending"],
+      ["release", 0, "pending"],
+    ]);
+    expect(d?.changes.kind).toBe("files");
+    expect(d?.metrics.retries).toBe(2);
+  });
+
+  test("a gate's card says gate, with the question, and is not mistaken for a run that is going on", async () => {
+    const d = await load();
+    expect(d?.kind).toBe("gate");
+    expect(d?.prompt).toBe("Look at the diff.");
   });
 
   test("one failing read does not take the whole detail down", async () => {

@@ -46,6 +46,14 @@ export interface TabState {
   line: number;
 }
 
+/**
+ * The tabs a card has, in the order they are shown. A run at a gate has the whole set; a run that is
+ * going on has nothing to read as a report and nothing to comment on, so it has three.
+ */
+export function visibleTabs(d: GateDetail): number[] {
+  return d.kind === "running" ? [STEPS, CODE, LOG] : [REPORT, CODE, STEPS, COMMENTS, LOG];
+}
+
 /** The tabs that are a list of things to select. */
 export function isListTab(tab: number): boolean {
   return tab === CODE || tab === STEPS || tab === COMMENTS;
@@ -83,6 +91,13 @@ export function fileAt(d: GateDetail, cursor: number): string | undefined {
   return d.changes.kind === "files" ? d.changes.files[cursor]?.[0] : undefined;
 }
 
+/** Where the cursor of a tab starts: at the latest step for a run that is going on, else at the top. */
+export function startCursor(d: GateDetail, tab: number): number {
+  if (d.kind !== "running" || tab !== STEPS) return 0;
+  const entered = d.visits.findLastIndex((v) => v.attempt.n > 0);
+  return Math.max(0, entered);
+}
+
 /** Where a comment made now is about: the file or the step the person is looking at, else the gate. */
 export function commentPlace(d: GateDetail, st: TabState): string {
   if (st.tab === CODE) return fileAt(d, st.cursor) ?? d.node;
@@ -113,8 +128,11 @@ export function tailFit(text: string, width: number): string {
 
 export function duration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${Math.floor(ms / 60_000)}m${String(Math.round((ms % 60_000) / 1000)).padStart(2, "0")}`;
+  // 59.96 s would print as 60.0 s; from here on it is told in minutes.
+  if (ms < 59_950) return `${(ms / 1000).toFixed(1)}s`;
+  const seconds = Math.round(ms / 1000);
+  if (seconds >= 3600) return formatAge(seconds * 1000);
+  return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}`;
 }
 
 function thousands(n: number): string {
@@ -123,12 +141,19 @@ function thousands(n: number): string {
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-const MARK = { ok: green("✓"), bad: red("✗"), open: yellow("◐"), pending: dim("○") };
+const MARK = {
+  ok: green("✓"),
+  bad: red("✗"),
+  open: yellow("◐"),
+  run: cyan("●"),
+  pending: dim("○"),
+};
 
 function visitMark(v: Visit): string {
   if (v.state === "done") return MARK.ok;
   if (v.state === "failed") return MARK.bad;
-  if (v.state === "waiting" || v.state === "running") return MARK.open;
+  if (v.state === "waiting") return MARK.open;
+  if (v.state === "running") return MARK.run;
   return MARK.pending;
 }
 
@@ -244,7 +269,12 @@ export function headerBand(
       ? [chip("⚠ changes unknown", yellow("⚠ changes unknown"))]
       : []),
   ];
-  const where = `${bold(yellow(`${d.position} · ${d.node}`))} ${dim(`· waiting ${formatAge(now - s.since)}`)}`;
+  const where =
+    d.kind === "running"
+      ? `${bold(cyan(`running · ${d.node}`))} ${dim(`· ${d.position} · for ${formatAge(now - s.since)}`)}${
+          s.activity === "quiet" ? yellow(`  quiet ${formatAge(s.quietMs ?? 0)}`) : ""
+        }`
+      : `${bold(yellow(`${d.position} · ${d.node}`))} ${dim(`· waiting ${formatAge(now - s.since)}`)}`;
   if (compact) {
     // Little room: no frame, and the numbers on one line, cut where they stop fitting.
     const all = flow([...chips, ...warnings], "  ", inner)[0] ?? "";
@@ -305,9 +335,10 @@ function strip(
 }
 
 export function tabStrip(d: GateDetail, active: number, width: number, focused: boolean) {
+  const tabs = visibleTabs(d);
   return strip(
-    TABS.map((_, i) => tabText(d, i)),
-    active,
+    tabs.map((id) => tabText(d, id)),
+    Math.max(0, tabs.indexOf(active)),
     width,
     focused,
   );

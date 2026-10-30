@@ -39,10 +39,11 @@ import {
   REPORT,
   STEPS,
   SUBTABS,
-  TABS,
+  startCursor,
   type TabState,
   tabContent,
   tabStrip,
+  visibleTabs,
 } from "./tabs";
 
 export const SECTIONS = ["Sessions", "Pipeline", "Tasks", "Report"] as const;
@@ -210,7 +211,8 @@ function selectedSession(m: Model): Session | undefined {
   return m.sessions.find((s) => s.id === m.selected) ?? m.sessions[0];
 }
 
-export function update(m: Model, key: string, size: Size = DEFAULT_SIZE): Model {
+export function update(input: Model, key: string, size: Size = DEFAULT_SIZE): Model {
+  const m = normalized(input);
   if (key === "ctrl-c") return { ...m, quit: true };
   if (m.input) return typing(m, key);
   const current = selectedSession(m);
@@ -323,24 +325,29 @@ function cardKey(m: Model, key: string, size: Size): Model | undefined {
   const inStep = m.open && m.tab === STEPS;
   const reading = openDiff(m, found);
   if (reading) {
-    const moved = readingKey(m, key, reading);
+    const moved = readingKey(m, key, reading, found.d.kind === "gate");
     if (moved) return moved;
   }
   switch (key) {
     case "tab":
-      return inStep ? toSub(m, (m.sub + 1) % SUBTABS.length) : toTab(m, (m.tab + 1) % TABS.length);
+      return inStep
+        ? toSub(m, (m.sub + 1) % SUBTABS.length)
+        : toTab(m, around(found.d, m.tab, 1, true));
     case "shift-tab":
       return inStep
         ? toSub(m, (m.sub + SUBTABS.length - 1) % SUBTABS.length)
-        : toTab(m, (m.tab + TABS.length - 1) % TABS.length);
+        : toTab(m, around(found.d, m.tab, -1, true));
     case "right":
       return inStep
         ? toSub(m, Math.min(SUBTABS.length - 1, m.sub + 1))
-        : toTab(m, Math.min(TABS.length - 1, m.tab + 1));
+        : toTab(m, around(found.d, m.tab, 1, false));
     case "left":
       if (inStep) return toSub(m, Math.max(0, m.sub - 1));
       // Left of the first tab is the list.
-      return m.tab > 0 ? toTab(m, m.tab - 1) : { ...m, focus: "list", zoom: false };
+      // Left of the first tab is the list.
+      return around(found.d, m.tab, -1, false) !== m.tab
+        ? toTab(m, around(found.d, m.tab, -1, false))
+        : { ...m, focus: "list", zoom: false };
     case "up":
     case "k":
     case "down":
@@ -369,6 +376,7 @@ function cardKey(m: Model, key: string, size: Size): Model | undefined {
         ? { ...m, instructions: !m.instructions, cardScroll: 0 }
         : undefined;
     case "c": {
+      if (found.d.kind !== "gate") return undefined;
       const place = commentPlace(found.d, tabState(m, found.d));
       return { ...m, input: { text: "", severity: "major", place }, notice: "" };
     }
@@ -399,6 +407,7 @@ function readingKey(
   m: Model,
   key: string,
   reading: { p: Prepared; path: string },
+  canComment: boolean,
 ): Model | undefined {
   const { p, path } = reading;
   const at = m.line >= 0 ? m.line : firstCode(p);
@@ -425,6 +434,7 @@ function readingKey(
     case "G":
       return go(moveCode(p, p.rows.length, 0));
     case "c": {
+      if (!canComment) return undefined;
       const row = p.rows[at];
       return row
         ? { ...m, input: { text: "", severity: "major", place: placeOf(path, row) }, notice: "" }
@@ -446,7 +456,9 @@ function wantDiff(m: Model, found: { s: Session; d: GateDetail }): Model {
 function toTab(m: Model, tab: number): Model {
   // The log is read from its end: the newest records are the ones people look for.
   const scroll = tab === LOG ? Number.MAX_SAFE_INTEGER : 0;
-  return { ...m, tab, cursor: 0, open: false, sub: 0, cardScroll: scroll, notice: "" };
+  const found = detailOf(m);
+  const cursor = found ? startCursor(found.d, tab) : 0;
+  return { ...m, tab, cursor, open: false, sub: 0, cardScroll: scroll, notice: "" };
 }
 
 function toSub(m: Model, sub: number): Model {
@@ -465,8 +477,27 @@ function moveCursor(m: Model, d: GateDetail, by: number): Model {
 /** The selected run's gate detail, once it has been read. */
 function detailOf(m: Model): { s: Session; d: GateDetail } | undefined {
   const s = selectedSession(m);
-  const d = s?.need === "approve" ? m.details[detailKey(s)] : undefined;
+  const d = s ? m.details[detailKey(s)] : undefined;
   return s && d ? { s, d } : undefined;
+}
+
+/** The tab the card shows: the one asked for, or the first it has when this kind of card has no such tab. */
+function normalized(m: Model): Model {
+  const found = detailOf(m);
+  if (!found) return m;
+  const tabs = visibleTabs(found.d);
+  const tab = tabs[0] ?? 0;
+  return tabs.includes(m.tab)
+    ? m
+    : { ...m, tab, cursor: startCursor(found.d, tab), open: false, sub: 0 };
+}
+
+/** The tab `by` places from this one among the tabs the card has; at the ends it stops, or wraps round. */
+function around(d: GateDetail, tab: number, by: 1 | -1, wrap: boolean): number {
+  const tabs = visibleTabs(d);
+  const next = tabs.indexOf(tab) + by;
+  if (wrap) return tabs[(next + tabs.length) % tabs.length] ?? tab;
+  return tabs[Math.min(tabs.length - 1, Math.max(0, next))] ?? tab;
 }
 
 function moveSelection(m: Model, by: -1 | 1): Model {
@@ -756,6 +787,7 @@ function cardLines(s: Session | undefined, m: Model, width: number): string[] {
     );
     out.push("");
   }
+  if (s.status === "running") out.push(dim("Reading the details…"), "");
   if (s.steps.length > 0) {
     out.push(dim("STEPS"));
     for (const st of s.steps) {
@@ -812,21 +844,22 @@ function hints(m: Model): string {
   const zoom = `   ${bold("z")} ${m.zoom ? "show list" : "zoom"}`;
   if (m.focus === "card" && m.section === 0) {
     const found = detailOf(m);
+    const comment = found?.d.kind === "gate" ? `   ${bold("c")} comment` : "";
     let nav: string;
     if (!found) nav = `${bold("↑↓")} scroll   ${bold("Esc")} list`;
     else if (m.open && m.tab === STEPS) {
-      nav = `${bold("←→")} result/changes/log   ${bold("n/p")} next/prev   ${bold("c")} comment   ${bold("Esc")} back`;
+      nav = `${bold("←→")} result/changes/log   ${bold("n/p")} next/prev${comment}   ${bold("Esc")} back`;
     } else if (m.open && m.tab === CODE) {
-      nav = `${bold("↑↓")} line   ${bold("[ ]")} hunk   ${bold("n/p")} file   ${bold("c")} comment   ${bold("Esc")} back`;
+      nav = `${bold("↑↓")} line   ${bold("[ ]")} hunk   ${bold("n/p")} file${comment}   ${bold("Esc")} back`;
     } else if (m.open) {
-      nav = `${bold("↑↓")} scroll   ${bold("n/p")} next/prev   ${bold("c")} comment   ${bold("Esc")} back`;
+      nav = `${bold("↑↓")} scroll   ${bold("n/p")} next/prev${comment}   ${bold("Esc")} back`;
     } else if (m.tab === COMMENTS) {
       nav = `${bold("←→")} tabs   ${bold("↑↓")} select   ${bold("c")} add   ${bold("d")} delete   ${bold("Esc")} list`;
     } else if (isListTab(m.tab)) {
-      nav = `${bold("←→")} tabs   ${bold("↑↓")} select   ${bold("Enter")} open   ${bold("c")} comment   ${bold("Esc")} list`;
+      nav = `${bold("←→")} tabs   ${bold("↑↓")} select   ${bold("Enter")} open${comment}   ${bold("Esc")} list`;
     } else {
       const more = m.tab === REPORT && found.d.instructions ? `   ${bold("i")} instructions` : "";
-      nav = `${bold("←→")} tabs   ${bold("↑↓")} scroll   ${bold("c")} comment${more}   ${bold("Esc")} list`;
+      nav = `${bold("←→")} tabs   ${bold("↑↓")} scroll${comment}${more}   ${bold("Esc")} list`;
     }
     return `${nav}${decide}${zoom}   ${bold("q")} quit`;
   }
@@ -856,7 +889,8 @@ function emptyState(): string[] {
   ];
 }
 
-export function render(m: Model, { cols, rows }: Size): string[] {
+export function render(model: Model, { cols, rows }: Size): string[] {
+  const m = normalized(model);
   if (cols < 40 || rows < 12) {
     return [fit(`Terminal too small: ${cols}x${rows}, need 40x12.`, cols)];
   }
@@ -906,7 +940,8 @@ export type Hit =
   | { kind: "card" };
 
 /** What is under a point of the screen (1-based column and row, as the terminal reports them). */
-export function hitTest(m: Model, { cols, rows }: Size, x: number, y: number): Hit | undefined {
+export function hitTest(model: Model, { cols, rows }: Size, x: number, y: number): Hit | undefined {
+  const m = normalized(model);
   if (cols < 40 || rows < 12) return undefined;
   if (y === 1) {
     let start = MENU_BRAND.length + 1;
@@ -934,7 +969,8 @@ export function hitTest(m: Model, { cols, rows }: Size, x: number, y: number): H
       const { spans } = tabStrip(found.d, m.tab, layout.cardWidth, m.focus === "card");
       const at = x - layout.cardX;
       const index = spans.findIndex(([from, to]) => at >= from && at < to);
-      if (index >= 0) return { kind: "tab", index };
+      const tab = visibleTabs(found.d)[index];
+      if (tab !== undefined) return { kind: "tab", index: tab };
     }
   }
   return { kind: "card" };
@@ -945,10 +981,11 @@ export function hitTest(m: Model, { cols, rows }: Size, x: number, y: number): H
  * nothing else. A decision is never made with the mouse: it takes a key and a confirmation.
  */
 export function mouseUpdate(
-  m: Model,
+  input: Model,
   size: Size,
   event: Extract<InputEvent, { type: "mouse" }>,
 ): Model {
+  const m = normalized(input);
   if (!m.mouse || m.confirm !== null) return m;
   const layout = layoutOf(m, size.cols);
   if (event.action !== "press") {

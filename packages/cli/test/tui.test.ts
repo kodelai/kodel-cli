@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { stripAnsi, visibleLength } from "../src/tui/ansi";
-import { demoGateDetail, demoSessions } from "../src/tui/demo";
+import { demoGateDetail, demoRunningDetail, demoSessions } from "../src/tui/demo";
 import type { GateDetail, Session } from "../src/tui/session";
 import { formatAge } from "../src/tui/session";
-import { diffKey } from "../src/tui/tabs";
+import { diffKey, duration } from "../src/tui/tabs";
 import {
   detailKey,
   hitTest,
@@ -1008,5 +1008,213 @@ describe("tui card tabs with the mouse", () => {
     const log = { ...m, tab: 4, cardScroll: 0 };
     const small = { cols: 120, rows: 20 };
     expect(mouseUpdate(log, small, wheel("wheel_down", 100)).cardScroll).toBeGreaterThan(0);
+  });
+});
+
+describe("tui card of a run that is going on", () => {
+  const SIZE = { cols: 120, rows: 44 };
+  const going = () => demoSessions(NOW).sessions.find((s) => s.id === "r_1kd9q22vb") as Session;
+  const detail = () => demoRunningDetail(going().id, NOW) as GateDetail;
+  const withCard = (d: GateDetail = detail(), s: Session = going()) =>
+    withDetail({ ...demo(), selected: s.id }, detailKey(s), d);
+  const press = (m: ReturnType<typeof demo>, ...keys: string[]) =>
+    keys.reduce((acc, k) => update(acc, k, SIZE), m);
+  const text = (m: ReturnType<typeof demo>, size = SIZE) => plain(render(m, size)).join("\n");
+  const strip = (m: ReturnType<typeof demo>) =>
+    plain(render(m, SIZE)).find(
+      (l) => l.includes("Steps") && l.includes("Code") && l.includes("Log"),
+    ) ?? "";
+
+  test("it has the band of a run at a gate, saying that the run is going on, where, and for how long", () => {
+    const out = text(withCard());
+    expect(out).toContain("╭");
+    expect(out).toContain("fix-wait-timeout");
+    expect(out).toContain("r_1kd9q22vb · dev");
+    expect(out).toContain("running · checks · step 3 of 4 · for 9m");
+    expect(out).toContain("⏱ 9m work · 0s waiting");
+    expect(out).toContain("⟳ 1 retry");
+    expect(out).toContain("✓ 2/2 checks");
+    expect(out).toContain("± 3 files · 73 lines");
+    expect(out).toContain("⛁ 61k tokens");
+    expect(out).not.toContain("waiting for you");
+  });
+
+  test("a run that has gone quiet says so in the band", () => {
+    const quiet = { ...going(), activity: "quiet" as const, quietMs: 12 * 60_000 };
+    const band = (m: ReturnType<typeof demo>) =>
+      plain(render(m, SIZE)).find((l) => l.includes("running · checks")) ?? "";
+    const swapped = withCard();
+    const gone = {
+      ...swapped,
+      sessions: swapped.sessions.map((x) => (x.id === quiet.id ? quiet : x)),
+    };
+    expect(band(gone)).toContain("quiet 12m");
+    expect(band(withCard())).not.toContain("quiet");
+  });
+
+  test("it has Steps, Code and Log, and no Report to read and no Comments to make", () => {
+    const line = strip(withCard());
+    expect(line).toMatch(/Steps 4\]?\s+Code 3\s+Log 8/);
+    expect(line).not.toContain("Report");
+    expect(line).not.toContain("Comments");
+    expect(line.indexOf("Steps")).toBeLessThan(line.indexOf("Code"));
+  });
+
+  test("it opens on Steps, where the calls of the run are in the order they happened, each try on a line", () => {
+    const out = text(press(withCard(), "enter"));
+    expect(out).toContain("4 entries into steps · Enter opens one");
+    expect(out).toMatch(/✓\s+plan\s+agent\s+3m00/);
+    expect(out).toMatch(/✗\s+implement\s+agent\s+2m00\s+The test check failed/);
+    expect(out).toMatch(/✓ ↺ implement #2\s+agent\s+2m00/);
+    expect(out).toMatch(/●\s+checks\s+command\s+2m00/);
+  });
+
+  test("the cursor starts on the step the run is at, not on the first one", () => {
+    const m = press(withCard(), "enter");
+    expect(m.cursor).toBe(3);
+    expect(text(m)).toMatch(/▸ ●\s+checks\s+command/);
+    // the other tabs start at the top, and so does a card of a gate
+    expect(press(m, "right").cursor).toBe(0);
+    const gate = demoSessions(NOW).sessions.find((s) => s.need === "approve") as Session;
+    const atGate = withDetail(
+      { ...demo(), selected: gate.id },
+      detailKey(gate),
+      demoGateDetail(gate.id, NOW) as GateDetail,
+    );
+    expect(press(atGate, "enter", "right", "right").cursor).toBe(0);
+  });
+
+  test("a try opens to its details: result, changes, and what the agent did while it went on", () => {
+    let m = press(withCard(), "enter", "up", "up", "enter");
+    expect(text(m)).toContain("Steps › implement");
+    expect(text(m)).toContain("The test check failed: t40_wait_timeout_reports");
+    m = press(m, "escape", "down", "enter");
+    expect(text(m)).toContain("Steps › implement #2");
+    expect(text(m)).toContain("The agent says (not verified):");
+    m = press(m, "right", "right");
+    const out = text(m);
+    expect(out).toMatch(/⚙ Edit\s+packages\/cli\/src\/wait\.ts/);
+    expect(out).toMatch(/⚙ Bash\s+bun test wait/);
+    expect(out).not.toContain("Plan done");
+    // the step that is still going has the same view, with what it has so far
+    m = press(m, "escape", "down", "enter");
+    expect(text(m)).toContain("Steps › checks");
+    expect(text(m)).toContain("in progress");
+  });
+
+  test("Code and Log are the same as at a gate: the files, and the agent's own log", () => {
+    const code = text(press(withCard(), "enter", "right"));
+    expect(code).toContain("3 files · 73 lines · Enter opens a file");
+    expect(code).toContain("▸ packages/cli/src/wait.ts");
+    const log = text(press(withCard(), "enter", "right", "right"), { cols: 120, rows: 50 });
+    expect(log).toMatch(/agent I will read the wait command first/);
+    expect(log).toMatch(/↳ failed 35ms/);
+  });
+
+  test("the arrows and Tab go round the three tabs, and ← on the first one is the list", () => {
+    let m = press(withCard(), "enter");
+    expect(m.focus).toBe("card");
+    expect(press(m, "left").focus).toBe("list");
+    m = press(m, "right");
+    expect(m.tab).toBe(1);
+    m = press(m, "right", "right");
+    expect(m.tab).toBe(4);
+    expect(press(m, "tab").tab).toBe(2);
+    expect(press(m, "shift-tab").tab).toBe(1);
+    expect(press(press(m, "tab"), "shift-tab").tab).toBe(4);
+  });
+
+  test("there is no gate to comment at, so c does nothing, in the tabs and in a diff", () => {
+    const base = press(withCard(), "enter", "right", "enter");
+    const read = withDiff(base, diffKey(going().id, "packages/cli/src/wait.ts"), {
+      kind: "text",
+      text: "@@ -1,1 +1,2 @@\n a\n+b\n",
+      truncated: false,
+    });
+    expect(press(read, "c").input).toBeNull();
+    expect(press(withCard(), "enter", "c").input).toBeNull();
+    expect(plain(render(press(withCard(), "enter"), SIZE)).at(-1)).not.toContain("comment");
+  });
+
+  test("a and r mean nothing for a run that waits for no one", () => {
+    const m = press(withCard(), "enter");
+    expect(update(m, "a", SIZE).confirm).toBeNull();
+    expect(update(m, "r", SIZE).confirm).toBeNull();
+  });
+
+  test("a click on a tab name opens that tab, by the tabs this card has", () => {
+    const m = { ...withCard(), mouse: true };
+    const lines = plain(render(m, SIZE));
+    const y =
+      lines.findIndex((l) => l.includes("Steps") && l.includes("Code") && l.includes("Log")) + 1;
+    const x = (lines[y - 1] ?? "").indexOf("Log") + 2;
+    expect(hitTest(m, SIZE, x, y)).toEqual({ kind: "tab", index: 4 });
+    const next = mouseUpdate(m, SIZE, { type: "mouse", action: "press", x, y });
+    expect([next.tab, next.focus]).toEqual([4, "card"]);
+  });
+
+  test("another run's tab is not left over: a run that has no such tab starts on its first", () => {
+    const gate = demoSessions(NOW).sessions.find((s) => s.need === "approve") as Session;
+    const both = withDetail(
+      withDetail(
+        { ...demo(), selected: going().id, tab: 0 },
+        detailKey(gate),
+        demoGateDetail(gate.id, NOW) as GateDetail,
+      ),
+      detailKey(going()),
+      detail(),
+    );
+    // Report is tab 0 at a gate, and does not exist here
+    expect(strip(press(both, "enter"))).toContain("Steps");
+    expect(press(both, "enter").tab).toBe(2);
+    expect(press(both, "enter", "left").focus).toBe("list");
+  });
+
+  test("until the card is read it shows what there is, and says it is reading", () => {
+    const out = text({ ...demo(), selected: going().id });
+    expect(out).toContain("Reading the details…");
+    expect(out).not.toContain("╭");
+  });
+
+  test("every line fits the width, in every tab, wide, zoomed and narrow", () => {
+    for (const size of [
+      SIZE,
+      { cols: 70, rows: 36 },
+      { cols: 41, rows: 20 },
+      { cols: 120, rows: 16 },
+    ]) {
+      for (const zoom of [false, true]) {
+        for (const tab of [1, 2, 4]) {
+          for (const open of [false, true]) {
+            for (const sub of [0, 1, 2]) {
+              const m = {
+                ...withCard(),
+                focus: "card" as const,
+                zoom: zoom && size.cols >= WIDE_COLS,
+                tab,
+                open,
+                sub,
+              };
+              for (const line of render(m, size)) expect(visibleLength(line)).toBe(size.cols);
+            }
+          }
+        }
+      }
+    }
+  });
+});
+
+describe("tui durations", () => {
+  test("a time is told in the unit that fits, and a rounded second never makes a minute of sixty", () => {
+    expect(duration(250)).toBe("250ms");
+    expect(duration(1631)).toBe("1.6s");
+    expect(duration(59_000)).toBe("59.0s");
+    expect(duration(85_684)).toBe("1m26");
+    expect(duration(29 * 60_000 + 59_700)).toBe("30m00");
+    expect(duration(59_960)).toBe("1m00");
+    expect(duration(59 * 60_000 + 59_600)).toBe("1h00");
+    expect(duration(3_600_000)).toBe("1h00");
+    expect(duration(1344 * 60_000)).toBe("22h");
+    expect(duration(3 * 24 * 3_600_000)).toBe("3d");
   });
 });

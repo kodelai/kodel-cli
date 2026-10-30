@@ -482,6 +482,7 @@ export function demoGateDetail(runId: string, now: number = Date.now()): GateDet
   ];
   const journal = visits.flatMap((v) => v.attempt.log);
   return {
+    kind: "gate",
     node: "final-approval",
     attempt: 1,
     position: "gate 2 of 2",
@@ -522,5 +523,139 @@ export function demoGateDetail(runId: string, now: number = Date.now()): GateDet
       tokens: { total: 412_000, approx: false },
     },
     journal,
+  };
+}
+
+/** What the card of a sample run that is going on shows: the steps so far, one of them still at work. */
+export function demoRunningDetail(runId: string, now: number = Date.now()): GateDetail | undefined {
+  if (runId !== "r_1kd9q22vb") return undefined;
+  const at = (minutes: number) => now - Math.round(minutes * 60_000);
+  const check = (node: string, label: string, ms: number, passed = true) => ({
+    node,
+    label,
+    passed,
+    ms,
+  });
+  const timed = (a: Attempt, from: number, to: number | null): Attempt => ({
+    ...a,
+    from: at(from),
+    ...(to === null ? {} : { to: at(to) }),
+  });
+  const visits: Visit[] = [
+    visit(
+      "plan",
+      "agent",
+      "done",
+      timed(
+        attempt(1, {
+          ms: 3 * 60_000,
+          checks: [check("plan", "plan diff", 120)],
+          log: ["14:02:11 node_entered       plan", "14:05:10 check_finished     plan diff"],
+        }),
+        9,
+        6,
+      ),
+    ),
+    visit(
+      "implement",
+      "agent",
+      "failed",
+      timed(
+        attempt(1, {
+          outcome: "failed",
+          ok: false,
+          ms: 2 * 60_000,
+          reason: "The test check failed: t40_wait_timeout_reports",
+          checks: [check("implement", "implement test", 1900, false)],
+          log: [
+            "14:05:11 node_entered       implement",
+            "14:07:02 check_finished     implement test failed",
+          ],
+        }),
+        6,
+        4,
+      ),
+    ),
+    visit(
+      "implement",
+      "agent",
+      "done",
+      timed(
+        attempt(2, {
+          ms: 2 * 60_000,
+          summary:
+            "Counted the timeout from the last answer of the server, not from the start of the process.",
+          checks: [check("implement", "implement test", 2100)],
+          log: [
+            "14:07:03 node_entered       implement",
+            "14:09:00 check_finished     implement test",
+          ],
+        }),
+        4,
+        2,
+      ),
+      true,
+    ),
+    visit("checks", "command", "running", {
+      n: 1,
+      checks: [],
+      ms: 2 * 60_000,
+      from: at(2),
+      log: ["14:09:01 node_entered       checks"],
+    }),
+  ];
+  const call = (minutes: number, tool: string, text: string, ok = true): LogEntry => ({
+    ts: at(minutes),
+    kind: "call",
+    tool,
+    text,
+    result: { ok, ms: 35, size: 1536 },
+  });
+  const agentLog: LogEntry[] = [
+    { ts: at(8.8), kind: "text", text: "I will read the wait command first and write the plan." },
+    call(8.5, "Read", "packages/cli/src/wait.ts"),
+    { ts: at(5.9), kind: "text", text: "Plan done: count the timeout from the last answer." },
+    call(5.2, "Edit", "packages/cli/src/wait.ts"),
+    call(4.6, "Bash", "bun test wait", false),
+    {
+      ts: at(3.9),
+      kind: "text",
+      text: "A test caught it: the timeout was still counted from the start.",
+    },
+    call(3.0, "Edit", "packages/cli/src/wait.ts"),
+    call(2.4, "Bash", "bun test wait"),
+  ];
+  return {
+    kind: "running",
+    node: "checks",
+    attempt: 1,
+    position: "step 3 of 4",
+    prompt: "",
+    visits,
+    checks: [check("plan", "plan diff", 120), check("implement", "implement test", 2100)],
+    changes: {
+      kind: "files",
+      files: [
+        ["packages/cli/src/wait.ts", 34],
+        ["packages/cli/test/wait.test.ts", 21],
+        ["docs/plans/fix-wait-timeout.md", 18],
+      ],
+      totalFiles: 3,
+      totalLines: 73,
+    },
+    changedAfterChecks: [],
+    comments: [],
+    metrics: {
+      workMs: 9 * 60_000,
+      waitMs: 0,
+      stepsDone: 2,
+      stepsTotal: 3,
+      retries: 1,
+      checksPassed: 2,
+      checksTotal: 2,
+      tokens: { total: 61_000, approx: false },
+    },
+    agentLog,
+    journal: visits.flatMap((v) => v.attempt.log),
   };
 }

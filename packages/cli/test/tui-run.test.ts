@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { stripAnsi } from "../src/tui/ansi";
-import { demoGateDetail, demoSessions } from "../src/tui/demo";
+import { demoGateDetail, demoRunningDetail, demoSessions } from "../src/tui/demo";
 import { MOUSE_OFF, MOUSE_ON } from "../src/tui/input";
 import { runTui } from "../src/tui/run";
 
@@ -40,7 +40,7 @@ function terminal(cols = 120, rows = 32) {
 const start = (t: ReturnType<typeof terminal>, mouse = false) =>
   runTui(t.stdin, t.stdout, async () => demoSessions(BASE), "demo", {
     mouse,
-    loadDetail: async (id) => demoGateDetail(id, BASE),
+    loadDetail: async (id) => demoGateDetail(id, BASE) ?? demoRunningDetail(id, BASE),
   });
 
 describe("tui loop", () => {
@@ -130,6 +130,20 @@ describe("tui loop", () => {
     const mark = t.mark();
     t.type(`\u001b[<0;${x};${y}M`);
     expect(t.since(mark)).toContain("entries into steps");
+    t.type("q");
+    await done;
+  });
+
+  test("a run that is going on has its card read when it is selected", async () => {
+    const t = terminal();
+    const done = start(t);
+    await wait(60);
+    // four runs wait before the running ones, the newest of which is the first of them
+    t.type("\u001b[B\u001b[B\u001b[B\u001b[B\u001b[B");
+    await wait(120);
+    const out = t.since();
+    expect(out).toContain("running · checks · step 3 of 4");
+    expect(out).toMatch(/Steps 4\]?\s+Code 3\s+Log 8/);
     t.type("q");
     await done;
   });

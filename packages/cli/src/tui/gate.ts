@@ -66,7 +66,11 @@ interface Open extends Omit<Attempt, "log"> {
   records: JournalRecord[];
 }
 
-export async function loadGateDetail(
+/**
+ * What the card shows for a run: the one waiting at a human step, or the one that is going on. A run
+ * that is paused, or waits for a change of its pipeline, has no card of this kind.
+ */
+export async function loadRunDetail(
   source: GateSource,
   runId: string,
   now: number = Date.now(),
@@ -74,32 +78,57 @@ export async function loadGateDetail(
   const run = await source.open(runId);
   if (!run) return undefined;
   const [state, journal, next] = await Promise.all([run.state(), run.journal(), run.inspect()]);
-  if (!("waiting" in next) || next.waiting.reason !== "gate") return undefined;
-  const waiting = next.waiting;
-  const node = waiting.node_slug;
+  if ("waiting" in next) {
+    if (next.waiting.reason !== "gate") return undefined;
+    return build(run, state, journal, now, next.waiting);
+  }
+  return state.status === "running" ? build(run, state, journal, now, undefined) : undefined;
+}
+
+export const loadGateDetail = loadRunDetail;
+
+type Waiting = Extract<NextStep, { waiting: unknown }>["waiting"];
+
+async function build(
+  run: GateRun,
+  state: RunState,
+  journal: JournalRecord[],
+  now: number,
+  waiting: Waiting | undefined,
+): Promise<GateDetail> {
   const spec = await run.currentSpec(state);
-  const gate = state.active.find((v) => v.node === node && v.phase === "human");
-  const attempt = gate?.attempt ?? 1;
+  const active = state.active[0];
+  const node =
+    waiting?.node_slug ??
+    active?.node ??
+    String(journal.findLast((r) => r.event === "node_entered")?.node ?? "");
+  const gate = waiting
+    ? state.active.find((v) => v.node === node && v.phase === "human")
+    : undefined;
+  const attempt = gate?.attempt ?? active?.attempt ?? 1;
   const since = journal.findLast((r) => r.event === "gate_waiting" && r.node === node)?.ts;
 
   const [changed, afterGate, comments, reports, said, tokens, spoken] = await Promise.all([
     run.changesSinceStart().catch((e: unknown) => unavailable(e)),
-    run.changesSinceGate(node).catch((e: unknown) => unavailable(e)),
+    waiting
+      ? run.changesSinceGate(node).catch((e: unknown) => unavailable(e))
+      : { kind: "changes" as const, files: {} },
     gate ? run.resultsOf(node, attempt).catch(() => undefined) : undefined,
     readReports(run, journal),
-    run.agentReport?.(since ?? state.startedAt).catch(() => undefined),
+    waiting ? run.agentReport?.(since ?? state.startedAt).catch(() => undefined) : undefined,
     run.agentTokens?.().catch(() => undefined),
     run.agentLog?.().catch(() => undefined),
   ]);
-  const visits = visitsOf(spec, journal, reports, node, attempt, now);
+  const visits = visitsOf(spec, journal, reports, node, gate ? attempt : undefined, now);
   const metrics = metricsOf(visits, state, now, tokens);
   return {
+    kind: waiting ? "gate" : "running",
     node,
     attempt,
-    position: positionOf(visits, node),
-    prompt: waiting.prompt,
-    ...(waiting.instructions ? { instructions: waiting.instructions } : {}),
-    ...wordsOf(said, visits),
+    position: positionOf(visits, node, waiting !== undefined),
+    prompt: waiting?.prompt ?? "",
+    ...(waiting?.instructions ? { instructions: waiting.instructions } : {}),
+    ...(waiting ? wordsOf(said, visits) : {}),
     visits,
     checks: latestChecks(visits),
     changes: summarize(changed),
@@ -171,8 +200,9 @@ function visitsOf(
   spec: PipelineSpec,
   journal: JournalRecord[],
   reports: Map<string, Report>,
-  gate: string,
-  gateAttempt: number,
+  start: string,
+  /** The try of a human step the run waits at; nothing for a run that is going on. */
+  waitingAt: number | undefined,
   now: number,
 ): Visit[] {
   const tries = new Map<string, Open>();
@@ -195,7 +225,8 @@ function visitsOf(
         current.set(r.node, n);
         a.enteredAt = r.ts;
         a.from = r.ts;
-        order.push({ slug: r.node, n, rework: r.rework === true });
+        // The engine marks a re-entry only inside a visit; a step entered again by an edge has a later try.
+        order.push({ slug: r.node, n, rework: r.rework === true || n > 1 });
         break;
       case "agent_completed":
         if (typeof r.summary === "string" && r.summary !== "") a.summary = r.summary;
@@ -252,7 +283,8 @@ function visitsOf(
     const report = reports.get(keyOf(slug, n));
     const attempt = finish(open);
     const withReport = report ? { ...attempt, review: report } : attempt;
-    const waiting = slug === gate && n === gateAttempt && attempt.ok === undefined;
+    const waiting =
+      waitingAt !== undefined && slug === start && n === waitingAt && attempt.ok === undefined;
     const st: StepState =
       attempt.ok === true
         ? "done"
@@ -272,7 +304,7 @@ function visitsOf(
   });
   // Then where the usual outcomes lead from the gate, not yet entered.
   const seen = new Set(order.map((o) => o.slug));
-  let at = gate;
+  let at = start;
   for (let i = 0; i < LOOKAHEAD; i++) {
     const edge = spec.edges.find((e) => e.from === at && USUAL.includes(e.when));
     if (!edge || seen.has(edge.to)) break;
@@ -290,7 +322,11 @@ function visitsOf(
   return visits;
 }
 
-function positionOf(visits: Visit[], node: string): string {
+function positionOf(visits: Visit[], node: string, atGate: boolean): string {
+  if (!atGate) {
+    const steps = [...new Set(visits.map((v) => v.slug))];
+    return `step ${steps.indexOf(node) + 1} of ${steps.length}`;
+  }
   const gates = [...new Set(visits.filter((v) => v.human).map((v) => v.slug))];
   return `gate ${gates.indexOf(node) + 1} of ${gates.length}`;
 }

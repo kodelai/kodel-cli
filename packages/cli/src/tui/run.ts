@@ -21,6 +21,8 @@ import {
 
 const FRAME_MS = 100;
 const REFRESH_MS = 2000;
+/** How often the card of a run that is going on is read again. */
+const DETAIL_REFRESH_MS = 4000;
 
 export interface TuiOptions {
   /** Start with mouse events on; `m` turns them on and off while the screen is open. */
@@ -46,15 +48,21 @@ export async function runTui(
   let mouseSent = false;
 
   const size = () => ({ cols: stdout.columns ?? 80, rows: stdout.rows ?? 24 });
-  // The card of a run at a human step is read when the run is selected (it asks git), once per
-  // wait and run at a time; a failed read is not retried until the selection moves.
+  // The card of a run at a human step, or of one that is going on, is read when the run is selected
+  // (it asks git), one at a time. A run that is going on is read again from time to time, since it
+  // changes under the person's eyes; a failed read is not retried until the selection moves.
   const reading = new Set<string>();
+  const readAt = new Map<string, number>();
   const ensureDetail = (again = false) => {
     const wanted = model.sessions.find((x) => x.id === model.selected);
-    if (!options.loadDetail || wanted?.need !== "approve") return;
+    if (!options.loadDetail || !wanted) return;
+    if (wanted.need !== "approve" && wanted.status !== "running") return;
     const key = detailKey(wanted);
-    if (reading.has(key) || (!again && key in model.details)) return;
+    const stale =
+      wanted.status === "running" && Date.now() - (readAt.get(key) ?? 0) > DETAIL_REFRESH_MS;
+    if (reading.has(key) || (!again && !stale && key in model.details)) return;
     reading.add(key);
+    readAt.set(key, Date.now());
     options
       .loadDetail(wanted.id)
       .then((detail) => {
