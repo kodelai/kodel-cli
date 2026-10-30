@@ -16,6 +16,21 @@ import { firstCode, moveCode, moveHunk, type Prepared, placeOf, prepare } from "
 import type { InputEvent } from "./input";
 import type { Loaded } from "./load";
 import {
+  emptyPipes,
+  entryOf,
+  initialPipeState,
+  type PipeEntry,
+  type PipeState,
+  pipeCard,
+  pipeHead,
+  pipeHints,
+  pipeKey,
+  pipeList,
+  sortEntries,
+  waitingEntries,
+  withEntries,
+} from "./pipelines";
+import {
   type Comment,
   type DiffState,
   formatAge,
@@ -53,6 +68,9 @@ export interface Model {
   sessions: Session[];
   /** Pipelines the agent proposed outside a run; they wait on the Pipeline screen. */
   proposals: number;
+  /** What the Pipeline screen shows, and where it is. */
+  pipelines: PipeEntry[];
+  pipe: PipeState;
   /** Id of the selected session, so the selection follows it when the list reorders. */
   selected: string;
   /** On a narrow terminal the list and the card take turns. */
@@ -146,6 +164,8 @@ export function initialModel(
     section: 0,
     sessions: ordered(loaded.sessions),
     proposals: loaded.proposals,
+    pipelines: sortEntries(loaded.pipelines ?? []),
+    pipe: initialPipeState(sortEntries(loaded.pipelines ?? [])),
     selected: ordered(loaded.sessions)[0]?.id ?? "",
     focus: "list",
     confirm: null,
@@ -190,7 +210,17 @@ export function withData(m: Model, loaded: Loaded, now: number): Model {
   const confirm = sessions.some((s) => s.id === m.selected && s.need !== undefined)
     ? m.confirm
     : null;
-  return { ...m, sessions, proposals: loaded.proposals, selected, confirm, now };
+  const pipelines = sortEntries(loaded.pipelines ?? []);
+  return {
+    ...m,
+    sessions,
+    proposals: loaded.proposals,
+    pipelines,
+    pipe: withEntries(m.pipe, pipelines),
+    selected,
+    confirm,
+    now,
+  };
 }
 
 export function tick(m: Model, now: number): Model {
@@ -220,6 +250,7 @@ export function update(input: Model, key: string, size: Size = DEFAULT_SIZE): Mo
     if (key === "y") return decide(m, current, m.confirm);
     return { ...m, confirm: null, notice: "Cancelled." };
   }
+  if (m.section === 1 && !SHARED_KEYS.has(key)) return pipesUpdate(m, key, size);
   if (m.focus === "card" && m.section === 0) {
     const moved = cardKey(m, key, size);
     if (moved) return moved;
@@ -247,6 +278,11 @@ export function update(input: Model, key: string, size: Size = DEFAULT_SIZE): Mo
     case "b":
       return scrollCard(m, size, -PAGE);
     case "z":
+      if (m.section === 1) {
+        return m.pipelines.length === 0
+          ? m
+          : { ...m, zoom: !m.zoom, focus: m.zoom ? m.focus : "card" };
+      }
       if (m.section !== 0 || m.sessions.length === 0) return m;
       return { ...m, zoom: !m.zoom, focus: m.zoom ? m.focus : "card" };
     case "m":
@@ -275,6 +311,42 @@ export function update(input: Model, key: string, size: Size = DEFAULT_SIZE): Mo
     default:
       return m;
   }
+}
+
+/** The keys every screen reads the same way. */
+const SHARED_KEYS = new Set(["q", "tab", "1", "2", "3", "4", "m", "z"]);
+
+/** A key on the Pipeline screen. */
+function pipesUpdate(m: Model, key: string, size: Size): Model {
+  const layout = layoutOf(m, size.cols);
+  const entry = entryOf(m.pipelines, m.pipe);
+  const head = entry ? pipeHead(entry, m.pipe, layout.cardWidth, true).length : 0;
+  const r = pipeKey(m.pipe, key, {
+    entries: m.pipelines,
+    sessions: m.sessions,
+    focus: m.focus,
+    source: m.source,
+    width: layout.cardWidth,
+    room: Math.max(1, size.rows - 3 - head),
+  });
+  if (!r) return key === "escape" ? { ...m, zoom: false } : m;
+  let next: Model = { ...m, pipe: r.p, notice: r.notice ?? "" };
+  if (r.focus) next = { ...next, focus: r.focus, zoom: r.focus === "list" ? false : next.zoom };
+  if (r.open) {
+    next = {
+      ...next,
+      section: 0,
+      selected: r.open,
+      focus: "card",
+      zoom: false,
+      cardScroll: 0,
+      tab: 0,
+      cursor: 0,
+      open: false,
+      sub: 0,
+    };
+  }
+  return next;
 }
 
 /** Where a comment lands in the middle of being typed. */
@@ -815,7 +887,40 @@ const MENU_BRAND = " kodel ";
 
 function menuCount(m: Model, i: number): number {
   if (i === 0) return m.sessions.filter((s) => s.status === "waiting").length;
-  return i === 1 ? m.proposals : 0;
+  if (i !== 1) return 0;
+  return m.pipelines.length > 0 ? waitingEntries(m.pipelines) : m.proposals;
+}
+
+/** The list and the card side by side, or whichever one has the room. */
+function panes(
+  m: Model,
+  layout: Layout,
+  left: string[],
+  right: string[],
+  height: number,
+): string[] {
+  if (layout.showList && layout.showCard) {
+    const divider = m.focus === "card" ? cyan("┃") : dim("│");
+    return Array.from({ length: height }, (_, i) => {
+      const l = fit(left[i] ?? "", layout.listWidth);
+      const r = fit(right[i] ?? "", layout.cardWidth);
+      return `${l} ${divider} ${r}`;
+    });
+  }
+  return (layout.showCard ? right : left).map((l) => ` ${l}`);
+}
+
+function pipesBody(m: Model, cols: number, height: number): string[] {
+  const entry = entryOf(m.pipelines, m.pipe);
+  if (!entry) return emptyPipes();
+  const layout = layoutOf(m, cols);
+  const left = layout.showList
+    ? pipeList(m.pipelines, m.pipe, m.sessions, layout.listWidth, height, m.focus === "list")
+    : [];
+  const right = layout.showCard
+    ? pipeCard(entry, m.pipe, m.sessions, layout.cardWidth, height, m.focus === "card")
+    : [];
+  return panes(m, layout, left, right, height);
 }
 
 function menuLine(m: Model, cols: number): string {
@@ -832,6 +937,7 @@ function menuLine(m: Model, cols: number): string {
 }
 
 function hints(m: Model): string {
+  if (m.section === 1) return pipeHints(entryOf(m.pipelines, m.pipe), m.pipe, m.focus === "card");
   const current = selectedSession(m);
   if (m.confirm === "d")
     return `${bold("Delete this comment?")}  ${bold("y")} yes   ${bold("n")} no`;
@@ -899,12 +1005,14 @@ export function render(model: Model, { cols, rows }: Size): string[] {
   const out: string[] = [menuLine(m, cols), rule];
 
   let body: string[];
-  if (m.section !== 0) {
+  if (m.section >= 2) {
     body = [
       "",
       `  ${bold(SECTIONS[m.section] ?? "")}`,
       dim("  Not in this prototype yet. The layout under test is menu, session list and card."),
     ];
+  } else if (m.section === 1) {
+    body = pipesBody(m, cols, bodyHeight);
   } else if (m.sessions.length === 0) {
     body = emptyState();
   } else {
@@ -913,18 +1021,7 @@ export function render(model: Model, { cols, rows }: Size): string[] {
       ? panelLines(m, panel(m, layout.cardWidth, bodyHeight), layout.cardWidth, bodyHeight)
       : [];
     const left = layout.showList ? listView(m, layout.listWidth, bodyHeight).lines : [];
-    if (layout.showList && layout.showCard) {
-      const divider = m.focus === "card" ? cyan("┃") : dim("│");
-      body = Array.from({ length: bodyHeight }, (_, i) => {
-        const l = fit(left[i] ?? "", layout.listWidth);
-        const r = fit(right[i] ?? "", layout.cardWidth);
-        return `${l} ${divider} ${r}`;
-      });
-    } else if (layout.showCard) {
-      body = right.map((l) => ` ${l}`);
-    } else {
-      body = left.map((l) => ` ${l}`);
-    }
+    body = panes(m, layout, left, right, bodyHeight);
   }
   for (let i = 0; i < bodyHeight; i++) out.push(fit(body[i] ?? "", cols));
 

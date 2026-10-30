@@ -191,7 +191,8 @@ describe("tui sessions list", () => {
 
   test("proposals show on the menu and as a hint, not as a row", () => {
     const m = demo();
-    expect(screen(m)).toContain("2 Pipeline 1");
+    // The proposal and the change of a run's pipeline both wait for a person.
+    expect(screen(m)).toContain("2 Pipeline 2");
     expect(screen(m)).toContain("1 pipeline proposal wait on 2");
     expect(m.sessions.some((s) => s.title.includes("release"))).toBe(false);
   });

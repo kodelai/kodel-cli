@@ -6,6 +6,8 @@ import {
   type RunState,
   runSlug,
 } from "@kodel-ai/pipeline-core";
+import type { PipeEntry } from "./pipelines";
+import { canReadPipelines, loadPipelines } from "./pipes-load";
 import {
   type Activity,
   formatAge,
@@ -48,6 +50,8 @@ export interface Loaded {
   sessions: Session[];
   /** Pipelines the agent proposed outside a run, which wait for a person. */
   proposals: number;
+  /** What the Pipeline screen shows; a source that cannot say gives none. */
+  pipelines?: PipeEntry[];
 }
 
 const PAUSE_TEXT = {
@@ -72,7 +76,10 @@ export async function loadSessions(source: SessionSource, now: number): Promise<
     source.pipelineProposals().catch(() => []),
   ]);
   const sessions = await Promise.all(summaries.map((s) => buildSession(source, s, now)));
-  return { sessions, proposals: proposals.length };
+  const pipelines = canReadPipelines(source)
+    ? await loadPipelines(source, sessions).catch(() => [])
+    : [];
+  return { sessions, proposals: proposals.length, pipelines };
 }
 
 type Summary = Awaited<ReturnType<SessionSource["runSummaries"]>>[number];

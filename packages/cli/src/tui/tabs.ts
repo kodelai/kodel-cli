@@ -316,7 +316,7 @@ function tabText(d: GateDetail, i: number): { text: string; styled: string } {
 }
 
 /** A row of names; the active one stands out. Spans are where each name is (columns from 0), for a click. */
-function strip(
+export function strip(
   names: { text: string; styled: string }[],
   active: number,
   width: number,

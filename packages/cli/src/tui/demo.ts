@@ -1,4 +1,5 @@
 /** Sample sessions for `kodel tui --demo`. Nothing here is read from a project. */
+import { demoPipelines } from "./demo-pipelines";
 import type { Loaded } from "./load";
 import type {
   Attempt,
@@ -196,7 +197,7 @@ export function demoSessions(now: number): Loaded {
       log: [],
     },
   ];
-  return { sessions, proposals: 1 };
+  return { sessions, proposals: 1, pipelines: demoPipelines(sessions) };
 }
 
 const attempt = (n: number, over: Partial<Attempt> = {}): Attempt => ({
