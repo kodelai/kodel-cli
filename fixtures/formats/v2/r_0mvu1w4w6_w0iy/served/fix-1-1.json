@@ -1,0 +1,17 @@
+{
+  "v": 1,
+  "node": "fix",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "c805dc1e8bde91e2ad75a6291f85b340ad3c7e8f8aaa3200a62574c981412a13",
+  "answer": {
+    "slug": "fix",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "Verify and test ran at the same time on your change. If a branch failed, the feedback names it\nand says why: fix the cause, then finish with the outcome restart_failed so that only the failed\nsteps run again. If both passed, finish normally.\n",
+    "outcomes": [
+      "restart_failed"
+    ],
+    "workdir": "[REDACTED:high-entropy].kodel/worktrees/r_0mvu1w4w6_w0iy"
+  }
+}

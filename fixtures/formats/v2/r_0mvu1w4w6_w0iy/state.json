@@ -1,0 +1,154 @@
+{
+  "v": 2,
+  "runId": "r_0mvu1w4w6_w0iy",
+  "task": "add a farewell function and its test",
+  "specHash": "213970e8ca8ad327",
+  "status": "completed",
+  "startedAt": 1793309026811,
+  "nodes": {
+    "impl": {
+      "slug": "impl",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 1
+    },
+    "verify": {
+      "slug": "verify",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 2,
+      "fork": {
+        "id": "f1",
+        "branch": "verify"
+      }
+    },
+    "test": {
+      "slug": "test",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 2,
+      "consecutiveFailures": 0,
+      "extraAttempts": 1,
+      "visitId": 5,
+      "fork": {
+        "id": "f1",
+        "branch": "test"
+      }
+    },
+    "fix-test": {
+      "slug": "fix-test",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 4,
+      "fork": {
+        "id": "f1",
+        "branch": "test"
+      }
+    },
+    "fix": {
+      "slug": "fix",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 6,
+      "lastFailures": []
+    }
+  },
+  "active": [],
+  "trail": [
+    "impl",
+    "verify",
+    "test",
+    "fix-test",
+    "test",
+    "fix"
+  ],
+  "pauses": [],
+  "nextVisitId": 7,
+  "seq": 30,
+  "slug": "farewell-with-paused-branch",
+  "workdir": "/kodel-fixture/workdir/r_0mvu1w4w6_w0iy",
+  "pipelineFile": ".kodel/pipelines/fork-pause.yaml",
+  "history": {
+    "changes": {
+      "enabled": true,
+      "exclude": [],
+      "max_kb": 512
+    },
+    "output": {
+      "enabled": true,
+      "max_kb": 64
+    },
+    "prompts": {
+      "enabled": true
+    },
+    "executor": {
+      "enabled": true
+    },
+    "tool_log": {
+      "enabled": true
+    },
+    "agent_log": {
+      "enabled": false,
+      "mode": "full",
+      "preview_chars": {
+        "user": 4000,
+        "agent": 4000,
+        "tool_input": 4000,
+        "tool_result": 8000
+      },
+      "max_kb": 20480,
+      "interval_s": 10
+    }
+  },
+  "engineVersion": "0.1.0",
+  "served": {
+    "impl:1": [
+      "1fef2d302ec60b2a"
+    ],
+    "fix-test:1": [
+      "f6d2df2d414bfebf"
+    ],
+    "fix:1": [
+      "5477934118504c49"
+    ]
+  },
+  "servedEvents": 3,
+  "forks": {
+    "f1": {
+      "id": "f1",
+      "from": "impl",
+      "label": "passed",
+      "join": "fix",
+      "branches": [
+        "verify",
+        "test"
+      ],
+      "arrived": {
+        "verify": {
+          "node": "verify",
+          "label": "passed",
+          "seq": 14
+        },
+        "test": {
+          "node": "test",
+          "label": "passed",
+          "seq": 23
+        }
+      },
+      "joined": 1
+    }
+  },
+  "finishedAt": 1793309030245
+}

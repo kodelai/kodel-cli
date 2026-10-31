@@ -1,0 +1,10 @@
+{
+  "completeness": "complete",
+  "rows": [
+    {
+      "severity": "minor",
+      "location": "docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md:3",
+      "description": "[scope] the TL;DR does not say what the flag costs"
+    }
+  ]
+}

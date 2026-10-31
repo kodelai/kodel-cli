@@ -1,0 +1,39 @@
+{
+  "v": 1,
+  "node": "review",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "8a5e3ba6b8b357be58f47e11d1448b24fea8a0860158b96e0aa18d20a9b9456e",
+  "answer": {
+    "slug": "review",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "Review the changes against the plan in docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md and against AGENTS.md.\nReport every problem as a finding.\n\n\nWhen you are done, send your findings with pipeline_report_result as a complete list for this attempt: one row per finding with the columns severity (one of blocker, critical, major, minor, info), location (location), description (text). If you found nothing, send an empty list.",
+    "result_spec": {
+      "columns": {
+        "severity": {
+          "enum": [
+            "blocker",
+            "critical",
+            "major",
+            "minor",
+            "info"
+          ]
+        },
+        "location": "location",
+        "description": "text"
+      },
+      "fail_when": {
+        "severity": [
+          "blocker",
+          "critical",
+          "major"
+        ]
+      }
+    },
+    "execution": {
+      "instruction": "Do this step in a fresh context: give it to a subagent (or a new session) that sees only this step's prompt and the repository, not your earlier reasoning, so it is an independent look. Take what it finds as it is and send that; do not change it to agree with your own work."
+    },
+    "workdir": "[REDACTED:high-entropy].kodel/worktrees/r_0mvu1vxry_4ggv"
+  }
+}

@@ -299,7 +299,8 @@ describe("limits, pause and resume", () => {
     h.send(START);
     h.send(approve("plan-approval"));
     expect(h.state.status).toBe("paused");
-    expect(h.state.pause).toMatchObject({
+    expect(h.state.pauses).toHaveLength(1);
+    expect(h.state.pauses[0]).toMatchObject({
       reason: "consecutive",
       node: "build",
       blocked: { from: "build", label: "failed", to: "impl" },
@@ -380,7 +381,7 @@ describe("limits, pause and resume", () => {
     expect(h.state.nodes.impl?.attempt).toBe(10);
     h.send(reject("manual-test", "round 10"));
     expect(h.state.status).toBe("paused");
-    expect(h.state.pause).toMatchObject({ reason: "total", node: "impl" });
+    expect(h.state.pauses[0]).toMatchObject({ reason: "total", node: "impl" });
     h.send({ type: "resume" });
     expect(h.state.status).toBe("running");
     expect(h.state.nodes.impl?.attempt).toBe(11);
@@ -469,7 +470,7 @@ describe("interrupted engine work", () => {
       h.send({ type: "tick" });
     }
     expect(h.state.status).toBe("paused");
-    expect(h.state.pause?.reason).toBe("restarts");
+    expect(h.state.pauses[0]?.reason).toBe("restarts");
     expect(h.journal.filter((j) => j.event === "node_restarted")).toHaveLength(3);
     expect(h.state.nodes.build?.attempt).toBe(1);
     const before = h.effects.length;
@@ -529,7 +530,7 @@ describe("finishing", () => {
     h.send(approve("plan-approval"));
     h.send(approve("manual-test"));
     expect(h.journal.map((j) => j.seq)).toEqual(h.journal.map((_, i) => i + 1));
-    expect(h.journal.every((j) => j.v === 1)).toBe(true);
+    expect(h.journal.every((j) => j.v === 2)).toBe(true);
   });
 });
 

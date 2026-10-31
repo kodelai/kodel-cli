@@ -66,6 +66,8 @@ Each line is a limit and names the test that pins it (`policy`: it cannot be tes
 | Files matched by `history.changes.exclude`; `!pattern` means "every path but that one" | `t36tw_exclude_*`, `t36tw_limit_negated_glob_means_everything_but` |
 | Work between two hand-ins (a check, a command, a person) is in the next agent patch and in `run.patch`; an attempt that never hands in has no file | `t36tw_limit_parallel_double_counting_and_untouched_work_between_hand_ins` |
 | Agent steps that are active at the same time share one tree, and the second hand-in repeats the first's work | `t36tw_limit_parallel_double_counting_and_untouched_work_between_hand_ins` (the case of work in between), the rest: policy |
+| In a fork (T-40) the branches share one tree, so the patches of hand-ins of open steps may overlap: the base of a patch is the tree of the hand-in just before it, whatever branch that was, and the record of the hand-in says so (`changes_note`); the back-off after two slow hand-ins is not applied while another branch is active | `t40_hand_in_backoff_not_applied_in_open_fork`, `t40_gate_note_when_other_branches_active`, the overlap itself: policy |
+| A run of run-state format 2 (forks) opened with `@kodel-ai/kodel@0.1.0-beta.0` is refused as written by a newer kodel; the beta cannot read a fork run and must not be used on one (nor on a config with an `agents:` block) | policy; `fixtures/formats/README.md` |
 | A redacted patch may not apply: a secret in a context line, a lockfile integrity string | `t36tw_limit_a_redacted_patch_does_not_apply` |
 | A secret that spans lines changes the line counts of its hunk | `t36tw_limit_multi_line_redaction_breaks_the_hunk` |
 | A cut patch may cut a key in the middle | `t36tw_limit_cut_pem` |
@@ -87,6 +89,18 @@ Each line is a limit and names the test that pins it (`policy`: it cannot be tes
 `git apply --check run.patch` on a clean checkout of `base_commit` is expected to pass for a run in its own
 worktree that changed only text and had nothing to redact (`t36tw_run_patch_applies_on_clean_base_checkout`).
 Whether it is the case for a real run of the pipeline is checked by a person at the final gate.
+
+## A result and the pipeline version it was made under
+
+Since forks (T-40) every attempt in progress (`Visit` in `state.json`) carries `spec`: the hash of the
+pipeline version its engine work (the command, or the current check) was issued under, set again each
+time work is issued. A `command_finished`/`check_finished` result names the version it ran against
+(`specHash`); the engine keeps it when it matches the version the visit was issued under, and drops it
+only when it does not. Before, a result was dropped as soon as the run's current version differed from
+the one it named, which lost the result of a sibling branch's command in flight when a person accepted a
+change that did not touch that branch. An accepted change that leaves a node as it is does not re-issue
+its work, so that work finishes on the version it started on. `Visit.spec` is optional: a state without
+it (an attempt entered before the field) is judged against the run's current version, as before.
 
 ## Where a patch is looked for
 

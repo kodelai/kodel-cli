@@ -1,0 +1,11 @@
+{
+  "v": 2,
+  "runId": "r_0mvu1vxry_4ggv",
+  "pipeline": "dev",
+  "task": "Add a --json flag to kodel status so that scripts can read the list of runs",
+  "slug": "add-a-json-flag-to-kodel-status-so-that",
+  "specHash": "18d2fb74eedc72de",
+  "createdAt": 1793309017534,
+  "workdir": "/kodel-fixture/workdir/r_0mvu1vxry_4ggv",
+  "branch": "kodel/r_0mvu1vxry_4ggv"
+}

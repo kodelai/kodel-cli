@@ -1,0 +1,220 @@
+{
+  "v": 2,
+  "runId": "r_0mvu1vxry_4ggv",
+  "task": "Add a --json flag to kodel status so that scripts can read the list of runs",
+  "specHash": "2c0aa557cd9dfad5",
+  "status": "completed",
+  "startedAt": 1793309017598,
+  "nodes": {
+    "plan": {
+      "slug": "plan",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 2,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 5
+    },
+    "plan-critique": {
+      "slug": "plan-critique",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 3,
+      "consecutiveFailures": 0,
+      "extraAttempts": 1,
+      "visitId": 6
+    },
+    "plan-revise": {
+      "slug": "plan-revise",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 2,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 7
+    },
+    "plan-approval": {
+      "slug": "plan-approval",
+      "status": "passed",
+      "outcome": "approved",
+      "attempt": 2,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 8
+    },
+    "confirm-nothing-to-do": {
+      "slug": "confirm-nothing-to-do",
+      "status": "pending",
+      "outcome": null,
+      "attempt": 0,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 0
+    },
+    "impl": {
+      "slug": "impl",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 9
+    },
+    "verify": {
+      "slug": "verify",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 10
+    },
+    "test": {
+      "slug": "test",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 11
+    },
+    "build": {
+      "slug": "build",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 12
+    },
+    "review": {
+      "slug": "review",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 13
+    },
+    "sync": {
+      "slug": "sync",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 14
+    },
+    "final-approval": {
+      "slug": "final-approval",
+      "status": "passed",
+      "outcome": "approved",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 15
+    },
+    "publish": {
+      "slug": "publish",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 16
+    }
+  },
+  "active": [],
+  "trail": [
+    "plan",
+    "plan-critique",
+    "plan-revise",
+    "plan-approval",
+    "plan",
+    "plan-critique",
+    "plan-revise",
+    "plan-approval",
+    "impl",
+    "verify",
+    "test",
+    "build",
+    "review",
+    "sync",
+    "final-approval",
+    "publish"
+  ],
+  "pauses": [],
+  "nextVisitId": 17,
+  "seq": 84,
+  "slug": "add-a-json-flag-to-kodel-status-so-that",
+  "workdir": "/kodel-fixture/workdir/r_0mvu1vxry_4ggv",
+  "pipelineFile": ".kodel/pipelines/dev.yaml",
+  "history": {
+    "changes": {
+      "enabled": true,
+      "exclude": [],
+      "max_kb": 512
+    },
+    "output": {
+      "enabled": true,
+      "max_kb": 64
+    },
+    "prompts": {
+      "enabled": true
+    },
+    "executor": {
+      "enabled": true
+    },
+    "tool_log": {
+      "enabled": true
+    },
+    "agent_log": {
+      "enabled": false,
+      "mode": "full",
+      "preview_chars": {
+        "user": 4000,
+        "agent": 4000,
+        "tool_input": 4000,
+        "tool_result": 8000
+      },
+      "max_kb": 20480,
+      "interval_s": 10
+    }
+  },
+  "engineVersion": "0.1.0",
+  "served": {
+    "plan:1": [
+      "d80ea7e72e70ef05"
+    ],
+    "plan-critique:1": [
+      "3c6b91727e5e6888"
+    ],
+    "plan-critique:2": [
+      "ee051211940f61e7"
+    ],
+    "plan-revise:1": [
+      "ff917190f8fbdda4"
+    ],
+    "plan:2": [
+      "ca23c0705af9b9b8"
+    ],
+    "plan-critique:3": [
+      "9f9b12e3ec4c00c0"
+    ],
+    "plan-revise:2": [
+      "1852225e2a799cf7"
+    ],
+    "impl:1": [
+      "046bf38b9f3aa178"
+    ],
+    "review:1": [
+      "fc3c18dc69952386"
+    ],
+    "publish:1": [
+      "8abc57195a2028c7"
+    ]
+  },
+  "servedEvents": 10,
+  "proposals": 1,
+  "finishedAt": 1793309022318
+}

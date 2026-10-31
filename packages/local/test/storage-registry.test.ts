@@ -69,6 +69,7 @@ const ROWS: Record<string, { touches: boolean; args: (runId: string) => Record<s
     pipeline_plan: { touches: false, args: () => ({ pipeline: "demo", task: "t" }) },
     pipeline_start: { touches: true, args: () => ({ pipeline: "demo", task: "another" }) },
     pipeline_next_step: { touches: true, args: (run_id) => ({ run_id }) },
+    pipeline_take_step: { touches: true, args: (run_id) => ({ run_id, node_slug: "write" }) },
     pipeline_report_result: {
       touches: true,
       args: (run_id) => ({

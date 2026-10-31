@@ -148,6 +148,15 @@ export function agentLogLine(report: RunReport["agent_log"]): string {
   return `agent log: ${parts.join(", ")} (unverified)`;
 }
 
+/** What a change of the pipeline did to the run, one entry per step it stood at: `restart impl, recheck b`. */
+export function formatEffects(
+  effects: { kind: string; node: string }[],
+  plain: (text: string) => string,
+): string {
+  if (effects.length === 0) return "nothing";
+  return effects.map((e) => `${plain(e.kind)} ${plain(e.node)}`).join(", ");
+}
+
 /** A known cost that is not zero never reads as `$0.0000`: below a hundredth of a cent it says so. */
 const dollars = (usd: number): string =>
   usd > 0 && usd < 0.0001 ? "< $0.0001" : `$${usd.toFixed(usd < 1 ? 4 : 2)}`;
@@ -242,8 +251,37 @@ export function formatReport(
   }
   lines.push(
     `total ${formatDuration(report.total_s)}: work ${formatDuration(report.work_s)}, ` +
-      `waiting for a person ${formatDuration(report.waiting_s)}`,
+      `waiting for a person ${formatDuration(report.waiting_s)}` +
+      (report.forks.length > 0 ? `, busy wall clock ${formatDuration(report.busy_wall_s)}` : ""),
   );
+  if (report.failed_branches) {
+    lines.push(
+      report.status === "completed"
+        ? "completed with failed branches: a join was entered after branches of a fork had failed"
+        : "branches of a fork failed before their join was entered",
+    );
+  }
+  for (const fork of report.forks) {
+    const path = report.critical_path.find((p) => p.fork === fork.fork);
+    const chain = path?.attempts.map((a) => `${plain(a.node)}#${a.attempt}`).join(" > ") ?? "";
+    lines.push(
+      `fork ${plain(fork.fork)} at ${plain(fork.from)} (${fork.branches.map(plain).join(", ")}) -> ${plain(fork.join)}` +
+        (fork.failed.length > 0 ? `; failed: ${fork.failed.map(plain).join(", ")}` : "") +
+        (fork.unfinished.length > 0
+          ? `; still going: ${fork.unfinished.map(plain).join(", ")}`
+          : ""),
+    );
+    if (path) {
+      lines.push(
+        `  critical path: branch ${plain(path.branch)} ${formatDuration(path.seconds)}${chain ? ` (${chain})` : ""}`,
+      );
+    }
+    for (const overlap of fork.overlaps) {
+      lines.push(
+        `  ${plain(overlap.branches[0])} and ${plain(overlap.branches[1])} ran together for ${formatDuration(overlap.seconds)}`,
+      );
+    }
+  }
   lines.push(
     `redone: ${report.extra_attempts} extra attempt(s); ${report.restarts} restart(s), ` +
       `${report.pauses} pause(s), ${report.feedback} note(s) from the agent, ` +
@@ -278,7 +316,7 @@ export function formatReport(
       );
       const how = change.source === "proposal" ? "the agent's proposal" : "a change in the file";
       lines.push(
-        `  ${when}  ${how}  ${steps.join(", ") || "no step differs"}  then: ${plain(change.effect)}` +
+        `  ${when}  ${how}  ${steps.join(", ") || "no step differs"}  then: ${formatEffects(change.effects, plain)}` +
           (change.by === "agent" ? "  (accepted by the agent on the person's instruction)" : "") +
           (change.reason ? `  (${plain(change.reason)})` : ""),
       );

@@ -100,7 +100,7 @@ describe("taking work over from a process that is gone, and from one that went s
       s.send(i * 1_000 + 500, { type: "tick", deadOwners: [`a:${i}`] });
     }
     expect(s.state.status).toBe("paused");
-    expect(s.state.pause?.reason).toBe("restarts");
+    expect(s.state.pauses[0]?.reason).toBe("restarts");
   });
 
   test("work that merely went silent still counts against the usual limit of restarts", () => {

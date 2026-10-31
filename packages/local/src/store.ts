@@ -45,6 +45,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { sha256 } from "./integrity";
 import { MAX_PATCH_KB, preparePatch } from "./patch-text";
+import { CONFIG_FILE } from "./project-locate";
 import { ensurePlace, StoragePathsError, type StoragePlace, scrubHome } from "./storage-paths";
 import { sameDir } from "./worktree";
 
@@ -173,6 +174,19 @@ export function artifactFileName(node: string): string {
 const SERVED_REF = /^served\/[a-z0-9][a-z0-9-]{0,62}-\d{1,6}-\d{1,6}\.json$/;
 
 const isMissing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
+
+/**
+ * A lock file that another process is creating, reading or deleting right now. POSIX says EEXIST
+ * (or the file is gone); Windows answers EPERM, EACCES or EBUSY for a file that is open or waiting
+ * to be deleted, which is the same situation and must be retried, not raised.
+ */
+const lockBusy = (error: unknown) => {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "EEXIST") return true;
+  return (
+    process.platform === "win32" && (code === "EPERM" || code === "EACCES" || code === "EBUSY")
+  );
+};
 
 /**
  * How the stored stream of a session is opened for writing: for reading and writing and not in append mode, because a
@@ -436,7 +450,10 @@ export class FileStore {
     return metas.sort((a, b) => a.createdAt - b.createdAt || a.runId.localeCompare(b.runId));
   }
 
-  /** The newest run of this pipeline and task, finished or not. */
+  /**
+   * The newest run of this pipeline and task, finished or not, among those this kodel reads: a run
+   * of a format it does not read is passed over (it cannot be reported on or carried on here).
+   */
   async findLatest(
     pipeline: string,
     task: string,
@@ -446,10 +463,38 @@ export class FileStore {
       (m) => m.pipeline === pipeline && m.task === redactedTask && !this.isForeign(m),
     );
     for (const meta of candidates.reverse()) {
-      const state = await this.readState(meta.runId);
+      let state: RunState | undefined;
+      try {
+        state = await this.readState(meta.runId);
+      } catch (error) {
+        if (error instanceof KodelError && error.code === "UNSUPPORTED_FORMAT") continue;
+        throw error;
+      }
       if (state) return { meta, state };
     }
     return undefined;
+  }
+
+  /** The `v` and `status` fields of a state file as they are, without reading it as a run; nothing when there is no file or no JSON. */
+  async peekState(runId: string): Promise<{ v?: number; status?: string } | undefined> {
+    let text: string;
+    try {
+      text = await readFile(join(this.runDir(runId), "state.json"), "utf8");
+    } catch (error) {
+      if (isMissing(error)) return undefined;
+      throw error;
+    }
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (typeof parsed !== "object" || parsed === null) return {};
+      const { v, status } = parsed as { v?: unknown; status?: unknown };
+      return {
+        ...(typeof v === "number" ? { v } : {}),
+        ...(typeof status === "string" ? { status } : {}),
+      };
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -644,7 +689,11 @@ export class FileStore {
     await this.writeAtomic(path, content, false);
   }
 
-  /** The newest run of this pipeline and task that has not finished. */
+  /**
+   * The newest run of this pipeline and task that has not finished. An open run of a format this
+   * kodel does not read is not passed over: it is refused with its format, so no second run for the
+   * same task is started beside it.
+   */
   async findActive(
     pipeline: string,
     task: string,
@@ -654,7 +703,21 @@ export class FileStore {
       (m) => m.pipeline === pipeline && m.task === redactedTask && !this.isForeign(m),
     );
     for (const meta of candidates.reverse()) {
-      const state = await this.readState(meta.runId);
+      let state: RunState | undefined;
+      try {
+        state = await this.readState(meta.runId);
+      } catch (error) {
+        if (!(error instanceof KodelError) || error.code !== "UNSUPPORTED_FORMAT") throw error;
+        const peek = await this.peekState(meta.runId);
+        if (peek?.status === "running" || peek?.status === "paused") {
+          throw new KodelError(
+            error.code,
+            // Left as it is, the run is passed over everywhere but here: a second run beside it is refused.
+            `${error.message}; left as it is, it still blocks a new run of this pipeline for this task: run ${meta.runId} must be finished before a new run starts for this task`,
+          );
+        }
+        continue;
+      }
       if (state && (state.status === "running" || state.status === "paused"))
         return { meta, state };
     }
@@ -676,22 +739,62 @@ export class FileStore {
       if (isMissing(error)) return undefined;
       throw error;
     }
-    let state: RunState;
+    let parsed: unknown;
     try {
-      state = JSON.parse(text) as RunState;
+      parsed = JSON.parse(text);
     } catch {
       throw new KodelError(
         "STATE_MODIFIED_EXTERNALLY",
         `the state of run ${runId} is not valid JSON; it was changed outside kodel`,
       );
     }
-    if (state.v > RECORD_VERSION) {
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new KodelError(
+        "STATE_MODIFIED_EXTERNALLY",
+        `the state of run ${runId} is not a JSON object; it was changed outside kodel`,
+      );
+    }
+    const state = parsed as RunState;
+    // The format comes first, before anything reads a field: this is the one place a run of another
+    // run-state format is refused, and it is refused as such, never as a modified state. "Run-state
+    // format" so it is not taken for the format of `meta.json`, which has its own number.
+    const v: unknown = state.v;
+    if (typeof v !== "number") {
+      throw new KodelError(
+        "STATE_MODIFIED_EXTERNALLY",
+        `the state of run ${runId} has no run-state format version; it was changed outside kodel`,
+      );
+    }
+    if (v > RECORD_VERSION) {
       throw new KodelError(
         "UNSUPPORTED_FORMAT",
-        `run ${runId} was written by a newer kodel (state format ${state.v}); upgrade kodel`,
+        `run ${runId} was written by a newer kodel (run-state format ${v}, this kodel reads ${RECORD_VERSION}); upgrade kodel`,
+      );
+    }
+    if (v < RECORD_VERSION) {
+      throw new KodelError(
+        "UNSUPPORTED_FORMAT",
+        `run ${runId} was written in run-state format ${v} by an older kodel (this kodel reads ${RECORD_VERSION}); finish it with the kodel that started it, or leave it as it is (lists and reports pass it over)${await this.olderKodelNote()}`,
       );
     }
     return { state, hash: sha256(text) };
+  }
+
+  /**
+   * What stands in the way of the older kodel the person is sent back to: it refuses a project config
+   * with an `agents:` block (forks), so the person is told to set it aside while they finish the run.
+   * Read from the file's text, not parsed: this is a note on a refusal, never a reason for one.
+   */
+  private async olderKodelNote(): Promise<string> {
+    let text: string;
+    try {
+      text = await readFile(join(this.options.root, CONFIG_FILE), "utf8");
+    } catch {
+      return "";
+    }
+    return /^agents:/m.test(text)
+      ? ` (that kodel refuses the project config while it has an \`agents:\` block: take the block out of ${CONFIG_FILE} while you do)`
+      : "";
   }
 
   /**
@@ -1011,7 +1114,7 @@ export class FileStore {
     try {
       text = await readFile(lockPath, "utf8");
     } catch (error) {
-      if (isMissing(error)) return undefined; // released meanwhile; the next try takes it
+      if (isMissing(error) || lockBusy(error)) return undefined; // released or changing meanwhile; the next try takes it
       throw error;
     }
     // Asked about the very lock that was judged before: a different one is somebody else's, taken
@@ -1047,7 +1150,7 @@ export class FileStore {
     try {
       guard = await open(guardPath, "wx");
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (!lockBusy(error)) throw error;
       const modified = await stat(guardPath).then(
         (s) => s.mtimeMs,
         () => this.clock(),
@@ -1102,7 +1205,7 @@ export class FileStore {
         if (!makeFolder && (error as NodeJS.ErrnoException).code === "ENOENT") {
           throw new KodelError("UNKNOWN_RUN", `there is no run "${name}"`);
         }
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        if (!lockBusy(error)) throw error;
         if (await this.takeOverAbandoned(lockPath, params.staleMs)) continue;
         if (this.clock() >= deadline) {
           throw new KodelError("STATE_LOCKED", `timed out waiting for the lock on ${name}`);

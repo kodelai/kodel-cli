@@ -59,6 +59,8 @@ interface Person {
   pollMs?: number;
   /** Called when `wait` is watching a run that waits. */
   onWatching?: () => void;
+  /** In place of `wait`'s pause between two looks. */
+  betweenLooks?: () => Promise<void>;
 }
 
 /** Run a command as a person at a terminal who says yes, unless told otherwise. */
@@ -78,6 +80,7 @@ async function cliAs(person: Person, ...args: string[]) {
     environment: person.environment ?? {},
     ...(person.pollMs === undefined ? {} : { pollMs: person.pollMs }),
     ...(person.onWatching === undefined ? {} : { onWatching: person.onWatching }),
+    ...(person.betweenLooks === undefined ? {} : { betweenLooks: person.betweenLooks }),
     select: async () => [],
     confirm: async (question) => {
       asked.push(question);
@@ -243,6 +246,41 @@ describe("pipeline changes", () => {
     expect((await journalOf(id)).some((r) => r.event === "pipeline_accepted")).toBe(false);
   });
 
+  test("t40_accept_refused_when_standing_visits_changed", async () => {
+    const id = await runAtGate();
+    await editPipeline();
+    let err = "";
+    // While the person reads, the gate is decided elsewhere: the run is back at `write`, and the
+    // change (the same text) was shown for another standing of the run.
+    const result = await runCli(["pipeline", "changes", "apply", id], {
+      cwd: dir,
+      out: () => {},
+      err: (t) => {
+        err += t;
+      },
+      interactive: true,
+      environment: {},
+      confirm: async () => {
+        const other = await hostOf().open(id);
+        const decided = await other?.decideHuman("approve", "rejected", "not yet");
+        expect(decided?.ok).toBe(true);
+        return true;
+      },
+      select: async () => [],
+    });
+    expect(result).toBe(1);
+    expect(err).toContain("PIPELINE_CHANGE_REFUSED");
+    expect(err).toContain("the run moved on since the change was shown");
+    expect((await journalOf(id)).some((r) => r.event === "pipeline_accepted")).toBe(false);
+    // looked at again, the same change is taken for the run as it stands now
+    const again = await cli("pipeline", "changes", "apply", id);
+    expect(again.code).toBe(0);
+    expect((await journalOf(id)).some((r) => r.event === "pipeline_accepted")).toBe(true);
+    const history = await cli("pipeline", "changes", "history", id);
+    expect(history.out).toContain("changed: build (work)");
+    expect(history.out).not.toContain("then:");
+  });
+
   test("nothing to accept, or a change that cannot be accepted, is said", async () => {
     const id = await runAtGate();
     const none = await cli("pipeline", "changes", "apply", id);
@@ -317,7 +355,15 @@ describe("status", () => {
     const result = await cli("status", "--json");
     expect(result.code).toBe(0);
     expect(JSON.parse(result.out)).toEqual([
-      { runId: id, pipeline: "demo", status: "running", slug: "t", task: "t" },
+      {
+        runId: id,
+        pipeline: "demo",
+        status: "running",
+        slug: "t",
+        task: "t",
+        active: [{ node: "approve", attempt: 1, phase: "human" }],
+        pauses: [],
+      },
     ]);
   });
 
@@ -724,7 +770,8 @@ describe("what status shows and does", () => {
     const one = await cli("status", run.runId);
     for (const text of [list.out, one.out]) {
       expect(text).not.toContain("\u001b");
-      expect(text.split("\n").filter(Boolean).length).toBeLessThanOrEqual(7);
+      // the lines of one run: run, slug, task, status, integrity, seal, trail, active
+      expect(text.split("\n").filter(Boolean).length).toBeLessThanOrEqual(8);
     }
   });
 
@@ -791,6 +838,12 @@ describe("mcp over stdio", () => {
     const off = await instructionsOf();
     expect(off).not.toContain("kodel wait");
     expect(off).toContain("pipeline_start"); // the rest is as it was
+    // A bad value elsewhere in the config does not undo a valid `wait: false`.
+    await writeFile(
+      join(dir, ".kodel", "config.yaml"),
+      "worktree:\n  mode: sideways\nagent_hints:\n  wait: false\n",
+    );
+    expect(await instructionsOf()).not.toContain("kodel wait");
     // A config that cannot be read leaves the offer in; the server still starts.
     await writeFile(join(dir, ".kodel", "config.yaml"), "agent_hints: [\n");
     expect(await instructionsOf()).toContain("kodel wait");
@@ -1212,6 +1265,65 @@ describe("wait", () => {
     expect((await wait.result).out).toBe(LINE(run.runId, "resumed"));
   });
 
+  test("t40_wait_ends_when_a_run_is_resumed_and_pauses_again_at_the_same_step", async () => {
+    await writeFile(
+      join(dir, ".kodel", "pipelines", "stuck.yaml"),
+      [
+        "name: stuck",
+        "nodes:",
+        "  - slug: write",
+        "    kind: agent",
+        "    prompt: write it",
+        "  - slug: build",
+        "    kind: command",
+        `    command: node -e "process.exit(1)"`,
+        "edges:",
+        "  - { from: write, to: build }",
+        "  - { from: build, to: write, when: failed }",
+        "",
+      ].join("\n"),
+    );
+    const { run } = await hostOf().start({ pipeline: "stuck", task: "t", restart: false });
+    const toPause = async () => {
+      for (let i = 0; i < 10 && (await run.state()).status !== "paused"; i++) {
+        const attempt = (await run.state()).active.find((v) => v.node === "write")?.attempt ?? 1;
+        await run.completeStep("write", attempt);
+        await run.waitForRest(5_000);
+      }
+      expect((await run.state()).status).toBe("paused");
+    };
+    await toPause();
+    const before = JSON.stringify((await run.state()).pauses);
+    // wait looks again only when the test lets it: the resume and the pause after it both happen
+    // before its second look, so the state it sees is the one it saw first
+    let looked = 0;
+    let letLook: () => void = () => {};
+    const mayLook = new Promise<void>((resolve) => {
+      letLook = resolve;
+    });
+    const wait = started(
+      {
+        betweenLooks: () => {
+          looked += 1;
+          return mayLook;
+        },
+      },
+      "wait",
+      run.runId,
+      "--timeout",
+      "60",
+    );
+    await wait.ready();
+    await cli("resume", run.runId);
+    await toPause();
+    expect(JSON.stringify((await run.state()).pauses)).toBe(before);
+    // it is still before its second look: nothing it could have seen differs from the first
+    expect(looked).toBe(1);
+    expect(wait.isDone()).toBe(false);
+    letLook();
+    expect((await wait.result).out).toBe(LINE(run.runId, "resumed"));
+  }, 30_000);
+
   test("tNN_wait_still_names_the_decision_when_the_journal_is_written_after_the_state", async () => {
     const id = await runAtGate();
     const wait = started(FAST, "wait", id);
@@ -1336,6 +1448,7 @@ describe("a store made from the golden runs of the stored formats", () => {
     "formats",
     "v1",
   );
+  /** Two finished runs written in run-state format 1, which this kodel refuses to read. */
   const RUNS = ["r_0mviewgvl_i1ig", "r_0mvimyn54_tc9o"];
 
   let outer: string;
@@ -1346,50 +1459,139 @@ describe("a store made from the golden runs of the stored formats", () => {
     for (const id of RUNS) {
       await cp(join(V1, id), join(dir, ".kodel", "runs", id), { recursive: true });
     }
-    // A store is a project only with the marker, which the golden runs do not carry.
-    await writeFile(join(dir, ".kodel", "config.yaml"), "");
+    // A store is a project only with the marker, which the golden runs do not carry; the demo
+    // pipeline and a repository let a run of the current format be made beside them.
+    await mkdir(join(dir, ".kodel", "pipelines"), { recursive: true });
+    await writeFile(join(dir, ".kodel", "pipelines", "demo.yaml"), DEMO);
+    await writeFile(join(dir, ".kodel", "config.yaml"), "worktree:\n  mode: off\n");
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+    git("init", "-q");
+    git("config", "user.email", "t@example.com");
+    git("config", "user.name", "T");
+    git("commit", "-q", "--allow-empty", "-m", "initial");
   });
   afterEach(async () => {
     await rm(join(dir, ".."), { recursive: true, force: true });
     dir = outer;
   });
 
-  test("formats_status_lists_both_runs_and_shows_one_as_unsealed", async () => {
+  /** What a command says about a run of format 1: the code and the format, never "modified". */
+  const expectRefusedClearly = (result: { code: number; out: string; err: string }) => {
+    expect(result.code).not.toBe(0);
+    expect(result.err).toContain("run-state format 1");
+    expect(result.err).toContain("older kodel");
+    expect(result.err).not.toContain("modified");
+    expect(result.err).not.toContain("TypeError");
+  };
+
+  test("t40_status_list_marks_v1_runs", async () => {
     const list = await cli("status");
     expect(list.code).toBe(0);
     for (const id of RUNS) expect(list.out).toContain(id);
     expect(list.out.match(/ dev /g)?.length).toBe(2);
-    expect(list.out.match(/completed/g)?.length).toBe(2);
+    expect(list.out.match(/format 1/g)?.length).toBe(2);
+    expect(list.out).not.toContain("unreadable");
+    expect(list.out).not.toContain("completed");
+  });
+
+  test("t40_status_json_says_format_1", async () => {
+    const parsed = JSON.parse((await cli("status", "--json")).out) as {
+      runId: string;
+      status: string;
+    }[];
+    expect(parsed.map((r) => r.status)).toEqual(["format 1", "format 1"]);
+    expect(parsed.map((r) => r.runId).sort()).toEqual([...RUNS].sort());
+  });
+
+  test("t40_v1_run_refused_clearly", async () => {
     for (const id of RUNS) {
-      const one = await cli("status", id);
-      expect(one.code).toBe(0);
-      expect(one.out).toContain("status:    completed");
-      expect(one.out).toContain("seal:      unsealed");
+      expectRefusedClearly(await cli("status", id));
+      expectRefusedClearly(await cli("report", id));
+      expectRefusedClearly(await cli("report", id, "--json"));
+      expectRefusedClearly(await cli("resume", id));
+      expectRefusedClearly(await cli("gate", "approve", id));
     }
   });
 
-  test("formats_report_shows_where_the_time_went", async () => {
-    for (const id of RUNS) {
+  test("t40_v1_run_refused_by_ack_seal_wait_cancel_changes", async () => {
+    const id = RUNS[0] as string;
+    expectRefusedClearly(await cli("ack", id));
+    expectRefusedClearly(await cli("seal", id));
+    expectRefusedClearly(await cliAs({ pollMs: 10 }, "wait", id, "--timeout", "1"));
+    expectRefusedClearly(await cli("pipeline", "changes", "show", id));
+    expectRefusedClearly(await cli("pipeline", "changes", "history", id));
+    expectRefusedClearly(await cli("pipeline", "changes", "apply", id));
+  });
+
+  test("t40_v2_fixtures_open", async () => {
+    // the real runs of this engine beside the refused ones: `status`, `report` and the history of
+    // the pipeline read them, and the accepted change is shown with what it redid
+    const V2 = join(V1, "..", "v2");
+    const ids = ["r_0mvu1vxry_4ggv", "r_0mvu1w1ng_dk6c"];
+    const forks = ["r_0mvu1w2tp_ssyf", "r_0mvu1w4w6_w0iy"];
+    for (const id of [...ids, ...forks]) {
+      await cp(join(V2, id), join(dir, ".kodel", "runs", id), { recursive: true });
+    }
+    const list = await cli("status");
+    expect(list.code).toBe(0);
+    for (const id of [...ids, ...forks]) expect(list.out).toContain(id);
+    expect(list.out.match(/completed/g)?.length).toBe(4);
+    expect(list.out.match(/format 1/g)?.length).toBe(2);
+    // the fork runs: the trail of the fork, and the pause of the branch that was resumed
+    const [fork, paused] = forks as [string, string];
+    expect((await cli("status", fork)).out).toContain(
+      "trail:     impl > verify > test > fix > test > fix",
+    );
+    expect((await cli("report", fork)).out).toContain("0 pause(s)");
+    expect((await cli("status", paused)).out).toContain(
+      "trail:     impl > verify > test > fix-test > test > fix",
+    );
+    const pausedReport = await cli("report", paused);
+    expect(pausedReport.code).toBe(0);
+    expect(pausedReport.out).toContain("1 pause(s)");
+    expect(pausedReport.out).toContain("fork f1 at impl (verify, test) -> fix");
+    expect(pausedReport.out).toContain("prompts: 3 served");
+    for (const id of ids) {
+      expect((await cli("status", id)).code).toBe(0);
       const report = await cli("report", id);
       expect(report.code).toBe(0);
       expect(report.out).toContain(`run ${id}  completed`);
-      expect(report.out).toContain("final-approval");
-      expect(report.out).toContain("(a person decides)");
+      expect(report.out).toContain("the pipeline was changed while the run went:");
+      const parsed = JSON.parse((await cli("report", id, "--json")).out) as {
+        pipeline_changes: { effects: unknown[] }[];
+      };
+      expect(parsed.pipeline_changes).toHaveLength(1);
+      expect(Array.isArray(parsed.pipeline_changes[0]?.effects)).toBe(true);
     }
-    const parsed = JSON.parse((await cli("report", "r_0mviewgvl_i1ig", "--json")).out);
-    expect(parsed).toMatchObject({ status: "completed", extra_attempts: 9, feedback: 1 });
+    const [proposal, file] = ids as [string, string];
+    expect((await cli("report", proposal)).out).toContain(
+      "the agent's proposal  plan-critique (work)  then: restart plan-critique",
+    );
+    const history = await cli("pipeline", "changes", "history", proposal);
+    expect(history.code).toBe(0);
+    expect(history.out).toContain("accepted (the agent's proposal)  <- now");
+    expect(history.out).toContain("changed: plan-critique (work)  then: restart plan-critique");
+    expect((await cli("report", file)).out).toContain(
+      "a change in the file  review (work)  then: nothing",
+    );
+    expect((await cli("pipeline", "changes", "history", file)).out).not.toContain("then:");
   });
 
-  test("v75e_old_run_report_line_in_cli", async () => {
-    for (const id of RUNS) {
-      const report = await cli("report", id);
-      expect(report.out).toContain("prompts: not_collected");
-      expect(report.out.indexOf("prompts: not_collected")).toBeGreaterThan(
-        report.out.indexOf("final-approval"),
-      );
-    }
-    const parsed = JSON.parse((await cli("report", "r_0mviewgvl_i1ig", "--json")).out);
-    expect(parsed.prompts).toEqual({ not_collected: true });
+  test("t40_report_without_run_picks_latest_readable", async () => {
+    // with only runs of format 1 there is nothing to report on
+    const none = await cli("report");
+    expect(none.code).not.toBe(0);
+    expect(none.err).not.toContain("no runs yet");
+    expect(none.err).toContain("no run this kodel can read: all 2 runs are in run-state format 1");
+    // a run of this kodel beside them is the one `report` picks
+    const id = await runAtGate();
+    const report = await cli("report");
+    expect(report.code).toBe(0);
+    expect(report.out).toContain(`run ${id}  running`);
+    const list = await cli("status");
+    expect(list.out).toContain(`${id}`);
+    expect(list.out.match(/format 1/g)?.length).toBe(2);
+    expect(list.out).toContain("running at approve#1");
   });
 });
 

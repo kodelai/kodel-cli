@@ -39,12 +39,27 @@ This repository adds these rules:
   `pipeline proposals apply|discard`: they refuse to run without a terminal and ask for a confirmation, so
   trying them only fails.
 - `kodel wait <run>` is yours: it only watches and prints one line when the person has decided, so start it
-  in the background (Claude Code: the Bash tool with `run_in_background`) when a `waiting` answer offers it,
+  in the background (Claude Code: the Bash tool with `run_in_background`) when an answer offers it (a
+  `waiting` answer, or a `node` or `running` answer whose text names it because a decision waits besides),
   end your turn, and call `pipeline_next_step` when it reports. Never poll `pipeline_next_step` in a loop to
   wait for a person. If it says `still waiting` it gave up (`--timeout`, 8 hours by default): do not start it
   again, tell the person you stopped watching. A project can turn the offer off with
   `agent_hints: { wait: false }` in the project config; then no answer mentions `kodel wait`, and you just
   end your turn and wait to be told.
+- A pipeline may fork: a `node` answer then lists every open step in `steps`, and `execution.mode` says how
+  this project works them. In `parallel` mode start one subagent (a worker) per step that has no `taken_by`
+  and give it these rules: call `pipeline_take_step` with the run id and its step's slug and keep the
+  `claim_token`; if the answer is `taken` (another worker holds it), `queued` (the project's
+  `agents.max_parallel` steps are already being worked) or `none` (no free step), stop and report that
+  answer back without doing anything; do the step where its `workdir` says; call
+  `pipeline_complete_step` with `node_slug`, `attempt` and that `claim_token`; report the answer back to the
+  agent that started you as it is (one of `node`, `waiting`, `running` or `done`, with the `also_waiting` list
+  it may carry), never write to the person, and never start `kodel wait` as a worker. In `sequential` mode
+  do the steps one by one, without taking them, unless its instruction says the project lets you work
+  them in parallel (`agents.subagents: auto`): then, if you can start subagents, call `pipeline_next_step`
+  again with `subagents: {can: true}` to have them handed out to workers. When the workers are back, call `pipeline_next_step`
+  yourself; what waits for a person (`also_waiting` names every gate and pause) is for you to tell them,
+  with the command of each (`--node <slug>` when several wait).
 
 Tasks (`docs/tasks.md`) are off unless `.kodel/config.yaml` has `tasks: { enabled: true }`; when they are on the
 server also offers the `task_*` tools. When the user asks you to "create a task" for something you should not
@@ -124,6 +139,17 @@ For stored data:
    know says so ("written in format X, upgrade or migrate"); only a hash mismatch says it was modified.
 4. Before the first release, formats may break freely. At the first release, freeze what exists as v1:
    add the golden fixtures above for it, and from then on rules 1-3 apply to every change.
+
+One exception was made under rule 4, before the first release (decision T-40, forks in the run
+engine): run-state format 1 (`state.json` and the journal records with `v: 1`, written by
+`@kodel-ai/kodel@0.1.0-beta.0` and earlier; a beta is pre-release) was replaced by format 2 without
+a reader. The engine refuses a format-1 run with `UNSUPPORTED_FORMAT`, names the format and says to
+finish it with the kodel that started it. A run nobody wants to finish can be left as it is: it is
+refused, the run lists and `findLatest` pass it over, and it only blocks `pipeline_start` for the same
+pipeline and task (the refusal names the run and says it must be finished before a new run starts for
+that task). kodel has no command that cancels a run. The engine never guesses from the shape and never calls
+such a run modified, and `fixtures/formats/v1/` keeps the real runs that prove the refusal. The
+decision is refuted if a user outside this repository reports history lost to it.
 
 ## Decisions and tests
 

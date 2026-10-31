@@ -19,7 +19,11 @@ const report: RunReport = {
   status: "completed",
   total_s: 125,
   work_s: 50,
+  busy_wall_s: 50,
   waiting_s: 75,
+  forks: [],
+  critical_path: [],
+  failed_branches: false,
   restarts: 1,
   pauses: 0,
   feedback: 2,
@@ -82,7 +86,7 @@ describe("formatReport", () => {
             to: "bbbb",
             source: "proposal",
             nodes: [{ slug: "impl", changes: ["checks"] }],
-            effect: "recheck",
+            effects: [{ kind: "recheck", node: "impl" }],
             reason: "tests count too",
           },
         ],
@@ -107,10 +111,46 @@ describe("formatReport", () => {
     );
     expect(changed).toContain("the pipeline was changed while the run went:");
     expect(changed).toContain(
-      "the agent's proposal  impl (checks)  then: recheck  (tests count too)",
+      "the agent's proposal  impl (checks)  then: recheck impl  (tests count too)",
     );
     expect(changed).toContain("NOTE: the checks of impl were changed during this run");
     expect(changed).toContain("impl #2: checks");
+  });
+
+  test("t40_report_format_history_read_effects_list", () => {
+    const change = {
+      at: 0,
+      from: "aaaa",
+      to: "bbbb",
+      source: "file",
+      nodes: [
+        { slug: "a", changes: ["routing"] },
+        { slug: "b", changes: ["work"] },
+      ],
+    };
+    // one entry per step the run stood at, in the order the engine applied them
+    const several = formatReport(
+      {
+        ...report,
+        pipeline_changes: [
+          {
+            ...change,
+            effects: [
+              { kind: "restart", node: "b" },
+              { kind: "reroute", node: "a-test" },
+            ],
+          },
+        ],
+      },
+      (t) => t,
+    );
+    expect(several).toContain("a (routing), b (work)  then: restart b, reroute a-test");
+    // and nothing redone is said so
+    const none = formatReport(
+      { ...report, pipeline_changes: [{ ...change, effects: [] }] },
+      (t) => t,
+    );
+    expect(none).toContain("a (routing), b (work)  then: nothing");
   });
 
   test("what did not pass is listed with the reason, and only when something did not pass", () => {

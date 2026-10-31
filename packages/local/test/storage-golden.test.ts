@@ -48,12 +48,19 @@ describe("the golden runs in a home tree", () => {
     await writeFile(join(project, ".kodel", "config.yaml"), `storage: home\nproject_id: ${ID}\n`);
     const runs = join(base, "projects", ID, "runs");
     await mkdir(runs, { recursive: true });
-    const ids = (await readdir(join(FORMATS, "v1"), { withFileTypes: true }))
-      .filter((e) => e.isDirectory() && e.name.startsWith("r_"))
-      .map((e) => e.name)
-      .sort();
+    // Format 2 is what this engine reads; the format-1 runs are refused by format (T-40), from a home
+    // tree as from `.kodel/runs`, and never called modified.
+    const runIds = async (format: string) =>
+      (await readdir(join(FORMATS, format), { withFileTypes: true }))
+        .filter((e) => e.isDirectory() && e.name.startsWith("r_"))
+        .map((e) => e.name)
+        .sort();
+    const ids = await runIds("v2");
+    const old = await runIds("v1");
     expect(ids.length).toBeGreaterThan(0);
-    for (const id of ids) await cp(join(FORMATS, "v1", id), join(runs, id), { recursive: true });
+    expect(old.length).toBeGreaterThan(0);
+    for (const id of ids) await cp(join(FORMATS, "v2", id), join(runs, id), { recursive: true });
+    for (const id of old) await cp(join(FORMATS, "v1", id), join(runs, id), { recursive: true });
     const before = await hashTree(runs);
 
     const storage = await resolveStoragePlace({
@@ -67,7 +74,15 @@ describe("the golden runs in a home tree", () => {
       integrityDir: join(tmp, "integrity"),
       storage,
     });
-    expect((await host.runSummaries()).map((s) => s.meta.runId).sort()).toEqual(ids);
+    const summaries = await host.runSummaries();
+    expect(summaries.map((s) => s.meta.runId).sort()).toEqual([...ids, ...old].sort());
+    for (const summary of summaries.filter((s) => old.includes(s.meta.runId))) {
+      expect(summary.state).toBeUndefined();
+      expect(summary.unreadable).toMatchObject({ code: "UNSUPPORTED_FORMAT", format: 1 });
+    }
+    for (const id of old) {
+      await expect(host.open(id)).rejects.toMatchObject({ code: "UNSUPPORTED_FORMAT" });
+    }
     for (const id of ids) {
       const run = await host.open(id);
       expect(run).toBeDefined();

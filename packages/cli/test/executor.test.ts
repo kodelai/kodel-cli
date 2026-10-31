@@ -60,7 +60,7 @@ describe("the real server stamps who calls it", () => {
     expect(started.engine).toEqual({
       version: "7.8.9",
       commit: "feedface0000",
-      record_version: 1,
+      record_version: 2,
       meta_version: 2,
       contract_version: CONTRACT_VERSION,
       instructions_hash: sha256(serverInstructions()),

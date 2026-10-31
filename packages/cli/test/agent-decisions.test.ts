@@ -71,6 +71,8 @@ interface Options {
   }>;
   /** Passed instead of the options above when a test wants no host that can decide. */
   withoutHumans?: boolean;
+  /** Wraps the host that decides for the person (T-40: a host whose view of a change stands still). */
+  humansOf?: (host: LocalPipelineHost) => HumanHost;
 }
 
 async function connect(options: Options = {}) {
@@ -82,17 +84,19 @@ async function connect(options: Options = {}) {
       pipelineChange: options.pipelineChange ?? false,
     },
   });
-  const humans: HumanHost = options.unverified
-    ? {
-        open: async (runId) => {
-          const run = await host.open(runId);
-          if (!run) return undefined;
-          return Object.assign(Object.create(run), {
-            changesSinceGate: async () => ({ kind: "unavailable", reason: "git failed" }),
-          });
-        },
-      }
-    : host;
+  const humans: HumanHost = options.humansOf
+    ? options.humansOf(host)
+    : options.unverified
+      ? {
+          open: async (runId) => {
+            const run = await host.open(runId);
+            if (!run) return undefined;
+            return Object.assign(Object.create(run), {
+              changesSinceGate: async () => ({ kind: "unavailable", reason: "git failed" }),
+            });
+          },
+        }
+      : host;
   const server = createServer(host, "0.0.0", undefined, undefined, {
     ...(options.withoutHumans ? {} : { humans }),
     dialog: options.dialog ?? false,
@@ -122,6 +126,7 @@ async function connect(options: Options = {}) {
   const tools = async () => (await client.listTools()).tools.map((tool) => tool.name);
   return {
     host,
+    humans,
     client,
     call,
     tools,
@@ -648,6 +653,122 @@ describe("t_decisions: the dialog is off unless the config turns it on", () => {
     const { done } = await toGate(s);
     expect(s.forms()).toBe(1);
     expect(done.dialog).toMatchObject({ answer: "decided" });
+    await s.close();
+  });
+});
+
+// ── several decisions open at once (T-40) ───────────────────────────────────
+
+const FORK_GATES = [
+  "name: forkgates",
+  "nodes:",
+  "  - { slug: plan, kind: agent, prompt: plan }",
+  "  - { slug: a-gate, kind: human, prompt: a fine? }",
+  "  - { slug: b-gate, kind: human, prompt: b fine? }",
+  "  - { slug: merge, kind: agent, prompt: merge, join: all }",
+  "edges:",
+  "  - { from: plan, to: a-gate }",
+  "  - { from: plan, to: b-gate }",
+  "  - { from: a-gate, to: merge, when: approved }",
+  "  - { from: a-gate, to: merge, when: rejected }",
+  "  - { from: b-gate, to: merge, when: approved }",
+  "  - { from: b-gate, to: merge, when: rejected }",
+  "",
+].join("\n");
+
+const FORK_STEP_AND_GATE = [
+  "name: forkstep",
+  "nodes:",
+  "  - { slug: plan, kind: agent, prompt: plan }",
+  "  - { slug: a, kind: agent, prompt: do a }",
+  "  - { slug: b-gate, kind: human, prompt: b fine? }",
+  "  - { slug: merge, kind: agent, prompt: merge, join: all }",
+  "edges:",
+  "  - { from: plan, to: a }",
+  "  - { from: plan, to: b-gate }",
+  "  - { from: a, to: merge }",
+  "  - { from: b-gate, to: merge, when: approved }",
+  "  - { from: b-gate, to: merge, when: rejected }",
+  "",
+].join("\n");
+
+describe("t40 the agent decides one thing while others wait", () => {
+  test("t40_decide_gate_with_sibling_gate_or_pause_open", async () => {
+    await writeFile(join(dir, ".kodel", "pipelines", "forkgates.yaml"), FORK_GATES);
+    const s = await connect({ gate: true });
+    const started = await s.call("pipeline_start", { task: "split", pipeline: "forkgates" });
+    const runId = started.run_id as string;
+    const both = await s.call("pipeline_complete_step", {
+      run_id: runId,
+      node_slug: "plan",
+      attempt: 1,
+    });
+    expect(both.next.waiting).toMatchObject({ reason: "gate", node_slug: "a-gate" });
+    expect(both.next.waiting.also_waiting).toEqual([
+      expect.objectContaining({ reason: "gate", node_slug: "b-gate" }),
+    ]);
+    expect(both.next.waiting.how_to_decide.cli).toContain("--node a-gate");
+    // the agent decides the second gate on the person's word while the first still waits
+    const decided = await s.call("pipeline_decide_gate", {
+      run_id: runId,
+      node_slug: "b-gate",
+      attempt: 1,
+      decision: "approved",
+      instruction: "approve b",
+    });
+    expect(decided).toMatchObject({ ok: true, decided_by: "agent", node_slug: "b-gate" });
+    expect(decided.next.waiting).toMatchObject({ reason: "gate", node_slug: "a-gate" });
+    expect(decided.next.waiting.also_waiting).toBeUndefined();
+    const journal = await journalOf(runId);
+    expect(journal).toContain('"event":"gate_decided","node":"b-gate"');
+    expect(journal).not.toContain('"event":"gate_decided","node":"a-gate"');
+    await s.close();
+  });
+
+  test("t40_accept_change_with_fingerprint_changed_refused_for_agent_path", async () => {
+    await writeFile(join(dir, ".kodel", "pipelines", "forkstep.yaml"), FORK_STEP_AND_GATE);
+    // The host the agent decides through keeps the change as it was first shown; the run moves on
+    // (a sibling's gate is decided) before the agent accepts.
+    let shown: Awaited<ReturnType<HumanRun["pendingChange"]>> | undefined;
+    const s = await connect({
+      pipelineChange: true,
+      humansOf: (host) => ({
+        open: async (runId) => {
+          const run = await host.open(runId);
+          if (!run) return undefined;
+          return Object.assign(Object.create(run), {
+            pendingChange: async (state?: unknown, only?: "file" | "proposal") => {
+              shown ??= await run.pendingChange(state as never, only);
+              return shown;
+            },
+          });
+        },
+      }),
+    });
+    const started = await s.call("pipeline_start", { task: "split", pipeline: "forkstep" });
+    const runId = started.run_id as string;
+    await s.call("pipeline_complete_step", { run_id: runId, node_slug: "plan", attempt: 1 });
+    const proposed = await s.call("pipeline_propose_change", {
+      run_id: runId,
+      pipeline: FORK_STEP_AND_GATE.replace("prompt: merge,", "prompt: merge the branches,"),
+      summary: "a clearer join",
+    });
+    expect(proposed).toMatchObject({ ok: true, status: "proposed" });
+    const hash = proposed.pipeline_change.hash as string;
+    // the change is looked at once (what the wrapper keeps), then the sibling's gate is decided
+    const run = await s.host.open(runId);
+    const wrapped = await (s.humans as HumanHost).open(runId);
+    expect((await wrapped?.pendingChange())?.hash).toBe(hash);
+    const decided = await run?.decideHuman("b-gate", "approved");
+    expect(decided?.ok).toBe(true);
+    const accepted = await s.call("pipeline_accept_change", {
+      run_id: runId,
+      change_hash: hash,
+      instruction: "accept it",
+    });
+    expect(accepted).toMatchObject({ ok: false, code: "PIPELINE_CHANGE_REFUSED" });
+    expect(accepted.message).toContain("moved on");
+    expect(await journalOf(runId)).not.toContain('"event":"pipeline_accepted"');
     await s.close();
   });
 });

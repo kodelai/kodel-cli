@@ -8,6 +8,8 @@ import { join } from "node:path";
 import {
   AGENT_LOG_KINDS,
   AGENT_LOG_MODES,
+  type AgentsConfig,
+  DEFAULT_AGENTS,
   DEFAULT_TASK_ON_RUN,
   defaultAgentLog,
   defaultHistory,
@@ -101,6 +103,8 @@ export interface ProjectConfig {
   decisions: DecisionsConfig;
   tasks: TasksConfig;
   history: HistoryConfig;
+  /** How the open steps of a fork are worked, and how long a worker's hold on one lasts. */
+  agents: AgentsConfig;
   /**
    * Where runs, the proposals made outside a run, `start.lock` and the session index are kept:
    * `project` (under `.kodel`, the default) or `home` (`~/.kodel/projects/<project_id>/`).
@@ -109,6 +113,8 @@ export interface ProjectConfig {
   /** The stable name of the project's folder in `home` mode; it is committed, so a move keeps the history. */
   project_id?: string;
 }
+
+export { DEFAULT_AGENTS };
 
 export const DEFAULT_WORKTREE: WorktreeConfig = { mode: "auto", dir: DEFAULT_WORKTREE_DIR };
 export const DEFAULT_PIPELINE: PipelineConfig = { uncommitted: "ask" };
@@ -198,6 +204,12 @@ export const HISTORY_SECTION_KEYS = Object.keys(historySchema.shape);
 
 // Unknown keys are refused, not ignored: a misspelled `mode` must not leave the default in force
 // without the person noticing.
+const agentHintsSchema = z
+  .object({
+    wait: z.boolean().optional(),
+  })
+  .strict();
+
 const configSchema = z
   .object({
     version: z.union([z.number(), z.string()]).optional(),
@@ -214,12 +226,7 @@ const configSchema = z
       })
       .strict()
       .optional(),
-    agent_hints: z
-      .object({
-        wait: z.boolean().optional(),
-      })
-      .strict()
-      .optional(),
+    agent_hints: agentHintsSchema.optional(),
     decisions: z
       .object({
         dialog: z.boolean().optional(),
@@ -247,6 +254,14 @@ const configSchema = z
       .strict()
       .optional(),
     history: historySchema.optional(),
+    agents: z
+      .object({
+        subagents: z.enum(["auto", "yes", "no"]).optional(),
+        max_parallel: z.number().int().min(1).max(64).optional(),
+        claim_ttl_s: z.number().int().min(1).max(86_400).optional(),
+      })
+      .strict()
+      .optional(),
     storage: z.enum(STORAGE_MODES as [StorageMode, ...StorageMode[]]).optional(),
     project_id: z.string().optional(),
   })
@@ -254,6 +269,23 @@ const configSchema = z
 
 const invalid = (file: string, message: string) =>
   new KodelError("CONFIG_INVALID", `${file}: ${message}`);
+
+/**
+ * Only the `agent_hints` block of the config in `storeRoot`, for a reader that keeps going on a config
+ * that does not load: a bad value elsewhere must not undo a valid `wait: false`. The defaults when the
+ * block itself cannot be read.
+ */
+export async function loadAgentHints(storeRoot: string): Promise<AgentHintsConfig> {
+  try {
+    const raw: unknown = parse(await readFile(join(storeRoot, CONFIG_FILE), "utf8"));
+    const block =
+      raw !== null && typeof raw === "object" ? Reflect.get(raw, "agent_hints") : undefined;
+    const parsed = agentHintsSchema.safeParse(block ?? {});
+    return { wait: (parsed.success ? parsed.data.wait : undefined) ?? DEFAULT_AGENT_HINTS.wait };
+  } catch {
+    return { ...DEFAULT_AGENT_HINTS };
+  }
+}
 
 /** Read the config in `storeRoot`; the defaults when there is no file. */
 export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
@@ -271,6 +303,7 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
         decisions: { dialog: false, agent: { ...DEFAULT_DECISIONS.agent } },
         tasks: { ...DEFAULT_TASKS, on_run: { ...DEFAULT_TASKS.on_run }, adapters: {} },
         history: { ...defaultHistory(), agent_log: defaultAgentLog(), usage: defaultUsage() },
+        agents: { ...DEFAULT_AGENTS },
         storage: "project",
       };
     }
@@ -367,6 +400,11 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
       adapters: parsed.data.tasks?.adapters ?? {},
     },
     history: mergeHistory(parsed.data.history),
+    agents: {
+      subagents: parsed.data.agents?.subagents ?? DEFAULT_AGENTS.subagents,
+      max_parallel: parsed.data.agents?.max_parallel ?? DEFAULT_AGENTS.max_parallel,
+      claim_ttl_s: parsed.data.agents?.claim_ttl_s ?? DEFAULT_AGENTS.claim_ttl_s,
+    },
     storage: parsed.data.storage ?? "project",
     ...(parsed.data.project_id === undefined ? {} : { project_id: parsed.data.project_id }),
   };

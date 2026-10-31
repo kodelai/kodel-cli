@@ -58,8 +58,8 @@ describe("usage report", () => {
     usage.revisions.push("2026-10-01");
     const state = stateWith({ usage, runId: "r_000000001_aaaa", task: "t", nodes: {}, trail: [] });
     const journal: JournalRecord[] = [
-      { v: 1, seq: 1, ts: 1, event: "usage_from_the_future", something: { a: 1 } },
-      { v: 1, seq: 2, ts: 2, event: "cost_snapshot", amount: 3 },
+      { v: 2, seq: 1, ts: 1, event: "usage_from_the_future", something: { a: 1 } },
+      { v: 2, seq: 2, ts: 2, event: "cost_snapshot", amount: 3 },
     ];
     const known = usageReport(state, []);
     expect(usageReport(state, journal)).toEqual(known);
@@ -149,7 +149,7 @@ describe("usage report", () => {
   test("t9jrs_unknown_usage_v_is_cannot_read_not_modified", () => {
     const journal: JournalRecord[] = [
       {
-        v: 1,
+        v: 2,
         seq: 5,
         ts: 1,
         event: "usage_recorded",

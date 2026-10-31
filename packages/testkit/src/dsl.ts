@@ -44,6 +44,7 @@ class ScenarioBuilder {
   private pipelineRef: PipelineRef | undefined;
   private taskText: string | undefined;
   private mode: AgentMode = "auto";
+  private refusedAllowed = false;
   private readonly injects: Inject[] = [];
   private readonly steps: Step[] = [];
 
@@ -67,6 +68,12 @@ class ScenarioBuilder {
 
   agent(mode: AgentMode): this {
     this.mode = mode;
+    return this;
+  }
+
+  /** The scenario expects a follow-up of the engine to be refused while the run goes. */
+  allowRefusedFollowUps(): this {
+    this.refusedAllowed = true;
     return this;
   }
 
@@ -105,6 +112,7 @@ class ScenarioBuilder {
       steps: this.steps,
     };
     if (this.description !== undefined) scenario.description = this.description;
+    if (this.refusedAllowed) scenario.allowRefusedFollowUps = true;
     return scenario;
   }
 }

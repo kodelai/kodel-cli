@@ -58,6 +58,27 @@ kodel report <run>        # where the time went and what was redone
 An example of a full pipeline, with a plan, two human gates, a review and tests, is
 [`examples/pipelines/feature.yaml`](https://github.com/kodelai/kodel-cli/blob/main/examples/pipelines/feature.yaml).
 
+## Forks and subagents
+
+A pipeline may fork: several branches run at once and meet at a `join: all` step. How the agent works
+the steps that are open at the same time is set in the project config (`.kodel/config.yaml`):
+
+```yaml
+agents:
+  subagents: auto   # yes: one subagent (worker) per open step; no: one step after another;
+                    # auto (default): in parallel only when the agent says it can start subagents
+  max_parallel: 8   # how many steps may be worked at once (1-64); the others wait their turn
+  claim_ttl_s: 900  # how long a worker's hold on its step lasts unless it renews it (1-86400)
+```
+
+The engine still checks every step itself; a worker's hold only keeps two workers off one step.
+With `auto`, until the agent has said what it can do, the answer that hands out the open steps one by
+one tells it how: if it can start subagents, it calls `pipeline_next_step` again with
+`subagents: {can: true}` and the steps are handed out to workers; if it cannot, it carries on one step
+at a time. With `no` it is not asked. What the agent says it can do (`subagents` on `pipeline_next_step`) is kept by the
+running server only, not in the run's files: after the server restarts, the steps are handed out one
+by one until the agent says it again.
+
 ## Commands for people
 
 These ask for confirmation and refuse to run without a terminal, on purpose: an agent can propose,

@@ -78,7 +78,7 @@ describe("accepting another version of the pipeline", () => {
     expect(decision.state.specHash).toBe("h2");
     expect(decision.state.active[0]).toMatchObject({ node: "impl", attempt: 1, phase: "agent" });
     expect(decision.journal.find((r) => r.event === "pipeline_accepted")).toMatchObject({
-      effect: { kind: "none" },
+      effects: [],
       nodes: [{ slug: "impl", changes: ["checks"] }],
     });
     const done = step(after, decision.state, { type: "agent_completed", node: "impl", attempt: 1 });
@@ -132,7 +132,7 @@ describe("accepting another version of the pipeline", () => {
     const after = specOf(TEXT.replace("make verify", "make verify --all"));
     const decision = ok(accept(V1, after, atImpl()));
     expect(decision.journal.find((r) => r.event === "pipeline_accepted")).toMatchObject({
-      effect: { kind: "none" },
+      effects: [],
     });
   });
 
@@ -192,31 +192,39 @@ describe("accepting another version of the pipeline", () => {
     if (!decision.ok) expect(decision.error.message).toContain("wait");
   });
 
-  test("a result of the old version is dropped", () => {
+  test("t40_result_of_untouched_node_kept_after_change", () => {
     const after = specOf(TEXT.replace("make verify", "make verify --all"));
     let state = atImpl();
     state = step(V1, state, { type: "agent_completed", node: "impl", attempt: 1 }).state;
-    state = step(V1, state, {
+    expect(state.active[0]).toMatchObject({ node: "impl", phase: "checks", spec: "h" });
+    // a step the run has not reached changes while impl's first check runs: impl is as it was, its
+    // check was not issued again, and the result it sends names the version it was issued under
+    state = ok(accept(V1, after, state)).state;
+    expect(state.specHash).toBe("h2");
+    expect(state.active[0]).toMatchObject({ node: "impl", phase: "checks", spec: "h" });
+    const late = step(after, state, {
       type: "check_finished",
       node: "impl",
       attempt: 1,
       index: 0,
       passed: true,
       reason: "",
-    }).state;
-    // the second check is running; a result carrying the old hash arrives after the change
-    state = { ...state, specHash: "h2" };
-    const late = step(after, state, {
+      specHash: "h",
+    });
+    expect(late.noop).toBeUndefined();
+    expect(late.state.active[0]?.checkIndex).toBe(1);
+    // and a result that names a version the work was never issued under is dropped
+    const stray = step(after, late.state, {
       type: "check_finished",
       node: "impl",
       attempt: 1,
       index: 1,
       passed: true,
       reason: "",
-      specHash: "h",
+      specHash: "h3",
     });
-    expect(late.noop).toBe(true);
-    expect(late.state.active[0]?.checkIndex).toBe(1);
+    expect(stray.noop).toBe(true);
+    expect(stray.state.active[0]?.checkIndex).toBe(1);
   });
 
   test("accepting the same version twice is a repeat; a stale one is refused", () => {
@@ -276,7 +284,7 @@ describe("a run held back at a failure", () => {
   test("the run is paused with the failure of the check behind it", () => {
     const state = heldAtCheck();
     expect(state.status).toBe("paused");
-    expect(state.pause).toMatchObject({ reason: "consecutive", node: "impl" });
+    expect(state.pauses[0]).toMatchObject({ reason: "consecutive", node: "impl" });
     expect(state.nodes.impl?.lastFailure?.source).toBe("check:diff");
   });
 
@@ -284,7 +292,7 @@ describe("a run held back at a failure", () => {
     const after = specOf(HELD.replace("max_lines: 800", "max_lines: 2000"));
     const decision = ok(accept(before, after, heldAtCheck()));
     expect(decision.state.status).toBe("running");
-    expect(decision.state.pause).toBeUndefined();
+    expect(decision.state.pauses).toEqual([]);
     expect(decision.state.active[0]).toMatchObject({
       node: "impl",
       attempt: 1,
@@ -314,6 +322,26 @@ describe("a run held back at a failure", () => {
     expect(passed.active[0]?.node).toBe("verify");
   });
 
+  test("t40_result_of_rechecked_node_from_old_version_dropped", () => {
+    const after = specOf(HELD.replace("max_lines: 800", "max_lines: 2000"));
+    const decision = ok(accept(before, after, heldAtCheck()));
+    // the checks were issued again under the new version; what a process of the old one still
+    // sends for the same attempt and check is not a verdict on the new definition
+    expect(decision.state.active[0]).toMatchObject({ node: "impl", phase: "checks", spec: "h2" });
+    const late = step(after, decision.state, {
+      type: "check_finished",
+      node: "impl",
+      attempt: 1,
+      index: 0,
+      passed: false,
+      reason: "1438 lines changed, more than 800",
+      specHash: "h",
+    });
+    expect(late.noop).toBe(true);
+    expect(late.state.active[0]?.checkIndex).toBe(0);
+    expect(late.state.status).toBe("running");
+  });
+
   test("a raised limit lets a run held back at its attempts go on", () => {
     const tight = specOf(
       TEXT.replace(
@@ -341,7 +369,7 @@ describe("a run held back at a failure", () => {
       reason: "red",
     }).state;
     expect(state.status).toBe("paused");
-    expect(state.pause).toMatchObject({ reason: "total", node: "impl" });
+    expect(state.pauses[0]).toMatchObject({ reason: "total", node: "impl" });
 
     const loose = specOf(TEXT.replace("  - slug: impl\n", "  - slug: impl\n    max_attempts: 5\n"));
     const decision = ok(accept(tight, loose, state));
@@ -396,7 +424,7 @@ describe("the report of a run whose pipeline changed", () => {
         to: "h2",
         source: "proposal",
         nodes: [{ slug: "impl", changes: ["work"] }],
-        effect: "restart",
+        effects: [{ kind: "restart", node: "impl" }],
         reason: "r",
       },
     ]);

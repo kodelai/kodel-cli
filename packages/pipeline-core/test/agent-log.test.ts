@@ -258,6 +258,8 @@ describe("t3bk2 the report of the agent's log", () => {
       cut: 3,
       failed: [],
       unverified: true,
+      // the bytes of each visit of a step, as the engine counted them (both copies were of write#1)
+      visits: { "write:1": 700 },
     });
     // running: no word yet on whether the last step was copied
     expect("final_pass" in report).toBe(false);
@@ -300,7 +302,7 @@ describe("t3bk2 the report with many copies", () => {
     const journal = [...first.journal];
     for (let i = 0; i < MAX_AGENT_LOG_TICKS; i++) {
       journal.push({
-        v: 1,
+        v: 2,
         seq: journal.length + 1,
         ts: 1_000 + i * 10_000,
         event: "agent_log_saved",

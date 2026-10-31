@@ -6,39 +6,48 @@
  * caller gets the next answer and asks again later. If the process dies, a later `tick` finds the
  * work without a heartbeat and restarts it; the state on disk is all that is needed for that.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { mkdir, readFile, realpath } from "node:fs/promises";
 import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import {
   type AgentDecision,
+  type AgentStep,
+  type AgentsConfig,
   type Caller,
   type ChangeSet,
   type ChangesRef,
   type CheckVerdict,
   canonicalPipeline,
+  claimedStepsOpen,
   cleanExecutorText,
   clientOf,
+  DEFAULT_AGENTS,
   type Decision,
   decide,
   defaultRegistry,
-  describeEffect,
+  describeEffects,
   diffPipelines,
   type Effect,
   type EngineOptions,
   type ExecutorRecord,
+  effectsOf,
   evaluateCommand,
   evaluateDiff,
   evaluateResult,
   type HistoryConfig,
+  inOwnBranch,
   isRunEnd,
   isTreeId,
   type JournalRecord,
   KodelError,
+  liveClaim,
   measurePatch,
   mergeReports,
   type NextStep,
+  type NextStepOptions,
+  type NextStepRequest,
   nextStep,
   type OutputRef,
   type PendingChange,
@@ -56,17 +65,23 @@ import {
   redactText,
   renderContextOf,
   renderDeep,
+  resolveMode,
   rowsToCsv,
   runSlug,
   type ServedSurface,
   type StepResult,
+  type SubagentsDeclaration,
+  standingOf,
   summarizeRun,
+  type TakeOutcome,
+  TELL_CHANGES_NOTE,
   validateReport,
+  type WaitScope,
 } from "@kodel-ai/pipeline-core";
 import { type AgentLogRun, AgentLogWriter } from "./agent-log";
 import type { AgentLogTickers } from "./agent-log-ticker";
 import { type CommandOptions, type CommandResult, runCommand } from "./command";
-import { loadConfig, type WorktreeConfig } from "./config";
+import { loadAgentHints, loadConfig, type WorktreeConfig } from "./config";
 import {
   type BuildInfo,
   type ExecutorContext,
@@ -77,6 +92,7 @@ import {
 } from "./executor";
 import {
   checkTreeId,
+  DeadlineError,
   deadlineIn,
   GitSnapshotter,
   readHead,
@@ -88,7 +104,7 @@ import { patchBetween } from "./patch";
 import { MAX_PATCH_KB, PATCH_READ_MARGIN } from "./patch-text";
 import { fitServed, promptHashOf, type ServedNode, servedKeyOf } from "./served";
 import { type StoragePlace, scrubHome } from "./storage-paths";
-import { artifactFileName, FileStore, META_VERSION, newRunId, type RunMeta } from "./store";
+import { artifactFileName, FileStore, META_VERSION, type RunMeta } from "./store";
 import { UsageWriter } from "./usage";
 import { GitWorktreeProvider, type Workdir, type WorkdirProvider } from "./worktree";
 
@@ -197,6 +213,17 @@ export interface HostOptions {
    * that a command a person runs (`status`, `report`, `wait`, `gate`) never starts one.
    */
   agentLogTickers?: AgentLogTickers;
+  /**
+   * Told when the run's lock is taken and let go by this host (tests watch what happens under it:
+   * engine work never runs there, and a decision's snapshots stay within their bound).
+   */
+  lockHooks?: { entered?(runId: string): void; left?(runId: string): void };
+  /** How long one snapshot taken under the lock may take; `SNAPSHOT_DEADLINE_MS` by default. */
+  snapshotDeadlineMs?: number;
+  /** How long all the snapshots of one decision may take together; `DISPATCH_DEADLINE_MS` by default. */
+  dispatchDeadlineMs?: number;
+  /** The bound of the git facts read when a run ends (`RUN_FACTS_DEADLINE_MS`); tests make it short. */
+  runFactsDeadlineMs?: number;
 }
 
 /**
@@ -223,6 +250,32 @@ export function engineEnv(
 
 /** `<host>:<pid>` of this process. */
 export const processOwnerId = (): string => `${hostname()}:${process.pid}`;
+
+/**
+ * The part of a step that is the step's own: what is recorded as served, and what a worker is handed.
+ * Who else works the run (`steps`, `taken_by`, `also_waiting`, the mode) is left out, so the record
+ * of a step is the same whatever its siblings do.
+ */
+export function servedPart(
+  step: AgentStep,
+  change?: PipelineChange,
+): AgentStep & { pipeline_change?: PipelineChange } {
+  const out: AgentStep & { pipeline_change?: PipelineChange } = {
+    slug: step.slug,
+    kind: step.kind,
+    attempt: step.attempt,
+    prompt: step.prompt,
+  };
+  // A change of the run's pipeline that waits is shown with every step, and is part of what was shown.
+  if (change !== undefined) out.pipeline_change = change;
+  if (step.name !== undefined) out.name = step.name;
+  if (step.reentry_feedback !== undefined) out.reentry_feedback = step.reentry_feedback;
+  if (step.result_spec !== undefined) out.result_spec = step.result_spec;
+  if (step.execution !== undefined) out.execution = { instruction: step.execution.instruction };
+  if (step.outcomes !== undefined) out.outcomes = step.outcomes;
+  if (step.workdir !== undefined) out.workdir = step.workdir;
+  return out;
+}
 
 /**
  * Whether the process behind an owner id is alive. Only an owner on this machine can be judged;
@@ -256,6 +309,37 @@ export const END_DEADLINE_MS = 120_000;
 /** After this many hand-ins in a row that ran out of time, the next ones are not tried. */
 const DEADLINE_BACKOFF = 2;
 
+/**
+ * The snapshots a decision asks for (the baseline of a `diff` check, the tree at a gate) are taken
+ * under the run's lock, so another process waits for them: each gets this long, and all of one
+ * decision together get `DISPATCH_DEADLINE_MS`, both far below the time after which a lock counts as
+ * abandoned (60 s). A snapshot that does not fit is recorded as missing, never waited for.
+ */
+export const SNAPSHOT_DEADLINE_MS = 10_000;
+export const DISPATCH_DEADLINE_MS = 20_000;
+/** How long the git facts of a run's end (HEAD, the commits) may take; they are read under the lock. */
+export const RUN_FACTS_DEADLINE_MS = 10_000;
+
+/**
+ * `work`, unless `ms` pass first: then what `late` makes is thrown. The work is not stopped (the git
+ * calls under it carry deadlines of their own); the caller only stops waiting for it.
+ */
+async function within<T>(work: Promise<T>, ms: number, late: () => Error): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(late()), Math.max(ms, 0));
+  });
+  try {
+    return await Promise.race([work, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** What the record says when other branches of a fork wrote to the same tree. */
+export const SHARED_TREE_NOTE =
+  "other branches of the fork were active meanwhile: the files are one tree, so this may include their writes";
+
 /** The text fields an event carries from outside; the rest is structure and is left alone. */
 const FREE_TEXT_FIELDS = [
   "reason",
@@ -264,6 +348,7 @@ const FREE_TEXT_FIELDS = [
   "suggestion",
   "note",
   "changesError",
+  "changesNote",
 ] as const;
 
 function redactEvent(event: RunEvent, rules: RedactRule[]): RunEvent {
@@ -309,7 +394,12 @@ const lastChars = (text: string, n: number) => (text.length > n ? `...${text.sli
  * different from "nothing changed" and has to be said so.
  */
 export type ChangeReport =
-  | { kind: "changes"; files: ChangeSet }
+  | {
+      kind: "changes";
+      files: ChangeSet;
+      /** Other branches of a fork were active since the step was reached: the list may hold their writes. */
+      note?: string;
+    }
   | { kind: "unavailable"; reason: string }
   | { kind: "no_repo" };
 
@@ -335,6 +425,33 @@ export function hashSpec(spec: PipelineSpec): string {
   return createHash("sha256").update(JSON.stringify(spec)).digest("hex").slice(0, 16);
 }
 
+/** The journal events that say a node did work (and may have written to the tree). */
+const MOVING_EVENTS = new Set([
+  "node_entered",
+  "node_finished",
+  "agent_completed",
+  "command_finished",
+  "check_finished",
+]);
+
+/**
+ * Whether a node other than `node` is active and can write to the tree: an agent step, a command or
+ * its checks. A gate that waits for a person writes nothing, so two gates open at once share nothing.
+ */
+function writingElsewhere(state: RunState, node: string): boolean {
+  return state.active.some((v) => v.node !== node && v.phase !== "human");
+}
+
+/** Which nodes of the journal can write: every node but a gate (a node that waited for a person). */
+function writerOf(
+  journal: readonly { event: string; node?: unknown }[],
+): (node: string) => boolean {
+  const gates = new Set(
+    journal.filter((r) => r.event === "gate_waiting").map((r) => String(r.node)),
+  );
+  return (node) => !gates.has(node);
+}
+
 export class LocalHost {
   readonly store: FileStore;
   readonly snapshotter: GitSnapshotter;
@@ -354,6 +471,11 @@ export class LocalHost {
   readonly ownerId: string;
   readonly isOwnerAlive: (owner: string) => boolean;
   readonly agentLog: AgentLogWriter;
+  /**
+   * What the agent last said of itself (`subagents`) per run. Only `pipeline_next_step` carries it;
+   * the answers of a completion or a take are worked out without it, and must not flip the mode.
+   */
+  readonly declaredSubagents = new Map<string, SubagentsDeclaration>();
   readonly usage: UsageWriter;
 
   constructor(
@@ -710,7 +832,8 @@ export class LocalRun {
     string,
     { controller: AbortController; node: string; attempt: number }
   >();
-  private readonly pending = new Set<Promise<void>>();
+  /** The jobs of this process, each with the node whose work it is (none for a job of the whole run). */
+  private readonly pending = new Map<Promise<void>, string | undefined>();
   /** The jobs that record the patch of the run after it ended (also in `pending`). */
   private readonly endJobs = new Set<Promise<void>>();
   /** The job that records the patch of the run gave up (the files changed, the state could not be read). */
@@ -817,17 +940,46 @@ export class LocalRun {
   }
 
   /**
-   * Whether waiting answers offer the agent `kodel wait`: on unless the project's config turns it
-   * off. Read at each answer, so an edit of the config applies to the next one. A config that cannot
-   * be read leaves the default: this is a hint, and the commands that need the config say what is wrong.
+   * The hints (whether waiting answers offer the agent `kodel wait`) and the `agents` block of the
+   * project config, read at each answer so an edit of the config applies to the next one. A config
+   * that cannot be read leaves the defaults, so a bad value never fails `pipeline_next_step` or a
+   * worker's claim for a run that is going; the commands that need the config say what is wrong.
    */
-  private async waitHint(): Promise<boolean> {
+  private async hints(): Promise<{ wait: boolean; agents: AgentsConfig }> {
     const { options } = this.host;
+    const storeRoot = options.storeRoot ?? `${options.root}/.kodel`;
     try {
-      return (await loadConfig(options.storeRoot ?? `${options.root}/.kodel`)).agent_hints.wait;
+      const config = await loadConfig(storeRoot);
+      return { wait: config.agent_hints.wait, agents: config.agents };
     } catch {
-      return true;
+      // Only what failed falls back: a valid `agent_hints` block is kept beside a bad `agents` value.
+      return { wait: (await loadAgentHints(storeRoot)).wait, agents: { ...DEFAULT_AGENTS } };
     }
+  }
+
+  /** The options of an answer that depend on the config and on the request. */
+  private async answerOptions(request: NextStepRequest, state: RunState): Promise<NextStepOptions> {
+    const hints = await this.hints();
+    if (request.subagents !== undefined) {
+      this.host.declaredSubagents.set(this.runId, request.subagents);
+    }
+    const declared = request.subagents ?? this.host.declaredSubagents.get(this.runId);
+    const mode = resolveMode(hints.agents, declared);
+    const where = state.workdir === undefined ? undefined : await this.inProject(state.workdir);
+    return {
+      waitHint: hints.wait,
+      agentDecisions: this.agentDecisions(),
+      agents: {
+        mode,
+        maxParallel: hints.agents.max_parallel,
+        undeclared: hints.agents.subagents === "auto" && declared === undefined,
+      },
+      ...(where === undefined ? {} : { workdir: where }),
+      ...(request.nodeSlug === undefined ? {} : { nodeSlug: request.nodeSlug }),
+      ...(request.completionOf === undefined ? {} : { completionOf: request.completionOf }),
+      ...(request.worker === true ? { worker: true } : {}),
+      ...(request.atCompletion === true ? { atCompletion: true } : {}),
+    };
   }
 
   private agentDecisions(): { gate: boolean; pipelineChange: boolean } {
@@ -952,7 +1104,8 @@ export class LocalRun {
       at: number;
       how: "started" | "proposal" | "file";
       nodes: { slug: string; changes: string[] }[];
-      effect?: string;
+      /** What the run did about the change, per step it stood at; empty when nothing was redone. */
+      effects: { kind: string; node: string }[];
       reason?: string;
       current: boolean;
     }[];
@@ -968,16 +1121,16 @@ export class LocalRun {
           at: record.ts,
           how: "started",
           nodes: [],
+          effects: [],
           current: false,
         });
       } else if (record.event === "pipeline_accepted") {
-        const effect = record.effect as { kind?: string } | undefined;
         out.push({
           hash: String(record.to),
           at: record.ts,
           how: record.source === "proposal" ? "proposal" : "file",
           nodes: (record.nodes as { slug: string; changes: string[] }[] | undefined) ?? [],
-          ...(effect?.kind === undefined ? {} : { effect: effect.kind }),
+          effects: effectsOf(record.effects),
           ...(typeof record.reason === "string" ? { reason: record.reason } : {}),
           current: false,
         });
@@ -1042,8 +1195,9 @@ export class LocalRun {
         source,
         ...(watched === undefined ? {} : { watched }),
         changes: diff.nodes,
-        effect: diff.effect,
-        redo: describeEffect(diff.effect),
+        effects: diff.effects,
+        redo: describeEffects(diff.effects),
+        standing: standingOf(now),
         ...(diff.refused === undefined ? {} : { refused: diff.refused }),
         apply: `kodel pipeline changes apply ${this.runId}`,
         hash,
@@ -1148,6 +1302,8 @@ export class LocalRun {
     text: string;
     reason?: string;
     byAgent?: AgentDecision;
+    /** The `standing` of the change as it was shown; the engine refuses once the run has moved on. */
+    standing?: string;
   }): Promise<Decision> {
     const state = await this.state();
     const before = await this.currentSpec(state);
@@ -1171,6 +1327,7 @@ export class LocalRun {
       before,
       ...(input.reason === undefined ? {} : { reason: input.reason }),
       ...(input.byAgent === undefined ? {} : { byAgent: input.byAgent }),
+      ...(input.standing === undefined ? {} : { standing: input.standing }),
     });
     if (decision.ok) await this.host.store.removeProposal(this.runId).catch(() => undefined);
     return decision;
@@ -1267,7 +1424,7 @@ export class LocalRun {
     // A state a person accepted after editing may have no `changes`: not a reason to fail the call.
     if (decision.state.history?.changes?.enabled !== true) return;
     const job = this.recordRunPatch().catch(() => undefined);
-    this.pending.add(job);
+    this.pending.set(job, undefined);
     this.endJobs.add(job);
     void job.finally(() => {
       this.pending.delete(job);
@@ -1349,17 +1506,24 @@ export class LocalRun {
   private async recordHandIn(
     node: string,
     attempt: number,
-  ): Promise<{ changes?: ChangesRef; changesError?: string; tree?: string }> {
+  ): Promise<{ changes?: ChangesRef; changesError?: string; tree?: string; changesNote?: string }> {
     const settings = await this.changesSettings();
     if (!settings) return {};
+    // Whether another branch of a fork is active: the tree is shared, so the patch of this hand-in may
+    // hold a sibling's work, and a hand-in slowed down by a sibling's snapshot must not switch the
+    // patches off for the rest of the run.
+    let shared = false;
     try {
       // Only a step that is waiting for this hand-in; anything else is left to `apply` to refuse.
       const state = await this.state();
       const visit = state.active.find((v) => v.node === node && v.attempt === attempt);
       if (visit?.phase !== "agent") return {};
+      shared = await this.otherBranchesMovedSinceEntry(state, node, attempt);
     } catch {
       return {};
     }
+    const noted = <T extends object>(out: T): T & { changesNote?: string } =>
+      shared ? { ...out, changesNote: SHARED_TREE_NOTE } : out;
     const { store } = this.host;
     try {
       const earlier = (await store.readJournal(this.runId)).filter(
@@ -1369,7 +1533,11 @@ export class LocalRun {
       const timedOut = (r: JournalRecord) =>
         typeof r.changes_error === "string" &&
         (r.changes_error.startsWith("deadline:") || r.changes_error.startsWith("skipped:"));
-      if (earlier.length >= DEADLINE_BACKOFF && earlier.slice(-DEADLINE_BACKOFF).every(timedOut)) {
+      if (
+        !shared &&
+        earlier.length >= DEADLINE_BACKOFF &&
+        earlier.slice(-DEADLINE_BACKOFF).every(timedOut)
+      ) {
         return { changesError: "skipped: earlier hand-ins ran out of time recording the changes" };
       }
       // The base is the tree of the hand-in just before this one, whatever node it was; the start of
@@ -1388,7 +1556,7 @@ export class LocalRun {
       const deadline = deadlineIn(HAND_IN_DEADLINE_MS);
       // Checked here: core would drop a bad one without a word, and the chain would break unexplained.
       const tree = checkTreeId(await snapshotter.snapshot(deadline), "the snapshot");
-      if (base === undefined) return { tree, changesError: "no recorded start" };
+      if (base === undefined) return noted({ tree, changesError: "no recorded start" });
       try {
         const out = await patchBetween(snapshotter.root, base, tree, {
           exclude: settings.exclude,
@@ -1401,31 +1569,37 @@ export class LocalRun {
           out.patch,
           { cutByGit: out.cut, maxKb: settings.maxKb },
         );
-        return { changes, tree };
+        return noted({ changes, tree });
       } catch (error) {
         // The tree was taken: the next hand-in can start from it whatever happened to the patch.
-        return { tree, changesError: this.changesErrorText(error) };
+        return noted({ tree, changesError: this.changesErrorText(error) });
       }
     } catch (error) {
-      return { changesError: this.changesErrorText(error) };
+      return noted({ changesError: this.changesErrorText(error) });
     }
   }
 
   /** HEAD and the commits of the run, from its directory; whatever cannot be read is left out. */
   private async runFacts(state: RunState): Promise<RunFacts> {
-    try {
+    // Read under the run's lock: a hung git must not hold it, so the whole read has a bound, and
+    // a read that does not fit leaves the facts out as one that failed does.
+    const deadline = deadlineIn(this.host.options.runFactsDeadlineMs ?? RUN_FACTS_DEADLINE_MS);
+    const read = async (): Promise<RunFacts> => {
       const dir =
         state.workdir === undefined ? this.host.options.root : await this.inProject(state.workdir);
       const started = (await this.host.store.readJournal(this.runId)).find(
         (r) => r.event === "run_started",
       );
       const base = typeof started?.base_commit === "string" ? started.base_commit : undefined;
-      const found = await readRunCommits(dir, base, Math.floor(state.startedAt / 1000));
+      const found = await readRunCommits(dir, base, Math.floor(state.startedAt / 1000), deadline);
       return {
         ...(found.head === undefined ? {} : { head: found.head }),
         ...(found.commits === undefined ? {} : { commits: found.commits }),
         ...(found.truncated === true ? { commitsTruncated: true } : {}),
       };
+    };
+    try {
+      return await within(read(), deadline.remainingMs(), () => new DeadlineError());
     } catch {
       return {};
     }
@@ -1435,14 +1609,19 @@ export class LocalRun {
     const { store, engine, clock, integrity, rules } = this.host;
     // Whatever text came with the event (a reason, a message) reaches state and journal redacted.
     const event = redactEvent(incoming, rules);
-    return store.withLock(this.runId, async () => {
+    return this.locked(async () => {
       let state: RunState | undefined;
       if (event.type !== "start") {
         let raw: Awaited<ReturnType<typeof store.readStateRaw>>;
         try {
           raw = await store.readStateRaw(this.runId);
         } catch (error) {
-          if (error instanceof KodelError && error.code === "STATE_MODIFIED_EXTERNALLY") {
+          // A state this kodel cannot read, or one that is not as it was written: the event is
+          // refused with that, so a caller (a cancel, a decision) gets the reason and not a crash.
+          if (
+            error instanceof KodelError &&
+            (error.code === "STATE_MODIFIED_EXTERNALLY" || error.code === "UNSUPPORTED_FORMAT")
+          ) {
             return { ok: false, error } satisfies Decision;
           }
           throw error;
@@ -1512,8 +1691,21 @@ export class LocalRun {
           await integrity.set(`${this.runId}.seal`, sealHash);
         }
       }
-      for (const effect of decision.effects) await this.dispatch(effect);
+      await this.dispatchAll(decision.effects);
       return decision;
+    });
+  }
+
+  /** The run's lock, with the hooks a test watches it through. */
+  private locked<T>(fn: () => Promise<T>): Promise<T> {
+    const hooks = this.host.options.lockHooks;
+    return this.host.store.withLock(this.runId, async () => {
+      hooks?.entered?.(this.runId);
+      try {
+        return await fn();
+      } finally {
+        hooks?.left?.(this.runId);
+      }
     });
   }
 
@@ -1545,7 +1737,11 @@ export class LocalRun {
 
   /** Whether the state file is what kodel last wrote. `unknown`: kodel has not seen this run yet. */
   async integrityStatus(): Promise<"ok" | "modified" | "unknown"> {
-    const raw = await this.host.store.readStateRaw(this.runId).catch(() => undefined);
+    // A format this kodel does not read is not a modified state; that error is passed on as it is.
+    const raw = await this.host.store.readStateRaw(this.runId).catch((error: unknown) => {
+      if (error instanceof KodelError && error.code === "UNSUPPORTED_FORMAT") throw error;
+      return undefined;
+    });
     if (!raw) return "modified";
     const trusted = await this.host.integrity.trusts(this.runId, raw.hash);
     if (trusted === undefined) return "unknown";
@@ -1587,8 +1783,9 @@ export class LocalRun {
       this.host.clock(),
       this.host.engine.registry ?? defaultRegistry(),
       {
-        waitHint: await this.waitHint(),
-        agentDecisions: this.agentDecisions(),
+        // As the agent is answered (`nextStep`): the same cap and mode, so `kodel status` and
+        // `kodel wait` say what the agent is handed.
+        ...(await this.answerOptions({}, state)),
         ...(pending ? { pending: pending.info } : {}),
       },
     );
@@ -1603,8 +1800,9 @@ export class LocalRun {
       if ((await store.readSnapshots(this.runId)).run !== undefined) return; // a check took it
       await store.writeSnapshot(this.runId, "run", await snapshotter.snapshot());
     } catch (error) {
+      // Kept in snapshots.json and shown at the gate, like the failure of any other snapshot.
       await store
-        .writeSnapshot(this.runId, "run!", error instanceof Error ? error.message : String(error))
+        .writeSnapshot(this.runId, "run!", this.changesErrorText(error))
         .catch(() => undefined);
     }
   }
@@ -1616,7 +1814,8 @@ export class LocalRun {
    * fail must not get an approval that looks clean.
    */
   async changesSinceGate(node: string): Promise<ChangeReport> {
-    const visit = (await this.state()).active.find((v) => v.node === node && v.phase === "human");
+    const state = await this.state();
+    const visit = state.active.find((v) => v.node === node && v.phase === "human");
     if (!visit) return { kind: "unavailable", reason: `the run is not waiting at "${node}"` };
     const snapshots = await this.host.store.readSnapshots(this.runId);
     const tree = snapshots[`gate:${node}:${visit.attempt}`];
@@ -1630,13 +1829,90 @@ export class LocalRun {
       };
     }
     try {
-      return { kind: "changes", files: await (await this.snapshotter()).changesSince(tree) };
+      const files = await (await this.snapshotter()).changesSince(tree);
+      const shared = await this.otherBranchesActiveSince(state, node, visit.attempt);
+      return { kind: "changes", files, ...(shared ? { note: SHARED_TREE_NOTE } : {}) };
     } catch (error) {
       return {
         kind: "unavailable",
         reason: scrubHome(describeError(error), this.host.options.storage),
       };
     }
+  }
+
+  /**
+   * Whether another node was active while this gate waited, or is now: then what changed since the
+   * gate was reached is not only what this branch's agent did after its checks, and the person is
+   * told so. The tree is one, so no more than that can be said (a limit recorded in T-40).
+   */
+  private async otherBranchesActiveSince(
+    state: RunState,
+    node: string,
+    attempt: number,
+  ): Promise<boolean> {
+    if (writingElsewhere(state, node)) return true;
+    const journal = await this.host.store.readJournal(this.runId).catch(() => []);
+    const reached = journal.find(
+      (r) => r.event === "gate_waiting" && r.node === node && r.attempt === attempt,
+    );
+    if (!reached) return false;
+    const writes = writerOf(journal);
+    return journal.some(
+      (r) =>
+        r.seq > reached.seq &&
+        MOVING_EVENTS.has(r.event) &&
+        typeof r.node === "string" &&
+        r.node !== node &&
+        writes(r.node),
+    );
+  }
+
+  /**
+   * Whether another node is active now, or a node of another branch of a fork moved at any time in the
+   * run: the window of `changesSinceStart`, the list a gate's answer gives the agent.
+   */
+  private async otherBranchesMovedInRun(state: RunState, node: string): Promise<boolean> {
+    if (writingElsewhere(state, node)) return true;
+    if (state.forks === undefined) return false;
+    const journal = await this.host.store.readJournal(this.runId).catch(() => []);
+    const writes = writerOf(journal);
+    return journal.some(
+      (r) =>
+        MOVING_EVENTS.has(r.event) &&
+        typeof r.node === "string" &&
+        r.node !== node &&
+        writes(r.node) &&
+        !inOwnBranch(state, node, r.node),
+    );
+  }
+
+  /**
+   * Whether another node is active now, or a node of another branch moved since this attempt of the
+   * step was entered: a command branch that wrote files and arrived before this hand-in left its
+   * writes in the shared tree, so in this step's patch, though nothing else is active any more.
+   */
+  private async otherBranchesMovedSinceEntry(
+    state: RunState,
+    node: string,
+    attempt: number,
+  ): Promise<boolean> {
+    if (writingElsewhere(state, node)) return true;
+    if (state.forks === undefined) return false;
+    const journal = await this.host.store.readJournal(this.runId).catch(() => []);
+    const entered = journal.findLast(
+      (r) => r.event === "node_entered" && r.node === node && r.attempt === attempt,
+    );
+    if (!entered) return false;
+    const writes = writerOf(journal);
+    return journal.some(
+      (r) =>
+        r.seq > entered.seq &&
+        MOVING_EVENTS.has(r.event) &&
+        typeof r.node === "string" &&
+        r.node !== node &&
+        writes(r.node) &&
+        !inOwnBranch(state, node, r.node),
+    );
   }
 
   /** Accept the files of this finished run after a deliberate change, and seal them again. */
@@ -1652,42 +1928,75 @@ export class LocalRun {
     );
   }
 
-  private async dispatch(effect: Effect): Promise<void> {
-    switch (effect.type) {
-      case "take_snapshot": {
-        const tree = await (await this.snapshotter()).snapshot();
-        await this.host.store.writeSnapshot(this.runId, effect.key, tree);
-        return;
+  /**
+   * The effects of one decision. The snapshots (a `diff` baseline per branch, the tree at a gate)
+   * are taken first, under the lock, and only then is the engine work started (and not waited for):
+   * a command of this very decision must not write into the baseline its own `diff` check is judged
+   * against. One snapshot of the tree serves every key the decision asks for (a fork asks once per
+   * branch), each snapshot has a deadline and the whole set a bound, and a snapshot that fails or
+   * does not fit is recorded as missing under its key instead of failing the decision (a `diff`
+   * check against a missing baseline fails its branch and says so; a gate says it cannot tell what
+   * changed).
+   */
+  private async dispatchAll(effects: Effect[]): Promise<void> {
+    const { options, store } = this.host;
+    const total = deadlineIn(options.dispatchDeadlineMs ?? DISPATCH_DEADLINE_MS);
+    const each = options.snapshotDeadlineMs ?? SNAPSHOT_DEADLINE_MS;
+    const keys: { key: string; gate: boolean }[] = [];
+    const work: Extract<Effect, { type: "run_command" | "run_check" }>[] = [];
+    for (const effect of effects) {
+      switch (effect.type) {
+        case "take_snapshot":
+          keys.push({ key: effect.key, gate: false });
+          break;
+        case "await_human":
+          keys.push({ key: `gate:${effect.node}:${effect.attempt}`, gate: true });
+          break;
+        case "run_command":
+        case "run_check":
+          work.push(effect);
+          break;
+        default:
+          break; // need_agent waits for the agent
       }
-      case "run_command":
-      case "run_check":
-        this.spawn(effect);
-        return;
-      case "await_human": {
-        // Where the files stood when the person was asked, so approving can show what changed since.
-        // If that cannot be taken, the run still waits for the person (the state is already saved,
-        // and a failure here must not turn into an error for the agent that completed the step);
-        // what is missing is recorded, so the gate says it cannot tell instead of showing nothing.
-        const key = `gate:${effect.node}:${effect.attempt}`;
-        try {
-          const snapshotter = await this.snapshotter();
-          if (await snapshotter.isRepo()) {
-            await this.host.store.writeSnapshot(this.runId, key, await snapshotter.snapshot());
-          }
-        } catch (error) {
-          await this.host.store
-            .writeSnapshot(
-              this.runId,
-              `${key}!`,
-              error instanceof Error ? error.message : String(error),
-            )
-            .catch(() => undefined);
-        }
-        return;
-      }
-      default:
-        return; // need_agent waits for the agent
     }
+    if (keys.length > 0) {
+      let tree: string | undefined;
+      let failure: string | undefined;
+      // Where the files stood when the person was asked, or where a check starts from: a gate in a
+      // directory without git has nothing to record and nothing to say, a check has. A gate beside
+      // a check is still asked about git on its own: a tree is only the gate's when it has one.
+      let repo: boolean | undefined;
+      try {
+        // Finding the directory (and the worktree check behind it) is under the bound too: a hung
+        // git must not hold the lock past it, whatever it was asked.
+        const ranOut = () => new Error("the time for recording the files of this decision ran out");
+        if (total.remainingMs() <= 0) throw ranOut();
+        const snapshotter = await within(this.snapshotter(), total.remainingMs(), ranOut);
+        if (keys.some((k) => k.gate)) {
+          if (total.remainingMs() <= 0) throw ranOut();
+          repo = await snapshotter.isRepo(Math.max(total.remainingMs(), 1));
+        }
+        if (keys.some((k) => !k.gate) || repo === true) {
+          const left = total.remainingMs();
+          if (left <= 0) throw ranOut();
+          tree = await snapshotter.snapshot(deadlineIn(Math.min(each, left)));
+        }
+      } catch (error) {
+        // Kept in snapshots.json and shown at the gate: git's text is history, so it is redacted.
+        failure = this.changesErrorText(error);
+      }
+      for (const { key, gate } of keys) {
+        // A gate in a directory without git keeps nothing: it says so (`no_repo`), not "unavailable".
+        if (gate && repo === false) continue;
+        if (tree !== undefined) {
+          await store.writeSnapshot(this.runId, key, tree).catch(() => undefined);
+        } else if (failure !== undefined) {
+          await store.writeSnapshot(this.runId, `${key}!`, failure).catch(() => undefined);
+        }
+      }
+    }
+    for (const effect of work) this.spawn(effect);
   }
 
   // engine work
@@ -1757,7 +2066,7 @@ export class LocalRun {
         this.tasks.delete(key);
       }
     })();
-    this.pending.add(job);
+    this.pending.set(job, effect.node);
     void job.finally(() => this.pending.delete(job));
   }
 
@@ -1804,7 +2113,9 @@ export class LocalRun {
     signal: AbortSignal,
   ): Promise<RunEvent> {
     const cwd = await this.cwd();
-    const { specHash } = await this.state();
+    // The version the work was issued under, not one read now: a change accepted meanwhile that
+    // leaves the node as it is must not make its result look stale.
+    const specHash = effect.spec ?? (await this.state()).specHash;
     const result = await this.host.runner(
       effect.command,
       this.commandOptions(
@@ -1851,7 +2162,7 @@ export class LocalRun {
     const runner = this.host.checkRunners[effect.kind];
     const started = Date.now();
     const cwd = await this.cwd();
-    const { specHash } = await this.state();
+    const specHash = effect.spec ?? (await this.state()).specHash;
     const verdict: CheckVerdict & KeptOutput = runner
       ? await runner(effect, {
           runId: this.runId,
@@ -1903,9 +2214,26 @@ export class LocalRun {
 
   /**
    * Wait until the work running in this process has finished and its results are applied.
-   * `parked` says how many tasks are known to be stuck on purpose (tests), so they are not waited for.
+   * `parked` says how many tasks are known to be stuck on purpose (tests), so they are not waited for;
+   * it counts tasks of the whole run, so it is only meant for a wait without `node`.
    */
-  async settle(parked: () => number = () => 0, deadline = Number.POSITIVE_INFINITY): Promise<void> {
+  async settle(
+    parked: () => number = () => 0,
+    deadline = Number.POSITIVE_INFINITY,
+    node?: string,
+    scope: WaitScope = "chain",
+  ): Promise<void> {
+    // With a node, only the jobs that are the caller's (`ownWork`): the node's own, or the chain its
+    // branch leads into, but never a sibling's command that may run for an hour. The jobs that record
+    // the end of the run are everyone's: a decision that ended the run waits for its patch, or a
+    // command that exits right after would lose it.
+    const mine = async () => {
+      if (node === undefined) return [...this.pending.keys()];
+      const own = await this.ownWork(node, scope);
+      return [...this.pending]
+        .filter(([job, of]) => (of !== undefined && own(of)) || this.endJobs.has(job))
+        .map(([job]) => job);
+    };
     // The queue too is waited for no longer than the deadline: it may stand behind another process's lock.
     const queued = async () => {
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1921,9 +2249,11 @@ export class LocalRun {
     };
     for (;;) {
       await queued();
-      if (this.pending.size <= parked()) {
+      let jobs = await mine();
+      if (jobs.length <= parked()) {
         await queued();
-        if (this.pending.size <= parked()) return;
+        jobs = await mine();
+        if (jobs.length <= parked()) return;
       }
       const left = deadline - Date.now();
       if (left <= 0) return;
@@ -1934,7 +2264,7 @@ export class LocalRun {
         timer = Number.isFinite(left) ? setTimeout(resolve, left) : undefined;
       });
       try {
-        await Promise.race([...this.pending, wake]);
+        await Promise.race([...jobs, wake]);
       } finally {
         clearTimeout(timer);
       }
@@ -1942,28 +2272,60 @@ export class LocalRun {
   }
 
   /**
+   * Which nodes' work is the caller's to wait for, having decided or completed `node`. `step`: the
+   * node's own. `chain`: the nodes of its branch and the nodes outside every branch (`inOwnBranch`),
+   * read from the state as it stands, since the chain the decision led into grows while it is waited
+   * for; only another branch of an open fork is left to whoever asks next.
+   */
+  private async ownWork(node: string, scope: WaitScope): Promise<(of: string) => boolean> {
+    const state = scope === "chain" ? await this.state().catch(() => undefined) : undefined;
+    if (!state) return (of) => of === node;
+    return (of) => inOwnBranch(state, node, of);
+  }
+
+  /**
    * Wait for the engine's work on this run to come to rest, but no longer than `ms`: the work this
    * process runs, and also work another process owns (a session still going), which is watched in
-   * the state on disk.
+   * the state on disk. With `node`, only the work that is the caller's (`WaitScope`): the node's
+   * own, or the chain its branch leads into; a sibling branch goes on without the caller, who
+   * decided or completed that one node.
    */
-  async waitForRest(ms: number): Promise<void> {
+  async waitForRest(ms: number, node?: string, scope: WaitScope = "chain"): Promise<void> {
     if (ms <= 0) return;
     const deadline = Date.now() + ms;
-    await this.settle(() => 0, deadline);
+    await this.settle(() => 0, deadline, node, scope);
     // What is left is work another process owns. It is watched in the state on disk, and looked at
     // with a tick now and then, so work that has gone silent or lost its owner is started again
     // during the wait instead of after it.
     let rounds = 0;
-    while (Date.now() < deadline && (await this.engineBusy())) {
+    while (Date.now() < deadline && (await this.engineBusy(node, scope))) {
       await new Promise((resolve) => setTimeout(resolve, Math.min(300, deadline - Date.now())));
-      if (++rounds % 4 === 0) await this.tick().catch(() => undefined);
-      await this.settle(() => 0, deadline); // a tick may have started work in this process
+      // Only the caller's own work is taken over: a sibling's command started here would be left
+      // out of the wait, and lost when the process that waits exits right after.
+      if (++rounds % 4 === 0) await this.tick(node, scope).catch(() => undefined);
+      // a tick may have started work in this process
+      await this.settle(() => 0, deadline, node, scope);
     }
   }
 
-  private async engineBusy(): Promise<boolean> {
+  /**
+   * Engine work is going, or every open agent step is in a worker's hands: either way the caller
+   * that waits has nothing to do until something hands in. With `node`, only the engine work that
+   * is the caller's counts (`WaitScope`: the node's own, or its branch's chain by `inOwnBranch`); a
+   * sibling branch, and a claimed sibling's step, are not the caller's to wait for.
+   */
+  private async engineBusy(node?: string, scope: WaitScope = "chain"): Promise<boolean> {
     const state = await this.state().catch(() => undefined);
-    return state?.active.some((v) => v.phase === "engine" || v.phase === "checks") ?? false;
+    if (!state) return false;
+    const own = state.active.filter(
+      (v) =>
+        node === undefined ||
+        (scope === "chain" ? inOwnBranch(state, node, v.node) : v.node === node),
+    );
+    return (
+      own.some((v) => v.phase === "engine" || v.phase === "checks") ||
+      (node === undefined && claimedStepsOpen(state, this.host.clock()))
+    );
   }
 
   /**
@@ -1980,9 +2342,8 @@ export class LocalRun {
   // what callers do
 
   /** What the agent should do next. Throws `STATE_MODIFIED_EXTERNALLY` if the files were tampered with. */
-  async nextStep(
-    options: { atCompletion?: boolean; serve?: { caller?: Caller } } = {},
-  ): Promise<NextStep> {
+  /** `only`: of the steps the answer lists, the one slug recorded as served (a worker's take). */
+  async nextStep(options: NextStepRequest = {}, only?: string): Promise<NextStep> {
     await this.assertOurs();
     // Only a call of the agent through the MCP tools starts the copy of its log; looking at a run does not.
     if (options.serve !== undefined) this.watchAgentLog();
@@ -2005,13 +2366,13 @@ export class LocalRun {
       this.host.clock(),
       this.host.engine.registry ?? defaultRegistry(),
       {
-        waitHint: await this.waitHint(),
-        agentDecisions: this.agentDecisions(),
+        ...(await this.answerOptions(options, state)),
         ...(pending ? { pending: pending.info } : {}),
-        ...(options.atCompletion === true ? { atCompletion: true } : {}),
       },
     );
-    if ("done" in step && step.run_status === "completed") {
+    // A worker is told only to report back (`forWorker`): what is for the person is the coordinator's.
+    const worker = options.worker === true;
+    if (!worker && "done" in step && step.run_status === "completed") {
       const where = await this.locationForDisplay();
       // Only a run with a worktree of its own has something to protect: the end tree is read from it,
       // and removing it now would lose the patch.
@@ -2036,11 +2397,106 @@ export class LocalRun {
         step.waiting.changes = shown;
         if (omitted > 0) step.waiting.changes_omitted = omitted;
       }
+      // The note qualifies the list it stands by, so it is judged on the same window: the whole run.
+      // As the person is shown it (`kodel gate`, the dialog): with no file changed yet it still stands,
+      // since other branches may write while the person reads; no repository or no record has none.
+      if (
+        found.kind === "changes" &&
+        (await this.otherBranchesMovedInRun(state, step.waiting.node_slug))
+      ) {
+        step.waiting.changes_note = SHARED_TREE_NOTE;
+        if (!worker) step.waiting.tell_the_person += TELL_CHANGES_NOTE;
+      }
     }
     if (options.serve !== undefined && "node" in step) {
-      await this.recordServed(step.node, options.serve.caller, state);
+      // Every step handed out is recorded, each on its own: what a step says does not depend on its
+      // siblings, so the record of one is the same whoever else is working the run.
+      for (const handed of step.node.steps ?? [step.node]) {
+        if (only !== undefined && handed.slug !== only) continue;
+        // The directory is the run's (its `meta.json` has it), not the step's: an absolute path of
+        // this machine is kept out of the record of what the agent was shown.
+        const { workdir: _where, ...own } = servedPart(handed, step.node.pipeline_change);
+        await this.recordServed(own, options.serve.caller, state);
+      }
     }
     return step;
+  }
+
+  /**
+   * A worker takes a step: the one named, or the next free one. The token is made here and only its
+   * hash reaches the state and the journal; the machine decides under the run's lock whether the
+   * step is free, so two workers taking at once get one claim between them.
+   */
+  async takeStep(input: { node?: string; token?: string; caller?: Caller }): Promise<TakeOutcome> {
+    await this.assertOurs();
+    const hints = await this.hints();
+    const serve = { ...(input.caller === undefined ? {} : { caller: input.caller }) };
+    const token = input.token ?? randomBytes(16).toString("hex");
+    const hash = hashSource(token);
+    // Which step is free is decided by the machine under the lock, with the claim itself.
+    const decision = await this.apply({
+      type: "step_claimed",
+      ...(input.node === undefined ? {} : { node: input.node }),
+      token: hash,
+      ttlMs: hints.agents.claim_ttl_s * 1000,
+      maxParallel: hints.agents.max_parallel,
+    });
+    // The caller is a worker: when there is nothing to take (the step was handed in by another
+    // worker, the run finished or stopped) it is told so and to report back, never the coordinator's
+    // advice to call pipeline_next_step.
+    const none = async (): Promise<TakeOutcome> => ({
+      status: "none",
+      next: await this.nextStep({ serve, worker: true }),
+    });
+    if (!decision.ok) {
+      await this.recordRefusal("take_step", input.node, undefined, decision.error);
+      if (decision.error.code === "NODE_NOT_RUNNING") return none();
+      throw decision.error;
+    }
+    const after = decision.state;
+    const now = this.host.clock();
+    // What was claimed, and whether it was a renewal, is the machine's word under the lock: a state
+    // read around it may be another take's.
+    let claimed = decision.noop ? undefined : decision.claimed;
+    if (claimed === undefined) {
+      const node = input.node;
+      if (node === undefined) return none();
+      const visit = after.active.find((v) => v.node === node && v.phase === "agent");
+      if (!visit) return none();
+      const live = liveClaim(after.nodes[node], now);
+      if (live === undefined) {
+        // Held back by the cap, not by a holder: the machine left the step as it was.
+        const held = after.active.filter(
+          (v) => v.phase === "agent" && liveClaim(after.nodes[v.node], now) !== undefined,
+        ).length;
+        return {
+          status: "queued",
+          node_slug: node,
+          attempt: visit.attempt,
+          held,
+          max_parallel: hints.agents.max_parallel,
+        };
+      }
+      // The caller's own live claim is never "taken" from itself: it is a renewal.
+      if (live.token !== hash) {
+        return { status: "taken", node_slug: node, attempt: visit.attempt, taken_by: live.by };
+      }
+      claimed = { node, renewed: true };
+    }
+    // Only the step taken is recorded as served to this caller, not the siblings the answer lists.
+    const answer = await this.nextStep(
+      { nodeSlug: claimed.node, serve, worker: true },
+      claimed.node,
+    );
+    if (!("node" in answer)) {
+      // The step was taken and is gone already (a sibling died and ended the run, say): say what is.
+      return { status: "none", next: answer };
+    }
+    return {
+      status: claimed.renewed ? "renewed" : "claimed",
+      step: servedPart(answer.node, answer.node.pipeline_change),
+      claim_token: token,
+    };
   }
 
   /**
@@ -2162,9 +2618,20 @@ export class LocalRun {
     return [...owners].filter((owner) => !this.host.isOwnerAlive(owner));
   }
 
-  async tick() {
+  /** Restart stale or orphaned engine work; with `node`, only the work that is the caller's (`WaitScope`). */
+  async tick(node?: string, scope: WaitScope = "chain") {
     const deadOwners = await this.deadOwners();
-    return this.apply(deadOwners.length > 0 ? { type: "tick", deadOwners } : { type: "tick" });
+    let nodes: string[] | undefined;
+    if (node !== undefined) {
+      const own = await this.ownWork(node, scope);
+      const state = await this.state().catch(() => undefined);
+      nodes = (state?.active ?? []).map((v) => v.node).filter(own);
+    }
+    return this.apply({
+      type: "tick",
+      ...(deadOwners.length > 0 ? { deadOwners } : {}),
+      ...(nodes === undefined ? {} : { nodes }),
+    });
   }
 
   async completeStep(
@@ -2173,6 +2640,7 @@ export class LocalRun {
     summary?: string,
     outcome?: string,
     caller?: Caller,
+    claimToken?: string,
   ) {
     await this.assertOurs();
     // A change of the pipeline that waits for a person is met here: what the step is judged by may be
@@ -2244,10 +2712,13 @@ export class LocalRun {
         ...(head === undefined ? {} : { head }),
         ...(summary === undefined ? {} : { summary }),
         ...(outcome === undefined ? {} : { outcome }),
+        // Only the hash travels: the token itself is the worker's and is written nowhere.
+        ...(claimToken === undefined ? {} : { claimToken: hashSource(claimToken) }),
         ...(executor === undefined ? {} : executor),
         ...(recorded.changes === undefined ? {} : { changes: recorded.changes }),
         ...(recorded.changesError === undefined ? {} : { changesError: recorded.changesError }),
         ...(recorded.tree === undefined ? {} : { tree: recorded.tree }),
+        ...(recorded.changesNote === undefined ? {} : { changesNote: recorded.changesNote }),
       });
     } catch (error) {
       // A file no event points to is of no use to anyone.
@@ -2386,9 +2857,10 @@ export class LocalRun {
     });
   }
 
-  async resume() {
+  /** `node`: which paused branch to carry on, when more than one is paused. */
+  async resume(node?: string) {
     await this.assertOurs();
-    return this.apply({ type: "resume" });
+    return this.apply({ type: "resume", ...(node === undefined ? {} : { node }) });
   }
 
   async cancel() {

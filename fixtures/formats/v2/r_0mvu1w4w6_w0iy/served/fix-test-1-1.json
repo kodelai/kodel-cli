@@ -1,0 +1,15 @@
+{
+  "v": 1,
+  "node": "fix-test",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "2ac57b29a6494d207b8a5078ae2b2b403cbf9a529a7a20e868ab10774aee3742",
+  "answer": {
+    "slug": "fix-test",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "The test failed; fix the cause, then the test runs again.",
+    "reentry_feedback": "\"test\" failed (command): the command exited with 1, expected 0",
+    "workdir": "[REDACTED:high-entropy].kodel/worktrees/r_0mvu1w4w6_w0iy"
+  }
+}

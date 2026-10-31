@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { LocalRun } from "../../packages/local/src";
 import {
   type AgentTurn,
   callsTo,
@@ -158,7 +159,7 @@ describe("Claude Code on a real kodel server: harder paths", () => {
       const run = await humanHost(sandbox).open(runId);
       const state = await run?.state();
       expect(state?.status, why).toBe("paused");
-      expect(state?.pause?.reason, why).toBe("consecutive");
+      expect(state?.pauses[0]?.reason, why).toBe("consecutive");
       // Two failures are allowed; a third call would mean the agent pushed on after the pause.
       expect(callsTo(turn, "pipeline_complete_step").length, why).toBeLessThanOrEqual(3);
       expect(turn.calls.length, `the agent kept going${why}`).toBeLessThan(25);
@@ -261,7 +262,8 @@ describe("Claude Code on a real kodel server: harder paths", () => {
       sandboxes.push(sandbox);
       const host = humanHost(sandbox);
       const { run } = await host.start({ pipeline: "mini", task: "make hello", restart: false });
-      await run.cancel();
+      // `start` hands out the service's handle; cancelling is the host's own, as a person would do it
+      await (run as LocalRun).cancel();
 
       const turn = await runAgentTurn({
         sandbox,

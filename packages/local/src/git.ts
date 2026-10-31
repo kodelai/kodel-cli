@@ -141,11 +141,15 @@ const MAX_REFLOG_ENTRIES = MAX_RUN_COMMITS * 4;
 const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 
 /** The commit HEAD points at in `cwd`; none for no repository, no git, or a branch without commits. */
-export async function readHead(cwd: string): Promise<string | undefined> {
+export async function readHead(cwd: string, timeoutMs?: number): Promise<string | undefined> {
   try {
-    const { stdout } = await git(["rev-parse", "--verify", "--quiet", "HEAD"], cwd, {
-      GIT_OPTIONAL_LOCKS: "0",
-    });
+    const { stdout } = await git(
+      ["rev-parse", "--verify", "--quiet", "HEAD"],
+      cwd,
+      { GIT_OPTIONAL_LOCKS: "0" },
+      undefined,
+      timeoutMs,
+    );
     const sha = stdout.trim();
     return SHA.test(sha) ? sha : undefined;
   } catch {
@@ -171,8 +175,16 @@ export async function readRunCommits(
   cwd: string,
   base: string | undefined,
   sinceSeconds: number,
+  /** When given, every git call is held to it, and a call cut off by it throws `DeadlineError`. */
+  deadline?: Deadline,
 ): Promise<RunCommits> {
-  const head = await readHead(cwd);
+  const left = () => {
+    if (deadline === undefined) return undefined;
+    const ms = deadline.remainingMs();
+    if (ms <= 0) throw new DeadlineError();
+    return ms;
+  };
+  const head = await readHead(cwd, left());
   if (head === undefined) return {};
   if (base === undefined || !SHA.test(base)) return { head };
   const env = { GIT_OPTIONAL_LOCKS: "0" };
@@ -188,9 +200,12 @@ export async function readRunCommits(
       ["rev-list", `--max-count=${MAX_RUN_COMMITS + 1}`, `${base}..${head}`],
       cwd,
       env,
+      undefined,
+      left(),
     );
     for (const line of stdout.split("\n")) add(line.trim());
-  } catch {
+  } catch (error) {
+    if (error instanceof DeadlineError) throw error;
     // base unknown to this repository (a shallow clone, say): the reflog may still tell
   }
   let reflogCut = false;
@@ -206,6 +221,8 @@ export async function readRunCommits(
       ],
       cwd,
       env,
+      undefined,
+      left(),
     );
     const rows = stdout.split("\n").filter(Boolean);
     let oldest = Number.POSITIVE_INFINITY;
@@ -218,7 +235,8 @@ export async function readRunCommits(
     }
     // Cut only if what was read still reaches back into the run; older entries are not the run's.
     reflogCut = rows.length >= MAX_REFLOG_ENTRIES && oldest >= sinceSeconds;
-  } catch {
+  } catch (error) {
+    if (error instanceof DeadlineError) throw error;
     // no reflog (core.logAllRefUpdates=false, or nothing yet)
   }
   const truncated = commits.length > MAX_RUN_COMMITS || reflogCut;

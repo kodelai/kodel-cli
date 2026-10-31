@@ -19,3 +19,10 @@ paths = [
   '''^packages/local/test/changes-review\.test\.ts$''',
   '''^packages/testkit/test/run-task\.test\.ts$''',
 ]
+
+# Both must hold: this file and this value, so another value in the same file is still checked.
+[[allowlists]]
+description = "A made-up claim token of the fork tests (a counting string, not a key)"
+condition = "AND"
+paths = ['''^packages/pipeline-core/test/fork-steps\.test\.ts$''']
+regexes = ['''0123456789abcdef0123456789abcdef''']

@@ -237,7 +237,38 @@ describe("starting and finding runs", () => {
     expect((await h.store.listRuns()).length).toBe(1);
   });
 
+  const DIFF_SPEC = parsePipeline(
+    [
+      "name: snap",
+      "nodes:",
+      "  - slug: a",
+      "    kind: agent",
+      "    prompt: x",
+      "    checks:",
+      '      - { kind: diff, paths: ["x"] }',
+      "",
+    ].join("\n"),
+  );
+
   test("a run that could not be started leaves nothing behind", async () => {
+    class BrokenGit extends GitSnapshotter {
+      override async isRepo(): Promise<boolean> {
+        throw new Error("git is broken");
+      }
+    }
+    const h = new LocalHost(DIFF_SPEC, {
+      root: dir,
+      heartbeatMs: 0,
+      snapshotter: new BrokenGit(dir),
+    });
+    await expect(h.start("t")).rejects.toThrow("git is broken");
+    expect((await h.store.listRuns()).length).toBe(0);
+  });
+
+  test("t40_snapshot_failure_in_dispatch_not_fatal", async () => {
+    // The baseline of a `diff` check is taken under the lock when the step is entered; git failing
+    // there does not fail the start (nor any later decision): what is missing is recorded under the
+    // key, and the check that needs it fails its step and says so (T-40).
     class BrokenGit extends GitSnapshotter {
       override async isRepo() {
         return true;
@@ -246,22 +277,16 @@ describe("starting and finding runs", () => {
         throw new Error("git is broken");
       }
     }
-    const snapshotter = new BrokenGit(dir);
-    const spec = parsePipeline(
-      [
-        "name: snap",
-        "nodes:",
-        "  - slug: a",
-        "    kind: agent",
-        "    prompt: x",
-        "    checks:",
-        '      - { kind: diff, paths: ["x"] }',
-        "",
-      ].join("\n"),
-    );
-    const h = new LocalHost(spec, { root: dir, heartbeatMs: 0, snapshotter });
-    await expect(h.start("t")).rejects.toThrow("git is broken");
-    expect((await h.store.listRuns()).length).toBe(0);
+    const h = new LocalHost(DIFF_SPEC, {
+      root: dir,
+      heartbeatMs: 0,
+      snapshotter: new BrokenGit(dir),
+    });
+    const { run } = await h.start("t");
+    expect((await run.state()).active.map((v) => v.node)).toEqual(["a"]);
+    const snapshots = await h.store.readSnapshots(run.runId);
+    expect(snapshots["visit:1"]).toBeUndefined();
+    expect(snapshots["visit:1!"]).toContain("git is broken");
   });
 
   test("waitForRest returns when the work is done, or when the time is up", async () => {

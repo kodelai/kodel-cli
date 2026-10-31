@@ -69,10 +69,13 @@ test("t36tw_no_new_agent_tool_or_argument_and_agent_answers_do_not_leak_patch_da
       "pipeline_report_result",
       "pipeline_resolve",
       "pipeline_start",
+      "pipeline_take_step",
     ]);
+    // `claim_token` (T-40) is a worker's hold on a step, nothing of the patches.
     const complete = tools.find((t) => t.name === "pipeline_complete_step");
     expect(Object.keys((complete?.inputSchema.properties ?? {}) as object).sort()).toEqual([
       "attempt",
+      "claim_token",
       "node_slug",
       "outcome",
       "run_id",

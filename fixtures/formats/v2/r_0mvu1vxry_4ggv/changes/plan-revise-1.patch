@@ -1,0 +1,12 @@
+# kodel-patch v1
+diff --git a/docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md b/docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md
+--- a/docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md
++++ b/docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md
+@@ -14,3 +14,7 @@
+ - the status command prints the run list as JSON, point 10
+ - the status command prints the run list as JSON, point 11
+ - the status command prints the run list as JSON, point 12
++
++## Decisions needed
++
++None.

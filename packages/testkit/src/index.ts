@@ -9,6 +9,7 @@ export * from "./claude-log-builder";
 export * from "./dsl";
 export * from "./fake-agent-history";
 export * from "./history-fixtures";
+export * from "./latch-runner";
 export * from "./load";
 export * from "./local-engine";
 export * from "./matchers";

@@ -58,6 +58,22 @@ const MEMO_CAP = 16;
 
 const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
 
+/**
+ * The step a copy of the agent's log is booked to when the caller names none: the agent's words
+ * belong to a step of the agent, and a command running beside one in a fork does not write to the
+ * log, so the first open agent step is the one; the first visit only when no agent step is open, and
+ * the last node of the trail when nothing is.
+ */
+export function logVisitOf(state: Pick<RunState, "active" | "trail" | "nodes">): {
+  node: string;
+  attempt: number;
+} {
+  const visit = state.active.find((v) => v.phase === "agent") ?? state.active[0];
+  if (visit !== undefined) return { node: visit.node, attempt: visit.attempt };
+  const last = state.trail[state.trail.length - 1] ?? "";
+  return { node: last, attempt: state.nodes[last]?.attempt ?? 0 };
+}
+
 export interface AgentLogRun {
   readonly runId: string;
   state(): Promise<RunState>;
@@ -365,11 +381,7 @@ export class AgentLogWriter {
   }
 
   private nodeOf(state: RunState, input: CaptureInput): { node: string; attempt: number } {
-    if (input.step !== undefined) return input.step;
-    const visit = state.active[0];
-    if (visit !== undefined) return { node: visit.node, attempt: visit.attempt };
-    const last = state.trail[state.trail.length - 1] ?? "";
-    return { node: last, attempt: state.nodes[last]?.attempt ?? 0 };
+    return input.step ?? logVisitOf(state);
   }
 
   private async fail(

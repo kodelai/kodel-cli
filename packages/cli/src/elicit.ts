@@ -46,13 +46,15 @@ export interface HumanRun {
     reason?: string,
     byAgent?: AgentDecision,
   ): Promise<Decision>;
-  resume(): Promise<Decision>;
+  /** `node`: which paused branch, when more than one is paused. */
+  resume(node?: string): Promise<Decision>;
   acknowledge(note?: string): Promise<Decision>;
   acceptChange(input: {
     source: "file" | "proposal";
     text: string;
     reason?: string;
     byAgent?: AgentDecision;
+    standing?: string;
   }): Promise<Decision>;
   discardProposal(): Promise<boolean>;
   restoreFile(hash?: string): Promise<{ path: string; hash: string }>;
@@ -261,11 +263,35 @@ export function createElicitor(
   ): Promise<ToolResult> {
     if (kind === "ack") return { ...result, dialog } as ToolResult;
     const runId = runIdOf(call);
-    // If the state cannot be read now, the agent still hears what the person did.
+    // If the state cannot be read now, the agent still hears what the person did. The question is
+    // asked as the caller asked it: with `node_slug` the answer is about that step, the agent's
+    // declaration of itself (`subagents`) decides the mode as before, and after a completion the
+    // answer stays that completion's (its own step again or a summary, never a sibling's step).
+    const nodeSlug = call.args["node_slug"];
+    const declared = call.args["subagents"];
+    const completing = call.tool === "pipeline_complete_step" && typeof nodeSlug === "string";
     const fresh =
       runId === undefined
         ? undefined
-        : await service.nextStep({ run_id: runId }).catch(() => undefined);
+        : await service
+            .nextStep({
+              run_id: runId,
+              ...(call.tool === "pipeline_next_step" && typeof nodeSlug === "string"
+                ? { node_slug: nodeSlug }
+                : {}),
+              ...(isRecord(declared) && typeof declared["can"] === "boolean"
+                ? { subagents: { can: declared["can"] } }
+                : {}),
+              ...(completing
+                ? {
+                    after_completion: {
+                      node_slug: nodeSlug,
+                      worker: typeof call.args["claim_token"] === "string",
+                    },
+                  }
+                : {}),
+            })
+            .catch(() => undefined);
     if (!fresh?.ok) return { ...result, dialog } as ToolResult;
     const { ok: _ok, ...step } = fresh;
     if (call.tool === "pipeline_next_step") return { ok: true, ...step, dialog };
@@ -291,7 +317,7 @@ export function createElicitor(
           text(what.waiting["prompt"], 1000),
         );
       case "paused":
-        return pausedQuestion(runId, run);
+        return pausedQuestion(runId, run, text(what.waiting["node_slug"], 200));
       case "change":
         return changeQuestion(runId, run);
       case "ack":
@@ -351,6 +377,10 @@ export function createElicitor(
 
   return async (call) => {
     if (!DIALOG_TOOLS.has(call.tool)) return undefined;
+    // A worker (a call that hands in a claim token) is never held for the person: the agent that
+    // started it talks to them. The token, not `node_slug`, is the mark: every completion names a
+    // node, and the one of a run worked by one agent is where the gate dialog belongs.
+    if (typeof call.args["claim_token"] === "string") return undefined;
     if (!server.getClientCapabilities()?.elicitation?.form) return undefined;
     if (busy) return undefined;
     busy = true;
@@ -501,7 +531,19 @@ async function gateQuestion(
         return stale("a change of the pipeline is waiting for you; decide on it first");
       }
       // What is decided is what was shown: files that moved while the dialog was open are new facts.
-      if (changesFingerprint(await run.changesSinceGate(node)) !== changesFingerprint(found)) {
+      // Unless another branch of a fork was active since the gate was reached: it writes to the same
+      // tree, so its work would make every gate of the fork undecidable here (the tree is one; a
+      // limit recorded in T-40). The host judges that from the journal and says so with a note on
+      // the report, so a sibling that arrived at the join while the dialog was open counts too.
+      const now = await run.changesSinceGate(node);
+      // Fail closed: what was shown can no longer be compared with anything, note or not.
+      if (found.kind === "changes" && now.kind !== "changes") {
+        return stale("the files could no longer be listed to compare with what was shown");
+      }
+      const shared = (report: ChangeReport) =>
+        report.kind === "changes" && report.note !== undefined;
+      const moved = changesFingerprint(now) !== changesFingerprint(found);
+      if (!shared(now) && !shared(found) && moved) {
         return stale("the files changed while the dialog was open");
       }
       const done = await run.decideHuman(
@@ -512,16 +554,32 @@ async function gateQuestion(
       if (!done.ok) return refusedBy(done);
       return {
         done: "applied",
-        said: `${decision === "approve" ? "approved" : "rejected"} the step "${plain(node)}"`,
+        said: `${decision === "approve" ? "approved" : "rejected"} the step "${plain(node)}"${moved ? MOVED_WHILE_SHARED : ""}`,
       };
     },
   };
 }
 
-async function pausedQuestion(runId: string, run: HumanRun): Promise<Question | undefined> {
+/** Said with a gate decision kept although the files changed while the dialog was open. */
+const MOVED_WHILE_SHARED =
+  " (the files changed while the dialog was open; other branches of the fork were running, so the change may be theirs and the decision was kept)";
+
+/**
+ * `node`: the paused step the answer named. A pause of one branch of a fork leaves the run `running`,
+ * so the pause, not the run's status, is what is looked for; and that very branch is what is resumed.
+ */
+async function pausedQuestion(
+  runId: string,
+  run: HumanRun,
+  node: string,
+): Promise<Question | undefined> {
   const state = await run.state();
-  if (state.status !== "paused") return undefined;
-  const why = `${plain(state.pause?.reason ?? "?")} at ${plain(state.pause?.node ?? "?")}`;
+  if (state.status !== "running" && state.status !== "paused") return undefined;
+  const pause = state.pauses.find((p) => p.node === node) ?? state.pauses[0];
+  if (!pause) return undefined;
+  const why = `${plain(pause.reason)} at ${plain(pause.node)}`;
+  const branch =
+    pause.fork === undefined ? "" : ` (branch "${plain(pause.fork.branch)}" of a fork)`;
   return {
     key: `${runId}|paused|${why}`,
     notDecided: NOT_DECIDED,
@@ -530,21 +588,36 @@ async function pausedQuestion(runId: string, run: HumanRun): Promise<Question | 
       properties: {
         confirm: {
           type: "boolean",
-          title: "Carry the run on, with more attempts for the step that stopped it",
+          title: `Carry the run on at "${plain(pause.node)}", with more attempts for the step that stopped it`,
           default: false,
         },
       },
       required: ["confirm"],
     },
-    message: (note) => header(runId, `the run is paused (${why}).\n\n${NOT_THE_AGENT}`, note),
+    message: (note) =>
+      header(
+        runId,
+        `the run is paused (${why})${branch}.${
+          state.pauses.length > 1
+            ? ` It is also paused at: ${state.pauses
+                .filter((p) => p !== pause)
+                .map((p) => `"${plain(p.node)}"`)
+                .join(", ")}; each is resumed on its own.`
+            : ""
+        }\n\n${NOT_THE_AGENT}`,
+        note,
+      ),
     async apply(content) {
       if (content["confirm"] !== true) return none("declined", NOT_DECIDED);
       const again = await run.state();
-      if (again.status !== "paused") return stale("the run is no longer paused");
+      const still =
+        (again.status === "running" || again.status === "paused") &&
+        again.pauses.some((p) => p.node === pause.node);
+      if (!still) return stale("the run is no longer paused");
       if (await blockingChange(run, again)) {
         return stale("a change of the pipeline is waiting for you; decide on it first");
       }
-      const done = await run.resume();
+      const done = await run.resume(pause.node);
       return done.ok ? { done: "applied", said: "resumed the run" } : refusedBy(done);
     },
   };
@@ -603,6 +676,7 @@ async function changeQuestion(runId: string, run: HumanRun): Promise<Question | 
       const done = await run.acceptChange({
         source: found.info.source,
         text: found.text,
+        standing: found.info.standing,
         ...(reason === "" ? {} : { reason }),
       });
       return done.ok

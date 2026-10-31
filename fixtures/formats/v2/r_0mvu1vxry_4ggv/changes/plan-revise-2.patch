@@ -1,0 +1,12 @@
+# kodel-patch v1
+diff --git a/docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md b/docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md
+--- a/docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md
++++ b/docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md
+@@ -32,3 +32,7 @@ None.
+ - status --json is covered by a CLI test, point 9
+ - status --json is covered by a CLI test, point 10
+ - status --json is covered by a CLI test, point 11
++
++## Rejected review findings
++
++None.

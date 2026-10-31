@@ -128,31 +128,140 @@ export function usageEventKey(event: HistoryEvent): string {
 
 const isoOf = (ms: number): string => new Date(ms).toISOString();
 
+interface Interval {
+  from: number;
+  to: number;
+}
+
+/** `span` less every part of it that one of `cuts` covers. */
+function subtract(span: Interval, cuts: readonly Interval[]): Interval[] {
+  let pieces = [span];
+  for (const cut of cuts) {
+    pieces = pieces.flatMap((piece) => {
+      if (cut.to <= piece.from || cut.from >= piece.to) return [piece];
+      const left = cut.from > piece.from ? [{ from: piece.from, to: cut.from }] : [];
+      const right = cut.to < piece.to ? [{ from: cut.to, to: piece.to }] : [];
+      return [...left, ...right];
+    });
+  }
+  return pieces;
+}
+
 /**
- * The times the run waited for a person: from a gate being reached to the decision, and from a pause to the resume.
- * What the agent and the person say to each other then is not a node's work. A span still open lasts to `nowMs`.
+ * The times the run waited for a person and no agent step was being worked: from a gate being reached to the
+ * decision, and from a pause to the resume, each kept per node and branch (in a fork every branch has its own), less
+ * the times an agent step was open. What the agent and the person say to each other then is not a node's work;
+ * while an agent step is open, the session's use is that step's. A span still open lasts to `nowMs`.
+ *
+ * An agent step is open from its `node_entered` to its hand-in (`agent_completed`) or its end; a visit counts as
+ * one when the journal holds its hand-in or when it is among `openAgentSteps` (the visits in the agent phase now).
+ * `openPauses`, when given, are the pauses the state holds now: a pause window still open in the journal that is not
+ * among them was lifted without a `run_resumed` and is dropped.
  */
-export function outsideSpans(journal: readonly JournalRecord[], nowMs: number): TimeSpan[] {
-  const spans: TimeSpan[] = [];
-  const gates = new Map<string, number>();
-  let paused: number | undefined;
-  const close = (from: number, to: number) => spans.push({ from: isoOf(from), to: isoOf(to) });
+export function outsideSpans(
+  journal: readonly JournalRecord[],
+  nowMs: number,
+  openAgentSteps: Iterable<{ node: string; attempt: number }> = [],
+  openPauses?: Iterable<{ node: string; fork?: { branch: string } }>,
+): TimeSpan[] {
+  const visitKey = (node: string, attempt: number) => `${node}\u0000${attempt}`;
+  const pauseKey = (node: string, branch: string | undefined) => `${node}\u0000${branch ?? ""}`;
+  const agentVisits = new Set<string>();
+  for (const step of openAgentSteps) agentVisits.add(visitKey(step.node, step.attempt));
   for (const record of journal) {
-    const node = typeof record.node === "string" ? record.node : "";
-    if (record.event === "gate_waiting") gates.set(node, record.ts);
-    else if (record.event === "gate_decided") {
-      const from = gates.get(node);
-      if (from !== undefined) close(from, record.ts);
-      gates.delete(node);
-    } else if (record.event === "run_paused") paused = record.ts;
-    else if (record.event === "run_resumed") {
-      if (paused !== undefined) close(paused, record.ts);
-      paused = undefined;
+    if (
+      record.event === "agent_completed" &&
+      typeof record.node === "string" &&
+      typeof record.attempt === "number"
+    ) {
+      agentVisits.add(visitKey(record.node, record.attempt));
     }
   }
-  for (const from of gates.values()) close(from, nowMs);
-  if (paused !== undefined) close(paused, nowMs);
-  return spans;
+
+  const waits: Interval[] = [];
+  const working: Interval[] = [];
+  const gates = new Map<string, number>();
+  const pauses = new Map<string, { node: string; branch?: string; from: number }>();
+  const open = new Map<string, number>();
+  const closeVisit = (key: string, ts: number) => {
+    const from = open.get(key);
+    if (from === undefined) return;
+    working.push({ from, to: ts });
+    open.delete(key);
+  };
+  for (const record of journal) {
+    const node = typeof record.node === "string" ? record.node : "";
+    const branch = typeof record.branch === "string" ? record.branch : undefined;
+    const key = typeof record.attempt === "number" ? visitKey(node, record.attempt) : undefined;
+    switch (record.event) {
+      // A gate or a pause reached again (a superseded visit entered anew, a new pause after a change) starts its
+      // window over, as it did before forks.
+      case "gate_waiting":
+        gates.set(node, record.ts);
+        break;
+      case "gate_decided": {
+        const from = gates.get(node);
+        if (from !== undefined) waits.push({ from, to: record.ts });
+        gates.delete(node);
+        break;
+      }
+      // A fork's branches pause each at their own node; one resume lifts only its own.
+      case "run_paused":
+        pauses.set(pauseKey(node, branch), {
+          node,
+          ...(branch === undefined ? {} : { branch }),
+          from: record.ts,
+        });
+        break;
+      case "run_resumed": {
+        const k = pauseKey(node, branch);
+        const pause = pauses.get(k);
+        if (pause !== undefined) waits.push({ from: pause.from, to: record.ts });
+        pauses.delete(k);
+        break;
+      }
+      // An accepted change lifts the pauses its effects take care of, with no `run_resumed`. Their window is
+      // dropped, not closed: the change is the agent's repair of the step, and its time goes to the step handed in
+      // next, as it did before forks (where the next pause replaced the window). The effects name the node a pause
+      // was held on (`node`, `to`); a pause whose node they do not name (a `total` pause lifted by a recheck of the
+      // node it came from) is caught by `openPauses`.
+      case "pipeline_accepted":
+        for (const item of Array.isArray(record.effects) ? record.effects : []) {
+          if (typeof item !== "object" || item === null) continue;
+          const effect = item as Record<string, unknown>;
+          const named = [effect.node, effect.to].filter((n): n is string => typeof n === "string");
+          const only = typeof effect.branch === "string" ? effect.branch : undefined;
+          for (const [k, pause] of [...pauses]) {
+            if (named.includes(pause.node) && (only === undefined || pause.branch === only))
+              pauses.delete(k);
+          }
+        }
+        break;
+      case "node_entered":
+        if (key !== undefined && agentVisits.has(key)) open.set(key, record.ts);
+        break;
+      case "agent_completed":
+      case "node_finished":
+      case "node_superseded":
+        if (key !== undefined) closeVisit(key, record.ts);
+        break;
+      case "run_finished":
+        for (const k of [...open.keys()]) closeVisit(k, record.ts);
+        break;
+    }
+  }
+  const held =
+    openPauses === undefined
+      ? undefined
+      : new Set([...openPauses].map((p) => pauseKey(p.node, p.fork?.branch)));
+  for (const from of gates.values()) waits.push({ from, to: nowMs });
+  for (const [k, pause] of pauses) {
+    if (held === undefined || held.has(k)) waits.push({ from: pause.from, to: nowMs });
+  }
+  for (const from of open.values()) working.push({ from, to: nowMs });
+  return waits
+    .flatMap((wait) => subtract(wait, working))
+    .map((span) => ({ from: isoOf(span.from), to: isoOf(span.to) }));
 }
 
 export interface UsageWriterOptions {
@@ -364,7 +473,12 @@ export class UsageWriter {
         prices !== undefined && Object.keys(prices).length > 0 ? prices : undefined,
       ),
       node: step,
-      spans: outsideSpans(await run.journal().catch(() => []), started),
+      spans: outsideSpans(
+        await run.journal().catch(() => []),
+        started,
+        state.active.filter((v) => v.phase === "agent"),
+        state.pauses,
+      ),
       started,
       workdir,
       seen: new Set(),

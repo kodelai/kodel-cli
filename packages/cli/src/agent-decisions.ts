@@ -139,6 +139,7 @@ export function createAgentDecider(humans: HumanHost, dialog: DialogState): Agen
         done = await run.acceptChange({
           source: found.info.source,
           text: found.text,
+          standing: found.info.standing,
           ...(reason === "" ? {} : { reason }),
           byAgent: { instruction: input.instruction },
         });
