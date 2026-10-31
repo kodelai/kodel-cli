@@ -252,8 +252,15 @@ and `usage_failed` journal records, `usage` in the state) and a README rewritten
   new record version. With this branch they are written in format 2 like every other record; a usage delta keeps its own
   `v` (`USAGE_RECORD_FORMAT` 1). The tests that built journal records with `v: 1` now use `v: 2`.
 - **The golden run with usage was taken again.** `fixtures/usage-run/r_0mvr1f5ur_1h9c/` was a format-1 run, which this
-  branch refuses without a reader; it is replaced by `r_0mvw32fz3_x186/`, a format-2 run made the same way (the same
-  hand-made session log and flow, the same token figures; the stored price revision is 2026-10-28). Its README says so.
+  branch refuses without a reader; it is replaced by `r_0mvw32fz3_x186/`, a format-2 run made over a hand-made session
+  log with the flow of `t9jrs_flushed_open_response_corrected_on_next_pass`. Its token figures differ from the old run's
+  (`a:1` `cache_write_1h` 100 against 0, `b:1` output 55 against 5, and the costs with them); the stored price revision
+  is 2026-10-28. Its README says so.
+- **The wait for a person is per branch** (review of the merge): `outsideSpans` keeps a gate's and a pause's window per
+  node, so two pauses of two branches are neither merged nor lost, and takes off every time an agent step was open (from
+  its `node_entered` to its hand-in): in a fork, what the session used while one branch waits at a gate and another
+  agent branch is worked goes to that agent step, not to `unattributed`. Without a fork the spans are those of main
+  (`t40_usage_*` in `packages/local/test/usage-spans.test.ts`).
 - **The golden runs in a home tree** (`storage_golden_fixture_opens_from_home`) open the format-2 runs of
   `fixtures/formats/v2/` from the home tree, and check that the format-1 runs there are listed as `format 1` and refused
   with `UNSUPPORTED_FORMAT`, as from `.kodel/runs`. main's test expected the v1 runs to open; the plan (format 2 without a

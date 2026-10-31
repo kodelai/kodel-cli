@@ -8,7 +8,10 @@ holds no working directory) and `seal.json` left out.
 
 It replaces the run of format 1 (`r_0mvr1f5ur_1h9c/`) that the build adding `history.usage` took: format 2 refuses a
 format-1 run without a reader (AGENTS.md, "Stored data and compatibility"), so that run could no longer be opened. The
-token figures are the same; the stored revision is the one of the price table when it was taken (2026-10-28).
+token figures are **not** the same as that run's: this one follows the flow of the test named above (the response open at
+the first pass is corrected at the second), so `a:1` has `cache_write_1h` 100 (the old run had 0) and `b:1` has output 55
+(the old run had 5), and the computed costs differ with them. The stored revision is the one of the price table when it
+was taken (2026-10-28).
 
 It is read by `packages/local/test/usage-run-fixture.test.ts` with `open`, `state` and `report`, and nothing on disk may
 change. It is kept outside `fixtures/formats/` because those directories are pinned by `hashes.json`, which is not

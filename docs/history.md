@@ -464,8 +464,11 @@ when the run is over or when no session proved the run.
 **Which attempt.** What a pass reads is credited to the attempt that pass completes, so the windows of attempts are contiguous
 from the run's first call (the response that calls `pipeline_next_step` is written before the step is served and is in its step).
 What falls inside a wait for a person (from a gate being reached to its decision, or a pause to its resume, by the journal's
-times) is outside every step and is recorded as `unattributed`. The agent talking with the person while the run waits at a gate
-is therefore not charged to a node. Polling through command and check nodes is charged to the next agent node. Use after the last
+times) while no agent step is open is outside every step and is recorded as `unattributed`. The agent talking with the person
+while the run waits at a gate is therefore not charged to a node. In a fork each branch has its own window (kept per node: two
+branches paused at once are two windows, each closed by its own resume), and a window counts only for the time no agent step of
+any branch is open (from the step being entered to its hand-in): while one branch waits at a gate and an agent step of another
+branch is worked, the session's use goes to that step. Polling through command and check nodes is charged to the next agent node. Use after the last
 pass (the agent's final turn after the last `pipeline_complete_step`, a wait at the end) is not recorded: the run's total is a
 lower bound. A hand-in the engine refused after the pass, and then repeated, simply adds another delta to the same attempt.
 
@@ -510,10 +513,11 @@ not counted: the state is not redacted and holds numbers and safe ids only. The 
 record says so. Journal times are those of the machine that serves the run and log times those of the agent: a run served on
 another machine than the agent's (a devcontainer) may be windowed wrongly.
 
-**Format.** Additive, so no release waits for it: the optional `cache_write_1h` on the `usage` event (only a read made for usage
-carries it, so the events the other readers get and the golden fixtures are unchanged), the events `usage_recorded` and
-`usage_failed`, `state.usage` and `run_started.history.usage`. An engine without this change reads the journal and the state as
-plain JSON and ignores what it does not know. Every shipped price row carries `checkedAt: 2026-10-28`: that day all fourteen rows
+**Format.** The usage records exist only in run-state format 2 (forks, T-40): the optional `cache_write_1h` on the `usage`
+event (only a read made for usage carries it, so the events the other readers get and the golden fixtures are unchanged), the
+events `usage_recorded` and `usage_failed`, `state.usage` and `run_started.history.usage`. A run that has them is a format-2
+run, which `@kodel-ai/kodel@0.1.0-beta.0` (format 1) refuses as a format it does not know, so no older engine reads them; a
+usage delta also carries its own `v` (`USAGE_RECORD_FORMAT`). Every shipped price row carries `checkedAt: 2026-10-28`: that day all fourteen rows
 were compared with the live price page (the page of `https://docs.claude.com/en/docs/about-claude/pricing`, which redirects to
 `platform.claude.com`) and they match. How they were compared differs by row: the eleven rows that had first been taken from the
 model table of the `claude-api` skill (cached 2026-10-06) were also read column by hand (that table's Sonnet 5.5 cache read price

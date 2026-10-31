@@ -47,3 +47,82 @@ describe("the times a person was waited for", () => {
     expect(outsideSpans([rec(1, 1_000, "node_entered", "a")], 9_000)).toEqual([]);
   });
 });
+
+describe("the times a person was waited for, in a fork", () => {
+  const visit = (seq: number, ts: number, event: string, node: string, attempt = 1) => ({
+    ...rec(seq, ts, event, node),
+    attempt,
+    fork: "f1",
+    branch: node,
+  });
+
+  test("t40_usage_gate_of_one_branch_while_an_agent_branch_is_open_is_not_outside", () => {
+    // Agent branch `a` is open; gate branch `g` reaches its gate at 2s; `a` is handed in at 5s (the pass runs then).
+    const journal = [
+      visit(1, 1_000, "node_entered", "a"),
+      visit(2, 2_000, "node_entered", "g"),
+      visit(3, 2_000, "gate_waiting", "g"),
+    ];
+    expect(outsideSpans(journal, 5_000, [{ node: "a", attempt: 1 }])).toEqual([]);
+  });
+
+  test("t40_usage_gate_wait_is_outside_only_after_the_last_agent_branch_was_handed_in", () => {
+    const journal = [
+      visit(1, 1_000, "node_entered", "a"),
+      visit(2, 2_000, "node_entered", "g"),
+      visit(3, 2_000, "gate_waiting", "g"),
+      visit(4, 5_000, "agent_completed", "a"),
+      visit(5, 5_100, "node_finished", "a"),
+      visit(6, 8_000, "gate_decided", "g"),
+    ];
+    expect(outsideSpans(journal, 9_000)).toEqual([{ from: iso(5_000), to: iso(8_000) }]);
+  });
+
+  test("t40_usage_gate_and_command_steps_do_not_hold_a_wait_open", () => {
+    // `c` is a command step (no hand-in, not in the agent phase): it does not make the gate's wait a step's time.
+    const journal = [
+      visit(1, 1_000, "node_entered", "c"),
+      visit(2, 2_000, "node_entered", "g"),
+      visit(3, 2_000, "gate_waiting", "g"),
+    ];
+    expect(outsideSpans(journal, 9_000)).toEqual([{ from: iso(2_000), to: iso(9_000) }]);
+  });
+
+  test("t40_usage_pauses_of_two_branches_are_kept_apart", () => {
+    const journal = [
+      visit(1, 1_000, "run_paused", "x"),
+      visit(2, 2_000, "run_paused", "y"),
+      visit(3, 3_000, "run_resumed", "x"),
+      visit(4, 6_000, "run_resumed", "y"),
+    ];
+    expect(outsideSpans(journal, 9_000)).toEqual([
+      { from: iso(1_000), to: iso(3_000) },
+      { from: iso(2_000), to: iso(6_000) },
+    ]);
+  });
+
+  test("t40_usage_second_pause_still_open_lasts_to_now", () => {
+    const journal = [
+      visit(1, 1_000, "run_paused", "x"),
+      visit(2, 2_000, "run_paused", "y"),
+      visit(3, 3_000, "run_resumed", "x"),
+    ];
+    expect(outsideSpans(journal, 9_000)).toEqual([
+      { from: iso(1_000), to: iso(3_000) },
+      { from: iso(2_000), to: iso(9_000) },
+    ]);
+  });
+
+  test("t40_usage_pause_wait_less_the_time_an_agent_branch_was_open", () => {
+    // `x` pauses at 1s while agent branch `a` (entered at 0.5s) is worked until its hand-in at 4s.
+    const journal = [
+      visit(1, 500, "node_entered", "a"),
+      visit(2, 1_000, "run_paused", "x"),
+      visit(3, 4_000, "agent_completed", "a"),
+      visit(4, 7_000, "node_entered", "a", 2),
+    ];
+    expect(outsideSpans(journal, 9_000, [{ node: "a", attempt: 2 }])).toEqual([
+      { from: iso(4_000), to: iso(7_000) },
+    ]);
+  });
+});

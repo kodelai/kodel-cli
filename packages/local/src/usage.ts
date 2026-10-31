@@ -128,31 +128,105 @@ export function usageEventKey(event: HistoryEvent): string {
 
 const isoOf = (ms: number): string => new Date(ms).toISOString();
 
+interface Interval {
+  from: number;
+  to: number;
+}
+
+/** `span` less every part of it that one of `cuts` covers. */
+function subtract(span: Interval, cuts: readonly Interval[]): Interval[] {
+  let pieces = [span];
+  for (const cut of cuts) {
+    pieces = pieces.flatMap((piece) => {
+      if (cut.to <= piece.from || cut.from >= piece.to) return [piece];
+      const left = cut.from > piece.from ? [{ from: piece.from, to: cut.from }] : [];
+      const right = cut.to < piece.to ? [{ from: cut.to, to: piece.to }] : [];
+      return [...left, ...right];
+    });
+  }
+  return pieces;
+}
+
 /**
- * The times the run waited for a person: from a gate being reached to the decision, and from a pause to the resume.
- * What the agent and the person say to each other then is not a node's work. A span still open lasts to `nowMs`.
+ * The times the run waited for a person and no agent step was being worked: from a gate being reached to the
+ * decision, and from a pause to the resume, each kept per node (in a fork every branch has its own), less the times
+ * an agent step of another branch was open. What the agent and the person say to each other then is not a node's
+ * work; while an agent step is open, the session's use is that step's. A span still open lasts to `nowMs`.
+ *
+ * An agent step is open from its `node_entered` to its hand-in (`agent_completed`) or its end; a visit counts as
+ * one when the journal holds its hand-in or when it is among `openAgentSteps` (the visits in the agent phase now).
  */
-export function outsideSpans(journal: readonly JournalRecord[], nowMs: number): TimeSpan[] {
-  const spans: TimeSpan[] = [];
-  const gates = new Map<string, number>();
-  let paused: number | undefined;
-  const close = (from: number, to: number) => spans.push({ from: isoOf(from), to: isoOf(to) });
+export function outsideSpans(
+  journal: readonly JournalRecord[],
+  nowMs: number,
+  openAgentSteps: Iterable<{ node: string; attempt: number }> = [],
+): TimeSpan[] {
+  const visitKey = (node: string, attempt: number) => `${node}\u0000${attempt}`;
+  const agentVisits = new Set<string>();
+  for (const step of openAgentSteps) agentVisits.add(visitKey(step.node, step.attempt));
   for (const record of journal) {
-    const node = typeof record.node === "string" ? record.node : "";
-    if (record.event === "gate_waiting") gates.set(node, record.ts);
-    else if (record.event === "gate_decided") {
-      const from = gates.get(node);
-      if (from !== undefined) close(from, record.ts);
-      gates.delete(node);
-    } else if (record.event === "run_paused") paused = record.ts;
-    else if (record.event === "run_resumed") {
-      if (paused !== undefined) close(paused, record.ts);
-      paused = undefined;
+    if (
+      record.event === "agent_completed" &&
+      typeof record.node === "string" &&
+      typeof record.attempt === "number"
+    ) {
+      agentVisits.add(visitKey(record.node, record.attempt));
     }
   }
-  for (const from of gates.values()) close(from, nowMs);
-  if (paused !== undefined) close(paused, nowMs);
-  return spans;
+
+  const waits: Interval[] = [];
+  const working: Interval[] = [];
+  const gates = new Map<string, number>();
+  const pauses = new Map<string, number>();
+  const open = new Map<string, number>();
+  const closeVisit = (key: string, ts: number) => {
+    const from = open.get(key);
+    if (from === undefined) return;
+    working.push({ from, to: ts });
+    open.delete(key);
+  };
+  for (const record of journal) {
+    const node = typeof record.node === "string" ? record.node : "";
+    const key = typeof record.attempt === "number" ? visitKey(node, record.attempt) : undefined;
+    switch (record.event) {
+      case "gate_waiting":
+        if (!gates.has(node)) gates.set(node, record.ts);
+        break;
+      case "gate_decided": {
+        const from = gates.get(node);
+        if (from !== undefined) waits.push({ from, to: record.ts });
+        gates.delete(node);
+        break;
+      }
+      // A fork's branches pause each at their own node; one resume lifts only its own.
+      case "run_paused":
+        if (!pauses.has(node)) pauses.set(node, record.ts);
+        break;
+      case "run_resumed": {
+        const from = pauses.get(node);
+        if (from !== undefined) waits.push({ from, to: record.ts });
+        pauses.delete(node);
+        break;
+      }
+      case "node_entered":
+        if (key !== undefined && agentVisits.has(key)) open.set(key, record.ts);
+        break;
+      case "agent_completed":
+      case "node_finished":
+      case "node_superseded":
+        if (key !== undefined) closeVisit(key, record.ts);
+        break;
+      case "run_finished":
+        for (const k of [...open.keys()]) closeVisit(k, record.ts);
+        break;
+    }
+  }
+  for (const from of gates.values()) waits.push({ from, to: nowMs });
+  for (const from of pauses.values()) waits.push({ from, to: nowMs });
+  for (const from of open.values()) working.push({ from, to: nowMs });
+  return waits
+    .flatMap((wait) => subtract(wait, working))
+    .map((span) => ({ from: isoOf(span.from), to: isoOf(span.to) }));
 }
 
 export interface UsageWriterOptions {
@@ -364,7 +438,11 @@ export class UsageWriter {
         prices !== undefined && Object.keys(prices).length > 0 ? prices : undefined,
       ),
       node: step,
-      spans: outsideSpans(await run.journal().catch(() => []), started),
+      spans: outsideSpans(
+        await run.journal().catch(() => []),
+        started,
+        state.active.filter((v) => v.phase === "agent"),
+      ),
       started,
       workdir,
       seen: new Set(),
