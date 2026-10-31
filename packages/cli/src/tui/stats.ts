@@ -1,6 +1,17 @@
 /** The Report screen: how a pipeline fares over its runs, step by step, and across the versions of a step. */
 import type { NodeStats, NodeVersion, PipelineStats, Spread } from "@kodel-ai/pipeline-core";
-import { bold, cyan, dim, fit, green, red, stripAnsi, wrapText, yellow } from "./ansi";
+import {
+  bold,
+  cyan,
+  dim,
+  fit,
+  green,
+  red,
+  stripAnsi,
+  visibleLength,
+  wrapText,
+  yellow,
+} from "./ansi";
 import { definitionKey } from "./definition-text";
 import { type PipeEntry, unifiedDiff } from "./pipelines";
 import type { StatsData } from "./stats-load";
@@ -425,10 +436,7 @@ function stepsBody(stats: PipelineStats, rep: RepState, width: number): Body {
   out.push("");
   const total = stats.attempts.total;
   const notes = [
-    "◆ a person decides: its time is the wait. back: attempts that failed or were rejected. tries: attempts per run. finds: findings per attempt that reported. why: rejections that said why.",
-    stats.versions.length > 0
-      ? "▸3 the step has had 3 definitions: → shows them, ← hides them, v all. ◀ the present one. A version is green or red where it is better or worse than the one before."
-      : "",
+    "◆ a person decides there: its time is the wait. ? explains the columns and the signs.",
     stats.attempts.withUsage < total
       ? `The cost is known for ${stats.attempts.withUsage} of ${total} attempts.`
       : "",
@@ -676,11 +684,87 @@ export function headHeight(rep: RepState, slot: StatsSlot | undefined, width: nu
   return headOf(rep, slot, width).length;
 }
 
+/** What the columns and the signs of the Report mean: the window the ? key opens. */
+export function legendLines(width: number): string[] {
+  const out: string[] = [];
+  const room = Math.max(12, width);
+  const section = (title: string) => {
+    if (out.length > 0) out.push("");
+    out.push(dim(title));
+  };
+  /** A term, and what it says, wrapped under itself. */
+  const term = (name: string, text: string, indent = 9) => {
+    const parts = wrapText(text, Math.max(10, room - indent));
+    for (const [i, part] of parts.entries()) {
+      out.push(
+        `${i === 0 ? bold(name) + " ".repeat(Math.max(1, indent - visibleLength(name))) : " ".repeat(indent)}${part}`,
+      );
+    }
+  };
+  section("THE COLUMNS");
+  term("runs", "Runs that reached the step.");
+  term(
+    "tries",
+    "Attempts per run that reached the step. 1.0 means nobody sent the work back to it; 3.0 means each run did it three times.",
+  );
+  term(
+    "time",
+    "The median attempt: half of them were quicker. At a ◆ step it is the wait for a person.",
+  );
+  term("p90", "Nine attempts in ten were quicker than this: how long the slow ones take.");
+  term(
+    "back",
+    "The share of attempts that did not go on: a check or a command failed, or a person rejected the work. Red from 40%, yellow from 15%.",
+  );
+  term("finds", "Findings per attempt that reported any: the rows of its result reports.");
+  term(
+    "why",
+    "At a ◆ step: the rejections that came with a comment, out of all rejections. 6/8 means two said nothing.",
+  );
+  term(
+    "$/try",
+    "What an attempt cost on average, over the attempts whose usage was recorded. A dash when none was.",
+  );
+  section("THE SIGNS");
+  term("◆ ●", "A step where a person decides, and any other step.");
+  term(
+    "▸3 ▾3",
+    "The step has had 3 definitions (its work, its checks or its routing changed): hidden, shown.",
+  );
+  term("◀", "The definition the pipeline file has now.");
+  term("❯", "The cursor.");
+  section("THE COLOURS");
+  term("dim", "Fewer than 5 attempts: too few to go by.");
+  term(
+    "green",
+    "On a version: better than the version above it in tries, time or back (by 10%, or 5 points for back), when both have at least 3 attempts.",
+  );
+  term("red", "The same, worse.");
+  section("WHAT IS COUNTED");
+  term(
+    "present",
+    "Only the attempts that ran on the definition a step has now, so that the numbers can be compared. This is how the screen opens.",
+  );
+  term(
+    "every",
+    "All the attempts, whatever definition they ran on. The versions of a step always count every attempt.",
+  );
+  section("THE KEYS");
+  term("↑ ↓", "A step, or a version of it.");
+  term("→ ←", "Show the versions of a step; hide them, or go back to the list.");
+  term("v", "Show or hide the versions of every step.");
+  term("Enter", "Read a step or a version in full; n and p go to the next and the previous.");
+  term("a", "Switch between present and every.");
+  term("?", "This window.");
+  return out;
+}
+
 export function repHints(rep: RepState, card: boolean): string {
+  const legend = `   ${bold("?")} legend`;
   if (!card) {
-    return `${bold("↑↓")} select   ${bold("Enter")} open   ${bold("a")} scope   ${bold("Tab")} menu   ${bold("q")} quit`;
+    return `${bold("↑↓")} select   ${bold("Enter")} open   ${bold("a")} scope${legend}   ${bold("Tab")} menu   ${bold("q")} quit`;
   }
-  const tail = `   ${bold("a")} scope   ${bold("z")} zoom   ${bold("Esc")} ${rep.open ? "back" : "list"}`;
+  const tail = `   ${bold("a")} scope${legend}   ${bold("z")} zoom   ${bold("Esc")} ${rep.open ? "back" : "list"}`;
   if (rep.open) {
     const what = rep.ver >= 0 ? "version" : "step";
     return `${bold("↑↓")} scroll   ${bold("n/p")} next/prev ${what}${tail}`;

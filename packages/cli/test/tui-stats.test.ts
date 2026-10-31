@@ -472,6 +472,90 @@ describe("createStatsLoader", () => {
   });
 });
 
+describe("the legend", () => {
+  const SHORT = { cols: 80, rows: 16 };
+
+  test("? opens a window that says what the columns and the signs mean", () => {
+    const m = reading(["enter", "?"]);
+    expect(m.legend).toBe(0);
+    const text = screen(m, { cols: 120, rows: 60 });
+    for (const word of [
+      "What the numbers mean",
+      "THE COLUMNS",
+      "tries",
+      "back",
+      "THE SIGNS",
+      "THE KEYS",
+    ]) {
+      expect(text).toContain(word);
+    }
+  });
+
+  test("the hints of the screen say where the legend is, and the window says how to close it", () => {
+    expect(screen(reading(["enter"]))).toContain("? legend");
+    expect(screen(reading(["enter", "?"]))).toContain("any other key closes");
+  });
+
+  test("it opens from the list as well as from the table", () => {
+    expect(reading(["?"]).legend).toBe(0);
+  });
+
+  test("Esc closes it, and so does any key that does not scroll", () => {
+    for (const key of ["escape", "?", "x", "enter", "q"]) {
+      expect(press(reading(["enter", "?"]), [key]).legend).toBeNull();
+    }
+  });
+
+  test("a key that closes it does nothing else, and the screen is as it was", () => {
+    const before = reading(["enter", "down"]);
+    const m = press(before, ["?", "enter"]);
+    expect(m.legend).toBeNull();
+    expect(m.rep).toEqual(before.rep);
+    expect(m.quit).toBe(false);
+  });
+
+  test("the arrows scroll it instead of moving the cursor of the table", () => {
+    const m = reading(["enter", "?"], SHORT);
+    const down = press(m, ["down"], SHORT);
+    expect(down.legend).toBe(1);
+    expect(down.rep).toEqual(m.rep);
+    expect(screen(down, SHORT)).not.toEqual(screen(m, SHORT));
+    expect(press(m, ["up"], SHORT).legend).toBe(0);
+  });
+
+  test("it scrolls to the end and no further", () => {
+    let m = reading(["enter", "?"], SHORT);
+    for (let i = 0; i < 20; i++) m = press(m, ["pagedown"], SHORT);
+    const end = m.legend ?? 0;
+    expect(end).toBeGreaterThan(10);
+    expect(press(m, ["down"], SHORT).legend).toBe(end);
+    expect(screen(m, SHORT)).toContain("This window");
+  });
+
+  test("ctrl-c still quits", () => {
+    expect(press(reading(["enter", "?"]), ["ctrl-c"]).quit).toBe(true);
+  });
+
+  test("it is part of the Report only", () => {
+    const sessions = initialModel(demoSessions(Date.now()), "demo", Date.now());
+    expect(press(sessions, ["?"]).legend).toBeNull();
+    expect(press(sessions, ["2", "?"]).legend).toBeNull();
+  });
+
+  test("on a narrow terminal no line is wider than the screen", () => {
+    const m = reading(["enter", "?", "pagedown"], NARROW);
+    for (const line of render(m, NARROW)) {
+      expect(visibleLength(line)).toBeLessThanOrEqual(NARROW.cols);
+    }
+  });
+
+  test("the table no longer carries the explanations the window has", () => {
+    const text = screen(reading(["enter"]));
+    expect(text).toContain("? explains the columns");
+    expect(text).not.toContain("tries: attempts per run");
+  });
+});
+
 describe("the text of the definitions of a step", () => {
   const pipeline = (prompt: string) =>
     parsePipeline(

@@ -45,6 +45,7 @@ import {
   emptyReport,
   headHeight,
   initialRepState,
+  legendLines,
   type RepState,
   repCard,
   repHints,
@@ -87,6 +88,8 @@ export interface Model {
   /** The Report screen: where it is, and what has been read for it, by pipeline. */
   rep: RepState;
   stats: Record<string, StatsSlot>;
+  /** The legend of the Report is open, scrolled this many lines; null when it is closed. */
+  legend: number | null;
   /** Id of the selected session, so the selection follows it when the list reorders. */
   selected: string;
   /** On a narrow terminal the list and the card take turns. */
@@ -185,6 +188,7 @@ export function initialModel(
     pipe: initialPipeState(sortEntries(loaded.pipelines ?? [])),
     rep: initialRepState(repNames(sortEntries(loaded.pipelines ?? []))),
     stats: {},
+    legend: null,
     selected: ordered(loaded.sessions)[0]?.id ?? "",
     focus: "list",
     confirm: null,
@@ -283,6 +287,7 @@ export function update(input: Model, key: string, size: Size = DEFAULT_SIZE): Mo
 function updateKey(input: Model, key: string, size: Size): Model {
   const m = normalized(input);
   if (key === "ctrl-c") return { ...m, quit: true };
+  if (m.legend !== null) return legendKey(m, key, size);
   if (m.input) return typing(m, key);
   const current = selectedSession(m);
   if (m.confirm !== null && current) {
@@ -355,8 +360,67 @@ function updateKey(input: Model, key: string, size: Size): Model {
 /** The keys every screen reads the same way. */
 const SHARED_KEYS = new Set(["q", "tab", "1", "2", "3", "4", "m", "z"]);
 
+/** The window of the legend: as wide as it can be up to this, and as tall as the screen lets it. */
+const LEGEND_WIDTH = 78;
+
+function legendFrame(cols: number, rows: number) {
+  const width = Math.min(cols - 4, LEGEND_WIDTH);
+  const lines = legendLines(width - 4);
+  const room = Math.max(1, rows - 3 - 2);
+  const shown = Math.min(lines.length, room);
+  return { width, lines, shown, max: Math.max(0, lines.length - shown) };
+}
+
+/** A key while the legend is open: the arrows scroll it, any other key closes it. */
+function legendKey(m: Model, key: string, size: Size): Model {
+  if (m.legend === null) return m;
+  const frame = legendFrame(size.cols, size.rows);
+  const move = (by: number): Model => ({
+    ...m,
+    legend: Math.max(0, Math.min(frame.max, (m.legend ?? 0) + by)),
+  });
+  switch (key) {
+    case "up":
+    case "k":
+      return move(-1);
+    case "down":
+    case "j":
+      return move(1);
+    case "pagedown":
+    case " ":
+      return move(Math.max(1, frame.shown - 1));
+    case "pageup":
+    case "b":
+      return move(-Math.max(1, frame.shown - 1));
+    default:
+      return { ...m, legend: null };
+  }
+}
+
+/** The legend in a box in the middle of the screen, over the screen dimmed. */
+function legendOverlay(m: Model, body: string[], cols: number, height: number): string[] {
+  const frame = legendFrame(cols, height + 3);
+  const scroll = Math.min(frame.max, Math.max(0, m.legend ?? 0));
+  const inner = frame.width - 4;
+  const left = " ".repeat(Math.max(0, Math.floor((cols - frame.width) / 2)));
+  const title = " What the numbers mean ";
+  const hint = frame.max > 0 ? " ↑↓ scroll · any other key closes " : " any key closes ";
+  const box = [
+    `┌─${bold(title)}${"─".repeat(Math.max(0, frame.width - 3 - title.length))}┐`,
+    ...frame.lines.slice(scroll, scroll + frame.shown).map((line) => `│ ${fit(line, inner)} │`),
+    `└─${dim(hint)}${"─".repeat(Math.max(0, frame.width - 3 - hint.length))}┘`,
+  ];
+  const dimmed = Array.from({ length: height }, (_, i) => dim(stripAnsi(body[i] ?? "")));
+  const top = Math.max(0, Math.floor((height - box.length) / 2));
+  for (const [i, line] of box.entries()) {
+    if (top + i < height) dimmed[top + i] = fit(`${left}${line}`, cols);
+  }
+  return dimmed;
+}
+
 /** A key on the Report screen. */
 function reportUpdate(m: Model, key: string, size: Size): Model {
+  if (key === "?") return { ...m, legend: 0, notice: "" };
   const layout = layoutOf(m, size.cols);
   const slot = m.stats[m.rep.selected];
   const r = repKey(m.rep, key, {
@@ -1006,6 +1070,7 @@ function menuLine(m: Model, cols: number): string {
 
 function hints(m: Model): string {
   if (m.section === 1) return pipeHints(entryOf(m.pipelines, m.pipe), m.pipe, m.focus === "card");
+  if (m.legend !== null) return `${bold("↑↓")} scroll   any other key closes the legend`;
   if (m.section === 3) return repHints(m.rep, m.focus === "card");
   const current = selectedSession(m);
   if (m.confirm === "d")
@@ -1094,6 +1159,7 @@ export function render(model: Model, { cols, rows }: Size): string[] {
     const left = layout.showList ? listView(m, layout.listWidth, bodyHeight).lines : [];
     body = panes(m, layout, left, right, bodyHeight);
   }
+  if (m.legend !== null && m.section === 3) body = legendOverlay(m, body, cols, bodyHeight);
   for (let i = 0; i < bodyHeight; i++) out.push(fit(body[i] ?? "", cols));
 
   const status = m.input ? inputLine(m.input) : m.notice !== "" ? green(m.notice) : hints(m);
@@ -1162,7 +1228,7 @@ function mouseEvent(
   event: Extract<InputEvent, { type: "mouse" }>,
 ): Model {
   const m = normalized(input);
-  if (!m.mouse || m.confirm !== null) return m;
+  if (!m.mouse || m.confirm !== null || m.legend !== null) return m;
   const layout = layoutOf(m, size.cols);
   if (event.action !== "press") {
     if (m.section !== 0) return m;
