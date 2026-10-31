@@ -19,6 +19,7 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { LocalPipelineHost } from "../../packages/local/src";
+import { claudeConfigDir, findSessionLog, subagentLogs } from "../../packages/local/src/history";
 import type { Fixture } from "./pipelines";
 
 export const ENABLED = process.env.KODEL_AGENT_TESTS === "1";
@@ -36,6 +37,13 @@ export interface ToolCall {
   /** What the tool answered, as text. */
   output: string;
   isError: boolean;
+  /** The id of this `tool_use` block, so the calls a subagent made can be grouped under its Agent call. */
+  id?: string;
+  /**
+   * The Agent (or Task) call this one was made under, from the stream's `parent_tool_use_id`; absent for
+   * the calls of the agent the test started.
+   */
+  parent?: string;
 }
 
 /** What the agent says it used in a turn, per model, as the `result` event of `claude -p` has it. */
@@ -201,6 +209,11 @@ export function makeBareSandbox(): Sandbox {
 /** Where the `kodel` shim of a sandbox lives: first on the `PATH` of the agent under test. */
 export const shimDir = (stateDir: string) => join(stateDir, "bin");
 
+/** Where the `kodel` shim of a sandbox logs each call: one line per call, `<epoch seconds>\t<args>`. */
+export function kodelCallLog(stateDir: string): string {
+  return join(stateDir, "kodel-calls.log");
+}
+
 /**
  * The texts the server gives an agent name `kodel`, and a sandbox has no installed binary, so the
  * agent's shell gets one that runs this checkout on the sandbox. `KODEL_TEST_WAIT_TIMEOUT` makes
@@ -214,6 +227,9 @@ function writeKodelShim(stateDir: string, root: string): void {
     file,
     [
       "#!/bin/sh",
+      // Every call is logged, whoever made it (the agent or one of its subagents), so a scenario can
+      // tell what was run and when without relying on what the stream shows of subagents.
+      `printf '%s\\t%s\\n' "$(date +%s)" "$*" >> "${kodelCallLog(stateDir)}"`,
       'if [ "$1" = "wait" ] && [ -n "$KODEL_TEST_WAIT_TIMEOUT" ]; then',
       "  shift",
       `  exec ${run} wait "$@" --timeout "$KODEL_TEST_WAIT_TIMEOUT"`,
@@ -263,6 +279,7 @@ interface StreamBlock {
   tool_use_id?: string;
   content?: unknown;
   is_error?: boolean;
+  text?: string;
 }
 
 interface StreamEvent {
@@ -276,6 +293,7 @@ interface StreamEvent {
   modelUsage?: Record<string, Record<string, unknown>>;
   result?: string;
   is_error?: boolean;
+  parent_tool_use_id?: string | null;
 }
 
 const num = (value: unknown): number =>
@@ -513,6 +531,10 @@ export async function runAgentTurn(options: TurnOptions): Promise<AgentTurn> {
             input: block.input ?? {},
             output: "",
             isError: false,
+            id: block.id,
+            ...(typeof event.parent_tool_use_id === "string" && event.parent_tool_use_id !== ""
+              ? { parent: event.parent_tool_use_id }
+              : {}),
           };
           calls.push(call);
           pending.set(block.id, call);
@@ -605,3 +627,362 @@ export function servedFiles(sandbox: Sandbox, runId: string): string[] {
 /** The agent's calls to one kodel tool, in order. */
 export const callsTo = (turn: AgentTurn, tool: string): ToolCall[] =>
   turn.calls.filter((c) => c.name === KODEL_TOOL(tool));
+
+// ── forks and subagents ───────────────────────────────────────────────────────
+
+/**
+ * What a scenario about forks lets the agent use: the kodel tools, the file tools, Bash (for the steps'
+ * own commands and `kodel wait`; what only a person may run is checked from the shim's log) and the
+ * subagent tool under both of the names Claude Code has given it.
+ */
+export const FORK_TOOLS = [
+  "mcp__kodel",
+  "Read",
+  "Write",
+  "Edit",
+  "Glob",
+  "Grep",
+  "Bash",
+  "Agent",
+  "Task",
+];
+
+/** Whether a call starts a subagent. */
+export const isAgentCall = (call: ToolCall): boolean =>
+  call.name === "Agent" || call.name === "Task";
+
+/** The calls of the agent the test started, without those its subagents made. */
+export const orchestratorCalls = (turn: AgentTurn): ToolCall[] =>
+  turn.calls.filter((c) => c.parent === undefined);
+
+/** One subagent the orchestrator started, with the calls the stream shows it made. */
+export interface WorkerCalls {
+  /** The orchestrator's Agent (or Task) call that started it. */
+  agent: ToolCall;
+  /** The type of subagent asked for, when the call names one. */
+  subagentType?: string;
+  calls: ToolCall[];
+}
+
+/** The subagents the orchestrator started, each with its own calls (as the stream attributes them). */
+export function workerCalls(turn: AgentTurn): WorkerCalls[] {
+  return orchestratorCalls(turn)
+    .filter(isAgentCall)
+    .map((agent) => {
+      const type = agent.input.subagent_type;
+      return {
+        agent,
+        ...(typeof type === "string" ? { subagentType: type } : {}),
+        calls: turn.calls.filter((c) => agent.id !== undefined && c.parent === agent.id),
+      };
+    });
+}
+
+/** Subagents started by a subagent: the topology is meant to be flat. */
+export const nestedAgentCalls = (turn: AgentTurn): ToolCall[] =>
+  turn.calls.filter((c) => c.parent !== undefined && isAgentCall(c));
+
+/**
+ * What the agent wrote, from the text blocks of its own messages (never tool output, which carries the
+ * same commands). `topLevel` (the default) keeps only the orchestrator's text, not its subagents'.
+ */
+export function assistantText(turn: AgentTurn, options: { topLevel?: boolean } = {}): string {
+  const topLevel = options.topLevel !== false;
+  const stdout = turn.transcript.split("\n--- stderr ---\n")[0] ?? "";
+  const texts: string[] = [];
+  for (const line of stdout.split("\n")) {
+    if (!line.trim()) continue;
+    let event: StreamEvent;
+    try {
+      event = JSON.parse(line) as StreamEvent;
+    } catch {
+      continue;
+    }
+    if (event.type !== "assistant") continue;
+    const parent = event.parent_tool_use_id;
+    if (topLevel && typeof parent === "string" && parent !== "") continue;
+    const blocks = Array.isArray(event.message?.content) ? (event.message?.content ?? []) : [];
+    for (const block of blocks) {
+      if (block.type === "text" && typeof block.text === "string") texts.push(block.text);
+    }
+  }
+  return texts.join("\n");
+}
+
+/** One call of the `kodel` shim, by anyone in the sandbox. */
+export interface KodelCall {
+  /** When it was made, in epoch milliseconds (the shim logs whole seconds). */
+  at: number;
+  args: string;
+}
+
+/** The lines of a shim call log, parsed. */
+export function parseKodelCallLog(text: string): KodelCall[] {
+  return text
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const tab = line.indexOf("\t");
+      return { at: Number(line.slice(0, tab)) * 1000, args: line.slice(tab + 1) };
+    });
+}
+
+/** Every call of the `kodel` shim in a sandbox, in order. */
+export function kodelCalls(sandbox: Sandbox): KodelCall[] {
+  try {
+    return parseKodelCallLog(readFileSync(kodelCallLog(sandbox.stateDir), "utf8"));
+  } catch {
+    return [];
+  }
+}
+
+export type JournalRecord = Record<string, unknown>;
+
+const tsOf = (record: JournalRecord): number => (typeof record.ts === "number" ? record.ts : 0);
+
+/** The records of one event, in order. */
+export const recordsOf = (records: readonly JournalRecord[], event: string): JournalRecord[] =>
+  records.filter((r) => r.event === event);
+
+/** How many times a node was entered. */
+export const entriesOf = (records: readonly JournalRecord[], node: string): number =>
+  records.filter((r) => r.event === "node_entered" && r.node === node).length;
+
+/** The time one holder held one step: from its take to the hand-in, the lapse, or another's take. */
+export interface ClaimWindow {
+  node: string;
+  attempt: number;
+  /** The mark of the hold (`by`), the same across renewals. */
+  by: string;
+  start: number;
+  /** `Infinity` while the journal shows the hold live with no lapse known. */
+  end: number;
+  /** Whether the window ended with the step handed in (not lapsed or taken over). */
+  completed: boolean;
+}
+
+/**
+ * The claim windows of a run, from its journal. A renewal by the same holder extends its window (also
+ * after a restart gave the step a new attempt); the window closes at the step's `agent_completed`, at the
+ * lapse (`ttl_s` after the last take or renewal), or when another holder takes the step.
+ */
+export function claimWindows(records: readonly JournalRecord[]): ClaimWindow[] {
+  const windows: ClaimWindow[] = [];
+  const open = new Map<string, { window: ClaimWindow; lapse: number }>();
+  const lapseUntil = (now: number) => {
+    for (const [node, held] of open) {
+      if (held.lapse <= now) {
+        held.window.end = held.lapse;
+        open.delete(node);
+      }
+    }
+  };
+  for (const record of records) {
+    const ts = tsOf(record);
+    lapseUntil(ts);
+    const node = String(record.node ?? "");
+    const attempt = typeof record.attempt === "number" ? record.attempt : 0;
+    if (record.event === "step_claimed") {
+      const by = String(record.by ?? "");
+      const ttl = typeof record.ttl_s === "number" ? record.ttl_s * 1000 : Number.POSITIVE_INFINITY;
+      const held = open.get(node);
+      if (held !== undefined && held.window.by === by) {
+        held.window.attempt = attempt;
+        held.lapse = ts + ttl;
+        continue;
+      }
+      if (held !== undefined) held.window.end = ts;
+      const window: ClaimWindow = {
+        node,
+        attempt,
+        by,
+        start: ts,
+        end: Number.POSITIVE_INFINITY,
+        completed: false,
+      };
+      windows.push(window);
+      open.set(node, { window, lapse: ts + ttl });
+    } else if (record.event === "agent_completed") {
+      const held = open.get(node);
+      if (held !== undefined && held.window.attempt === attempt) {
+        held.window.end = ts;
+        held.window.completed = true;
+        open.delete(node);
+      }
+    }
+  }
+  for (const held of open.values()) held.window.end = held.lapse;
+  return windows;
+}
+
+/** Whether two windows share some time (touching ends do not count). */
+export const overlapping = (a: ClaimWindow, b: ClaimWindow): boolean =>
+  a.start < b.end && b.start < a.end;
+
+/** The most windows open at one moment. */
+export function maxConcurrentClaims(windows: readonly ClaimWindow[]): number {
+  // An end sorts before a start at the same time: a hand-in and the next take may share a millisecond.
+  const points = windows.flatMap((w) => [
+    { at: w.start, delta: 1 },
+    { at: w.end, delta: -1 },
+  ]);
+  points.sort((a, b) => a.at - b.at || a.delta - b.delta);
+  let now = 0;
+  let max = 0;
+  for (const point of points) {
+    now += point.delta;
+    max = Math.max(max, now);
+  }
+  return max;
+}
+
+/** How many times each attempt of each step was handed in, keyed `node#attempt`. */
+export function completionsPerAttempt(records: readonly JournalRecord[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const record of recordsOf(records, "agent_completed")) {
+    const key = `${String(record.node)}#${String(record.attempt)}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/** How a branch of a fork arrived at its join (or died). */
+export interface BranchSettled {
+  fork: string;
+  branch: string;
+  node: string;
+  label: string;
+  failed: boolean;
+  dead: boolean;
+}
+
+/** Every `branch_settled` record, in order. */
+export function branchSettled(records: readonly JournalRecord[]): BranchSettled[] {
+  return recordsOf(records, "branch_settled").map((r) => ({
+    fork: String(r.fork ?? ""),
+    branch: String(r.branch ?? ""),
+    node: String(r.node ?? ""),
+    label: String(r.label ?? ""),
+    failed: r.failed === true,
+    dead: r.dead === true,
+  }));
+}
+
+const pause = (ms: number) => new Promise((done) => setTimeout(done, ms));
+
+/** The id of the only run of a sandbox. */
+export async function onlyRunId(sandbox: Sandbox): Promise<string> {
+  const runs = await humanHost(sandbox).runSummaries();
+  const first = runs[0];
+  if (runs.length !== 1 || first === undefined) {
+    throw new Error(`expected one run, found ${runs.length}`);
+  }
+  return first.meta.runId;
+}
+
+/** Waits until a run has an active visit of every node named, in the phase given; its id. */
+async function waitForVisits(
+  sandbox: Sandbox,
+  slugs: readonly string[],
+  phase: "human" | "agent",
+  timeoutMs: number,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const runs = await humanHost(sandbox).runSummaries();
+    const at = runs.find((r) =>
+      slugs.every((slug) => r.state?.active.some((v) => v.node === slug && v.phase === phase)),
+    );
+    if (at) return at.meta.runId;
+    await pause(500);
+  }
+  throw new Error(`the run never had ${phase} steps open at ${slugs.join(", ")}`);
+}
+
+/** The id of the run once every gate named waits for a person at the same time. */
+export const waitForGates = (sandbox: Sandbox, slugs: readonly string[], timeoutMs: number) =>
+  waitForVisits(sandbox, slugs, "human", timeoutMs);
+
+/** The id of the run once every agent step named is open at the same time. */
+export const waitForOpenSteps = (sandbox: Sandbox, slugs: readonly string[], timeoutMs: number) =>
+  waitForVisits(sandbox, slugs, "agent", timeoutMs);
+
+/** The person decides one gate of several, as `kodel gate --node` does; true when it was taken. */
+export async function decideGate(
+  sandbox: Sandbox,
+  runId: string,
+  node: string,
+  decision: "approved" | "rejected",
+  reason?: string,
+): Promise<boolean> {
+  const run = await humanHost(sandbox).open(runId);
+  if (run === undefined) throw new Error(`no run ${runId}`);
+  const result = await run.decideHuman(node, decision, reason);
+  await run.waitForRest(60_000);
+  return result.ok;
+}
+
+/**
+ * A worker that takes a step and never comes back: the test holds the claim, and only its lapse
+ * (`agents.claim_ttl_s`) frees the step. Returns the token.
+ */
+export async function ghostTake(sandbox: Sandbox, runId: string, node: string): Promise<string> {
+  const run = await humanHost(sandbox).open(runId);
+  if (run === undefined) throw new Error(`no run ${runId}`);
+  const taken = await run.takeStep({ node });
+  if (taken.status !== "claimed") throw new Error(`could not take ${node}: ${taken.status}`);
+  return taken.claim_token;
+}
+
+/** The tool calls in a Claude Code transcript file (JSONL), with their answers. */
+export function toolCallsOfTranscript(text: string): ToolCall[] {
+  const calls: ToolCall[] = [];
+  const pending = new Map<string, ToolCall>();
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let entry: StreamEvent;
+    try {
+      entry = JSON.parse(line) as StreamEvent;
+    } catch {
+      continue;
+    }
+    const blocks = Array.isArray(entry.message?.content) ? (entry.message?.content ?? []) : [];
+    for (const block of blocks) {
+      if (entry.type === "assistant" && block.type === "tool_use" && block.id && block.name) {
+        const call: ToolCall = {
+          name: block.name,
+          input: block.input ?? {},
+          output: "",
+          isError: false,
+          id: block.id,
+        };
+        calls.push(call);
+        pending.set(block.id, call);
+      }
+      if (entry.type === "user" && block.type === "tool_result") {
+        const call = pending.get(block.tool_use_id ?? "");
+        if (call) {
+          call.output = textOf(block.content);
+          call.isError = block.is_error === true;
+        }
+      }
+    }
+  }
+  return calls;
+}
+
+/**
+ * The fallback when the stream does not show what subagents did: their calls, from the transcript
+ * files Claude Code keeps next to the session's own (`<session>/subagents/agent-*.jsonl`), one entry
+ * per subagent. Empty when the session's log is not found.
+ */
+export async function subagentToolCalls(
+  cwd: string,
+  sessionId: string,
+): Promise<{ log: string; calls: ToolCall[] }[]> {
+  const store = join(claudeConfigDir(), "projects");
+  const session = await findSessionLog(store, [cwd], sessionId);
+  if (session === undefined) return [];
+  const logs = await subagentLogs(session, sessionId);
+  return logs.map((log) => ({ log, calls: toolCallsOfTranscript(readFileSync(log, "utf8")) }));
+}
