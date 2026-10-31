@@ -176,6 +176,19 @@ const SERVED_REF = /^served\/[a-z0-9][a-z0-9-]{0,62}-\d{1,6}-\d{1,6}\.json$/;
 const isMissing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
 
 /**
+ * A lock file that another process is creating, reading or deleting right now. POSIX says EEXIST
+ * (or the file is gone); Windows answers EPERM, EACCES or EBUSY for a file that is open or waiting
+ * to be deleted, which is the same situation and must be retried, not raised.
+ */
+const lockBusy = (error: unknown) => {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "EEXIST") return true;
+  return (
+    process.platform === "win32" && (code === "EPERM" || code === "EACCES" || code === "EBUSY")
+  );
+};
+
+/**
  * How the stored stream of a session is opened for writing: for reading and writing and not in append mode, because a
  * handle that appends has no right to truncate on Windows (`EPERM: ftruncate`), and the stream is cut to the length the
  * journal vouches for before anything is added. A file that is not there yet is made, never replaced (`wx+`).
@@ -1101,7 +1114,7 @@ export class FileStore {
     try {
       text = await readFile(lockPath, "utf8");
     } catch (error) {
-      if (isMissing(error)) return undefined; // released meanwhile; the next try takes it
+      if (isMissing(error) || lockBusy(error)) return undefined; // released or changing meanwhile; the next try takes it
       throw error;
     }
     // Asked about the very lock that was judged before: a different one is somebody else's, taken
@@ -1137,7 +1150,7 @@ export class FileStore {
     try {
       guard = await open(guardPath, "wx");
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (!lockBusy(error)) throw error;
       const modified = await stat(guardPath).then(
         (s) => s.mtimeMs,
         () => this.clock(),
@@ -1192,7 +1205,7 @@ export class FileStore {
         if (!makeFolder && (error as NodeJS.ErrnoException).code === "ENOENT") {
           throw new KodelError("UNKNOWN_RUN", `there is no run "${name}"`);
         }
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        if (!lockBusy(error)) throw error;
         if (await this.takeOverAbandoned(lockPath, params.staleMs)) continue;
         if (this.clock() >= deadline) {
           throw new KodelError("STATE_LOCKED", `timed out waiting for the lock on ${name}`);
