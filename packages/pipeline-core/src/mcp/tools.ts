@@ -84,7 +84,7 @@ export function serverInstructions(
 const stepsRule = (waitHint: boolean) =>
   "9a. A `node` answer may list several open steps (`steps`): `execution.mode` says how this project works them, and `execution.instruction` says exactly what to do. In `parallel` mode you start one worker per free step; each worker takes its step with pipeline_take_step (node_slug), keeps the `claim_token`, does the step, completes it with pipeline_complete_step and that token, and reports the answer back to you; a worker never writes to the person" +
   (waitHint ? " and never starts `kodel wait`" : "") +
-  ". In `sequential` mode you do them one by one. A `running` answer with `open_steps` means every open step is in a worker's hands: wait for them (wait_s) or for their reports. `also_waiting` on an answer names decisions a person has to make meanwhile: tell them. pipeline_next_step only reads; it never takes a step.";
+  ". In `sequential` mode you do them one by one, unless its instruction says the project lets you work them in parallel: then, if you can start subagents, call pipeline_next_step again with subagents: {can: true} to have the open steps worked in parallel; if you cannot, carry on one step at a time. A `running` answer with `open_steps` means every open step is in a worker's hands: wait for them (wait_s) or for their reports. `also_waiting` on an answer names decisions a person has to make meanwhile: tell them. pipeline_next_step only reads; it never takes a step.";
 
 export const SERVER_INSTRUCTIONS = serverInstructions();
 

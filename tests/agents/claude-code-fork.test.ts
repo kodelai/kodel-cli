@@ -18,7 +18,7 @@ import {
   type JournalRecord,
   journalRecords,
   KODEL_TOOL,
-  kodelCalls,
+  kodelCommands,
   makeSandbox,
   maxConcurrentClaims,
   onlyRunId,
@@ -31,6 +31,7 @@ import {
   type ToolCall,
   waitForGates,
   waitForOpenSteps,
+  waitForWatchers,
   workerCalls,
 } from "./harness";
 import { FAILFIX, FORKFIX, forkFixture, GATES } from "./pipelines";
@@ -43,8 +44,9 @@ import { FAILFIX, FORKFIX, forkFixture, GATES } from "./pipelines";
  * topology flat, tells the person about every decision that waits, and finishes a join with
  * `restart_failed` when a branch failed.
  *
- * The evidence is the run's journal first (claim windows, hand-ins, joins), the `kodel` shim's log
- * second, and the agent's tool calls third. Which calls a subagent made is read from the stream's
+ * The evidence is the run's journal first (claim windows, hand-ins, joins), and the agent's tool calls
+ * second: the `kodel` commands it and its workers ran are read from their Bash calls, and whether a
+ * `kodel wait` runs from the processes. Which calls a subagent made is read from the stream's
  * `parent_tool_use_id`; when the stream does not carry it, from the subagents' own transcript files.
  * The only text read is the orchestrator's, and only for the `--node` commands it must hand on.
  */
@@ -119,19 +121,28 @@ function explain(turn: AgentTurn, workers: readonly Worker[], records?: JournalR
 const kodelCall = (calls: readonly ToolCall[], tool: string) =>
   calls.filter((c) => c.name === KODEL_TOOL(tool));
 
+/** Every call the agent and its workers made; a worker's calls may come from its transcript only. */
+const allCalls = (turn: AgentTurn, workers: readonly Worker[]): ToolCall[] => {
+  const seen = new Set(turn.calls);
+  return [...turn.calls, ...workers.flatMap((w) => w.calls).filter((c) => !seen.has(c))];
+};
+
+/** The `kodel wait` commands the agent or a worker ran, from their Bash calls. */
+const waitCommands = (turn: AgentTurn, workers: readonly Worker[]) =>
+  kodelCommands(allCalls(turn, workers)).filter((c) => /^wait\b/.test(c.args));
+
 /** What the agent or a worker did that only a person may, or a look into the run's files. */
-function forbidden(turn: AgentTurn, workers: readonly Worker[], sandbox: Sandbox): string[] {
-  const calls = [...turn.calls, ...workers.flatMap((w) => w.calls)];
-  const byTool = calls
-    .filter((c) => {
-      const text = String(c.input.command ?? c.input.file_path ?? c.input.path ?? "");
-      return /kodel (gate|resume|ack|seal)\b/.test(text) || text.includes(".kodel/runs");
-    })
+function forbidden(turn: AgentTurn, workers: readonly Worker[]): string[] {
+  const calls = allCalls(turn, workers);
+  const byPath = calls
+    .filter((c) =>
+      String(c.input.command ?? c.input.file_path ?? c.input.path ?? "").includes(".kodel/runs"),
+    )
     .map((c) => `${c.name} ${JSON.stringify(c.input).slice(0, 160)}`);
-  const byShim = kodelCalls(sandbox)
+  const byCommand = kodelCommands(calls)
     .filter((c) => /^(gate|resume|ack|seal)\b/.test(c.args) || /\bapply\b/.test(c.args))
-    .map((c) => `kodel ${c.args}`);
-  return [...byTool, ...byShim];
+    .map((c) => `kodel ${c.args}${c.call.parent === undefined ? "" : " (a worker)"}`);
+  return [...byPath, ...byCommand];
 }
 
 async function stateOf(sandbox: Sandbox, runId: string) {
@@ -188,10 +199,10 @@ describe("Claude Code on a real kodel server: forks and subagents", () => {
       }
       expect(kodelCall(orchestrator, "pipeline_next_step").length, why).toBeLessThanOrEqual(4);
       expect(
-        kodelCalls(sandbox).filter((c) => c.args.startsWith("wait")),
+        waitCommands(turn, workers).map((c) => c.args),
         why,
       ).toEqual([]);
-      expect(forbidden(turn, workers, sandbox), why).toEqual([]);
+      expect(forbidden(turn, workers), why).toEqual([]);
     },
     { timeout: 660_000, retry: 1 },
   );
@@ -227,7 +238,7 @@ describe("Claude Code on a real kodel server: forks and subagents", () => {
       for (const [key, count] of completionsPerAttempt(records)) {
         expect(count, `${key} was handed in twice${why}`).toBe(1);
       }
-      expect(forbidden(turn, workers, sandbox), why).toEqual([]);
+      expect(forbidden(turn, workers), why).toEqual([]);
     },
     { timeout: 660_000 },
   );
@@ -273,7 +284,7 @@ describe("Claude Code on a real kodel server: forks and subagents", () => {
       const b = windowOf(records, "b");
       expect(a && b && overlapping(a, b), `the steps were not worked at once${why}`).toBe(true);
       expect((await stateOf(sandbox, runId))?.status, why).toBe("completed");
-      expect(forbidden(turn, workers, sandbox), why).toEqual([]);
+      expect(forbidden(turn, workers), why).toEqual([]);
     },
     { timeout: 660_000, retry: 1 },
   );
@@ -312,7 +323,7 @@ describe("Claude Code on a real kodel server: forks and subagents", () => {
         ),
         why,
       ).toBe(true);
-      expect(forbidden(turn, workers, sandbox), why).toEqual([]);
+      expect(forbidden(turn, workers), why).toEqual([]);
     },
     { timeout: 660_000 },
   );
@@ -328,22 +339,14 @@ describe("Claude Code on a real kodel server: forks and subagents", () => {
         timeoutMs: 1_200_000,
         budgetUsd: BUDGET,
       });
-      const waits = () => kodelCalls(sandbox).filter((c) => c.args.startsWith("wait"));
-      const waitForWatch = async (count: number, timeoutMs: number) => {
-        const deadline = Date.now() + timeoutMs;
-        while (Date.now() < deadline) {
-          if (waits().length >= count) return true;
-          await sleep(1_000);
-        }
-        return false;
-      };
-
       const runId = await waitForGates(sandbox, ["gate-a", "gate-b"], 600_000);
-      const firstWatch = await waitForWatch(1, 180_000);
+      // The `kodel wait` processes seen so far: the second watch is a process not seen before.
+      const watchers = new Set<number>();
+      const firstWatch = await waitForWatchers(runId, watchers, 1, 180_000);
       // Let it end its turn: what wakes it is the decision.
       await sleep(5_000);
       expect(await decideGate(sandbox, runId, "gate-a", "approved", "a.txt is right")).toBe(true);
-      const secondWatch = await waitForWatch(2, 300_000);
+      const secondWatch = await waitForWatchers(runId, watchers, 2, 300_000);
       await sleep(5_000);
       expect(await decideGate(sandbox, runId, "gate-b", "approved", "b.txt is right")).toBe(true);
       const turn = await agent;
@@ -367,18 +370,36 @@ describe("Claude Code on a real kodel server: forks and subagents", () => {
       expect(a && b && overlapping(a, b), `the steps were not worked at once${why}`).toBe(true);
       expect((await stateOf(sandbox, runId))?.status, why).toBe("completed");
 
-      const started = waits();
-      expect(started.length, why).toBeGreaterThanOrEqual(1);
-      expect(started.length, `it started kodel wait too often${why}`).toBeLessThanOrEqual(2);
-      const branchDone = Math.max(
-        ...recordsOf(records, "agent_completed")
-          .filter((r) => r.node === "a" || r.node === "b")
-          .map((r) => (typeof r.ts === "number" ? r.ts : 0)),
+      // `index` is the place in the stream, so these are taken from `turn.calls` itself.
+      const started = kodelCommands(turn.calls).filter(
+        (c) => c.call.parent === undefined && /^wait\b/.test(c.args),
       );
-      for (const call of started) {
-        // The shim logs whole seconds.
-        expect(call.at, `kodel wait before the branches were in${why}`).toBeGreaterThanOrEqual(
-          Math.floor(branchDone / 1000) * 1000,
+      expect(started.length, `no Bash call of its own ran kodel wait${why}`).toBeGreaterThanOrEqual(
+        1,
+      );
+      expect(started.length, `it started kodel wait too often${why}`).toBeLessThanOrEqual(2);
+      expect(waitCommands(turn, workers).length, `a worker started kodel wait${why}`).toBe(
+        started.length,
+      );
+      expect(watchers.size, `more kodel wait processes than it started${why}`).toBeLessThanOrEqual(
+        started.length,
+      );
+      // Each watch comes after both branches were handed in: in the stream's order when it carries
+      // the workers' calls, else after the orchestrator started its workers.
+      const handIns = turn.calls.flatMap((c, index) =>
+        c.name === KODEL_TOOL("pipeline_complete_step") &&
+        (c.input.node_slug === "a" || c.input.node_slug === "b") &&
+        !c.isError
+          ? [index]
+          : [],
+      );
+      const agents = turn.calls.flatMap((c, index) =>
+        c.parent === undefined && isAgentCall(c) ? [index] : [],
+      );
+      const branchesIn = handIns.length >= 2 ? Math.max(...handIns) : Math.max(-1, ...agents);
+      for (const command of started) {
+        expect(command.index, `kodel wait before the branches were in${why}`).toBeGreaterThan(
+          branchesIn,
         );
       }
 
@@ -403,7 +424,7 @@ describe("Claude Code on a real kodel server: forks and subagents", () => {
         kodelCall(orchestratorCalls(turn), "pipeline_next_step").length,
         `it polled pipeline_next_step${why}`,
       ).toBeLessThanOrEqual(6);
-      expect(forbidden(turn, workers, sandbox), why).toEqual([]);
+      expect(forbidden(turn, workers), why).toEqual([]);
     },
     { timeout: 1_500_000, retry: 1 },
   );
@@ -455,7 +476,7 @@ describe("Claude Code on a real kodel server: forks and subagents", () => {
         kodelCall(orchestratorCalls(turn), "pipeline_next_step").length,
         `it polled pipeline_next_step${why}`,
       ).toBeLessThanOrEqual(8);
-      expect(forbidden(turn, workers, sandbox), why).toEqual([]);
+      expect(forbidden(turn, workers), why).toEqual([]);
     },
     { timeout: 660_000 },
   );
@@ -496,7 +517,7 @@ describe("Claude Code on a real kodel server: forks and subagents", () => {
         kodelCall(orchestratorCalls(turn), "pipeline_next_step").length,
         `it polled pipeline_next_step${why}`,
       ).toBeLessThanOrEqual(10);
-      expect(forbidden(turn, workers, sandbox), why).toEqual([]);
+      expect(forbidden(turn, workers), why).toEqual([]);
     },
     { timeout: 960_000, retry: 1 },
   );
@@ -536,7 +557,7 @@ describe("Claude Code on a real kodel server: forks and subagents", () => {
         why,
       ).toBe(true);
       expect(recordsOf(records, "step_claim_conflict"), why).toEqual([]);
-      expect(forbidden(turn, workers, sandbox), why).toEqual([]);
+      expect(forbidden(turn, workers), why).toEqual([]);
     },
     { timeout: 960_000 },
   );
@@ -568,7 +589,7 @@ describe("Claude Code on a real kodel server: forks and subagents", () => {
       expect(readFileSync(join(workdir as string, "b.txt"), "utf8").trim(), why).toBe("beta");
       expect(existsSync(join(sandbox.dir, "a.txt")), `a.txt was written outside${why}`).toBe(false);
       expect(existsSync(join(sandbox.dir, "b.txt")), `b.txt was written outside${why}`).toBe(false);
-      expect(forbidden(turn, workers, sandbox), why).toEqual([]);
+      expect(forbidden(turn, workers), why).toEqual([]);
     },
     { timeout: 660_000 },
   );

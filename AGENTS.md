@@ -55,7 +55,9 @@ This repository adds these rules:
   `pipeline_complete_step` with `node_slug`, `attempt` and that `claim_token`; report the answer back to the
   agent that started you as it is (one of `node`, `waiting`, `running` or `done`, with the `also_waiting` list
   it may carry), never write to the person, and never start `kodel wait` as a worker. In `sequential` mode
-  do the steps one by one, without taking them. When the workers are back, call `pipeline_next_step`
+  do the steps one by one, without taking them, unless its instruction says the project lets you work
+  them in parallel (`agents.subagents: auto`): then, if you can start subagents, call `pipeline_next_step`
+  again with `subagents: {can: true}` to have them handed out to workers. When the workers are back, call `pipeline_next_step`
   yourself; what waits for a person (`also_waiting` names every gate and pause) is for you to tell them,
   with the command of each (`--node <slug>` when several wait).
 

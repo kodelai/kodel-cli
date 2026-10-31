@@ -106,6 +106,7 @@ describe("t40 the docs of forks", () => {
       "never write to the person",
       "never start `kodel wait` as a worker",
       "`sequential` mode",
+      "again with `subagents: {can: true}`",
       "`also_waiting`",
       "`--node <slug>`",
     ]) {
@@ -129,6 +130,14 @@ describe("t40 the docs of forks", () => {
     }
     expect(TELL_CHANGES_NOTE).toContain("`changes_note`");
     expect(TELL_CHANGES_NOTE).toContain("tell the person");
+  });
+
+  test("t40_server_instructions_say_how_to_declare_subagents", () => {
+    for (const waitHint of [true, false]) {
+      expect(serverInstructions({ waitHint })).toContain(
+        "if you can start subagents, call pipeline_next_step again with subagents: {can: true}",
+      );
+    }
   });
 
   test("t40_server_instructions_cover_steps_workers_and_also_waiting", () => {

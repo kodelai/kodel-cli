@@ -8,11 +8,12 @@ import {
   completionsPerAttempt,
   entriesOf,
   type JournalRecord,
+  kodelArgsOf,
+  kodelCommands,
   maxConcurrentClaims,
   nestedAgentCalls,
   orchestratorCalls,
   overlapping,
-  parseKodelCallLog,
   type ToolCall,
   toolCallsOfTranscript,
   workerCalls,
@@ -303,10 +304,37 @@ describe("what the stream says of subagents", () => {
     ]);
   });
 
-  test("t40_harness_parses_the_shim_call_log", () => {
-    expect(parseKodelCallLog("1700000000\twait r_1\n1700000005\tstatus\n")).toEqual([
-      { at: 1_700_000_000_000, args: "wait r_1" },
-      { at: 1_700_000_005_000, args: "status" },
+  test("t40_harness_reads_kodel_commands_from_shell_lines", () => {
+    expect(kodelArgsOf("kodel wait r_1")).toEqual(["wait r_1"]);
+    expect(kodelArgsOf("cd /x && kodel wait r_1 & echo started")).toEqual(["wait r_1"]);
+    expect(kodelArgsOf("./bin/kodel gate approve r_1 --node a; kodel status")).toEqual([
+      "gate approve r_1 --node a",
+      "status",
+    ]);
+    expect(kodelArgsOf("(kodel resume r_1)")).toEqual(["resume r_1"]);
+    expect(kodelArgsOf("cat .kodel/runs/r_1/state.json")).toEqual([]);
+    expect(kodelArgsOf("echo kodelwait; ls kodel-agent-x")).toEqual([]);
+  });
+
+  test("t40_harness_finds_kodel_commands_of_the_agent_and_its_workers", () => {
+    const bash = (command: string, parent?: string): ToolCall => ({
+      name: "Bash",
+      input: { command, run_in_background: true },
+      output: "",
+      isError: false,
+      ...(parent === undefined ? {} : { parent }),
+    });
+    const calls: ToolCall[] = [
+      bash("kodel wait r_1"),
+      { name: "Read", input: { file_path: "kodel wait" }, output: "", isError: false },
+      bash("kodel gate approve r_1", "agent-1"),
+      { name: "Monitor", input: { command: "kodel wait r_1" }, output: "", isError: false },
+    ];
+    const found = kodelCommands(calls);
+    expect(found.map((c) => [c.args, c.index, c.call.parent])).toEqual([
+      ["wait r_1", 0, undefined],
+      ["gate approve r_1", 2, "agent-1"],
+      ["wait r_1", 3, undefined],
     ]);
   });
 });

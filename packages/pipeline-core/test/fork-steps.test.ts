@@ -500,6 +500,31 @@ describe("t40 modes", () => {
     expect(nodeOf(openFork().next()).execution?.mode).toBe("sequential");
   });
 
+  test("t40_sequential_text_under_auto_tells_how_to_declare_subagents", () => {
+    const declare =
+      "call pipeline_next_step again now, before you do any step, with subagents: {can: true}";
+    // `auto` and nothing declared: the agent is told how to have the steps worked in parallel
+    const auto = nodeOf(
+      openFork().next({ agents: { mode: "sequential", maxParallel: 8, undeclared: true } }),
+    );
+    expect(auto.execution?.mode).toBe("sequential");
+    const text = auto.execution?.instruction ?? "";
+    expect(text).toContain(declare);
+    expect(text).toContain("if you cannot, carry on one step at a time");
+    expect(text).toContain("Do not take the steps with pipeline_take_step");
+    // `no` (or a declaration already made): the plain one-by-one text, no invitation
+    const plain = nodeOf(openFork().next(SEQUENTIAL)).execution?.instruction ?? "";
+    expect(plain).toContain("this project works them one by one");
+    expect(plain).toContain("Do not start subagents for the other steps.");
+    expect(plain).not.toContain("subagents: {can: true}");
+    // the parallel text is the same whatever was declared
+    const parallel = (undeclared: boolean) =>
+      nodeOf(openFork().next({ agents: { mode: "parallel", maxParallel: 8, undeclared } }))
+        .execution?.instruction;
+    expect(parallel(true)).toBe(nodeOf(openFork().next(PARALLEL)).execution?.instruction);
+    expect(parallel(false)).not.toContain("subagents: {can: true}");
+  });
+
   test("t40_sequential_rules_do_not_send_the_agent_to_take_its_steps", () => {
     // An agent that took its steps one by one would, at the last one, be told that every open step
     // is held and to wait for itself: the rules say to hand the steps in without a claim, and the

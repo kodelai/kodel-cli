@@ -209,15 +209,12 @@ export function makeBareSandbox(): Sandbox {
 /** Where the `kodel` shim of a sandbox lives: first on the `PATH` of the agent under test. */
 export const shimDir = (stateDir: string) => join(stateDir, "bin");
 
-/** Where the `kodel` shim of a sandbox logs each call: one line per call, `<epoch seconds>\t<args>`. */
-export function kodelCallLog(stateDir: string): string {
-  return join(stateDir, "kodel-calls.log");
-}
-
 /**
  * The texts the server gives an agent name `kodel`, and a sandbox has no installed binary, so the
  * agent's shell gets one that runs this checkout on the sandbox. `KODEL_TEST_WAIT_TIMEOUT` makes
- * `kodel wait` give up sooner, so a scenario about the timeout does not take hours.
+ * `kodel wait` give up sooner, so a scenario about the timeout does not take hours. It keeps no log
+ * of its calls: the agent's own sandbox may forbid writing one, so what was run is read from the
+ * stream (`kodelCommands`) and what runs now from the processes (`waitProcesses`).
  */
 function writeKodelShim(stateDir: string, root: string): void {
   mkdirSync(shimDir(stateDir), { recursive: true });
@@ -227,9 +224,6 @@ function writeKodelShim(stateDir: string, root: string): void {
     file,
     [
       "#!/bin/sh",
-      // Every call is logged, whoever made it (the agent or one of its subagents), so a scenario can
-      // tell what was run and when without relying on what the stream shows of subagents.
-      `printf '%s\\t%s\\n' "$(date +%s)" "$*" >> "${kodelCallLog(stateDir)}"`,
       'if [ "$1" = "wait" ] && [ -n "$KODEL_TEST_WAIT_TIMEOUT" ]; then',
       "  shift",
       `  exec ${run} wait "$@" --timeout "$KODEL_TEST_WAIT_TIMEOUT"`,
@@ -632,8 +626,8 @@ export const callsTo = (turn: AgentTurn, tool: string): ToolCall[] =>
 
 /**
  * What a scenario about forks lets the agent use: the kodel tools, the file tools, Bash (for the steps'
- * own commands and `kodel wait`; what only a person may run is checked from the shim's log) and the
- * subagent tool under both of the names Claude Code has given it.
+ * own commands and `kodel wait`; what only a person may run is checked from the stream's Bash calls,
+ * the workers' too) and the subagent tool under both of the names Claude Code has given it.
  */
 export const FORK_TOOLS = [
   "mcp__kodel",
@@ -709,30 +703,68 @@ export function assistantText(turn: AgentTurn, options: { topLevel?: boolean } =
   return texts.join("\n");
 }
 
-/** One call of the `kodel` shim, by anyone in the sandbox. */
-export interface KodelCall {
-  /** When it was made, in epoch milliseconds (the shim logs whole seconds). */
-  at: number;
+/**
+ * The `kodel` commands in a shell command line, by their arguments: `cd x && kodel wait r_1 &` gives
+ * `wait r_1`. A path to the binary counts (`./bin/kodel gate ...`); `.kodel/runs` does not.
+ */
+export function kodelArgsOf(command: string): string[] {
+  const found: string[] = [];
+  for (const match of command.matchAll(/(?:^|[\s;&|(`/])kodel[ \t]+([^;&|\n)`]*)/g)) {
+    const args = match[1]?.trim() ?? "";
+    if (args !== "") found.push(args);
+  }
+  return found;
+}
+
+/** One `kodel` command an agent ran through a shell tool, as the stream shows it. */
+export interface KodelCommand {
   args: string;
+  /** The tool call that ran it: its `parent` says whether a worker did. */
+  call: ToolCall;
+  /** Where the call stands in the list it was found in (the stream's order for `turn.calls`). */
+  index: number;
 }
 
-/** The lines of a shim call log, parsed. */
-export function parseKodelCallLog(text: string): KodelCall[] {
-  return text
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => {
-      const tab = line.indexOf("\t");
-      return { at: Number(line.slice(0, tab)) * 1000, args: line.slice(tab + 1) };
-    });
+/** Every `kodel` command run through Bash (or Monitor) in a list of calls, in order. */
+export function kodelCommands(calls: readonly ToolCall[]): KodelCommand[] {
+  return calls.flatMap((call, index) =>
+    call.name === "Bash" || call.name === "Monitor"
+      ? kodelArgsOf(String(call.input.command ?? "")).map((args) => ({ args, call, index }))
+      : [],
+  );
 }
 
-/** Every call of the `kodel` shim in a sandbox, in order. */
-export function kodelCalls(sandbox: Sandbox): KodelCall[] {
+/** The ids of the `kodel wait <run>` processes running now, whoever started them. */
+export function waitProcesses(runId: string): number[] {
   try {
-    return parseKodelCallLog(readFileSync(kodelCallLog(sandbox.stateDir), "utf8"));
+    const out = execFileSync("pgrep", ["-f", `main.ts .* wait ${runId}`], { encoding: "utf8" });
+    return out
+      .split("\n")
+      .map((line) => Number(line.trim()))
+      .filter((pid) => Number.isInteger(pid) && pid > 0);
   } catch {
+    // pgrep exits 1 when nothing matches.
     return [];
+  }
+}
+
+/**
+ * Waits until `count` different `kodel wait <run>` processes have been seen, adding the ids it sees
+ * to `seen`. A process that starts and ends between two looks is missed; one that watches for a
+ * person runs until the person decides.
+ */
+export async function waitForWatchers(
+  runId: string,
+  seen: Set<number>,
+  count: number,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    for (const pid of waitProcesses(runId)) seen.add(pid);
+    if (seen.size >= count) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 500));
   }
 }
 

@@ -706,6 +706,25 @@ describe("t40 claims on the host", () => {
     expect(JSON.stringify(file)).not.toContain(dir);
   });
 
+  test("t40_host_invites_a_declaration_only_under_auto_before_one", async () => {
+    const declare = "with subagents: {can: true}";
+    const rules = async (handle: Awaited<ReturnType<typeof openAgents>>["run"]) => {
+      const answer = await handle.nextStep({ serve: {} });
+      if (!("node" in answer)) throw new Error("expected a node");
+      return answer.node.execution?.instruction ?? "";
+    };
+    const { run } = await openAgents();
+    // `auto` by default, nothing declared: the one-by-one text says how to declare
+    expect(await rules(run)).toContain(declare);
+    // `no`: the project forbids parallel work, nothing to declare
+    await config("agents:\n  subagents: no\n");
+    expect(await rules(run)).not.toContain(declare);
+    // back to `auto`, and the agent said it cannot: it is not asked again
+    await config("agents:\n  subagents: auto\n");
+    await run.nextStep({ serve: {}, subagents: { can: false } });
+    expect(await rules(run)).not.toContain(declare);
+  });
+
   test("t40_subagents_declaration_sticks_for_the_run", async () => {
     const { h, run } = await openAgents();
     const declared = await run.nextStep({ serve: {}, subagents: { can: true } });

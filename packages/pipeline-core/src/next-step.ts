@@ -301,13 +301,24 @@ const parallelRules = (waitHint: boolean) =>
   }. When your workers are back, call pipeline_next_step yourself: it hands out what is open ` +
   "then, and what waits for a person is told to you, not to the workers.";
 
-/** The rules of working several open steps one by one. */
-const SEQUENTIAL_RULES =
-  "Several steps of this run are open at once (`steps`) and this project works them one by one: " +
+/**
+ * The rules of working several open steps one by one. When the project leaves the mode to the agent
+ * and it has not said what it can do, it is told how to say it: an agent is not asked otherwise.
+ */
+const sequentialRules = (undeclared: boolean) =>
+  "Several steps of this run are open at once (`steps`) and " +
+  (undeclared
+    ? "this project lets you work them in parallel if you can start subagents: if you can, call " +
+      "pipeline_next_step again now, before you do any step, with subagents: {can: true}, and the " +
+      "open steps are handed out for one worker each; if you cannot, carry on one step at a time: "
+    : "this project works them one by one: ") +
   "do the step in `node` and hand it in with pipeline_complete_step (node_slug and attempt), then " +
   "call pipeline_next_step for the next open step. Do not take the steps with pipeline_take_step: a " +
   "claim is a worker's mark, and a step you held would not be handed to you again without its " +
-  "node_slug. Do not start subagents for the other steps.";
+  "node_slug. " +
+  (undeclared
+    ? "Do not start subagents for the other steps before that call has handed them out."
+    : "Do not start subagents for the other steps.");
 
 export interface NextStepOptions {
   /** Whether a waiting answer offers the agent `kodel wait`; on unless the project turned it off. */
@@ -321,8 +332,11 @@ export interface NextStepOptions {
    * then says the tool may be used, and only when told to; without it the text is as it always was.
    */
   agentDecisions?: { gate?: boolean; pipelineChange?: boolean };
-  /** How open steps are worked (the host resolves the config and the agent's declaration). */
-  agents?: { mode: ExecutionMode; maxParallel: number };
+  /**
+   * How open steps are worked (the host resolves the config and the agent's declaration).
+   * `undeclared`: the project leaves the mode to the agent (`auto`) and it has not said what it can do.
+   */
+  agents?: { mode: ExecutionMode; maxParallel: number; undeclared?: boolean };
   /** Where the run's work is done, as the host names it for the agent, when not where it started. */
   workdir?: string;
   /** Exactly this open agent step, whoever holds it; refused when it is not one. */
@@ -685,7 +699,10 @@ function baseStep(
     const out = stepOf(first);
     if (visible.length > 1) {
       const mode = options.agents?.mode ?? "sequential";
-      const rules = mode === "parallel" ? parallelRules(waitHint) : SEQUENTIAL_RULES;
+      const rules =
+        mode === "parallel"
+          ? parallelRules(waitHint)
+          : sequentialRules(options.agents?.undeclared === true);
       const steps = [...handed, ...taken].map(stepOf);
       const queued = free.length - handed.length;
       return {

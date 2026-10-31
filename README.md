@@ -72,7 +72,10 @@ agents:
 ```
 
 The engine still checks every step itself; a worker's hold only keeps two workers off one step.
-With `auto`, what the agent says it can do (`subagents` on `pipeline_next_step`) is kept by the
+With `auto`, until the agent has said what it can do, the answer that hands out the open steps one by
+one tells it how: if it can start subagents, it calls `pipeline_next_step` again with
+`subagents: {can: true}` and the steps are handed out to workers; if it cannot, it carries on one step
+at a time. With `no` it is not asked. What the agent says it can do (`subagents` on `pipeline_next_step`) is kept by the
 running server only, not in the run's files: after the server restarts, the steps are handed out one
 by one until the agent says it again.
 

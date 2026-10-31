@@ -963,15 +963,17 @@ export class LocalRun {
     if (request.subagents !== undefined) {
       this.host.declaredSubagents.set(this.runId, request.subagents);
     }
-    const mode = resolveMode(
-      hints.agents,
-      request.subagents ?? this.host.declaredSubagents.get(this.runId),
-    );
+    const declared = request.subagents ?? this.host.declaredSubagents.get(this.runId);
+    const mode = resolveMode(hints.agents, declared);
     const where = state.workdir === undefined ? undefined : await this.inProject(state.workdir);
     return {
       waitHint: hints.wait,
       agentDecisions: this.agentDecisions(),
-      agents: { mode, maxParallel: hints.agents.max_parallel },
+      agents: {
+        mode,
+        maxParallel: hints.agents.max_parallel,
+        undeclared: hints.agents.subagents === "auto" && declared === undefined,
+      },
       ...(where === undefined ? {} : { workdir: where }),
       ...(request.nodeSlug === undefined ? {} : { nodeSlug: request.nodeSlug }),
       ...(request.completionOf === undefined ? {} : { completionOf: request.completionOf }),
