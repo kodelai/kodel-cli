@@ -940,6 +940,24 @@ export class LocalRun {
   }
 
   /**
+   * Every version of the pipeline the run has had, as it was kept, oldest name first. A version that
+   * cannot be read is left out: this is for looking at what was, not for running anything.
+   */
+  async keptVersions(): Promise<PipelineSpec[]> {
+    const specs: PipelineSpec[] = [];
+    for (const hash of await this.host.store.listSpecs(this.runId)) {
+      const text = await this.host.store.readSpec(this.runId, hash);
+      if (text === undefined) continue;
+      try {
+        specs.push(parseSnapshot(text));
+      } catch (error) {
+        if (!(error instanceof KodelError)) throw error;
+      }
+    }
+    return specs;
+  }
+
+  /**
    * The agent proposes another version of the pipeline. Nothing about the run changes: the proposal
    * is checked, kept apart, and journaled, and a person accepts it or not. What would be refused at
    * the person's command is refused here, so the agent hears it at once.
