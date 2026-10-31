@@ -433,6 +433,28 @@ describe("usage pass", () => {
     );
   });
 
+  test("t40_usage_writer_counts_the_agent_step_open_now_as_work_during_a_gate", async () => {
+    // Only the state says `a#1` is an agent step (no hand-in in the journal yet): a gate of another branch reached
+    // while it is open is not outside, so nothing goes to `unattributed`.
+    const r = await rig();
+    const log = sessionLog(r.runId);
+    log.wait(1_000).say("msg_g", "worked while the gate waits", { input: 7, output: 3 });
+    log.wait(2_000).say("msg_h", "still at work", { input: 11, output: 4 });
+    await install(log);
+    const at = Date.parse("2026-10-21T10:00:01.000Z");
+    const journal = async (): Promise<JournalRecord[]> => [
+      { v: 2, seq: 1, ts: at - 500, event: "node_entered", node: "a", attempt: 1 },
+      { v: 2, seq: 2, ts: at, event: "gate_waiting", node: "g", attempt: 1 },
+    ];
+    const done = await r.writer.capture(runWith(r, journal), { node: "a", attempt: 1 }, held);
+    expect(done.recorded).toBeGreaterThan(0);
+    const usage = (await stateOf(r)).usage;
+    expect(tokensOf(usage?.unattributed ?? emptyUsage().unattributed).input).toBe(0);
+    expect(tokensOf(usage?.attempts["a:1"] ?? emptyUsage().unattributed).input).toBe(
+      100 + 200 + 7 + 11,
+    );
+  });
+
   test("t9jrs_node_sums_plus_unattributed_equal_run_total", async () => {
     const r = await rig();
     await install(sessionLog(r.runId));

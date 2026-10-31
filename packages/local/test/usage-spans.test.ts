@@ -43,6 +43,56 @@ describe("the times a person was waited for", () => {
     ]);
   });
 
+  test("t40_usage_pause_lifted_by_an_accepted_change_is_closed_as_on_main", () => {
+    // `x` is handed in and paused; a change is accepted and `x` worked again; command `c`; a pause at `y` resumed;
+    // agent step `z` open now. Before forks the next pause replaced the window of `x`: only `y`'s wait is outside.
+    const step = (seq: number, ts: number, event: string, node: string, attempt = 1) => ({
+      ...rec(seq, ts, event, node),
+      attempt,
+    });
+    const journal: JournalRecord[] = [
+      step(1, 1_000, "node_entered", "x"),
+      step(2, 2_000, "agent_completed", "x"),
+      rec(3, 2_200, "run_paused", "x"),
+      { ...rec(4, 3_000, "pipeline_accepted"), effects: [{ kind: "reroute", node: "x", to: "x" }] },
+      step(5, 3_100, "node_entered", "x", 2),
+      step(6, 4_000, "agent_completed", "x", 2),
+      step(7, 4_000, "node_finished", "x", 2),
+      step(8, 4_200, "node_entered", "c"),
+      step(9, 6_000, "node_finished", "c"),
+      rec(10, 6_100, "run_paused", "y"),
+      rec(11, 7_000, "run_resumed", "y"),
+      step(12, 7_100, "node_entered", "z"),
+    ];
+    const main = [{ from: iso(6_100), to: iso(7_000) }];
+    expect(outsideSpans(journal, 9_000, [{ node: "z", attempt: 1 }], [])).toEqual(main);
+    expect(outsideSpans(journal, 9_000, [{ node: "z", attempt: 1 }])).toEqual(main);
+  });
+
+  test("t40_usage_pause_lifted_by_a_change_that_does_not_name_it_is_dropped_by_the_state", () => {
+    // A `total` pause held at `x` is lifted by a recheck of the node its route came from; the record names `w`.
+    const journal: JournalRecord[] = [
+      rec(1, 1_000, "run_paused", "x"),
+      { ...rec(2, 2_000, "pipeline_accepted"), effects: [{ kind: "recheck", node: "w" }] },
+    ];
+    expect(outsideSpans(journal, 9_000, [], [])).toEqual([]);
+    expect(outsideSpans(journal, 9_000, [], [{ node: "x" }])).toEqual([
+      { from: iso(1_000), to: iso(9_000) },
+    ]);
+  });
+
+  test("t40_usage_gate_superseded_and_reached_again_starts_at_the_new_gate", () => {
+    const journal: JournalRecord[] = [
+      { ...rec(1, 1_000, "gate_waiting", "g"), attempt: 1 },
+      { ...rec(2, 2_000, "pipeline_accepted"), effects: [{ kind: "restart", node: "g" }] },
+      { ...rec(3, 2_000, "node_superseded", "g"), attempt: 1 },
+      { ...rec(4, 2_000, "node_entered", "g"), attempt: 2 },
+      { ...rec(5, 3_000, "gate_waiting", "g"), attempt: 2 },
+      { ...rec(6, 5_000, "gate_decided", "g"), attempt: 2 },
+    ];
+    expect(outsideSpans(journal, 9_000)).toEqual([{ from: iso(3_000), to: iso(5_000) }]);
+  });
+
   test("t9jrs_no_waiting_no_spans", () => {
     expect(outsideSpans([rec(1, 1_000, "node_entered", "a")], 9_000)).toEqual([]);
   });
