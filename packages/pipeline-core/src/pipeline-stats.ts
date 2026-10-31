@@ -72,7 +72,8 @@ export interface NodeStats {
   };
 }
 
-export interface NodeVersion {
+/** One definition of a step, with everything a step shows, counted over the attempts that ran on it. */
+export interface NodeVersion extends Omit<NodeStats, "node" | "elsewhere"> {
   /** 1 for the oldest definition seen. */
   index: number;
   /** The definition is the one the pipeline has now. */
@@ -80,15 +81,8 @@ export interface NodeVersion {
   /** What differs from the version before: the work, the checks, the routing. */
   changed: ("work" | "checks" | "routing")[];
   firstSeen: number;
-  runs: number;
-  attempts: number;
-  perRun: number;
-  failed: number;
-  seconds: Spread;
-  findings: { attempts: number; rows: number };
-  usage: { attempts: number; usd: number };
-  /** At a gate: the rejections, and how many of them said why. */
-  decisions?: { rejected: number; rejectedWithReason: number };
+  /** The fingerprints of the definition, which a host can look the text of up by. */
+  definition: NodeForms;
 }
 
 export interface NodeVersions {
@@ -157,6 +151,74 @@ const brief = (text: string) => {
   return flat.length > WORDS ? `${flat.slice(0, WORDS - 1)}…` : flat;
 };
 
+/** What the attempts of a step, or of one version of it, show: how they ended, why, what they found, what they cost. */
+function describeAttempts(
+  node: string,
+  gate: boolean,
+  runs: number,
+  attempts: AttemptReport[],
+): Omit<NodeStats, "elsewhere"> {
+  const outcomes: Record<string, number> = {};
+  const failures = new Map<string, { source: string; reason: string; n: number }>();
+  const findings = { attempts: 0, rows: 0, bySeverity: {} as Record<string, number> };
+  const usage = { attempts: 0, usd: 0, input: 0, output: 0, cache_read: 0, cache_write: 0 };
+  const decisions = { approved: 0, rejected: 0, rejectedWithReason: 0, reasons: [] as string[] };
+  let failed = 0;
+  for (const a of attempts) {
+    const label = a.outcome ?? "?";
+    outcomes[label] = (outcomes[label] ?? 0) + 1;
+    if (a.failure) {
+      failed++;
+      const reason = brief(a.failure.reason);
+      const key = `${a.failure.source}\u0000${reason}`;
+      const row = failures.get(key) ?? { source: a.failure.source, reason, n: 0 };
+      row.n++;
+      failures.set(key, row);
+    }
+    const rows = rowsOf(a);
+    if (rows !== undefined) {
+      findings.attempts++;
+      findings.rows += rows;
+      for (const [severity, n] of Object.entries(a.findings ?? {})) {
+        findings.bySeverity[severity] = (findings.bySeverity[severity] ?? 0) + n;
+      }
+    }
+    if (a.usage) {
+      usage.attempts++;
+      usage.usd += a.usage.usd;
+      usage.input += a.usage.input;
+      usage.output += a.usage.output;
+      usage.cache_read += a.usage.cache_read;
+      usage.cache_write += a.usage.cache_write;
+    }
+    if (a.decision) {
+      if (a.decision.outcome === "rejected") {
+        decisions.rejected++;
+        if (a.decision.reason !== undefined) {
+          decisions.rejectedWithReason++;
+          decisions.reasons.push(brief(a.decision.reason));
+        }
+      } else {
+        decisions.approved++;
+      }
+    }
+  }
+  return {
+    node,
+    gate,
+    runs,
+    attempts: attempts.length,
+    perRun: runs === 0 ? 0 : attempts.length / runs,
+    failed,
+    outcomes,
+    failures: [...failures.values()].sort((a, b) => b.n - a.n).slice(0, 5),
+    seconds: spread(attempts.map((a) => a.seconds)),
+    findings,
+    ...(gate ? { decisions: { ...decisions, reasons: decisions.reasons.slice(-5) } } : {}),
+    usage,
+  };
+}
+
 export function summarizePipeline(runs: StatsRun[], options: StatsOptions): PipelineStats {
   const ordered = [...runs].sort((a, b) => a.at - b.at);
   const inScope = (node: string, a: AttemptReport) =>
@@ -222,70 +284,15 @@ export function summarizePipeline(runs: StatsRun[], options: StatsOptions): Pipe
         },
       ];
     }
-    const attempts = visits.flatMap((v) => v.attempts);
-    const outcomes: Record<string, number> = {};
-    const failures = new Map<string, { source: string; reason: string; n: number }>();
-    const findings = { attempts: 0, rows: 0, bySeverity: {} as Record<string, number> };
-    const usage = { attempts: 0, usd: 0, input: 0, output: 0, cache_read: 0, cache_write: 0 };
-    const decisions = { approved: 0, rejected: 0, rejectedWithReason: 0, reasons: [] as string[] };
-    let failed = 0;
-    let gate = false;
-    for (const v of visits) {
-      gate ||= v.gate;
-      for (const a of v.attempts) {
-        const label = a.outcome ?? "?";
-        outcomes[label] = (outcomes[label] ?? 0) + 1;
-        if (a.failure) {
-          failed++;
-          const reason = brief(a.failure.reason);
-          const key = `${a.failure.source}\u0000${reason}`;
-          const row = failures.get(key) ?? { source: a.failure.source, reason, n: 0 };
-          row.n++;
-          failures.set(key, row);
-        }
-        const rows = rowsOf(a);
-        if (rows !== undefined) {
-          findings.attempts++;
-          findings.rows += rows;
-          for (const [severity, n] of Object.entries(a.findings ?? {})) {
-            findings.bySeverity[severity] = (findings.bySeverity[severity] ?? 0) + n;
-          }
-        }
-        if (a.usage) {
-          usage.attempts++;
-          usage.usd += a.usage.usd;
-          usage.input += a.usage.input;
-          usage.output += a.usage.output;
-          usage.cache_read += a.usage.cache_read;
-          usage.cache_write += a.usage.cache_write;
-        }
-        if (a.decision) {
-          if (a.decision.outcome === "rejected") {
-            decisions.rejected++;
-            if (a.decision.reason !== undefined) {
-              decisions.rejectedWithReason++;
-              decisions.reasons.push(brief(a.decision.reason));
-            }
-          } else {
-            decisions.approved++;
-          }
-        }
-      }
-    }
+    const gate = visits.some((v) => v.gate);
     return [
       {
-        node: name,
-        gate,
-        runs: visits.length,
-        attempts: attempts.length,
-        perRun: attempts.length / visits.length,
-        failed,
-        outcomes,
-        failures: [...failures.values()].sort((a, b) => b.n - a.n).slice(0, 5),
-        seconds: spread(attempts.map((a) => a.seconds)),
-        findings,
-        ...(gate ? { decisions: { ...decisions, reasons: decisions.reasons.slice(-5) } } : {}),
-        usage,
+        ...describeAttempts(
+          name,
+          gate,
+          visits.length,
+          visits.flatMap((v) => v.attempts),
+        ),
         elsewhere: elsewhere.get(name) ?? 0,
       },
     ];
@@ -314,6 +321,7 @@ function versionsOf(ordered: StatsRun[], order: string[], options: StatsOptions)
     key: string;
     definition: NonNullable<AttemptReport["definition"]>;
     firstSeen: number;
+    gate: boolean;
     runs: Set<string>;
     attempts: AttemptReport[];
   };
@@ -329,10 +337,12 @@ function versionsOf(ordered: StatsRun[], order: string[], options: StatsOptions)
           key,
           definition: a.definition,
           firstSeen: run.at,
+          gate: false,
           runs: new Set<string>(),
           attempts: [],
         };
         group.runs.add(run.runId);
+        group.gate ||= node.gate;
         group.attempts.push(a);
         forNode.set(key, group);
       }
@@ -351,9 +361,8 @@ function versionsOf(ordered: StatsRun[], order: string[], options: StatsOptions)
         node,
         versions: list.map((g, i): NodeVersion => {
           const before = list[i - 1]?.definition;
-          const rows = g.attempts.map(rowsOf).filter((n): n is number => n !== undefined);
-          const used = g.attempts.filter((a) => a.usage);
           return {
+            ...describeAttempts(node, g.gate, g.runs.size, g.attempts),
             index: i + 1,
             current:
               now !== undefined &&
@@ -362,30 +371,11 @@ function versionsOf(ordered: StatsRun[], order: string[], options: StatsOptions)
               g.definition.routing === now.routing,
             changed: before
               ? (["work", "checks", "routing"] as const).filter(
-                  (p) => before[p] !== g.definition[p],
+                  (part) => before[part] !== g.definition[part],
                 )
               : [],
             firstSeen: g.firstSeen,
-            runs: g.runs.size,
-            attempts: g.attempts.length,
-            perRun: g.attempts.length / g.runs.size,
-            failed: g.attempts.filter((a) => a.failure).length,
-            seconds: spread(g.attempts.map((a) => a.seconds)),
-            findings: { attempts: rows.length, rows: rows.reduce((s, n) => s + n, 0) },
-            usage: {
-              attempts: used.length,
-              usd: used.reduce((s, a) => s + (a.usage?.usd ?? 0), 0),
-            },
-            ...(g.attempts.some((a) => a.decision)
-              ? {
-                  decisions: {
-                    rejected: g.attempts.filter((a) => a.decision?.outcome === "rejected").length,
-                    rejectedWithReason: g.attempts.filter(
-                      (a) => a.decision?.outcome === "rejected" && a.decision.reason !== undefined,
-                    ).length,
-                  },
-                }
-              : {}),
+            definition: g.definition,
           };
         }),
       },

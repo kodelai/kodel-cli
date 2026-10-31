@@ -270,10 +270,45 @@ describe("the definitions of a step", () => {
       ],
       { scope: "all" },
     );
-    expect(s.versions[0]?.versions.map((v) => v.decisions)).toEqual([
-      { rejected: 2, rejectedWithReason: 1 },
-      { rejected: 1, rejectedWithReason: 1 },
-    ]);
+    const [v1, v2] = s.versions[0]?.versions ?? [];
+    expect(v1?.decisions).toMatchObject({ rejected: 2, rejectedWithReason: 1 });
+    expect(v2?.decisions).toMatchObject({ rejected: 1, rejectedWithReason: 1 });
+    expect(v2?.decisions?.reasons).toEqual(["no tests"]);
+  });
+
+  test("a version has everything a step has: how it ended, why, what it found, the definition", () => {
+    const s = summarizePipeline(
+      [
+        run("a", 1, [
+          node("review", [
+            attempt(1, { ...failed("1 blocking finding"), findings: { blocker: 1, minor: 2 } }),
+            attempt(2),
+          ]),
+        ]),
+        run("b", 2, [node("review", [attempt(1, { definition: DEF_B })])]),
+      ],
+      { scope: "all" },
+    );
+    const [v1, v2] = s.versions[0]?.versions ?? [];
+    expect(v1).toMatchObject({
+      node: "review",
+      gate: false,
+      attempts: 2,
+      outcomes: { blocking_findings: 1, passed: 1 },
+      failures: [{ source: "check:result", reason: "1 blocking finding", n: 1 }],
+      findings: { attempts: 1, rows: 3, bySeverity: { blocker: 1, minor: 2 } },
+      definition: DEF_A,
+    });
+    expect(v2).toMatchObject({ attempts: 1, definition: DEF_B, outcomes: { passed: 1 } });
+  });
+
+  test("a step counted whole and its only version say the same", () => {
+    const runs = [run("a", 1, [node("impl", [attempt(1, failed("x")), attempt(2)])])];
+    const whole = summarizePipeline(runs, { scope: "all" }).nodes[0];
+    const other = summarizePipeline([...runs, run("b", 2, [node("other", [attempt(1)])])], {
+      scope: "all",
+    });
+    expect(other.nodes[0]?.outcomes).toEqual(whole?.outcomes);
   });
 
   test("a step that nobody decides has no decisions in its versions", () => {
