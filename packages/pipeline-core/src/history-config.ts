@@ -4,11 +4,13 @@
  * at all. A run whose `run_started` has no `history` was started before the section existed.
  */
 import { minimatch } from "minimatch";
+import type { PricesOverride } from "./price-table";
 
 /**
  * Every category of sensitive data the engine can write into a run's history, each with a plain `enabled`
  * switch. The agent's conversation log (`agent_log`) is the most sensitive one and has a section of its own with
  * more keys (`AgentLogConfig`); it is not in this list and, unlike these, it is optional in `HistoryConfig`.
+ * Usage (`usage`) is the same: tokens and an estimated cost, with a price override, in a section of its own.
  */
 export const HISTORY_CATEGORIES = ["changes", "output", "prompts", "executor", "tool_log"] as const;
 
@@ -30,6 +32,27 @@ export interface HistoryConfig {
    * in a host that did not ask for it; the project config always fills it (`DEFAULT_AGENT_LOG`).
    */
   agent_log?: AgentLogConfig;
+  /**
+   * What the run records of the agent's token use and its estimated cost. Absent in a run started before it existed
+   * (read as "not captured"); the project config always fills it (`defaultUsage`).
+   */
+  usage?: UsageConfig;
+}
+
+/**
+ * `enabled: false` writes nothing and does not read the agent's log. `prices` replaces the shipped price of a model
+ * whole (all four prices); it is frozen with the rest of the section when the run starts.
+ */
+export interface UsageConfig {
+  enabled: boolean;
+  prices: PricesOverride;
+}
+
+export const DEFAULT_USAGE: UsageConfig = { enabled: true, prices: {} };
+
+/** A copy of the defaults, so no caller shares or changes the constant. */
+export function defaultUsage(): UsageConfig {
+  return { enabled: DEFAULT_USAGE.enabled, prices: {} };
 }
 
 export const AGENT_LOG_MODES = ["full", "metadata"] as const;

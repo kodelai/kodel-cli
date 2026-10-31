@@ -103,7 +103,9 @@ import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integ
 import { patchBetween } from "./patch";
 import { MAX_PATCH_KB, PATCH_READ_MARGIN } from "./patch-text";
 import { fitServed, promptHashOf, type ServedNode, servedKeyOf } from "./served";
-import { artifactFileName, FileStore, META_VERSION, newRunId, type RunMeta } from "./store";
+import { type StoragePlace, scrubHome } from "./storage-paths";
+import { artifactFileName, FileStore, META_VERSION, type RunMeta } from "./store";
+import { UsageWriter } from "./usage";
 import { GitWorktreeProvider, type Workdir, type WorkdirProvider } from "./worktree";
 
 export interface CommandContext {
@@ -170,11 +172,18 @@ export interface HostOptions {
   checkRunners?: Record<string, CheckRunner>;
   /** How often running engine work sends a heartbeat; 0 turns the timer off (tests). */
   heartbeatMs?: number;
+  /** How long the end of a step waits for the lock on copying the agent's log; 5 s by default (tests). */
+  agentLogStepWaitMs?: number;
   maxTailBytes?: number;
   /** Where the trusted hash of a run's state is kept; by default a file outside the repository. */
   integrity?: IntegrityStore;
   /** The directory for those files; defaults to `defaultIntegrityDir()`. */
   integrityDir?: string;
+  /**
+   * Where runs, proposals made outside a run and `start.lock` are kept. Absent: under `storeRoot`
+   * (the `project` place). The CLI and the MCP server always pass the place the config names.
+   */
+  storage?: StoragePlace;
   /** The YAML the pipeline was read from; a copy is kept with each run so the run is pinned to it. */
   source?: string;
   /** The pipeline file, relative to `root` with `/` separators; kept in the run's state. */
@@ -197,6 +206,8 @@ export interface HostOptions {
    * opened through two of them is copied by one. A host makes its own when not given one.
    */
   agentLog?: AgentLogWriter;
+  /** What counts the agent's token use at the end of each step. One per process, like `agentLog`. */
+  usage?: UsageWriter;
   /**
    * The timers that copy the agent's log while runs go: present only in the process that serves the MCP tools, so
    * that a command a person runs (`status`, `report`, `wait`, `gate`) never starts one.
@@ -450,6 +461,7 @@ export class LocalHost {
   readonly rules: RedactRule[];
   readonly checkRunners: Record<string, CheckRunner>;
   readonly heartbeatMs: number;
+  readonly agentLogStepWaitMs: number;
   readonly maxTailBytes: number | undefined;
   private readonly outputSettingsCache = new Map<
     string,
@@ -464,6 +476,7 @@ export class LocalHost {
    * the answers of a completion or a take are worked out without it, and must not flip the mode.
    */
   readonly declaredSubagents = new Map<string, SubagentsDeclaration>();
+  readonly usage: UsageWriter;
 
   constructor(
     readonly spec: PipelineSpec,
@@ -471,7 +484,11 @@ export class LocalHost {
   ) {
     this.rules = options.rules ?? [];
     const storeRoot = options.storeRoot ?? `${options.root}/.kodel`;
-    this.store = new FileStore({ root: storeRoot, rules: this.rules });
+    this.store = new FileStore({
+      root: storeRoot,
+      rules: this.rules,
+      ...(options.storage === undefined ? {} : { place: options.storage }),
+    });
     this.agentLog =
       options.agentLog ??
       new AgentLogWriter({
@@ -481,15 +498,28 @@ export class LocalHost {
         env: () => options.environment ?? process.env,
         now: options.clock ?? Date.now,
       });
+    this.usage =
+      options.usage ??
+      new UsageWriter({
+        root: options.root,
+        rules: this.rules,
+        env: () => options.environment ?? process.env,
+        now: options.clock ?? Date.now,
+      });
     this.integrity =
       options.integrity ??
-      new FileIntegrity(options.integrityDir ?? defaultIntegrityDir(), storeRoot);
+      new FileIntegrity(
+        options.integrityDir ?? defaultIntegrityDir(),
+        storeRoot,
+        options.storage?.hashKey,
+      );
     this.snapshotter = options.snapshotter ?? new GitSnapshotter(options.root);
     this.clock = options.clock ?? Date.now;
     this.engine = { fingerprint: hashSource, ...options.engine };
     this.runner = options.runCommand ?? ((command, opts) => runCommand(command, opts));
     this.heartbeatMs =
       options.heartbeatMs ?? Math.max(1_000, (options.engine?.staleMs ?? 30_000) / 3);
+    this.agentLogStepWaitMs = options.agentLogStepWaitMs ?? 5_000;
     this.maxTailBytes = options.maxTailBytes;
     this.ownerId = options.ownerId ?? processOwnerId();
     this.isOwnerAlive = options.isOwnerAlive ?? processIsAlive;
@@ -548,7 +578,7 @@ export class LocalHost {
       // Short and without the folder: the journal is read by people and by other tools.
       return {
         output_error: redactText(
-          describeError(error).replaceAll(this.options.root, "."),
+          scrubHome(describeError(error).replaceAll(this.options.root, "."), this.options.storage),
           this.rules,
         ).slice(0, 200),
       };
@@ -626,7 +656,8 @@ export class LocalHost {
 
       await requireGit();
       const now = this.clock();
-      const runId = newRunId(now);
+      // The folder is taken now, so an id a clone has already taken is never used twice.
+      const runId = await this.store.reserveRunId(now);
       // Of the text the pipeline was read from, when it is known: that is what a copy is checked
       // against, and it does not change when the parser learns a new field.
       const specHash = this.specHash;
@@ -637,10 +668,16 @@ export class LocalHost {
         (options.worktree
           ? new GitWorktreeProvider(this.options.root, options.worktree)
           : undefined);
-      const workdir = await provider?.prepare({
-        runId,
-        ...(options.cwd === undefined ? {} : { callerCwd: options.cwd }),
-      });
+      let workdir: Workdir | undefined;
+      try {
+        workdir = await provider?.prepare({
+          runId,
+          ...(options.cwd === undefined ? {} : { callerCwd: options.cwd }),
+        });
+      } catch (error) {
+        await this.store.removeRun(runId).catch(() => undefined);
+        throw error;
+      }
       try {
         // The copy is part of the start: if it cannot be made the directory is taken away again.
         if (workdir && options.pipelineCopy) {
@@ -668,6 +705,9 @@ export class LocalHost {
         const executor = recordsExecutor
           ? await observeExecutor(options.caller, {
               root: this.options.root,
+              ...(this.options.storage === undefined
+                ? {}
+                : { indexPath: this.options.storage.sessionsPath }),
               dirs: [...(workdir ? [workdir.path] : []), this.options.root],
               ...(this.options.environment === undefined ? {} : { env: this.options.environment }),
             })
@@ -805,6 +845,32 @@ export class LocalRun {
     private readonly host: LocalHost,
     readonly runId: string,
   ) {}
+
+  /** The run's folder when the history is kept under `~/.kodel` (`storage: home`); none in the project. */
+  homeFolder(): string | undefined {
+    return this.host.options.storage?.mode === "home"
+      ? this.host.store.runDir(this.runId)
+      : undefined;
+  }
+
+  /**
+   * The root of another checkout that made this run, when it is not ours: clones of one project
+   * share a `home` history, and each continues only its own runs. Advisory, like the `root` it
+   * reads (the agent can rewrite `meta.json`).
+   */
+  async foreignRoot(): Promise<string | undefined> {
+    const meta = await this.meta();
+    return meta && this.host.store.isForeign(meta) ? meta.root : undefined;
+  }
+
+  private async assertOurs(): Promise<void> {
+    const root = await this.foreignRoot();
+    if (root === undefined) return;
+    throw new KodelError(
+      "WORKDIR_INVALID",
+      `run ${this.runId} belongs to the checkout at ${root}; this checkout does not continue it (start the task here for a run of its own)`,
+    );
+  }
 
   /** The run's record of where it works (its `meta.json`); read once, it does not change. */
   private meta(): Promise<RunMeta | undefined> {
@@ -1155,6 +1221,7 @@ export class LocalRun {
    * the person's command is refused here, so the agent hears it at once.
    */
   async proposeChange(input: { yaml: string; summary: string }): Promise<ProposeOutcome> {
+    await this.assertOurs();
     const { store, rules } = this.host;
     const state = await this.state();
     if (state.status !== "running" && state.status !== "paused") {
@@ -1615,6 +1682,7 @@ export class LocalRun {
         if (finished) {
           this.host.options.agentLogTickers?.stop(this.runId);
           this.host.agentLog.forget(this.runId);
+          this.host.usage.forget(this.runId);
         }
         if (finished) {
           const sealHash = await store.writeSeal(this.runId, clock());
@@ -1763,7 +1831,10 @@ export class LocalRun {
       const shared = await this.otherBranchesActiveSince(state, node, visit.attempt);
       return { kind: "changes", files, ...(shared ? { note: SHARED_TREE_NOTE } : {}) };
     } catch (error) {
-      return { kind: "unavailable", reason: describeError(error) };
+      return {
+        kind: "unavailable",
+        reason: scrubHome(describeError(error), this.host.options.storage),
+      };
     }
   }
 
@@ -1964,7 +2035,7 @@ export class LocalRun {
               : await this.runCheck(effect, controller.signal);
         } catch (error) {
           if (controller.signal.aborted) return;
-          const reason = `the host could not finish this: ${describeError(error)}`;
+          const reason = `the host could not finish this: ${scrubHome(describeError(error), this.host.options.storage)}`;
           event =
             effect.type === "run_command"
               ? {
@@ -2271,6 +2342,7 @@ export class LocalRun {
   /** What the agent should do next. Throws `STATE_MODIFIED_EXTERNALLY` if the files were tampered with. */
   /** `only`: of the steps the answer lists, the one slug recorded as served (a worker's take). */
   async nextStep(options: NextStepRequest = {}, only?: string): Promise<NextStep> {
+    await this.assertOurs();
     // Only a call of the agent through the MCP tools starts the copy of its log; looking at a run does not.
     if (options.serve !== undefined) this.watchAgentLog();
     const tick = await this.tick();
@@ -2354,6 +2426,7 @@ export class LocalRun {
    * step is free, so two workers taking at once get one claim between them.
    */
   async takeStep(input: { node?: string; token?: string; caller?: Caller }): Promise<TakeOutcome> {
+    await this.assertOurs();
     const hints = await this.hints();
     const serve = { ...(input.caller === undefined ? {} : { caller: input.caller }) };
     const token = input.token ?? randomBytes(16).toString("hex");
@@ -2483,7 +2556,10 @@ export class LocalRun {
           node: node.slug,
           attempt: node.attempt,
           n: record.n,
-          message: describeError(error).replaceAll(this.host.options.root, "."),
+          message: scrubHome(
+            describeError(error).replaceAll(this.host.options.root, "."),
+            this.host.options.storage,
+          ),
         });
       }
     } catch {
@@ -2523,7 +2599,10 @@ export class LocalRun {
     try {
       return { kind: "changes", files: await (await this.snapshotter()).changesSince(tree) };
     } catch (error) {
-      return { kind: "unavailable", reason: describeError(error) };
+      return {
+        kind: "unavailable",
+        reason: scrubHome(describeError(error), this.host.options.storage),
+      };
     }
   }
 
@@ -2561,6 +2640,7 @@ export class LocalRun {
     caller?: Caller,
     claimToken?: string,
   ) {
+    await this.assertOurs();
     // A change of the pipeline that waits for a person is met here: what the step is judged by may be
     // about to change, so it is not judged yet. The agent is told to wait for the person.
     const held = await this.pendingChange();
@@ -2576,9 +2656,35 @@ export class LocalRun {
     this.watchAgentLog();
     // The agent's log up to its last closed response, copied before the step is judged: once the last step is
     // completed the run ends, and nothing is written to a run that has ended.
-    await this.host.agentLog
-      .capture(this.agentLogRun(), { why: "step", waitMs: 5_000, step: { node, attempt } })
+    // The count of usage runs under the same lock, right after the copy; it has a switch of its own.
+    const run = this.agentLogRun();
+    let counted = false;
+    const copied = await this.host.agentLog
+      .capture(run, {
+        why: "step",
+        waitMs: this.host.agentLogStepWaitMs,
+        step: { node, attempt },
+        also: async (lock) => {
+          counted = true;
+          // The count is told by itself: a failure of it is not a failure of the copy it runs after.
+          await this.host.usage.capture(run, { node, attempt }, lock).catch(async () => {
+            await this.apply({ type: "usage_failed", reason: "unreadable" }).catch(() => undefined);
+          });
+        },
+      })
       .catch(() => undefined);
+    if (!counted) {
+      // Said once: what the pass would have read is read by the next one, the cursor did not move. A step the copy
+      // had nothing to do with (the run is over, or it is not at an agent step) has nothing to say either.
+      // The lock was busy or lost before the count could run: nothing was read, so it is `busy`. A copy that throws no longer stops the count (it runs after the copy under the same lock, and the copy tells its own failure).
+      // With the copy switched off (`disabled`) the count still runs under the lock, so not running it means the lock
+      // was lost: that is `busy` too. Only a run that is over or not at an agent step has nothing to say.
+      const reason =
+        copied?.skipped === "not_running" || copied?.skipped === "no_step" ? undefined : "busy";
+      if (reason !== undefined) {
+        await this.apply({ type: "usage_failed", reason }).catch(() => undefined);
+      }
+    }
     const executor = await this.executorNow(caller);
     // HEAD of the run's own directory: the root may be somewhere else entirely.
     const head = await this.cwd()
@@ -2640,6 +2746,7 @@ export class LocalRun {
         if (where === undefined) return undefined;
         return this.inProject(where.path).catch(() => where.path);
       },
+      journal: () => this.host.store.readJournal(this.runId),
     };
   }
 
@@ -2749,7 +2856,8 @@ export class LocalRun {
   }
 
   /** `node`: which paused branch to carry on, when more than one is paused. */
-  resume(node?: string) {
+  async resume(node?: string) {
+    await this.assertOurs();
     return this.apply({ type: "resume", ...(node === undefined ? {} : { node }) });
   }
 
@@ -2768,6 +2876,7 @@ export class LocalRun {
     suggestion?: string;
     check?: string;
   }) {
+    await this.assertOurs();
     const decision = await this.apply({ type: "feedback", ...input });
     if (!decision.ok)
       await this.recordRefusal("feedback", input.node, input.attempt, decision.error);
@@ -2785,6 +2894,7 @@ export class LocalRun {
     raw: unknown,
     options: { replace?: boolean } = {},
   ): Promise<StepResult> {
+    await this.assertOurs();
     const result = await this.acceptReport(node, attempt, raw, options.replace === true);
     if (!result.ok) await this.recordRefusal("report_result", node, attempt, result);
     return result;

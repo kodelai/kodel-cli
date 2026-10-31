@@ -12,7 +12,7 @@ import {
   type ToolResult,
 } from "@kodel-ai/pipeline-core";
 import type { AgentDecider } from "@kodel-ai/pipeline-core/mcp";
-import { blockingChange, type DialogState, type HumanHost } from "./elicit";
+import { blockingChange, type DialogState, type HumanHost, type HumanRun } from "./elicit";
 import { plain } from "./plain";
 
 const WHILE_DIALOG =
@@ -23,6 +23,20 @@ const dialogOpen = (): ToolResult => ({
   ok: true,
   waiting: { reason: "dialog_open", message: WHILE_DIALOG, tell_the_person: WHILE_DIALOG },
 });
+
+/**
+ * An agent decides only on a run of its own checkout. A person may decide on behalf of another
+ * clone's run (the command says whose it is); an agent that was told to approve is not given that.
+ */
+async function foreignRefusal(run: HumanRun, runId: string): Promise<ToolResult | undefined> {
+  const root = await run.foreignRoot?.();
+  return root === undefined
+    ? undefined
+    : failure(
+        "WORKDIR_INVALID",
+        `run ${plain(runId)} belongs to the checkout at ${plain(root)}; it is decided from there, not from this one`,
+      );
+}
 
 /** The run as it is after the decision, with the mark that the agent made it. */
 async function after(
@@ -42,6 +56,8 @@ export function createAgentDecider(humans: HumanHost, dialog: DialogState): Agen
       if (dialog.open > 0) return dialogOpen();
       const run = await humans.open(input.run_id);
       if (!run) return failure("UNKNOWN_RUN", `there is no run ${plain(input.run_id)}`);
+      const foreign = await foreignRefusal(run, input.run_id);
+      if (foreign) return foreign;
       const node = input.node_slug;
       const state = await run.state();
       const visit = state.active.find((v) => v.node === node && v.phase === "human");
@@ -97,6 +113,8 @@ export function createAgentDecider(humans: HumanHost, dialog: DialogState): Agen
       if (dialog.open > 0) return dialogOpen();
       const run = await humans.open(input.run_id);
       if (!run) return failure("UNKNOWN_RUN", `there is no run ${plain(input.run_id)}`);
+      const foreign = await foreignRefusal(run, input.run_id);
+      if (foreign) return foreign;
       const found = await run.pendingChange();
       if (!found) {
         return failure("PIPELINE_CHANGE_REFUSED", "no change of this run's pipeline is waiting");

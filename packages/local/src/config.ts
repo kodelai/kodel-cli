@@ -13,11 +13,13 @@ import {
   DEFAULT_TASK_ON_RUN,
   defaultAgentLog,
   defaultHistory,
+  defaultUsage,
   type HistoryConfig,
   isValidGlob,
   KodelError,
   MAX_SUPPORTED_MAJOR,
   parseVersion,
+  pricesOverrideSchema,
   TASK_ON_RUN_MODES,
   type TaskOnRunMode,
 } from "@kodel-ai/pipeline-core";
@@ -25,6 +27,13 @@ import { parse } from "yaml";
 import { z } from "zod";
 import { MAX_PATCH_KB } from "./patch-text";
 import { CONFIG_FILE } from "./project-locate";
+import {
+  parseStorageLines,
+  projectIdProblem,
+  STORAGE_MODES,
+  type StorageMode,
+  StoragePathsError,
+} from "./storage-paths";
 
 export const DEFAULT_WORKTREE_DIR = ".kodel/worktrees";
 
@@ -96,6 +105,13 @@ export interface ProjectConfig {
   history: HistoryConfig;
   /** How the open steps of a fork are worked, and how long a worker's hold on one lasts. */
   agents: AgentsConfig;
+  /**
+   * Where runs, the proposals made outside a run, `start.lock` and the session index are kept:
+   * `project` (under `.kodel`, the default) or `home` (`~/.kodel/projects/<project_id>/`).
+   */
+  storage: StorageMode;
+  /** The stable name of the project's folder in `home` mode; it is committed, so a move keeps the history. */
+  project_id?: string;
 }
 
 export { DEFAULT_AGENTS };
@@ -146,6 +162,15 @@ const agentLogSchema = z
   })
   .strict();
 
+// `prices` is the shipped table's override: per model, all four prices, a safe id and a bound on how many, so what is
+// frozen into the run's state is never free text.
+const usageSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    prices: pricesOverrideSchema.optional(),
+  })
+  .strict();
+
 // Strict at every level like the rest: a misspelled category must not leave a switch on without the
 // person noticing, and a switch is the point of this section.
 const historySchema = z
@@ -170,6 +195,7 @@ const historySchema = z
     executor: z.object({ enabled: z.boolean().optional() }).strict().optional(),
     tool_log: z.object({ enabled: z.boolean().optional() }).strict().optional(),
     agent_log: agentLogSchema.optional(),
+    usage: usageSchema.optional(),
   })
   .strict();
 
@@ -236,6 +262,8 @@ const configSchema = z
       })
       .strict()
       .optional(),
+    storage: z.enum(STORAGE_MODES as [StorageMode, ...StorageMode[]]).optional(),
+    project_id: z.string().optional(),
   })
   .strict();
 
@@ -274,8 +302,9 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
         agent_hints: { ...DEFAULT_AGENT_HINTS },
         decisions: { dialog: false, agent: { ...DEFAULT_DECISIONS.agent } },
         tasks: { ...DEFAULT_TASKS, on_run: { ...DEFAULT_TASKS.on_run }, adapters: {} },
-        history: { ...defaultHistory(), agent_log: defaultAgentLog() },
+        history: { ...defaultHistory(), agent_log: defaultAgentLog(), usage: defaultUsage() },
         agents: { ...DEFAULT_AGENTS },
+        storage: "project",
       };
     }
     throw error;
@@ -304,6 +333,36 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
       );
     }
     throw invalid(file, `${first?.message ?? "invalid"}${keys}${where ? ` (at "${where}")` : ""}`);
+  }
+  // The hook reads these two keys with a line matcher (it cannot load this file within its budget),
+  // so a spelling the matcher cannot read is refused here: the hook and the server then cannot
+  // disagree about where the history goes.
+  try {
+    const lines = parseStorageLines(text);
+    // Both ways: what the parser read is what the matcher reads, and a line the matcher reads is
+    // the key the parser read (a line of the matcher's that is not the parser's key would be a
+    // setting for the hook and none for the server).
+    if (lines.storage !== parsed.data.storage) {
+      throw new StoragePathsError(
+        parsed.data.storage === undefined
+          ? `storage is a line the config does not read as that key; write it as "storage: home" or "storage: project" at the top level`
+          : `storage must be written as "storage: ${parsed.data.storage}" on a line of its own, not as a flow mapping, an anchor or a block`,
+      );
+    }
+    if (parsed.data.project_id !== undefined) {
+      const problem = projectIdProblem(parsed.data.project_id);
+      if (problem !== undefined) throw new StoragePathsError(`project_id ${problem}`);
+    }
+    if (lines.project_id !== parsed.data.project_id) {
+      throw new StoragePathsError(
+        parsed.data.project_id === undefined
+          ? `project_id is a line the config does not read as that key; write it as "project_id: my-app-k3f9a2x1" at the top level`
+          : `project_id must be written as "project_id: ${parsed.data.project_id}" on a line of its own`,
+      );
+    }
+  } catch (error) {
+    if (error instanceof StoragePathsError) throw invalid(file, error.message);
+    throw error;
   }
   let version: { version: string; major: number };
   try {
@@ -346,6 +405,8 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
       max_parallel: parsed.data.agents?.max_parallel ?? DEFAULT_AGENTS.max_parallel,
       claim_ttl_s: parsed.data.agents?.claim_ttl_s ?? DEFAULT_AGENTS.claim_ttl_s,
     },
+    storage: parsed.data.storage ?? "project",
+    ...(parsed.data.project_id === undefined ? {} : { project_id: parsed.data.project_id }),
   };
 }
 
@@ -365,6 +426,10 @@ function mergeHistory(given: z.infer<typeof historySchema> | undefined): History
     executor: { enabled: given?.executor?.enabled ?? d.executor.enabled },
     tool_log: { enabled: given?.tool_log?.enabled ?? d.tool_log.enabled },
     agent_log: mergeAgentLog(given?.agent_log),
+    usage: {
+      enabled: given?.usage?.enabled ?? defaultUsage().enabled,
+      prices: given?.usage?.prices ?? {},
+    },
   };
 }
 

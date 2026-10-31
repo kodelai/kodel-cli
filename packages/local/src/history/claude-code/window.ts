@@ -5,6 +5,7 @@
  * what the person and the agent said before it, and what an earlier run did in the same session, stay out.
  * The search looks at lines, not at events, so it works whatever the capture mode and stores nothing.
  */
+import { open } from "node:fs/promises";
 import { toTs } from "@kodel-ai/pipeline-core";
 import { streamRawLines } from "../jsonl";
 
@@ -83,4 +84,64 @@ export async function findRunStart(
     }
   }
   return undefined;
+}
+
+/** The tool that hands a step in, whatever the server is called in `.mcp.json`. */
+const STEP_TOOL = /(?:^|__)pipeline_complete_step$/;
+
+/** How much of the end of the log is looked at for the call of a step: the call is the last thing the agent wrote. */
+export const STEP_CALL_TAIL_BYTES = 256 * 1024;
+
+/**
+ * Whether the end of the log holds the call that hands in `node` at `attempt` of the run `runId`. The agent writes its
+ * log a little behind its own work, so the response that makes this very call may not be there yet when the engine is
+ * asked to judge the step. Only the tail of the file is read, never the whole log, and any trouble reads as "not there".
+ */
+export async function hasStepCall(
+  path: string,
+  runId: string,
+  node: string,
+  attempt: number,
+  tailBytes = STEP_CALL_TAIL_BYTES,
+): Promise<boolean> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(path, "r");
+    const { size } = await handle.stat();
+    const from = Math.max(0, size - tailBytes);
+    const buffer = Buffer.alloc(size - from);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, from);
+    const lines = buffer.subarray(0, bytesRead).toString("utf8").split("\n");
+    // The tail may begin in the middle of a line: that one is not read.
+    if (from > 0) lines.shift();
+    for (const text of lines) {
+      if (!text.includes("pipeline_complete_step") || !text.includes(runId)) continue;
+      let entry: unknown;
+      try {
+        entry = JSON.parse(text);
+      } catch {
+        continue;
+      }
+      if (!isObject(entry) || !isObject(entry["message"])) continue;
+      const content = entry["message"]["content"];
+      if (!Array.isArray(content)) continue;
+      for (const block of content) {
+        if (!isObject(block) || block["type"] !== "tool_use") continue;
+        const name = block["name"];
+        const input = block["input"];
+        if (typeof name !== "string" || !STEP_TOOL.test(name) || !isObject(input)) continue;
+        if (
+          input["run_id"] === runId &&
+          input["node_slug"] === node &&
+          input["attempt"] === attempt
+        )
+          return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
 }

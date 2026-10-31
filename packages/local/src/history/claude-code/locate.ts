@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { type LocateOptions, type SessionRef, toTs } from "@kodel-ai/pipeline-core";
 import { SESSIONS_INDEX } from "../../hooks/session-registrar";
+import { placeOfRoot } from "../../storage-paths";
 import { streamJsonl } from "../jsonl";
 import { isFile, isInside, isKodelProject, projectWorkdirs, realOrSelf } from "../scope";
 import { AGENT_ID } from "./normalize";
@@ -73,14 +74,48 @@ async function subagentRefs(ref: SessionRef): Promise<SessionRef[]> {
     }));
 }
 
+/**
+ * Where the hook index of a project is: in the project, or with `storage: home` in its folder under
+ * `~/.kodel`. A config that names a place that cannot be used leaves the project's own index.
+ */
+async function indexOf(root: string): Promise<{ path: string; shared: boolean }> {
+  try {
+    const place = await placeOfRoot(root);
+    // In `home` mode the index may hold the sessions of another clone of the project.
+    return { path: place.sessionsPath, shared: place.mode === "home" };
+  } catch {
+    return { path: join(root, SESSIONS_INDEX), shared: false };
+  }
+}
+
+/**
+ * Where the index of a project is, when whoever builds the collector knows (the host does: it
+ * resolved the place from the config); `shared` says it may hold the sessions of other checkouts.
+ */
+export type IndexLocator = (root: string) => Promise<{ path: string; shared: boolean }>;
+
 /** The sessions the index names for this agent, or `undefined` when it has no line of it. */
-async function fromIndex(root: string, store: string): Promise<SessionRef[] | undefined> {
-  if (!(await isFile(join(root, SESSIONS_INDEX)))) return undefined;
+async function fromIndex(
+  root: string,
+  store: string,
+  locate: IndexLocator,
+): Promise<SessionRef[] | undefined> {
+  const index = await locate(root);
+  if (!(await isFile(index.path))) return undefined;
+  // A shared index lists the sessions of every clone: only the ones in this checkout and its
+  // worktrees are this project's here, and the others neither name a session nor stop the scan.
+  const workdirs = index.shared ? await projectWorkdirs(root) : undefined;
   let named = false;
   const latest = new Map<string, { path: string }>();
-  for await (const line of streamJsonl(join(root, SESSIONS_INDEX))) {
+  for await (const line of streamJsonl(index.path)) {
     const record = line as Record<string, unknown> | null;
     if (record?.["agent"] !== AGENT_ID || typeof record["session_id"] !== "string") continue;
+    if (workdirs !== undefined) {
+      const cwd = record["cwd"];
+      if (typeof cwd !== "string") continue;
+      const real = await realOrSelf(cwd);
+      if (!workdirs.some((dir) => isInside(dir, real))) continue;
+    }
     named = true;
     const path = record["transcript_path"];
     if (typeof path !== "string") continue;
@@ -134,9 +169,11 @@ export async function locateClaudeSessions(
   root: string,
   store: string,
   options: LocateOptions = {},
+  indexLocator: IndexLocator = indexOf,
 ): Promise<SessionRef[]> {
   if (!(await isKodelProject(root))) return [];
-  const parents = (await fromIndex(root, store)) ?? (await fromScan(root, store, options.signal));
+  const parents =
+    (await fromIndex(root, store, indexLocator)) ?? (await fromScan(root, store, options.signal));
   const refs: SessionRef[] = [];
   for (const parent of parents) {
     refs.push(parent, ...(await subagentRefs(parent)));
@@ -145,8 +182,24 @@ export async function locateClaudeSessions(
 }
 
 /**
- * The log of a session whose id is known, without scanning the store: the folder of each directory given, then
- * the folders under the first one (a session started in a subdirectory of the project, or in a worktree gone since).
+ * The directories as given and, after each, the path they really are. Claude Code names a folder after the directory
+ * it was started in, which is the real one (`/private/var/...`), while the project may have been reached through a
+ * link (`/var/...` on macOS, a linked home): the name of either can be the one on disk. Only names are built here:
+ * what a log is allowed to be is still decided by whoever opens it.
+ */
+async function withRealNames(dirs: readonly string[]): Promise<string[]> {
+  const names = new Set<string>();
+  for (const dir of dirs) {
+    names.add(dir);
+    names.add(await realOrSelf(dir));
+  }
+  return [...names];
+}
+
+/**
+ * The log of a session whose id is known, without scanning the store: the folder of each directory given (and of
+ * the path it really is), then the folders that begin with the name of each of those directories (a session started in a
+ * subdirectory of the project, or in a worktree gone since).
  * The id must be a safe one; the path is inside `store` by construction and is checked again by whoever opens it.
  */
 export async function findSessionLog(
@@ -155,11 +208,12 @@ export async function findSessionLog(
   sessionId: string,
 ): Promise<string | undefined> {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(sessionId)) return undefined;
-  for (const dir of dirs) {
+  const named = await withRealNames(dirs);
+  for (const dir of named) {
     const exact = join(store, projectFolderName(dir), `${sessionId}.jsonl`);
     if (await isFile(exact)) return exact;
   }
-  for (const dir of dirs) {
+  for (const dir of named) {
     for (const folder of await foldersFor(store, dir)) {
       const path = join(folder, `${sessionId}.jsonl`);
       if (await isFile(path)) return path;

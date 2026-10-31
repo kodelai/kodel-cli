@@ -1,7 +1,7 @@
 /**
  * The local `PipelineHost`: pipelines are the YAML files in `.kodel/pipelines`, runs are kept in
- * `.kodel/runs`. A run keeps a copy of the pipeline it started with, so editing a file never
- * changes a run in flight.
+ * `.kodel/runs` (or under `~/.kodel/projects/<project_id>` with `storage: home`). A run keeps a copy
+ * of the pipeline it started with, so editing a file never changes a run in flight.
  */
 
 import { mkdir, readdir, readFile } from "node:fs/promises";
@@ -47,7 +47,14 @@ import {
   type LocalRun,
   normalizeTask,
 } from "./host";
-import { FileStore, META_VERSION, type PipelineProposalRecord, type RunMeta } from "./store";
+import { type StoragePlace, samePlace } from "./storage-paths";
+import {
+  FileStore,
+  META_VERSION,
+  type PipelineProposalRecord,
+  placeProblem,
+  type RunMeta,
+} from "./store";
 import { openTaskService } from "./tasks";
 
 export interface LocalPipelineHostOptions extends HostOptions {
@@ -58,10 +65,49 @@ export interface LocalPipelineHostOptions extends HostOptions {
   /** Instead of the `history` section of the project config; mostly for tests. */
   history?: HistoryConfig;
   /**
+   * The server asks the config for the place again at each call that opens or starts a run, and
+   * refuses when it is no longer the place the server started with (the keys are committed, so a
+   * checkout of another branch can change them): nothing is then written to the old place by a
+   * server that was told another.
+   */
+  watchStorage?: () => Promise<StoragePlace>;
+  /**
+   * Why the history cannot be used (the config names a place that cannot be placed). The server
+   * still starts and serves what does not need the history (the pipelines, their documentation);
+   * every call that opens, starts or lists runs, or keeps a proposal, answers with this.
+   */
+  storageError?: KodelError;
+  /**
    * Copy the agent's log of the runs on a timer (the interval each run started with), in this process. Only the
    * process that serves the MCP tools asks for it. Timers can be given, for tests; the system's by default.
    */
   agentLogTimer?: boolean | Timers;
+}
+
+/** The methods of the host that read or write the history; see `guardEntryPoints`. */
+const ENTRY_POINTS = [
+  "open",
+  "runSummaries",
+  "proposePipeline",
+  "pipelineProposals",
+  "pipelineProposal",
+  "hasPipelineProposal",
+  "discardPipelineProposal",
+  "acceptPipelineProposal",
+  "seal",
+] as const;
+
+interface StartInput {
+  pipeline: string;
+  task: string;
+  restart: boolean;
+  cwd?: string;
+  pipeline_version?: "working" | "committed";
+  title?: string;
+  task_key?: string;
+  restart_task?: boolean;
+  caller?: Caller;
+  surface?: ServedSurface;
 }
 
 interface Loaded {
@@ -137,8 +183,10 @@ export class LocalPipelineHost implements PipelineHost {
     this.dir = options.pipelinesDir ?? join(this.storeRoot, "pipelines");
     this.store = new FileStore({
       root: this.storeRoot,
+      ...(options.storage ? { place: options.storage } : {}),
       ...(options.rules ? { rules: options.rules } : {}),
     });
+    this.guardEntryPoints();
     this.agentLog =
       options.agentLog ??
       new AgentLogWriter({
@@ -154,6 +202,58 @@ export class LocalPipelineHost implements PipelineHost {
           typeof options.agentLogTimer === "object" ? options.agentLogTimer : undefined,
         )
       : undefined;
+  }
+
+  /**
+   * The calls that read or write the history are the ones a tool of the server ends in, and what
+   * they throw goes to an agent as text. With the history under `~/.kodel`, a system error whose path
+   * is in that tree (a folder that lost its permissions, a full disk, a tree removed under a running
+   * server) leaves as a `CONFIG_INVALID` error without the folder; anything else is left as it is
+   * (`placeProblem`). `start` and the runs this host hands out are guarded where they are made.
+   */
+  private guardEntryPoints(): void {
+    const place = this.options.storage;
+    if (place?.mode !== "home") return;
+    const self = this as unknown as Record<string, unknown>;
+    for (const name of ENTRY_POINTS) {
+      const original = self[name];
+      if (typeof original !== "function") continue;
+      self[name] = (...args: unknown[]): unknown => {
+        try {
+          const result: unknown = original.apply(this, args);
+          return result instanceof Promise
+            ? result.catch((error: unknown) => {
+                throw placeProblem(error, place);
+              })
+            : result;
+        } catch (error) {
+          throw placeProblem(error, place);
+        }
+      };
+    }
+  }
+
+  /**
+   * The place the config names now must be the one this server started with. A config that cannot be
+   * read is the business of the call that loads it (`start` refuses it); the others go on.
+   */
+  private async assertPlace(strict: boolean): Promise<void> {
+    if (this.options.storageError !== undefined) throw this.options.storageError;
+    const { watchStorage, storage } = this.options;
+    if (watchStorage === undefined || storage === undefined) return;
+    let now: StoragePlace;
+    try {
+      now = await watchStorage();
+    } catch (error) {
+      if (strict) throw error;
+      return;
+    }
+    if (!samePlace(now, storage)) {
+      throw new KodelError(
+        "CONFIG_INVALID",
+        "storage or project_id in the config changed since the server started (a checkout of another branch does this too); restart the server, then run the command again",
+      );
+    }
   }
 
   private linkPromise: Promise<RunTaskLink | undefined> | undefined;
@@ -243,6 +343,7 @@ export class LocalPipelineHost implements PipelineHost {
     summary: string;
     name?: string;
   }): Promise<PipelineProposalOutcome> {
+    await this.assertPlace(false);
     const refuse = (code: "INVALID_ARGUMENTS" | "PIPELINE_CHANGE_REFUSED", message: string) =>
       ({ ok: false, code, message }) as const;
     if (input.yaml.trim() === "") {
@@ -329,7 +430,8 @@ export class LocalPipelineHost implements PipelineHost {
   }
 
   /** The proposals that wait, by name. */
-  pipelineProposals(): Promise<PipelineProposalRecord[]> {
+  async pipelineProposals(): Promise<PipelineProposalRecord[]> {
+    await this.assertPlace(false);
     return this.store.listPipelineProposals();
   }
 
@@ -499,18 +601,14 @@ export class LocalPipelineHost implements PipelineHost {
     }
   }
 
-  async start(input: {
-    pipeline: string;
-    task: string;
-    restart: boolean;
-    cwd?: string;
-    pipeline_version?: "working" | "committed";
-    title?: string;
-    task_key?: string;
-    restart_task?: boolean;
-    caller?: Caller;
-    surface?: ServedSurface;
-  }): Promise<StartOutcome> {
+  start(input: StartInput): Promise<StartOutcome> {
+    return this.startRun(input).catch((error: unknown) => {
+      throw placeProblem(error, this.options.storage);
+    });
+  }
+
+  private async startRun(input: StartInput): Promise<StartOutcome> {
+    await this.assertPlace(true);
     let found = await this.find(input.pipeline);
     if (!found)
       throw new KodelError("UNKNOWN_PIPELINE", `there is no pipeline "${input.pipeline}"`);
@@ -586,8 +684,8 @@ export class LocalPipelineHost implements PipelineHost {
       ...(input.surface === undefined ? {} : { surface: input.surface }),
     });
     // An existing run goes on with the pipeline it started with, which may no longer be the file's.
-    const known = reused || terminal ? await this.open(run.runId) : run;
-    if (!known) throw new KodelError("UNKNOWN_RUN", `there is no run "${run.runId}"`);
+    const known = reused || terminal ? await this.open(run.runId) : this.guard(run);
+    if (!known) throw this.unknownRun(run.runId);
     this.runs.set(run.runId, known);
     known.watchAgentLog();
     // Where the run works is what its record says, also for a run picked up again.
@@ -674,12 +772,18 @@ export class LocalPipelineHost implements PipelineHost {
     return !input.restart && (await this.store.findLatest(name, task)) !== undefined;
   }
 
+  /** The root of another checkout that made the run with this record, when it is not this one. */
+  foreignRootOf(meta: RunMeta): string | undefined {
+    return this.store.isForeign(meta) ? meta.root : undefined;
+  }
+
   /**
    * Every run on disk, oldest first, with its state when it can be read, and otherwise why not: a
    * run of another run-state format says which format, so a list can show it as that and not as
    * something broken.
    */
   async runSummaries(): Promise<RunSummary[]> {
+    await this.assertPlace(false);
     const metas = await this.store.listRuns();
     return Promise.all(
       metas.map(async (meta): Promise<RunSummary> => {
@@ -740,20 +844,64 @@ export class LocalPipelineHost implements PipelineHost {
   }
 
   async open(runId: string): Promise<LocalRun | undefined> {
+    await this.assertPlace(false);
     // Checked on every call, not only the first: the copy can be edited while the server runs.
     const found = await this.specFor(runId);
     if (!found) return undefined;
     const cached = this.runs.get(runId);
     if (cached) return cached;
-    const run = this.hostFor(found.spec, found.source).open(runId);
+    const run = this.guard(this.hostFor(found.spec, found.source).open(runId));
     this.runs.set(runId, run);
     return run;
+  }
+
+  /**
+   * A run as the callers of this host get it. With the history under `~/.kodel`, a file-system
+   * error in any of its operations (the disk is full, the folder lost its permissions, the tree was
+   * removed under a running server) leaves as a `CONFIG_INVALID` error without the folder: the
+   * answer to a tool goes to an agent, and the folder has the user's name in it. Inside, the run
+   * is the same object, so nothing else changes.
+   */
+  private guard(run: LocalRun): LocalRun {
+    const place = this.options.storage;
+    if (place?.mode !== "home") return run;
+    return new Proxy(run, {
+      get(target, property) {
+        const value: unknown = Reflect.get(target, property, target);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          try {
+            const result: unknown = value.apply(target, args);
+            return result instanceof Promise
+              ? result.catch((error: unknown) => {
+                  throw placeProblem(error, place);
+                })
+              : result;
+          } catch (error) {
+            throw placeProblem(error, place);
+          }
+        };
+      },
+    });
   }
 
   /** Accept the files of a finished run after a deliberate change (`kodel seal`). */
   async seal(runId: string): Promise<void> {
     const run = await this.open(runId);
-    if (!run) throw new KodelError("UNKNOWN_RUN", `there is no run "${runId}"`);
+    if (!run) throw this.unknownRun(runId);
     await run.seal();
+  }
+
+  /**
+   * A run that is not found. With the history under `~/.kodel` it may be in the other place (the
+   * setting was changed, or `KODEL_STATE_DIR` differs between the shell and the server), and the
+   * message says so; the default project keeps its plain text.
+   */
+  private unknownRun(runId: string): KodelError {
+    const elsewhere =
+      this.options.storage?.mode === "home"
+        ? "; with storage: home it may be kept in the other place (storage was changed, or KODEL_STATE_DIR is not the same here and in the server)"
+        : "";
+    return new KodelError("UNKNOWN_RUN", `there is no run "${runId}"${elsewhere}`);
   }
 }

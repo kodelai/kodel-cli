@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { FileStore, readStoredAgentLog } from "../../packages/local/src";
 import { claudeConfigDir, projectFolderName } from "../../packages/local/src/history";
@@ -133,7 +133,13 @@ describe("Claude Code, the agent's log kept in a run", () => {
         | undefined;
       const session = started?.session?.value as string;
       const raw = readFileSync(
-        join(claudeConfigDir(), "projects", projectFolderName(sandbox.dir), `${session}.jsonl`),
+        // the agent's folder is named after the real directory (macOS: /private/var, not the /var the sandbox has)
+        join(
+          claudeConfigDir(),
+          "projects",
+          projectFolderName(realpathSync(sandbox.dir)),
+          `${session}.jsonl`,
+        ),
         "utf8",
       );
       // the canary did reach the agent's own log: the test means something

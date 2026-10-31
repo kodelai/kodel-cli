@@ -242,3 +242,27 @@ What the code does where it differs from, or is more exact than, the text above 
 - **The fixture script rewrites only the files that carry the workdir** (tenth review, 11): `meta.json`, `state.json`, the journal and `served/*.json`; artifacts, patches and specs are copied byte for byte (a path of the machine there is refused). The existing fixtures do not change: the placeholder is only in those three files.
 - **Bounds by state, not by the clock** (tenth review, 12): `t40_apply_queue_delay_bounded` asserts the burst is decided while both branches are still latched, `t40_host_apply_delay_bounded_with_slow_snapshot` that the hand-in is decided while the snapshot was never released; their time limits are only guards against a hang, with a wide margin.
 - **Small ones** (tenth review, 13): the latch runner ends at once on a signal aborted before it started (`t40_latch_runner_releases_at_once_on_an_aborted_signal`). `failed_branches` of a report is worked out from the arrivals the state holds now: a run whose failed branches were redone by `restart_failed` is not flagged, and the journal's `join_reached.failed` still shows that they failed once.
+
+## Merge of main (storage, usage)
+
+main brought `storage: home` (the history under `~/.kodel/projects/<id>`), the usage pass (`history.usage`, `usage_recorded`
+and `usage_failed` journal records, `usage` in the state) and a README rewritten for npm. Both sides are kept; where they meet:
+
+- **Usage is format 2 here.** main added the `usage` state field and the two journal records to run-state format 1, without a
+  new record version. With this branch they are written in format 2 like every other record; a usage delta keeps its own
+  `v` (`USAGE_RECORD_FORMAT` 1). The tests that built journal records with `v: 1` now use `v: 2`.
+- **The golden run with usage was taken again.** `fixtures/usage-run/r_0mvr1f5ur_1h9c/` was a format-1 run, which this
+  branch refuses without a reader; it is replaced by `r_0mvw32fz3_x186/`, a format-2 run made the same way (the same
+  hand-made session log and flow, the same token figures; the stored price revision is 2026-10-28). Its README says so.
+- **The golden runs in a home tree** (`storage_golden_fixture_opens_from_home`) open the format-2 runs of
+  `fixtures/formats/v2/` from the home tree, and check that the format-1 runs there are listed as `format 1` and refused
+  with `UNSUPPORTED_FORMAT`, as from `.kodel/runs`. main's test expected the v1 runs to open; the plan (format 2 without a
+  reader) wins over that expectation, and nothing else of main's test changed.
+- **A run of another checkout** (main's `assertOurs`) is refused by `pipeline_take_step` too, like `pipeline_next_step` and
+  `pipeline_complete_step`; `resume(node)` keeps the branch argument and became async for that check. The storage
+  registry test lists `pipeline_take_step` as a tool that reaches the store.
+- **`kodel status --json`** carries both `active`/`pauses`/`failed_branches` and main's `foreign`.
+- **Usage in a fork** is credited at a step's hand-in to that step, as on main. When several agent steps of a fork are worked at
+  once in one agent session, what the session used since the last pass goes to whichever step is handed in first; the
+  numbers are display data and never feed a check, a route or a gate, so this was left as it is (a per-worker session
+  attribution is a possible follow-up).

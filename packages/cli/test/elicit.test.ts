@@ -56,7 +56,8 @@ beforeEach(async () => {
   dir = await makeRepo();
 });
 afterEach(async () => {
-  for (const d of [dir, ...extraDirs.splice(0)]) await rm(d, { recursive: true, force: true });
+  for (const d of [dir, ...extraDirs.splice(0)])
+    await rm(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 type Form = { message: string; requestedSchema: { properties: Record<string, unknown> } };

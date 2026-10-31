@@ -1,0 +1,161 @@
+{
+  "v": 2,
+  "runId": "r_0mvw32fz3_x186",
+  "task": "t",
+  "specHash": "ecb79800c8fdeaea",
+  "status": "completed",
+  "startedAt": 1793431933034,
+  "nodes": {
+    "a": {
+      "slug": "a",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 1
+    },
+    "b": {
+      "slug": "b",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 2
+    }
+  },
+  "active": [],
+  "trail": ["a", "b"],
+  "pauses": [],
+  "nextVisitId": 3,
+  "seq": 12,
+  "slug": "t",
+  "pipelineFile": ".kodel/pipelines/two.yaml",
+  "history": {
+    "changes": {
+      "enabled": true,
+      "exclude": [],
+      "max_kb": 512
+    },
+    "output": {
+      "enabled": true,
+      "max_kb": 64
+    },
+    "prompts": {
+      "enabled": true
+    },
+    "executor": {
+      "enabled": true
+    },
+    "tool_log": {
+      "enabled": true
+    },
+    "agent_log": {
+      "enabled": true,
+      "mode": "full",
+      "preview_chars": {
+        "user": 4000,
+        "agent": 4000,
+        "tool_input": 4000,
+        "tool_result": 8000
+      },
+      "max_kb": 20480,
+      "interval_s": 0
+    },
+    "usage": {
+      "enabled": true,
+      "prices": {}
+    }
+  },
+  "engineVersion": "unknown",
+  "served": {},
+  "agentLog": {
+    "nodes": ["a", "b"],
+    "sessions": {
+      "55555555-5555-4555-8555-555555555555": {
+        "last_seq": 7,
+        "length": 2039,
+        "tail_hash": "021f5f9ffe18141be439105def8c0fa1e8b49550982d6fa98c46d1f63a46c391",
+        "last_key": "d74743e8e132e97a631b21faf7706b8c7b3a46604421351379d551965d0b9ced",
+        "entries": 7
+      }
+    },
+    "ticks": 0,
+    "steps": 2,
+    "bytes": 2039,
+    "cut": 0,
+    "failed": [],
+    "visits": {
+      "a:1": 1214,
+      "b:1": 825
+    },
+    "endedInStep": []
+  },
+  "usage": {
+    "sessions": {
+      "55555555-5555-4555-8555-555555555555": {
+        "last_seq": 7,
+        "last_key": "19e1dc247ae795b898a8db51df2d4f64313fd7fa58ec1e0f1c2a50d8bd67da47",
+        "flushed": {
+          "offset": 3372,
+          "key": "d9d697d0a12a658e0bf258b9fad60ab802a647dd06a297b35e831ffd95a2fee0",
+          "model": "claude-sonnet-5-5",
+          "input": 10,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0,
+          "cache_write_1h": 0
+        }
+      }
+    },
+    "attempts": {
+      "a:1": {
+        "models": {
+          "claude-sonnet-5-5": {
+            "input": 300,
+            "output": 30,
+            "cache_read": 1000,
+            "cache_write": 300,
+            "cache_write_1h": 100,
+            "api_calls": 2,
+            "long_context_calls": 0,
+            "reported_usd": 0,
+            "computed_usd": 0.0019,
+            "unpriced_calls": 0,
+            "config_priced_calls": 0
+          }
+        },
+        "passes": 1,
+        "last_open": true
+      },
+      "b:1": {
+        "models": {
+          "claude-sonnet-5-5": {
+            "input": 10,
+            "output": 55,
+            "cache_read": 0,
+            "cache_write": 0,
+            "cache_write_1h": 0,
+            "api_calls": 1,
+            "long_context_calls": 0,
+            "reported_usd": 0,
+            "computed_usd": 0.00057,
+            "unpriced_calls": 0,
+            "config_priced_calls": 0
+          }
+        },
+        "passes": 1,
+        "last_open": true
+      }
+    },
+    "unattributed": {
+      "models": {},
+      "passes": 0
+    },
+    "events": 2,
+    "failed": [],
+    "revisions": ["2026-10-28"]
+  },
+  "finishedAt": 1793431933615
+}

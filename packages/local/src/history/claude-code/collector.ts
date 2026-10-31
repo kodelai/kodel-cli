@@ -30,7 +30,7 @@ import {
   projectWorkdirs,
   realOrSelf,
 } from "../scope";
-import { claudeConfigDir, firstCwd, locateClaudeSessions } from "./locate";
+import { claudeConfigDir, firstCwd, type IndexLocator, locateClaudeSessions } from "./locate";
 import {
   AGENT_ID,
   CLAUDE_PROFILES,
@@ -52,6 +52,12 @@ interface ReaderState {
 export interface ClaudeCodeCollectorOptions {
   /** Where Claude Code keeps its data; `CLAUDE_CONFIG_DIR` or `~/.claude` when not given. */
   configDir?: string;
+  /**
+   * Where the hook's session index of a project is. Absent: asked of the project's config with the
+   * line matcher the hook uses (which is what the host resolves too, since the loader enforces that
+   * they agree). A caller that already knows the place can pass it.
+   */
+  indexLocator?: IndexLocator;
   /**
    * Remember the project's directories (30 s) and the `cwd` of each log between reads. For a consumer that reads the
    * same log every few seconds; a directory added in between is seen after the time is up.
@@ -145,6 +151,7 @@ export function claudeCodeCollector(
       drifted: false,
     };
     const state = reader.claude;
+    if (readOptions.usageDetail === true) state.usageDetail = true;
     const chosen = new Map<
       string,
       ReturnType<typeof selectProfile<(typeof CLAUDE_PROFILES)[number]>>
@@ -249,7 +256,7 @@ export function claudeCodeCollector(
         publish();
         yield* given;
       }
-      if (!holdBack) {
+      if (!holdBack && !(stopped && readOptions.usageDetail === true)) {
         const rest = shape(flushPending(state));
         publish();
         yield* rest;
@@ -269,7 +276,7 @@ export function claudeCodeCollector(
     agent: AGENT_ID,
     profiles: CLAUDE_PROFILES,
     locate: (root: string, locateOptions?: LocateOptions) =>
-      locateClaudeSessions(root, store, locateOptions),
+      locateClaudeSessions(root, store, locateOptions, options.indexLocator),
     read,
   };
 }

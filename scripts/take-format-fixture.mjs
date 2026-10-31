@@ -2,6 +2,9 @@
 //
 //   node scripts/take-format-fixture.mjs <format> <run-dir> [<run-dir> ...]
 //
+// A run directory is the same under `.kodel/runs` and under the home tree of `storage: home`
+// (`~/.kodel/projects/<project_id>/runs`): either can be named here.
+//
 // The only changes: the run's absolute workdir becomes a placeholder wherever it is written as it is
 // in the files that carry it (meta.json, state.json, the journal and served/*.json; a served answer
 // whose workdir the redaction already replaced, `[REDACTED:high-entropy]...`, keeps that text, which

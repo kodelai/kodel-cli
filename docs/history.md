@@ -40,6 +40,11 @@ The fields of each kind:
     the cached tokens inside `input`, so a total subtracts them first.
   - `reasoning` is the part of `output` spent on thinking, when the agent says so. It is inside `output`
     already, never added to it.
+  - `cache_write_1h?` is the part of `cache_write` written with the 1-hour lifetime (priced higher than the
+    5-minute one). It is inside `cache_write`, never added to it, and only a read made for usage
+    (`ReadOptions.usageDetail`) carries it; the events other readers get have no such field. The same option makes
+    a stopped read without `holdBack` keep back the response it was in the middle of; the engine's own usage pass
+    reads with `holdBack` and does not need that, so it is a guard for other consumers.
   - `cost` is `{ amount?, basis }`; `basis` is `reported` (the agent wrote it), `reported_zero`, `computed` or
     `unknown`. Collectors do not compute a cost: a log that does not carry one gives `unknown`.
 - `tool_call`: `id`, `name`, `mcp_server?` (from `mcp__<server>__<tool>`), `input_preview?`, `started`.
@@ -96,6 +101,114 @@ version uses the newest (`unknown_version`). The collector says so, never silent
 
 A real-agent test fails when the installed agent is outside every profile, and says what to add.
 
+## Where the history is kept
+
+A config without the `storage` key keeps what Kodel writes under the project's own `.kodel` folder, so a project
+that already exists does not change. `kodel init` writes `storage: home` and a generated `project_id` into a new config
+(`kodel init --storage project` writes neither, and an existing config is never rewritten). With `storage: home` the
+history goes to the project's folder under the user's home instead, so it is never committed and a `git clean` or a
+branch switch cannot touch it:
+
+```yaml
+storage: home
+project_id: etude-k3f9a2x1
+```
+
+| kept in `~/.kodel/projects/<project_id>/` with `storage: home` | stays in the project |
+| --- | --- |
+| `runs/` (the journal, state, reports, prompts, the agent log of each run) | `config.yaml`, `pipelines/`, `tasks/` |
+| `proposals/<checkout key>/` (pipelines the agent proposed outside a run) | `worktrees/` (the run worktrees) |
+| `start.lock` | `hooks.log` |
+| `sessions.jsonl` (the hook's index of agent sessions) | |
+
+`kodel init --storage home` writes both lines into a **new** config; the id is the folder name (lowercased, cut to
+`[a-z0-9._-]`, at most 24 characters) and 8 random characters. An existing config is not rewritten: add the two lines
+yourself. The id is a folder name on three systems, so it must be 3 to 64 characters of `a-z`, `0-9`, `.`, `_`, `-`
+starting with a letter or a digit, with no `..`, no trailing dot and not a name Windows keeps for a device (`con`, `nul`,
+`com1`, ...). Both keys must be written as lines of their own at the top level (`storage: home`, optional quotes and a
+trailing comment): the hook reads them with a line matcher, so the config refuses any other spelling (a flow mapping,
+an anchor, a block).
+
+**`KODEL_STATE_DIR`** replaces `~/.kodel` as the base (`$KODEL_STATE_DIR/projects/<project_id>/`). It must be an absolute
+path. It is also where the integrity hashes are kept, so with it set the history and the hashes share one folder;
+`XDG_STATE_HOME` moves the hashes but not the history. Set it in your shell profile, not only in `.mcp.json`: the MCP
+server, your shell, the agent's shell and the hook each read their own environment, and `kodel wait` (which the agent
+runs) looks where its own environment says. `KODEL_*` is not passed to the commands the engine runs.
+
+**One place is read: the one the config names.** Switching `storage` hides the runs of the other place until you move
+them. To carry the history from `.kodel` to `home` (with `$HOME_TREE` for `~/.kodel/projects/<project_id>`, or
+`$KODEL_STATE_DIR/projects/<project_id>`):
+
+```sh
+mkdir -p "$HOME_TREE/runs"
+mv .kodel/runs/* "$HOME_TREE/runs/"
+cat .kodel/sessions.jsonl >> "$HOME_TREE/sessions.jsonl"
+```
+
+and the other way round with the two places swapped. Pending proposals made outside a run are not moved: the folder
+inside `proposals/` is named by a hash of the checkout. **Before** you switch, take them back with
+`kodel pipeline proposals discard <name>` (afterwards that command reads only the new place and cannot see them), and let
+the agent propose again. Then restart the MCP server: it refuses every call that opens or starts a run while the
+config names another place than the one it started with (a checkout of a branch without the keys does the same). A run
+that was open when you moved the history does not resume (its `workdir` is an absolute path), as after any move.
+
+**The id is stable, the path is not.** Renaming, moving or re-cloning the project keeps its history, because the folder
+is named by `project_id`, not by where the project stands. The integrity hashes are keyed by the id in `home` mode too,
+so a moved project keeps its trust. Switching the mode, or editing `project_id`, changes the key: the moved runs read as
+*unknown* and are adopted on first use (so does a run whose hash file was deleted; `kodel status` counts the runs
+without a recorded hash). Treat both as ways to reset trust.
+
+**Several clones of one project on one machine** share one history, because they share the `project_id`; the same
+goes for a fork that copied the config. Each run records the checkout that made it (`root` in `meta.json`); a clone
+does not reuse or continue a run of another one (`resume`, `next_step` and the like fail with "belongs to the checkout at
+..."), starts its own, and shows the others as `foreign` in `kodel status`. `gate`, `ack` and `seal` by id still work
+and say whose run it is. `root` is advisory: it sits in a file the agent can rewrite, so it keeps honest clones from
+stepping on each other and is not a security boundary. Outside-a-run proposals are kept per checkout. To separate two
+clones, give one of them another `project_id`.
+
+**Who can change it.** `storage` and `project_id` are in the config, which is the person's file, and no MCP tool takes
+them. The deny rules of this repository (`Edit/Write` on `.kodel/runs/**`) cover the project place only: with `home`
+the person adds rules for the home tree and for the config to the agent's settings (they are the person's file;
+nothing is shipped). For Claude Code, in `.claude/settings.json`; the path forms matter there: `~/` is the home folder,
+`//` starts a path from the root of the file system, and a path with a single leading `/` is relative to the project, so
+it would match nothing here:
+
+```json
+"deny": [
+  "Edit(~/.kodel/projects/<project_id>/**)",
+  "Write(~/.kodel/projects/<project_id>/**)",
+  "Edit(.kodel/config.yaml)",
+  "Write(.kodel/config.yaml)"
+]
+```
+
+With `KODEL_STATE_DIR` set the tree is under that folder: write it with `//` (`Edit(//data/kodel/projects/<project_id>/**)`
+for `KODEL_STATE_DIR=/data/kodel`).
+
+An agent that edits the config can still move new runs out of the rules, and nothing alerts the person: this is
+accepted and stated here, and the requirement "only a person changes the setting" holds by the rule in `AGENTS.md`, not
+by enforcement.
+
+**For a team.** The keys are committed, so the mode is the team's and follows the branch. An older kodel refuses a
+config with the keys ("unknown key"), so upgrade everybody's kodel before committing them. The history is per user:
+teammates and CI do not see each other's runs, and a machine without a writable `$HOME` (CI, a sandboxed agent) cannot
+start a run in `home` mode; set `KODEL_STATE_DIR` to a writable folder there. A sandbox that confines writes to the
+workspace also stops the hook from writing the session index (it logs the failure and skips; the sessions of that agent
+are then not recorded); one that cannot even read `~/.kodel` stops `kodel wait` too, which then does not find the run.
+
+**What `kodel status` shows.** With `storage: home` it prints the same table as before (it does not name the folder),
+marks the runs of another clone as `[foreign]` and counts the runs that have no recorded hash. A project that keeps its history in `.kodel` prints what it
+always printed on a machine that has no history under `~/.kodel` (or `KODEL_STATE_DIR`); on a machine that has (the
+`projects` folder is there) it adds one line, `storage: project (this project keeps its history in .kodel; ...)`, so a
+branch that flips a project from `home` to `project` is named, not just seen as "no runs". The server refuses the
+next call that opens or starts a run in that case. A server that is already running writes to the place it started
+with until it is restarted: the check stops new calls, it does not move a call that has begun.
+
+**If a run cannot be found** the message says it may be kept in the other place: after a switch, or because
+`KODEL_STATE_DIR` is not the same in the shell and in the server. It says so for a `home` project and for any project
+on a machine that has the `projects` folder; a machine with no history under `~/.kodel` keeps the plain text. An orphan
+folder left by a project that was deleted is removed by hand (the folder name starts with the project's name).
+
 ## Which sessions are read
 
 Only the sessions of Kodel projects: a directory tree with the Kodel marker (`.kodel/config.yaml`, found as
@@ -103,8 +216,9 @@ Only the sessions of Kodel projects: a directory tree with the Kodel marker (`.k
 
 - A collector works only on a root that has the marker: `locate` of a directory without it returns nothing and `read`
   of a ref into it is refused with `HISTORY_PATH_OUTSIDE_PROJECT`, whatever sessions the agent has for that directory.
-- With the session index of the hook transport (`.kodel/sessions.jsonl`), when it has lines of the agent, the
-  index is the answer and nothing is scanned. It lists only the sessions started since the hooks were connected.
+- With the session index of the hook transport (`.kodel/sessions.jsonl`, or the project's folder under `~/.kodel` with
+  `storage: home`; there the lines whose `cwd` is outside this checkout and its worktrees are ignored), when it has lines
+  of the agent, the index is the answer and nothing is scanned. It lists only the sessions started since the hooks were connected.
 - Otherwise the agent's own folders for the root and for its worktrees are scanned, and the folders of the
   directories under them (a session started in a subdirectory, or in a worktree that was removed with its run).
   A log counts only when the `cwd` of its first entry that has one, found in the first 256 KB, is in the project;
@@ -123,9 +237,28 @@ Only the sessions of Kodel projects: a directory tree with the Kodel marker (`.k
 Logs are in `$CLAUDE_CONFIG_DIR/projects/<folder>/<session>.jsonl` (`~/.claude` by default). The folder name is the
 working directory with every character that is not a letter or digit replaced by `-`; a name over 200 characters
 is cut and followed by a hash, which is not reproduced: such a folder is found by its first 200 characters.
+The agent names the folder after the directory it really works in. A project reached through a link (on macOS the
+temporary directory is `/var/...`, a link to `/private/var/...`, and a linked home is the same) is therefore looked for
+under both names, the one as given and the real one, for the copy of the agent's log and for usage alike; what counts as the
+project's is still decided by the log's own `cwd`, so a folder of another project is never credited (its lines are scanned for the
+run's id only, and it is refused when its own `cwd` is not in the project).
 
 The transcript does not contain every request the agent makes (titles, summaries and the like), so the totals of
-the events are a little below the agent's own. On a clean one-turn session the test accepts a difference of 10%.
+the events are a little below the agent's own. On a clean one-turn session the test accepts a difference of 10%, and
+the comparison is **window to window**: the agent's own count for the whole `claude -p` turn is far above the run's by
+design, because it holds the requests before the run (a tool search, listing the pipelines, the first large cache write) and
+after it (the final answer, the background watch). In the first real run the run held 4 / 319 / 57 612 / 534 tokens (input /
+output / cache read / cache write) and the whole turn 14 / 1 133 / 186 722 / 17 448. The real-agent test therefore builds
+its reference from the agent's own stream: the responses from the one that issued `pipeline_start` to the one that issued
+the last `pipeline_complete_step`, both included, which is what the pass credits to a run. **Output is not compared:** in
+Claude Code's stream the per-message `output_tokens` is a streamed placeholder (66 in the stream against 513 in the transcript
+in the real run, while input, cache read and cache write were exactly equal), the transcript holds the final value, so the
+stream is no independent reference for it and output is only printed. The sum of input, cache read and cache write is held to
+10%, and each of them when the agent's own figure for it is at least 100 tokens.
+The transcript also undercounts uncached input and cache reads for a session with forks and subagents (a fork does not log the
+prompt it inherited, and a cache written again after it went idle is not in it): in a measured session they were 23-51% below
+Claude Code's own `/usage`, while output agreed within 1%. The 10% holds for a clean one-turn session only, and the cost of a model
+is only as good as its row of the price table.
 
 ## Writing a collector for another agent
 
@@ -155,7 +288,7 @@ is `{ value, source }`, and a part that cannot be observed is left out, never gu
 | --- | --- |
 | `observed` | the transport says it (the MCP handshake: the client's name and version) |
 | `observed-env` | the environment of the server (`CLAUDE_CODE_SESSION_ID`): the session that was current when the server started. A server lives as long as its agent process, so after `/clear` it still names the old session |
-| `observed-hook` | the newest session the hooks registered in `.kodel/sessions.jsonl` for the run's directories; used when the environment has none |
+| `observed-hook` | the newest session the hooks registered in the session index (`.kodel/sessions.jsonl`, or its place under `~/.kodel` with `storage: home`) for the run's directories; used when the environment has none |
 | `derived` | read out of the session's own log (the model of its last answer) |
 
 Strings from outside are stripped of control characters and cut at 200 characters, and the store redacts them like
@@ -202,6 +335,7 @@ Each run keeps the sessions of its agent in `agent_log/` of the run folder, as n
 previews. It is **on by default and `full`**, with no opt-in (like the other history categories that are on by default).
 The raw log is never copied. The run folder is committed when the project tracks `.kodel/runs` (this repository ignores
 it, and `kodel init` does not write `.gitignore`); a project that tracks it should ignore `.kodel/runs/*/agent_log`.
+With `storage: home` the run folder is not in the repository at all.
 **Projects that upgrade start storing full sessions.** The decisions behind it were taken in TASK-52A8 and built in
 TASK-3BK2.
 
@@ -291,22 +425,104 @@ have another session of the project copied into the run. Lower the exposure with
 `system` event. At the first release the sample run in `fixtures/agent-log/` is moved under the frozen formats (or its hash
 is pinned), and from then on a change of the event shape needs a reader of the previous format.
 
-## Prices (planned)
+## Usage and cost (`usage_recorded`)
 
-**Planned defaults, not yet built.** They were decided in TASK-52A8 and are built in TASK-9JRS (cost and prices). Until
-that lands, `usage.cost` has no `revision` or `source` and no cost is computed. The plan is `docs/plans/task_52a8.md`.
+Each run records what its agent used: tokens per model (`input`, `output`, `cache_read`, `cache_write` with its 1-hour part,
+`api_calls`) and an **estimated** cost, per attempt of an agent node and for the run. It is built in TASK-9JRS on the
+collectors above, and it is information only: usage and cost never feed a check, a route or a gate.
 
-**Prices.** A table in code (`pipeline-core`, plain data): `format`, `revision` (a date), per model the prices of input,
-output, cache read and cache write, and `effectiveFrom`, `sourceUrl`, `checkedAt`. The entry is chosen by the time of
-the usage event. A project can override it in `history.usage.prices`; an entry replaces the shipped one of that model
-whole, and the cost records `source: shipped | config`. A cost is computed when the usage is collected, stored with the
-`revision`, and not recomputed with a later table. A total over a model without a price is `partial`, never `$0`. Every
-cost from the table is an estimate. The check of the table (a script with a network mode and a `--local` mode, and a
-skill for the maintainers) is built with it. Claude Code's own `cost-state` entry totals a whole session, is written once
-when it ends, is missing from about half of the session files and is always above the event totals. It is not an event,
-is never in a run and is never shown as a run's cost; only the `--local` check reads it, with the same project scoping
-as the collectors (Kodel projects only).
+```yaml
+history:
+  usage:
+    enabled: true   # false writes nothing and does not read the agent's log
+    prices:         # optional; per model, replaces the shipped price of that model whole
+      claude-example-model: { input: 1.5, output: 7.5, cache_read: 0.15, cache_write: 1.875, cache_write_1h: 3 }  # an example, not a price: USD per million tokens
+```
 
-**Constraint.** The format change the prices need (optional `revision`/`source` on `usage.cost`, a `computed` basis, new
-keys in `run_started.history`) is allowed under `v: 1` only before the first release, so the release waits for it, or the
-version is bumped with a reader of the previous format.
+**It has its own switch.** `agent_log: false` does not stop the transcript being read; only `usage: false` does. Usage stores
+numbers and model ids and no text. The keys are frozen at the start of the run (`run_started.history.usage`), so an edit of
+the config during a run changes nothing for it; a run without them reads as `not_captured`.
+
+**When and what.** One pass at the end of each agent step, before the step is judged, under the same lock as the copy of the
+agent's log (the copy first, then usage); the timer never counts usage. The pass reads the log of the sessions that belong to
+the run (found as for the agent log, see "The agent log"), and the logs of their subagents whatever `tool_log` says, and journals
+a `usage_recorded` delta: `session`, `node`, `attempt`, the delta (tokens, costs and flags per model) and the cursor (`last_seq`,
+`last_key`, and the response that was still open). A delta is only added to; nothing is rewritten, and nothing is written to a
+run that has ended. The worst time a pass adds before a step is judged is the wait for the lock (5 s), the copy's budget (30 s),
+usage's own budget (10 s) and the wait for the step's own call in the log (2 s, below).
+
+**The wait for the step's call.** The pass runs inside the agent's `pipeline_complete_step` call, and the agent writes its log a
+little behind its work. Without a wait the response that makes this very call could be missing from the log when the pass reads
+it: it was then counted in the next step, and after the last step not at all (seen once on a real `claude -p` run, where the
+window's total was 34% short; a run before it had agreed to 0.5%). So a pass at a step end first waits, up to
+`STEP_END_LOG_WAIT_MS` (2 s, once per pass whatever the number of sessions, counted in the pass's own time), until the tail of
+the log of a session that proved the run holds the call that hands in this node and attempt with the run's id (the tail only is
+read, every 100 ms; the whole log never is). It ends the moment the call is there. If it never is, the pass goes on with what the
+log has, as before, and says nothing: it is not a failure. The timer's pass never waits, and nothing waits when usage is off,
+when the run is over or when no session proved the run.
+
+**Which attempt.** What a pass reads is credited to the attempt that pass completes, so the windows of attempts are contiguous
+from the run's first call (the response that calls `pipeline_next_step` is written before the step is served and is in its step).
+What falls inside a wait for a person (from a gate being reached to its decision, or a pause to its resume, by the journal's
+times) is outside every step and is recorded as `unattributed`. The agent talking with the person while the run waits at a gate
+is therefore not charged to a node. Polling through command and check nodes is charged to the next agent node. Use after the last
+pass (the agent's final turn after the last `pipeline_complete_step`, a wait at the end) is not recorded: the run's total is a
+lower bound. A hand-in the engine refused after the pass, and then repeated, simply adds another delta to the same attempt.
+
+**The cursor.** `seq` of the events is the same for the same log, and the state keeps, per session, the last `seq` credited.
+After a server restart the log is read again from the run's start (within the pass's budget) and what was credited is skipped; a
+pass that runs out of time credits only what it read and marks the record `incomplete`, and the next pass goes on (`complete:
+false` in the report until the log is read to its end). A log that is shorter than before, or whose event at the cursor is not
+the one that was credited, stops the count for that session (`unreadable`). Only closed responses are read from the log. The
+response the agent is writing at the end of a step (the one that calls `pipeline_complete_step`) is counted as it stands from a
+copy of the reader's state, marked `last_open` (its output may be low), and when it is whole the next pass adds only the rest.
+It is only counted if it is in the log when the pass reads: see "The wait for the step's call" for how the pass waits for it.
+
+**Cost.** A table of prices in code (`pipeline-core/src/price-table.json`): `format`, `revision` (a date), per model a list of
+dated entries with the prices of input, output, cache read, cache write and the 1-hour cache write (`cache_write_1h`, default
+twice the input price), `effectiveFrom`, `sourceUrl`, `checkedAt`. The entry is chosen by the time of the usage event; a model
+that is not in the table (a Bedrock or Vertex id, an alias) has no price, and a total over it is `partial`, never `$0`. An entry in
+`history.usage.prices` replaces the shipped entry of that model whole (it keeps the shipped `long_context_tokens` of the model unless it
+gives its own), and the report says the cost was priced from the config. A redaction rule of the project that matches a model id
+rewrites the id before it is priced, so that model has no price and the total is `partial`: such a rule removes the cost.
+Long context (more than 200 000 prompt tokens in one request, or the model's own `long_context_tokens` when the table gives one,
+priced higher by some models) is not modelled: such calls are
+counted in `long_context` and flagged, and the cost may be low. A cost is computed when the usage is read, stored in the delta
+with the table's `revision`, and never recomputed with a later table, so a run that crossed a table update lists both revisions.
+**Every cost is an estimate**, not a bill. Claude Code's own `cost-state` entry totals a whole session, is written once when it
+ends, is missing from about half of the session files and is always above the event totals: it is not an event, is never in a run
+and is never shown as a run's cost.
+
+**What the report shows** (`kodel report`, and the same object with `--json`): per attempt and for the run the tokens per model,
+calls and the estimated cost with the table revisions, and the flags `complete`, `partial`, `unattributed`, `last_open`,
+`long_context`, `incomplete`, `includes subagents`; or `not_collected` with a reason: `not_captured` (the run did not ask for it),
+`disabled`, `session_unknown`, `log_missing`, `refused`, `unreadable`, `busy` (the lock was taken by another pass; said once, and
+nothing is lost because the cursor did not move; also said when the lock was lost before the pass could run: nothing was read; a copy that fails does not stop the pass, which runs after it under the same lock and tells its own failures itself), `agent_unsupported` (the
+run's agent has no collector), and, next to a report that has numbers, `cap` (the run journaled as many records as it may) and
+`record_refused` (the run's account refused a record, so the pass stopped; said once). A subagent log with no time on any entry cannot be
+told from one that began before the run: it is not guessed at and reads `unreadable`. A record written in a
+format this engine does not know reads `cannot read (format X)`, never "modified".
+
+**Limits.** At most 16 models per record and 64 per run (the rest are `other`), 1000 `usage_recorded` events and 2000 attempts per
+run (past 2000 attempts the rest is counted in the run's `unattributed`; past 1000 events nothing more is counted and the report
+says `cap`). A model id that does not look like an id is counted as `other`; a session id that does not (it is at most 128 characters, like the run's own ids) is not looked at, so its use is
+not counted: the state is not redacted and holds numbers and safe ids only. The set that tells a response read from two logs apart holds 200 000 keys; beyond it a repeat may be counted twice and the
+record says so. Journal times are those of the machine that serves the run and log times those of the agent: a run served on
+another machine than the agent's (a devcontainer) may be windowed wrongly.
+
+**Format.** Additive, so no release waits for it: the optional `cache_write_1h` on the `usage` event (only a read made for usage
+carries it, so the events the other readers get and the golden fixtures are unchanged), the events `usage_recorded` and
+`usage_failed`, `state.usage` and `run_started.history.usage`. An engine without this change reads the journal and the state as
+plain JSON and ignores what it does not know. Every shipped price row carries `checkedAt: 2026-10-28`: that day all fourteen rows
+were compared with the live price page (the page of `https://docs.claude.com/en/docs/about-claude/pricing`, which redirects to
+`platform.claude.com`) and they match. How they were compared differs by row: the eleven rows that had first been taken from the
+model table of the `claude-api` skill (cached 2026-10-06) were also read column by hand (that table's Sonnet 5.5 cache read price
+was wrong, 0.20 against the 0.10 of the page; found from Claude Code's own `/usage`); the three 4.5 rows were verified by the set
+comparison of the script only. The copy of the page used was fetched with `curl` on 2026-10-28 and is **not committed**, so the
+repository's fixture page (`fixtures/price-pages/`) stays hand-made and the repository itself cannot show that the live page
+parses. `scripts/check-prices.mjs` is the check, and `skills/kodel-prices/` is how a maintainer runs it again. The check compares
+the SET of dollar amounts that follow a model's name and cannot tell the columns apart; it looks at every place that names the
+model, and reports a page whose places disagree on one price of a row (a stale mention that still quotes the old set does not hide
+a changed row), but a change of several prices at once while an old mention remains is not caught. A request
+over a model's own `long_context_tokens` (200 000 unless the table says otherwise, 100 000 for `claude-haiku-5-5`) is flagged, and
+the higher price of such requests is not modelled.

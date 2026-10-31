@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   type CaptureOptions,
   type HistoryEvent,
@@ -21,7 +22,7 @@ import {
 import { claudeCodeCollector, findRunStart } from "../src/history";
 
 const MARKER = join(".kodel", "config.yaml");
-const GOLDEN = new URL("../../../fixtures/formats/v1/history/", import.meta.url).pathname;
+const GOLDEN = fileURLToPath(new URL("../../../fixtures/formats/v1/history/", import.meta.url));
 
 let base: string;
 let configDir: string;
@@ -98,7 +99,7 @@ describe("t3bk2 collector options: defaults stay as they were", () => {
     const text = (await read(collector, ref))
       .map((e) =>
         JSON.stringify(e)
-          .replaceAll(root, "__CWD__")
+          .replaceAll(JSON.stringify(root).slice(1, -1), "__CWD__")
           .replace('"cwd":"__CWD__"', '"cwd":"[REDACTED:high-entropy]"'),
       )
       .join("\n");
@@ -145,6 +146,7 @@ describe("t3bk2 collector options: metadata mode", () => {
     "output",
     "cache_read",
     "cache_write",
+    "cache_write_1h",
     "reasoning",
     "semantics",
     "request_id",

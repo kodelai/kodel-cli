@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   DEFAULT_AGENT_LOG,
   DEFAULT_HISTORY,
+  DEFAULT_USAGE,
   defaultAgentLog,
   HISTORY_CATEGORIES,
   KodelError,
@@ -53,8 +54,9 @@ describe("the project config", () => {
         on_run: { mode: "auto" },
         adapters: {},
       },
-      history: { ...DEFAULT_HISTORY, agent_log: DEFAULT_AGENT_LOG },
+      history: { ...DEFAULT_HISTORY, agent_log: DEFAULT_AGENT_LOG, usage: DEFAULT_USAGE },
       agents: { subagents: "auto", max_parallel: 8, claim_ttl_s: 900 },
+      storage: "project",
     });
   });
 
@@ -203,7 +205,7 @@ describe("the project config", () => {
 
 describe("the history section", () => {
   test("history_defaults_when_there_is_no_file_or_no_section", async () => {
-    const defaults = { ...DEFAULT_HISTORY, agent_log: DEFAULT_AGENT_LOG };
+    const defaults = { ...DEFAULT_HISTORY, agent_log: DEFAULT_AGENT_LOG, usage: DEFAULT_USAGE };
     expect((await loadConfig(dir)).history).toEqual(defaults);
     await write("version: 1\n");
     expect((await loadConfig(dir)).history).toEqual(defaults);
@@ -230,6 +232,7 @@ describe("the history section", () => {
       executor: { enabled: false },
       tool_log: { enabled: false },
       agent_log: DEFAULT_AGENT_LOG,
+      usage: DEFAULT_USAGE,
     });
     await write("history:\n  changes: { exclude: ['a/**'] }\n");
     expect((await loadConfig(dir)).history.changes).toEqual({
@@ -286,8 +289,10 @@ describe("the history section", () => {
   test("every_history_category_has_a_switch", async () => {
     // The categories the engine can write, the section of the schema and the defaults must list the
     // same ones, and each must have an `enabled` key.
-    // `agent_log` is the one section with more than a switch (mode, caps, interval) and is listed apart
-    expect([...HISTORY_SECTION_KEYS].sort()).toEqual([...HISTORY_CATEGORIES, "agent_log"].sort());
+    // `agent_log` and `usage` are the sections with more than a switch (mode, caps, interval; the price override) and are listed apart
+    expect([...HISTORY_SECTION_KEYS].sort()).toEqual(
+      [...HISTORY_CATEGORIES, "agent_log", "usage"].sort(),
+    );
     expect(Object.keys(DEFAULT_HISTORY).sort()).toEqual([...HISTORY_CATEGORIES].sort());
     for (const category of HISTORY_CATEGORIES) {
       expect(DEFAULT_HISTORY[category].enabled).toBe(true);
@@ -415,5 +420,52 @@ describe("t40 the agents section", () => {
     );
     expect((await failure("agents:\n  parallel: true\n")).message).toContain("parallel");
     expect((await failure("agents: true\n")).message).toContain("agents");
+  });
+});
+
+describe("the usage section", () => {
+  const usage = async () => (await loadConfig(dir)).history.usage;
+  const PRICE = "{ input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 }";
+
+  test("t9jrs_usage_config_defaults", async () => {
+    // on, with no override; with no file, an empty file and an empty section alike
+    expect(await usage()).toEqual({ enabled: true, prices: {} });
+    await write("");
+    expect(await usage()).toEqual({ enabled: true, prices: {} });
+    await write("history:\n  usage: {}\n");
+    expect(await usage()).toEqual({ enabled: true, prices: {} });
+    await write("history:\n  usage: { enabled: false }\n");
+    expect(await usage()).toEqual({ enabled: false, prices: {} });
+  });
+
+  test("t9jrs_usage_config_reads_a_price_override_per_model", async () => {
+    await write(
+      `history:\n  usage:\n    prices:\n      claude-sonnet-5-5: ${PRICE}\n      my-model: { input: 1, output: 2, cache_read: 0.1, cache_write: 1.2, cache_write_1h: 2 }\n`,
+    );
+    expect((await usage())?.prices).toEqual({
+      "claude-sonnet-5-5": { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 },
+      "my-model": { input: 1, output: 2, cache_read: 0.1, cache_write: 1.2, cache_write_1h: 2 },
+    });
+  });
+
+  test("t9jrs_usage_config_refuses_what_is_not_a_price_or_a_safe_id", async () => {
+    const many = Array.from({ length: 65 }, (_, i) => `      m${i}: ${PRICE}`).join("\n");
+    for (const bad of [
+      "enabled: yes please",
+      "unknown_key: 1",
+      "prices: { m: { input: 1, output: 1, cache_read: 1 } }",
+      "prices: { m: { input: -1, output: 1, cache_read: 1, cache_write: 1 } }",
+      "prices: { m: { input: .inf, output: 1, cache_read: 1, cache_write: 1 } }",
+      "prices: { m: { input: 1, output: 1, cache_read: 1, cache_write: 1, surprise: 1 } }",
+      `prices: { 'has space': ${PRICE} }`,
+      `prices: { '../x': ${PRICE} }`,
+      "prices: [1, 2]",
+    ]) {
+      const error = await failure(`history:\n  usage: { ${bad} }\n`);
+      expect(error.code).toBe("CONFIG_INVALID");
+      expect(error.message).toContain("history.usage");
+    }
+    const tooMany = await failure(`history:\n  usage:\n    prices:\n${many}\n`);
+    expect(tooMany.code).toBe("CONFIG_INVALID");
   });
 });

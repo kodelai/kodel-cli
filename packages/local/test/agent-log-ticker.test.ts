@@ -62,7 +62,7 @@ beforeEach(async () => {
   await writeFile(join(dir, ".kodel", "config.yaml"), "worktree:\n  mode: off\n");
 });
 afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
+  await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   await rm(claude, { recursive: true, force: true });
 });
 
@@ -598,6 +598,7 @@ describe("t3bk2 the timer: giving up", () => {
       return { ok: true };
     },
     workdir: async () => undefined,
+    journal: async () => [],
   });
 
   test("t3bk2_tick_stops_after_3_failures", async () => {

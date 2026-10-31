@@ -16,7 +16,7 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "kodel-host-"));
 });
 afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
+  await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 const initGit = () => {

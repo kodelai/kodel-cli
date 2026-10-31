@@ -28,7 +28,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import {
   isChangesRef,
   isRunId,
@@ -46,6 +46,8 @@ import {
 import { sha256 } from "./integrity";
 import { MAX_PATCH_KB, preparePatch } from "./patch-text";
 import { CONFIG_FILE } from "./project-locate";
+import { ensurePlace, StoragePathsError, type StoragePlace, scrubHome } from "./storage-paths";
+import { sameDir } from "./worktree";
 
 /** The most of a patch the report reads: patches are cut at `max_kb`, so a larger file is not ours. */
 const MAX_READ_PATCH_BYTES = (MAX_PATCH_KB + 64) * 1024;
@@ -66,11 +68,22 @@ export interface RunMeta {
   workdir?: string;
   /** The branch made for the run's worktree, when kodel made one. */
   branch?: string;
+  /**
+   * The project root of the checkout that made the run; written in `home` mode only, where clones of
+   * one project share the history. Advisory: this file can be rewritten by the agent, so it keeps
+   * honest clones from stepping on each other and is not a security boundary.
+   */
+  root?: string;
 }
 
 export interface StoreOptions {
   /** The `.kodel` directory. */
   root: string;
+  /**
+   * Where runs, proposals made outside a run and `start.lock` are kept; by default under `root`,
+   * which is the project place.
+   */
+  place?: StoragePlace;
   /** Extra redaction rules from the project config. */
   rules?: RedactRule[];
   lockTimeoutMs?: number;
@@ -162,6 +175,67 @@ const SERVED_REF = /^served\/[a-z0-9][a-z0-9-]{0,62}-\d{1,6}-\d{1,6}\.json$/;
 
 const isMissing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
 
+/**
+ * How the stored stream of a session is opened for writing: for reading and writing and not in append mode, because a
+ * handle that appends has no right to truncate on Windows (`EPERM: ftruncate`), and the stream is cut to the length the
+ * journal vouches for before anything is added. A file that is not there yet is made, never replaced (`wx+`).
+ */
+export const agentLogOpenFlags = (exists: boolean): "r+" | "wx+" => (exists ? "r+" : "wx+");
+
+/** Opens the stored stream for writing at any position; a race with another maker of the file is settled by one retry. */
+async function openAgentLogForWrite(path: string): Promise<Awaited<ReturnType<typeof open>>> {
+  try {
+    return await open(path, agentLogOpenFlags(true));
+  } catch (error) {
+    if (!isMissing(error)) throw error;
+  }
+  try {
+    return await open(path, agentLogOpenFlags(false));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    return open(path, agentLogOpenFlags(true));
+  }
+}
+
+/** The code of an error of the operating system (`EACCES`, `ENOSPC`), not of Node itself (`ERR_...`). */
+const SYSTEM_ERROR = /^E(?!RR_)[A-Z0-9]+$/;
+
+/**
+ * A file-system error in the home tree as a configuration problem: with a code, and without the
+ * folder (the home base and the user's name in it go to an agent through a tool answer). Only an
+ * error of the system whose path lies under the home base is taken: the project's own folders, an
+ * error of Node and anything else keep the error as it is. An error with no path (a write that
+ * failed half way: the disk is full) is taken only where the caller knows the operation was in the
+ * home tree (`certain`).
+ */
+export function placeProblem(
+  error: unknown,
+  place: StoragePlace | undefined,
+  certain = false,
+): unknown {
+  if (place?.mode !== "home" || place.base === undefined || error instanceof KodelError) {
+    return error;
+  }
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  if (typeof code !== "string" || !SYSTEM_ERROR.test(code)) return error;
+  const { path, dest } = error as { path?: unknown; dest?: unknown };
+  const named = [path, dest].filter((p): p is string => typeof p === "string");
+  const base = place.base;
+  const inside = (p: string) => p === base || p.startsWith(base.endsWith(sep) ? base : base + sep);
+  if (named.length > 0 ? !named.some(inside) : !certain) return error;
+  // A file that is not there is not a place that cannot be used: the folder was removed or moved.
+  if (code === "ENOENT" || code === "ENOTDIR") {
+    return new KodelError(
+      "UNKNOWN_RUN",
+      `a file of the history is missing, so the folder may have been removed or moved: ${scrubHome((error as Error).message, place)}`,
+    );
+  }
+  return new KodelError(
+    "CONFIG_INVALID",
+    `the history in the home folder cannot be used (<home> is ~/.kodel, or KODEL_STATE_DIR when it is set): ${scrubHome((error as Error).message, place)}`,
+  );
+}
+
 export class FileStore {
   private readonly rules: RedactRule[];
   private readonly lockTimeoutMs: number;
@@ -173,6 +247,11 @@ export class FileStore {
   private readonly wait: (ms: number) => Promise<void>;
   private writes = 0;
   private readonly held = new Map<string, Promise<unknown>>();
+  private readonly runsRoot: string;
+  private readonly proposalsRoot: string;
+  private readonly lockRoot: string;
+  private readonly checkoutRoot: string | undefined;
+  private prepared: Promise<void> | undefined;
 
   constructor(private readonly options: StoreOptions) {
     this.rules = options.rules ?? [];
@@ -183,11 +262,85 @@ export class FileStore {
     this.isAlive = options.isAlive ?? processIsAlive;
     this.clock = options.clock ?? Date.now;
     this.wait = options.sleep ?? sleep;
+    const place = options.place;
+    this.runsRoot = place?.runsRoot ?? join(options.root, "runs");
+    this.proposalsRoot = place?.proposalsRoot ?? join(options.root, "proposals");
+    this.lockRoot = place?.lockRoot ?? options.root;
+    this.checkoutRoot = place?.checkoutRoot;
+  }
+
+  /**
+   * The folders of the place exist (a `home` place is made once, with mode 0700) before anything is
+   * written there. A problem with the place is a configuration problem and says so.
+   */
+  private ready(): Promise<void> {
+    const place = this.options.place;
+    if (place === undefined || place.mode === "project") return Promise.resolve();
+    this.prepared ??= ensurePlace(place).catch((error: unknown) => {
+      this.prepared = undefined;
+      if (error instanceof StoragePathsError) {
+        throw new KodelError("CONFIG_INVALID", scrubHome(error.message, place));
+      }
+      throw this.placeProblem(error);
+    });
+    return this.prepared;
+  }
+
+  /**
+   * A file-system error in the home tree as a configuration problem: with a code, and without the
+   * folder (the home base and the user's name in it go to an agent through a tool answer). The
+   * project's own folders keep the error as it is.
+   */
+  private placeProblem(error: unknown): unknown {
+    return placeProblem(error, this.options.place, true);
   }
 
   runDir(runId: string): string {
     if (!isRunId(runId)) throw new KodelError("UNKNOWN_RUN", `"${runId}" is not a run id`);
-    return join(this.options.root, "runs", runId);
+    return join(this.runsRoot, runId);
+  }
+
+  /** A folder in the home tree is for its owner only; in the project it keeps the usual mode. */
+  private folderMode(): { mode?: number } {
+    return this.options.place?.mode === "home" ? { mode: 0o700 } : {};
+  }
+
+  /**
+   * Whether a run was made by another checkout of the same project (clones share a `home` history).
+   * A run with no `root` is taken as ours.
+   */
+  isForeign(meta: RunMeta): boolean {
+    // The file can be rewritten by the agent: anything but a path is no claim to be another checkout's.
+    return (
+      this.checkoutRoot !== undefined &&
+      typeof meta.root === "string" &&
+      !sameDir(meta.root, this.checkoutRoot)
+    );
+  }
+
+  /**
+   * Take a free run id: the folder is made without `recursive`, so an id that is already there (a
+   * clone started in the same millisecond with the same random part) is never reused.
+   */
+  async reserveRunId(now: number): Promise<string> {
+    await this.ready();
+    try {
+      // With the mode too: the folder may have been taken away while the server ran.
+      await mkdir(this.runsRoot, { recursive: true, ...this.folderMode() });
+    } catch (error) {
+      throw this.placeProblem(error);
+    }
+    for (let attempt = 0; ; attempt += 1) {
+      const runId = newRunId(now);
+      try {
+        await mkdir(this.runDir(runId), this.folderMode());
+        return runId;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt >= 8) {
+          throw this.placeProblem(error);
+        }
+      }
+    }
   }
 
   private redact<T>(value: T): T {
@@ -200,20 +353,24 @@ export class FileStore {
   }
 
   /** Write a file so that a reader sees the old content or the new, never half of it. */
-  private async writeAtomic(path: string, content: string): Promise<void> {
+  private async writeAtomic(path: string, content: string, inHistory = true): Promise<void> {
     this.writes += 1;
     const tmp = `${path}.tmp-${this.pid}-${this.writes}`;
-    // The name is predictable, so something planted there (a link to another file) is removed
-    // first and the file is created exclusively; a write never follows a link out of the folder.
-    await rm(tmp, { force: true });
-    const handle = await open(tmp, "wx");
     try {
-      await handle.writeFile(content);
-      await handle.sync();
-    } finally {
-      await handle.close();
+      // The name is predictable, so something planted there (a link to another file) is removed
+      // first and the file is created exclusively; a write never follows a link out of the folder.
+      await rm(tmp, { force: true });
+      const handle = await open(tmp, "wx");
+      try {
+        await handle.writeFile(content);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await rename(tmp, path);
+    } catch (error) {
+      throw inHistory ? this.placeProblem(error) : error;
     }
-    await rename(tmp, path);
   }
 
   private async readJson<T>(path: string): Promise<T | undefined> {
@@ -228,20 +385,33 @@ export class FileStore {
   // runs
 
   async createRun(meta: RunMeta): Promise<void> {
-    await mkdir(join(this.runDir(meta.runId), "reports"), { recursive: true });
+    await this.ready();
+    try {
+      await mkdir(this.runDir(meta.runId), { recursive: true, ...this.folderMode() });
+    } catch (error) {
+      throw this.placeProblem(error);
+    }
     // The directory and the branch are made by kodel, not typed by the agent, and a path the rules
     // rewrote (a long random-looking folder name is enough) would no longer name the directory: the
-    // run could not find its way back to it. They are kept as they are.
-    const { workdir, branch, ...rest } = meta;
+    // run could not find its way back to it. They are kept as they are. So is the root of the
+    // checkout that made the run (in `home` mode only).
+    const { workdir, branch, root: _root, ...rest } = meta;
     const record: RunMeta = {
       ...this.redact(rest),
       ...(workdir === undefined ? {} : { workdir }),
       ...(branch === undefined ? {} : { branch }),
+      ...(this.checkoutRoot === undefined ? {} : { root: this.checkoutRoot }),
     };
+    // The record first: a folder with a `meta.json` is a run, and one without is not, so nothing
+    // half-made shows up as a run.
     await this.writeAtomic(
       join(this.runDir(meta.runId), "meta.json"),
       `${JSON.stringify(record, null, 2)}\n`,
     );
+    await mkdir(join(this.runDir(meta.runId), "reports"), {
+      recursive: true,
+      ...this.folderMode(),
+    });
   }
 
   async readMeta(runId: string): Promise<RunMeta | undefined> {
@@ -251,7 +421,7 @@ export class FileStore {
   async listRuns(): Promise<RunMeta[]> {
     let names: string[];
     try {
-      names = await readdir(join(this.options.root, "runs"));
+      names = await readdir(this.runsRoot);
     } catch (error) {
       if (isMissing(error)) return [];
       throw error;
@@ -277,7 +447,7 @@ export class FileStore {
   ): Promise<{ meta: RunMeta; state: RunState } | undefined> {
     const redactedTask = this.redact(task);
     const candidates = (await this.listRuns()).filter(
-      (m) => m.pipeline === pipeline && m.task === redactedTask,
+      (m) => m.pipeline === pipeline && m.task === redactedTask && !this.isForeign(m),
     );
     for (const meta of candidates.reverse()) {
       let state: RunState | undefined;
@@ -320,7 +490,7 @@ export class FileStore {
    */
   async writeSpec(runId: string, hash: string, source: string): Promise<void> {
     const dir = this.specsDir(runId);
-    await mkdir(dir, { recursive: true });
+    await mkdir(dir, { recursive: true, ...this.folderMode() });
     await this.writeAtomic(join(dir, specFileName(hash)), source);
   }
 
@@ -358,7 +528,7 @@ export class FileStore {
   }
 
   async writeProposal(runId: string, source: string): Promise<void> {
-    await mkdir(dirname(this.proposalPath(runId)), { recursive: true });
+    await mkdir(dirname(this.proposalPath(runId)), { recursive: true, ...this.folderMode() });
     await this.writeAtomic(this.proposalPath(runId), source);
   }
 
@@ -386,12 +556,17 @@ export class FileStore {
   private pipelineProposalPath(name: string): string {
     const problem = proposalNameProblem(name);
     if (problem !== undefined) throw new KodelError("INVALID_ARGUMENTS", problem);
-    return join(this.options.root, "proposals", `${name}.json`);
+    return join(this.proposalsRoot, `${name}.json`);
   }
 
   async writePipelineProposal(record: PipelineProposalRecord): Promise<void> {
+    await this.ready();
     const path = this.pipelineProposalPath(record.name);
-    await mkdir(dirname(path), { recursive: true });
+    try {
+      await mkdir(dirname(path), { recursive: true, ...this.folderMode() });
+    } catch (error) {
+      throw this.placeProblem(error);
+    }
     // The text is the agent's and is kept as it is (the caller refused anything redaction would change).
     await this.writeAtomic(
       path,
@@ -442,7 +617,7 @@ export class FileStore {
   async listPipelineProposals(): Promise<PipelineProposalRecord[]> {
     let files: string[];
     try {
-      files = await readdir(join(this.options.root, "proposals"));
+      files = await readdir(this.proposalsRoot);
     } catch (error) {
       if (isMissing(error)) return [];
       throw error;
@@ -497,7 +672,8 @@ export class FileStore {
 
   /** Write a file that is not the store's own (a pipeline file the person accepted), all or nothing. */
   async replaceFile(path: string, content: string): Promise<void> {
-    await this.writeAtomic(path, content);
+    // Not in the history: a failure here is about the project's own files and is said as it is.
+    await this.writeAtomic(path, content, false);
   }
 
   /**
@@ -511,7 +687,7 @@ export class FileStore {
   ): Promise<{ meta: RunMeta; state: RunState } | undefined> {
     const redactedTask = this.redact(task);
     const candidates = (await this.listRuns()).filter(
-      (m) => m.pipeline === pipeline && m.task === redactedTask,
+      (m) => m.pipeline === pipeline && m.task === redactedTask && !this.isForeign(m),
     );
     for (const meta of candidates.reverse()) {
       let state: RunState | undefined;
@@ -690,12 +866,16 @@ export class FileStore {
         return `${JSON.stringify(redacted)}\n`;
       })
       .join("");
-    const handle = await open(join(this.runDir(runId), "journal.jsonl"), "a");
     try {
-      await handle.writeFile(lines);
-      await handle.sync();
-    } finally {
-      await handle.close();
+      const handle = await open(join(this.runDir(runId), "journal.jsonl"), "a");
+      try {
+        await handle.writeFile(lines);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    } catch (error) {
+      throw this.placeProblem(error);
     }
   }
 
@@ -768,7 +948,7 @@ export class FileStore {
     attempt: number,
     report: ResultReport,
   ): Promise<void> {
-    await mkdir(join(this.runDir(runId), "reports"), { recursive: true });
+    await mkdir(join(this.runDir(runId), "reports"), { recursive: true, ...this.folderMode() });
     await this.writeAtomic(
       this.reportPath(runId, node, attempt),
       `${JSON.stringify(this.redact(report), null, 2)}\n`,
@@ -800,7 +980,7 @@ export class FileStore {
     }
     const ref = `artifacts/${artifactFileName(node)}-${attempt}-${part}.txt`;
     const content = redactText(text, this.rules);
-    await mkdir(join(this.runDir(runId), "artifacts"), { recursive: true });
+    await mkdir(join(this.runDir(runId), "artifacts"), { recursive: true, ...this.folderMode() });
     await this.writeAtomic(join(this.runDir(runId), ref), content);
     return { ref, bytes: Buffer.byteLength(content) };
   }
@@ -863,7 +1043,7 @@ export class FileStore {
     if (!SERVED_REF.test(ref)) {
       throw new KodelError("INVALID_ARGUMENTS", `"${ref}" is not a served file`);
     }
-    await mkdir(join(this.runDir(runId), "served"), { recursive: true });
+    await mkdir(join(this.runDir(runId), "served"), { recursive: true, ...this.folderMode() });
     await this.writeAtomic(join(this.runDir(runId), ref), `${JSON.stringify(content, null, 2)}\n`);
   }
 
@@ -879,17 +1059,24 @@ export class FileStore {
    * processes the lock file decides, and a lock whose holder died is taken over.
    */
   async withLock<T>(runId: string, fn: () => Promise<T>): Promise<T> {
-    return this.queued(runId, join(this.runDir(runId), "lock"), fn);
+    return this.queued(runId, join(this.runDir(runId), "lock"), fn, false);
   }
 
   /** Held while a run is looked for and created, so two starts of one task cannot make two runs. */
   async withStartLock<T>(fn: () => Promise<T>): Promise<T> {
-    return this.queued("start", join(this.options.root, "start.lock"), fn);
+    return this.queued("start", join(this.lockRoot, "start.lock"), fn, true);
   }
 
-  private queued<T>(key: string, lockPath: string, fn: () => Promise<T>): Promise<T> {
+  private queued<T>(
+    key: string,
+    lockPath: string,
+    fn: () => Promise<T>,
+    makeFolder: boolean,
+  ): Promise<T> {
     const previous = this.held.get(key) ?? Promise.resolve();
-    const run = previous.catch(() => undefined).then(() => this.lockedRun(key, lockPath, fn));
+    const run = previous
+      .catch(() => undefined)
+      .then(() => this.lockedRun(key, lockPath, fn, makeFolder));
     this.held.set(key, run);
     return run;
   }
@@ -974,6 +1161,7 @@ export class FileStore {
     name: string,
     lockPath: string,
     fn: (lock: HeldLock) => Promise<T>,
+    makeFolder: boolean,
     params: { timeoutMs: number; staleMs: number } = {
       timeoutMs: this.lockTimeoutMs,
       staleMs: this.staleLockMs,
@@ -981,7 +1169,16 @@ export class FileStore {
   ): Promise<T> {
     const deadline = this.clock() + params.timeoutMs;
     const token = randomUUID();
-    await mkdir(dirname(lockPath), { recursive: true });
+    // Only the start lock makes its folder. A lock for a run never does: a run that is not there
+    // would otherwise get an empty folder, which is how a run could end up split between two places.
+    if (makeFolder) {
+      await this.ready();
+      try {
+        await mkdir(dirname(lockPath), { recursive: true, ...this.folderMode() });
+      } catch (error) {
+        throw this.placeProblem(error);
+      }
+    }
     for (;;) {
       try {
         const handle = await open(lockPath, "wx");
@@ -992,6 +1189,9 @@ export class FileStore {
         }
         break;
       } catch (error) {
+        if (!makeFolder && (error as NodeJS.ErrnoException).code === "ENOENT") {
+          throw new KodelError("UNKNOWN_RUN", `there is no run "${name}"`);
+        }
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         if (await this.takeOverAbandoned(lockPath, params.staleMs)) continue;
         if (this.clock() >= deadline) {
@@ -1033,10 +1233,16 @@ export class FileStore {
     waitMs: number,
     fn: (lock: HeldLock) => Promise<T>,
   ): Promise<T> {
-    return this.lockedRun(`${runId} agent log`, join(this.runDir(runId), "agent_log.lock"), fn, {
-      timeoutMs: waitMs,
-      staleMs: this.agentLogStaleMs,
-    });
+    return this.lockedRun(
+      `${runId} agent log`,
+      join(this.runDir(runId), "agent_log.lock"),
+      fn,
+      false,
+      {
+        timeoutMs: waitMs,
+        staleMs: this.agentLogStaleMs,
+      },
+    );
   }
 
   /** The hash of the last bytes of the first `length` bytes of the file, or `undefined` if it is shorter. */
@@ -1084,7 +1290,7 @@ export class FileStore {
       if (tail === undefined || tail !== expect.tail_hash) return { ok: false };
     }
     await mkdir(dirname(path), { recursive: true });
-    const handle = await open(path, "a+");
+    const handle = await openAgentLogForWrite(path);
     try {
       await handle.truncate(expect.length);
       const bytes = Buffer.from(text, "utf8");

@@ -24,6 +24,20 @@ import { type AcceptEffect, diffPipelines, standingOf } from "./pipeline-diff";
 import { defaultRegistry, labelsOf, RESTART_FAILED, type Registry } from "./registry";
 import { renderContextOf, renderDeep, renderTemplate } from "./render";
 import { runSlug } from "./slug";
+import {
+  addDelta,
+  MAX_USAGE_ATTEMPTS,
+  MAX_USAGE_EVENTS,
+  newTotals,
+  newUsageState,
+  USAGE_FAILURES,
+  type UsageCursor,
+  type UsageDelta,
+  type UsageFailure,
+  type UsageState,
+  usageCursorSchema,
+  usageDeltaSchema,
+} from "./usage-record";
 import { RECORD_VERSION } from "./version";
 
 export const DEFAULT_STALE_MS = 30_000;
@@ -338,6 +352,13 @@ export interface RunState {
    * numbers, ids and hex hashes, never text: the state is not redacted.
    */
   agentLog?: AgentLogState;
+  /**
+   * What the agent used, per attempt and for the run, summed from the records a pass of the host appended
+   * (`usage_recorded`). Present only for a run started with `history.usage` on, so its absence says "not captured".
+   * Holds numbers, safe ids and hex hashes, never text: the state is not redacted. Information only: nothing here
+   * feeds a check, a route or a gate.
+   */
+  usage?: UsageState;
 }
 
 /** Where the stored stream of one session ends, and what the journal vouches for. */
@@ -633,6 +654,21 @@ export type RunEvent =
     }
   /** The agent's log could not be copied, for this reason; journaled once per reason. */
   | { type: "agent_log_failed"; reason: AgentLogFailure; session?: string }
+  /**
+   * What the agent used since the last record of this session, as a delta. With `node` and `attempt` it is credited to
+   * that attempt, which must be the agent step the run is at; without them it is use outside every step. `cursor` is
+   * where the credited part of the session's log now ends.
+   */
+  | {
+      type: "usage_recorded";
+      session: string;
+      node?: string;
+      attempt?: number;
+      delta: UsageDelta;
+      cursor: UsageCursor;
+    }
+  /** Usage could not be recorded, for this reason; journaled once per reason. */
+  | { type: "usage_failed"; reason: UsageFailure; session?: string }
   /** A human accepted a change made to the run's files outside kodel. Journaled; changes nothing else. */
   | { type: "acknowledge"; note?: string }
   /**
@@ -1591,6 +1627,8 @@ class Machine {
     if (event.type === "step_claimed") return this.claim(event);
     if (event.type === "agent_log_saved") return this.agentLogSaved(event);
     if (event.type === "agent_log_failed") return this.agentLogFailed(event);
+    if (event.type === "usage_recorded") return this.usageRecorded(event);
+    if (event.type === "usage_failed") return this.usageFailed(event);
     if (event.type === "cancel") {
       if (this.s.status === "running" || this.s.status === "paused") this.end("canceled");
       else throw new Repeat();
@@ -1839,6 +1877,7 @@ class Machine {
         failed: [],
       };
     }
+    if (event.history?.usage?.enabled === true) this.s.usage = newUsageState();
     this.log("run_started", {
       run: event.runId,
       task: event.task,
@@ -2051,6 +2090,62 @@ class Machine {
     }
     log.failed.push(event.reason);
     this.log("agent_log_failed", {
+      reason: event.reason,
+      ...(event.session !== undefined && SAFE_ID.test(event.session)
+        ? { session: event.session }
+        : {}),
+    });
+  }
+
+  /**
+   * Keep the account of usage. A record with a node is accepted only for the agent step the run is at, so a call that
+   * names another node or a future attempt cannot close a record that does not exist; one without a node is use
+   * outside every step. Like the copy of the agent's log, anything that does not hold is a quiet no-op: usage is
+   * display data and must never refuse or fail a step. A record only adds: the cursor of its session must not go back.
+   */
+  private usageRecorded(event: Extract<RunEvent, { type: "usage_recorded" }>) {
+    const usage = this.s.usage;
+    if (usage === undefined || this.s.status !== "running") throw new Repeat();
+    const delta = usageDeltaSchema.safeParse(event.delta);
+    const cursor = usageCursorSchema.safeParse(event.cursor);
+    if (!SAFE_ID.test(event.session) || !delta.success || !cursor.success) throw new Repeat();
+    if (usage.events >= MAX_USAGE_EVENTS) throw new Repeat();
+    const stored = usage.sessions[event.session];
+    if (cursor.data.last_seq < (stored?.last_seq ?? 0)) throw new Repeat();
+    let key: string | undefined;
+    if (event.node !== undefined || event.attempt !== undefined) {
+      const visit = this.s.active.find(
+        (v) => v.node === event.node && v.attempt === event.attempt && v.phase === "agent",
+      );
+      if (visit === undefined) throw new Repeat();
+      key = `${visit.node}:${visit.attempt}`;
+      // Past the limit a record counts in the run's `unattributed`: the state stays bounded and the sum stays whole.
+      if (!(key in usage.attempts) && Object.keys(usage.attempts).length >= MAX_USAGE_ATTEMPTS) {
+        key = undefined;
+      }
+    }
+    const totals = key === undefined ? usage.unattributed : (usage.attempts[key] ?? newTotals());
+    addDelta(totals, delta.data);
+    if (key !== undefined) usage.attempts[key] = totals;
+    usage.sessions[event.session] = cursor.data;
+    usage.events += 1;
+    if (!usage.revisions.includes(delta.data.revision)) usage.revisions.push(delta.data.revision);
+    this.log("usage_recorded", {
+      session: event.session,
+      ...(key === undefined ? {} : { node: event.node, attempt: event.attempt }),
+      delta: delta.data,
+      cursor: cursor.data,
+    });
+  }
+
+  private usageFailed(event: Extract<RunEvent, { type: "usage_failed" }>) {
+    const usage = this.s.usage;
+    if (usage === undefined || this.s.status !== "running") throw new Repeat();
+    if (!USAGE_FAILURES.includes(event.reason) || usage.failed.includes(event.reason)) {
+      throw new Repeat();
+    }
+    usage.failed.push(event.reason);
+    this.log("usage_failed", {
       reason: event.reason,
       ...(event.session !== undefined && SAFE_ID.test(event.session)
         ? { session: event.session }

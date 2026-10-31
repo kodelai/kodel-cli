@@ -20,7 +20,8 @@ that is already registered needs no change of the agent's configuration.
 
 - Types, the dispatcher and the per-agent normalizers: `packages/pipeline-core/src/hooks.ts`, `hook-normalizers.ts`.
 - The registry (`registry.ts`, the single source of truth for which events are registered), the session registrar
-  (`.kodel/sessions.jsonl`), the project lookup and `runHook`: `packages/local/src/hooks/`.
+  (`.kodel/sessions.jsonl`, or the project's folder under `~/.kodel` with `storage: home`), the project lookup and
+  `runHook`: `packages/local/src/hooks/`.
 - Registration: `kodel init` does it by default (`--no-hooks` turns it off) in `.claude/settings.local.json`,
   `.codex/hooks.json` and `.opencode/plugins/kodel-hooks.ts`, all personal files. Running `init` again adds the
   events of handlers added since; the hook notes in `.kodel/hooks.log` when events are missing.
@@ -36,7 +37,8 @@ What each agent does with the hook, as seen on the real agents:
 - Claude Code: a command hook per event in `.claude/settings.local.json`; the payload has `session_id`,
   `transcript_path`, `cwd` and `hook_event_name`.
 - Codex: the same payload in `.codex/hooks.json`. The hook runs only after a person trusts it in `/hooks`, and it runs
-  inside Codex's sandbox: in a read-only session it cannot write the session index.
+  inside Codex's sandbox: in a read-only session it cannot write the session index (and with `storage: home` a
+  sandbox that confines writes to the workspace cannot write under `~/.kodel` either).
 - OpenCode (v2): no command hooks; the generated plugin passes session and tool events to the same command. The event
   stream belongs to the server, so the plugin forwards only the sessions of its own directory. OpenCode finds its project
   by `PWD`, so a program that starts it must set `PWD` along with the working directory.

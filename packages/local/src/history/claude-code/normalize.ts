@@ -41,6 +41,8 @@ export interface ClaudeState {
   skipped: number;
   /** How texts are shaped; without it a text is a 500 character preview with whitespace collapsed. */
   capture: CaptureOptions | undefined;
+  /** `usage` events carry the 1-hour part of the cache writes (`ReadOptions.usageDetail`). */
+  usageDetail?: boolean;
   /** Events at the start of the last entry's output that ended a response (the rest belong to the open one). */
   flushedCount: number;
   /** How many leading events of the last entry's output are settled: not part of a response still being written. */
@@ -234,6 +236,11 @@ function normalizeEntry(entry: unknown, state: ClaudeState): DraftEvent[] {
         const details = isObject(usage["output_tokens_details"])
           ? usage["output_tokens_details"]
           : {};
+        const tiers = isObject(usage["cache_creation"]) ? usage["cache_creation"] : undefined;
+        const oneHour =
+          state.usageDetail === true && tiers !== undefined
+            ? count(tiers["ephemeral_1h_input_tokens"])
+            : undefined;
         state.pending = {
           key,
           draft: {
@@ -244,6 +251,7 @@ function normalizeEntry(entry: unknown, state: ClaudeState): DraftEvent[] {
             output: count(usage["output_tokens"]),
             cache_read: count(usage["cache_read_input_tokens"]),
             cache_write: count(usage["cache_creation_input_tokens"]),
+            ...(oneHour === undefined ? {} : { cache_write_1h: oneHour }),
             reasoning: count(details["thinking_tokens"]),
             semantics: "additive",
             message_id: messageId ?? key,

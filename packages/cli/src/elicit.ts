@@ -31,6 +31,10 @@ import { plain } from "./plain";
 
 /** One run as far as the decisions need it; `LocalRun` is one. */
 export interface HumanRun {
+  /** The run's folder when the history is under `~/.kodel`; none when it is in the project. */
+  homeFolder?(): string | undefined;
+  /** The root of another checkout that made the run, when it is not this one (clones share a `home` history). */
+  foreignRoot?(): Promise<string | undefined>;
   state(): Promise<RunState>;
   currentSpec(): Promise<PipelineSpec>;
   pendingChange(state?: RunState, only?: "file" | "proposal"): Promise<PendingFound | undefined>;
@@ -705,7 +709,7 @@ async function ackQuestion(
     message: (note) =>
       header(
         runId,
-        `its state was changed outside kodel: ${plain(why)}\n\nThe agent cannot tell you this is safe. Look at what changed in the run's files (.kodel/runs/${plain(runId)}) before you accept; if you did not change them yourself, decline.`,
+        `its state was changed outside kodel: ${plain(why)}\n\nThe agent cannot tell you this is safe. Look at what changed in the run's files (${plain(run.homeFolder?.() ?? `.kodel/runs/${runId}`)}) before you accept; if you did not change them yourself, decline.`,
         note,
       ),
     async apply(content) {
