@@ -26,6 +26,11 @@ const target = join(root, "fixtures", "formats", format);
 /** The files of a run that hold its workdir, as text; the only ones rewritten. */
 const CARRY_WORKDIR = /^(meta\.json|state\.json|journal\.jsonl|served\/[^/]+\.json)$/;
 const MACHINE_PATH = /\/Users\/|\/home\/|[A-Za-z]:\\{1,2}Users/;
+/** Whether a text holds a path of this machine: a home folder, or the run's own workdir (a temporary one included). */
+const holdsMachinePath = (text, workdir) =>
+  MACHINE_PATH.test(text) ||
+  text.includes(workdir) ||
+  text.includes(JSON.stringify(workdir).slice(1, -1));
 
 async function files(dir, prefix = "") {
   const found = [];
@@ -40,7 +45,9 @@ async function files(dir, prefix = "") {
 for (const source of runDirs) {
   const runId = basename(resolve(source));
   const meta = JSON.parse(await readFile(join(source, "meta.json"), "utf8"));
-  if (typeof meta.workdir !== "string") throw new Error(`${runId}: meta.json has no workdir`);
+  if (typeof meta.workdir !== "string" || meta.workdir === "") {
+    throw new Error(`${runId}: meta.json has no workdir`);
+  }
   const placeholder = `/kodel-fixture/workdir/${runId}`;
   const out = join(target, runId);
   await rm(out, { recursive: true, force: true });
@@ -52,7 +59,7 @@ for (const source of runDirs) {
   for (const name of await files(out)) {
     const path = join(out, name);
     if (!CARRY_WORKDIR.test(name)) {
-      if (MACHINE_PATH.test(await readFile(path, "latin1"))) {
+      if (holdsMachinePath(await readFile(path, "latin1"), meta.workdir)) {
         throw new Error(`${runId}/${name}: holds a path of this machine and is copied as it is`);
       }
       continue;
@@ -65,7 +72,7 @@ for (const source of runDirs) {
       .split(escaped)
       .join(placeholder);
     if (name === "journal.jsonl") text = placeholderInJournal(text, placeholder);
-    if (MACHINE_PATH.test(text)) {
+    if (holdsMachinePath(text, meta.workdir)) {
       throw new Error(`${runId}/${name}: a path of this machine is left after the replacement`);
     }
     await writeFile(path, text);

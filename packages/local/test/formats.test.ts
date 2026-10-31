@@ -649,6 +649,8 @@ describe("every stored format against the current engine", () => {
     expect(error?.message ?? "").toContain(
       `run ${id} must be finished before a new run starts for this task`,
     );
+    // leaving it as it is stays a choice; the text says what that choice costs
+    expect(error?.message ?? "").toContain("left as it is, it still blocks a new run");
     // and `findLatest` still passes it over: it is not a run this kodel can report on
     expect(await store.findLatest(pipeline, task)).toBeUndefined();
   });

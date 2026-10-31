@@ -737,8 +737,8 @@ describe("t40 snapshots under the lock", () => {
   /** A snapshotter that counts its calls and can be made slow or broken. */
   class Counting extends GitSnapshotter {
     calls = 0;
-    /** A slow snapshot finishes for real only once this is set; until then only its deadline ends it. */
-    released = false;
+    /** How many slow snapshots ended on their deadline: a slow snapshot never finishes on git. */
+    timedOut = 0;
     constructor(
       root: string,
       private readonly behave: "ok" | "slow" | "broken" = "ok",
@@ -750,10 +750,11 @@ describe("t40 snapshots under the lock", () => {
       if (this.behave === "broken") throw new Error("git is broken");
       if (this.behave === "slow") {
         // Takes as long as it is allowed, then gives up: what a hung git looks like to the host.
-        while ((deadline?.remainingMs() ?? 0) > 0 && !this.released) {
+        while ((deadline?.remainingMs() ?? 0) > 0) {
           await new Promise((resolve) => setTimeout(resolve, 5));
         }
-        if (!this.released) throw new Error("deadline: git took longer than the time allowed");
+        this.timedOut += 1;
+        throw new Error("deadline: git took longer than the time allowed");
       }
       return super.snapshot(deadline);
     }
@@ -786,12 +787,16 @@ describe("t40 snapshots under the lock", () => {
       lockHooks: spy.hooks,
     });
     const { run } = await h.start("split the work");
-    // The bound is logical: the hand-in is decided while the snapshot is never released, so it ended
+    const before = { calls: snapshotter.calls, timedOut: snapshotter.timedOut };
+    // The bound is logical: the hand-in is decided while the snapshot never finishes, so it ended
     // on the deadline and not on git. The time limit is only a guard against a hang.
     const completing = run.completeStep("plan", 1);
     expect(await settlesWithin(completing, 30_000)).toBe(true);
     expect((await completing).ok).toBe(true);
-    expect(snapshotter.released).toBe(false);
+    // the hand-in did ask git, and every snapshot it asked for ended on its deadline
+    const asked = snapshotter.calls - before.calls;
+    expect(asked).toBeGreaterThan(0);
+    expect(snapshotter.timedOut - before.timedOut).toBe(asked);
     expect(spy.depth()).toBe(0);
     expect(Math.max(...spy.held)).toBeLessThan(15_000);
     const state = await run.state();
@@ -1047,8 +1052,9 @@ describe("t40 the shared tree at a gate and at a hand-in", () => {
     expect(step.waiting.tell_the_person).toContain("`changes_note`");
   });
 
-  test("t40_gate_note_only_with_a_list_of_changed_files", async () => {
-    // b runs beside the gate, but no file changed: there is no list for the note to qualify
+  test("t40_gate_note_with_no_file_changed_is_the_same_for_agent_and_person", async () => {
+    // b runs beside the gate, but no file changed yet: b may still write while the person reads, so
+    // the agent's answer carries the note as the person's question does (`changesSinceGate`)
     const { run, latch } = await latched(GATED);
     await run.completeStep("plan", 1);
     await latch.started("b#1");
@@ -1057,8 +1063,10 @@ describe("t40 the shared tree at a gate and at a hand-in", () => {
     const step = await run.nextStep();
     if (!("waiting" in step)) throw new Error("expected a waiting answer");
     expect(step.waiting.changes).toBeUndefined();
-    expect(step.waiting).not.toHaveProperty("changes_note");
-    expect(step.waiting.tell_the_person).not.toContain(TELL_CHANGES_NOTE);
+    expect(step.waiting.changes_note).toBe(SHARED_TREE_NOTE);
+    expect(step.waiting.tell_the_person).toContain(TELL_CHANGES_NOTE);
+    const found = await run.changesSinceGate("a-gate");
+    expect(found).toMatchObject({ kind: "changes", files: {}, note: SHARED_TREE_NOTE });
     latch.release("b#1");
     await run.waitForRest(5_000);
   });

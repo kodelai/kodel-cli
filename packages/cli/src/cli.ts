@@ -8,6 +8,7 @@
 import {
   findProjectRoot,
   LocalPipelineHost,
+  loadAgentHints,
   loadConfig,
   openTaskService,
   type ProjectRoot,
@@ -15,6 +16,7 @@ import {
 import { MAX_PAYLOAD_BYTES, runHook } from "@kodel-ai/local/hooks";
 import {
   type Decision,
+  deadBranchNote,
   KodelError,
   type NewTask,
   RECORD_VERSION,
@@ -331,10 +333,12 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         env.err(`kodel: the task tools are not served: ${plain(why)}\n`);
       }
       // The instructions are sent once, when the agent connects: a change of this setting applies
-      // when the server is started again. A config that cannot be read leaves the default.
+      // when the server is started again. A config that cannot be read leaves the default, except
+      // for a valid `agent_hints` block: a bad value elsewhere must not undo `wait: false`.
+      const waitHint = (await loadAgentHints(resolved.dataDir)).wait;
       const settings = await loadConfig(resolved.dataDir)
         .then((config) => ({
-          waitHint: config.agent_hints.wait,
+          waitHint,
           dialog: config.decisions.dialog,
           agentDecisions: {
             gate: config.decisions.agent.gate,
@@ -342,7 +346,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           },
         }))
         .catch(() => ({
-          waitHint: true,
+          waitHint,
           dialog: false,
           agentDecisions: { gate: false, pipelineChange: false },
         }));
@@ -546,8 +550,8 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           env.out(`waiting:   ${plain(other.node_slug)} (${other.reason})\n`);
         }
         // A doomed fork is still worked: say why the run cannot end well and what it still waits for.
-        const note =
-          "node" in next ? next.node.note : "running" in next ? next.running.note : undefined;
+        // Only that part of the agent's note: the rest of it (the offer of `kodel wait`) is not for a person.
+        const note = deadBranchNote(state.forks);
         if (note !== undefined) {
           env.out(`note:      ${plain(note)}\n`);
           const open =
@@ -556,7 +560,11 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
               : "running" in next
                 ? next.running.active.map((a) => a.node_slug)
                 : [];
-          if (open.length > 0) env.out(`waits for: ${open.map(plain).join(", ")}\n`);
+          const decisions = [...("waiting" in next ? [next.waiting] : []), ...(also ?? [])].map(
+            (w) => `${plain(w.node_slug)} (${w.reason})`,
+          );
+          const all = [...open.map(plain), ...decisions];
+          if (all.length > 0) env.out(`waits for: ${all.join(", ")}\n`);
         }
       } catch {
         env.out("next:      cannot be worked out from this state (it is not readable as a run)\n");

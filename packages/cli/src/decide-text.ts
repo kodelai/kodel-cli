@@ -43,7 +43,8 @@ export async function describePendingChange(
 export function gateChangesText(found: ChangeReport): string | undefined {
   if (found.kind === "changes") {
     const files = Object.keys(found.files);
-    // With no file changed yet the note still stands: other branches may write while the person reads.
+    // With no file changed yet the note still stands: other branches may write while the person
+    // reads. The agent's answer (`changes_note`) follows the same rule.
     const shared = found.note === undefined ? [] : [SHARED_TREE_TEXT];
     if (files.length === 0) return shared[0];
     const shown = files.slice(0, SHOWN_FILES).map((f) => `  ${plain(f)}`);

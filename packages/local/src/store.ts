@@ -523,7 +523,8 @@ export class FileStore {
         if (peek?.status === "running" || peek?.status === "paused") {
           throw new KodelError(
             error.code,
-            `${error.message}; run ${meta.runId} must be finished before a new run starts for this task`,
+            // Left as it is, the run is passed over everywhere but here: a second run beside it is refused.
+            `${error.message}; left as it is, it still blocks a new run of this pipeline for this task: run ${meta.runId} must be finished before a new run starts for this task`,
           );
         }
         continue;

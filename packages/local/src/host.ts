@@ -1730,8 +1730,9 @@ export class LocalRun {
       if ((await store.readSnapshots(this.runId)).run !== undefined) return; // a check took it
       await store.writeSnapshot(this.runId, "run", await snapshotter.snapshot());
     } catch (error) {
+      // Kept in snapshots.json and shown at the gate, like the failure of any other snapshot.
       await store
-        .writeSnapshot(this.runId, "run!", error instanceof Error ? error.message : String(error))
+        .writeSnapshot(this.runId, "run!", this.changesErrorText(error))
         .catch(() => undefined);
     }
   }
@@ -2323,9 +2324,10 @@ export class LocalRun {
         if (omitted > 0) step.waiting.changes_omitted = omitted;
       }
       // The note qualifies the list it stands by, so it is judged on the same window: the whole run.
-      // Only a list has something to qualify: no repository, no record or no file changed has none.
+      // As the person is shown it (`kodel gate`, the dialog): with no file changed yet it still stands,
+      // since other branches may write while the person reads; no repository or no record has none.
       if (
-        step.waiting.changes !== undefined &&
+        found.kind === "changes" &&
         (await this.otherBranchesMovedInRun(state, step.waiting.node_slug))
       ) {
         step.waiting.changes_note = SHARED_TREE_NOTE;

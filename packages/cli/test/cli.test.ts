@@ -838,6 +838,12 @@ describe("mcp over stdio", () => {
     const off = await instructionsOf();
     expect(off).not.toContain("kodel wait");
     expect(off).toContain("pipeline_start"); // the rest is as it was
+    // A bad value elsewhere in the config does not undo a valid `wait: false`.
+    await writeFile(
+      join(dir, ".kodel", "config.yaml"),
+      "worktree:\n  mode: sideways\nagent_hints:\n  wait: false\n",
+    );
+    expect(await instructionsOf()).not.toContain("kodel wait");
     // A config that cannot be read leaves the offer in; the server still starts.
     await writeFile(join(dir, ".kodel", "config.yaml"), "agent_hints: [\n");
     expect(await instructionsOf()).toContain("kodel wait");

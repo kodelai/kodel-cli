@@ -402,6 +402,20 @@ describe("approving knows what changed since the gate, and says when it cannot t
     expect(text).not.toContain(tmpdir());
   });
 
+  test("t40_failed_run_baseline_text_holds_no_absolute_path", async () => {
+    class FailsWithPath extends GitSnapshotter {
+      override async snapshot(): Promise<string> {
+        throw new Error(`fatal: unable to write ${join(dir, ".git", "index.lock")}`);
+      }
+    }
+    const run = await startRun(host({ snapshotter: new FailsWithPath(dir) }));
+    const text = await readFile(join(runDir(run.runId), "snapshots.json"), "utf8");
+    const snapshots = JSON.parse(text) as Record<string, string>;
+    expect(snapshots["run!"]).toContain("index.lock");
+    expect(text).not.toContain(dir);
+    expect(text).not.toContain(tmpdir());
+  });
+
   test("a start that cannot record the baseline still starts, and the gate says it cannot tell", async () => {
     const snapshotter = new FailsOnDemand(dir);
     snapshotter.failing = true;

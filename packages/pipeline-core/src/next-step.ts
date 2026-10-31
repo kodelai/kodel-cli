@@ -230,7 +230,7 @@ const PAUSE_TEXT = {
 
 /** Added by the host to a gate's `tell_the_person` when the answer carries `changes_note`. */
 export const TELL_CHANGES_NOTE =
-  " Other branches of the fork were running while this step waited (`changes_note`): tell the person in your message that some of the changed files may be theirs, as the working tree is one.";
+  " Other branches of the fork were running while this step waited (`changes_note`): tell the person in your message that some of the changed files, listed now or written while they read, may be theirs, as the working tree is one.";
 
 const TELL_AT_GATE =
   "Write to the person, in the language they use, before you end your turn: (1) what they are " +
@@ -865,7 +865,7 @@ function runningBody(spec: PipelineSpec, state: RunState, now: number) {
 }
 
 /** The text for a fork whose branch died: the run cannot end well, but the open steps are still worked. */
-function deadBranchNote(forks: Record<string, ForkState> | undefined): string | undefined {
+export function deadBranchNote(forks: Record<string, ForkState> | undefined): string | undefined {
   const dead = Object.values(forks ?? {}).flatMap((fork) =>
     fork.branches.flatMap((branch) => {
       const arrival = fork.arrived[branch];

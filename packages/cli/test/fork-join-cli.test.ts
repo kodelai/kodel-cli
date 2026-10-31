@@ -240,6 +240,26 @@ const DOOMED = [
   "",
 ].join("\n");
 
+/** As `doomed`, with a third branch that waits for a person. */
+const DOOMED_GATE = [
+  "name: doomed-gate",
+  "nodes:",
+  "  - { slug: plan, kind: agent, prompt: plan }",
+  "  - { slug: a, kind: agent, prompt: a }",
+  "  - { slug: b, kind: agent, prompt: b }",
+  "  - { slug: c, kind: human, prompt: fine? }",
+  "  - { slug: merge, kind: agent, prompt: merge, join: all }",
+  "edges:",
+  "  - { from: plan, to: a }",
+  "  - { from: plan, to: b }",
+  "  - { from: plan, to: c }",
+  "  - { from: a, to: merge }",
+  "  - { from: b, to: merge }",
+  "  - { from: c, to: merge }",
+  "  - { from: c, to: merge, when: rejected }",
+  "",
+].join("\n");
+
 /** Two steps: the person's approval ends the run. */
 const ENDS = [
   "name: ends",
@@ -299,6 +319,7 @@ beforeEach(async () => {
     ["pauses", PAUSES],
     ["failed-branch", FAILED_BRANCH],
     ["doomed", DOOMED],
+    ["doomed-gate", DOOMED_GATE],
     ["ends", ENDS],
     ["resume-ends", RESUME_ENDS],
     ["apply-ends", APPLY_ENDS],
@@ -525,6 +546,37 @@ describe("t40 several gates at once", () => {
     expect(one.out).toContain('note:      A branch of the fork is dead (branch "b" failed at "b"');
     expect(one.out).toContain("the run ends failed when the others have settled");
     expect(one.out).toContain("waits for: a\n");
+  });
+
+  test("t40_status_note_is_for_the_person_and_names_every_decision", async () => {
+    const h = host();
+    const run = (await h.start({ pipeline: "doomed-gate", task: "t", restart: false }))
+      .run as LocalRun;
+    await run.completeStep("plan", 1);
+    await run.completeStep("b", 1);
+    await run.waitForRest(10_000);
+    const state = await run.state();
+    const fork = state.forks?.f1;
+    const arrival = fork?.arrived.b;
+    if (!fork || !arrival) throw new Error("expected b to have arrived");
+    fork.arrived.b = {
+      ...arrival,
+      label: "failed",
+      failure: { source: "pipeline", reason: "red", from: "b" },
+      dead: true,
+    };
+    const inner = (run as unknown as { host: LocalHost }).host;
+    const hash = await inner.store.writeState(run.runId, state, (next) =>
+      inner.integrity.stage(run.runId, next),
+    );
+    await inner.integrity.set(run.runId, hash);
+    const one = await cli("status", run.runId);
+    expect(one.code).toBe(0);
+    expect(one.out).toContain("note:      A branch of the fork is dead");
+    // the agent's part of the note (its own `kodel wait`) is not printed to the person
+    expect(one.out).not.toContain("kodel wait");
+    expect(one.out).not.toContain("Tell them when you report");
+    expect(one.out).toContain("waits for: a, c (gate)\n");
   });
 
   test("t40_resume_works_from_cli_with_running_sibling", async () => {
