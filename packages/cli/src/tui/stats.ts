@@ -1,7 +1,8 @@
 /** The Report screen: how a pipeline fares over its runs, step by step, and across the versions of a step. */
 import type { NodeStats, NodeVersion, PipelineStats, Spread } from "@kodel-ai/pipeline-core";
 import { bold, cyan, dim, fit, green, red, stripAnsi, wrapText, yellow } from "./ansi";
-import type { PipeEntry } from "./pipelines";
+import { definitionKey } from "./definition-text";
+import { type PipeEntry, unifiedDiff } from "./pipelines";
 import type { StatsData } from "./stats-load";
 import { duration } from "./tabs";
 
@@ -15,6 +16,8 @@ export interface RepState {
   selected: string;
   /** The step the table is on. */
   row: number;
+  /** The version of that step the cursor is on, or -1 when it is on the step. */
+  ver: number;
   /** The step is opened and read in full. */
   open: boolean;
   /** The steps whose versions are shown under them in the table. */
@@ -31,6 +34,7 @@ export function initialRepState(names: string[]): RepState {
   return {
     selected: names[0] ?? "",
     row: 0,
+    ver: -1,
     open: false,
     expanded: [],
     scope: "current",
@@ -54,6 +58,18 @@ function clamp(n: number, max: number): number {
 /** The numbers the screen shows: of the scope asked for, when the present definitions are known. */
 export function statsOf(rep: RepState, data: StatsData): PipelineStats {
   return rep.scope === "current" && data.definitionsKnown ? data.current : data.all;
+}
+
+function versionsIn(stats: PipelineStats | undefined, name: string): NodeVersion[] {
+  return stats?.versions.find((g) => g.node === name)?.versions ?? [];
+}
+
+/** Where the cursor really is: on a step, and on one of its versions when they are shown. */
+function cursorOf(rep: RepState, stats: PipelineStats | undefined): { row: number; ver: number } {
+  const row = clamp(rep.row, (stats?.nodes.length ?? 0) - 1);
+  const node = stats?.nodes[row];
+  const shown = node && rep.expanded.includes(node.node) ? versionsIn(stats, node.node) : [];
+  return { row, ver: shown.length === 0 ? -1 : Math.min(rep.ver, shown.length - 1) };
 }
 
 // ── keys ────────────────────────────────────────────────────────────────────
@@ -85,7 +101,13 @@ export function repKey(rep: RepState, key: string, v: RepView): RepResult | unde
       return { rep, notice: "The pipeline file cannot be read, so every attempt is counted." };
     }
     return {
-      rep: { ...rep, scope: rep.scope === "current" ? "all" : "current", row: 0, scroll: 0 },
+      rep: {
+        ...rep,
+        scope: rep.scope === "current" ? "all" : "current",
+        row: 0,
+        ver: -1,
+        scroll: 0,
+      },
       notice:
         rep.scope === "current" ? "Counting every attempt." : "Counting the present definitions.",
     };
@@ -101,8 +123,10 @@ export function repKey(rep: RepState, key: string, v: RepView): RepResult | unde
   }
   const stats = data ? statsOf(rep, data) : undefined;
   const count = stats?.nodes.length ?? 0;
-  const node = stats?.nodes[clamp(rep.row, count - 1)];
-  const versioned = (name: string) => stats?.versions.some((g) => g.node === name) ?? false;
+  const at = cursorOf(rep, stats);
+  const node = stats?.nodes[at.row];
+  const shownOf = (name: string) =>
+    rep.expanded.includes(name) ? versionsIn(stats, name).length : 0;
   const close = (): RepResult => ({ rep: { ...rep, open: false, scroll: 0 } });
   switch (key) {
     case "escape":
@@ -110,18 +134,23 @@ export function repKey(rep: RepState, key: string, v: RepView): RepResult | unde
     case "left":
       if (rep.open) return close();
       if (node && rep.expanded.includes(node.node)) {
-        return { rep: { ...rep, expanded: rep.expanded.filter((x) => x !== node.node) } };
+        // Closing the versions of a step puts the cursor on the step.
+        return {
+          rep: { ...rep, expanded: rep.expanded.filter((x) => x !== node.node), ver: -1 },
+        };
       }
       return { rep, focus: "list" };
     case "right":
-      if (rep.open || !node || rep.expanded.includes(node.node)) return { rep };
-      if (!versioned(node.node)) return { rep, notice: "This step has had one definition only." };
+      if (rep.open || !node || at.ver >= 0 || rep.expanded.includes(node.node)) return { rep };
+      if (versionsIn(stats, node.node).length === 0) {
+        return { rep, notice: "This step has had one definition only." };
+      }
       return { rep: { ...rep, expanded: [...rep.expanded, node.node] } };
     case "v": {
       if (rep.open) return undefined;
       const names = (stats?.versions ?? []).map((g) => g.node);
       const every = names.length > 0 && names.every((x) => rep.expanded.includes(x));
-      return { rep: { ...rep, expanded: every ? [] : names } };
+      return { rep: { ...rep, expanded: every ? [] : names, ver: every ? -1 : rep.ver } };
     }
     default:
   }
@@ -133,12 +162,28 @@ export function repKey(rep: RepState, key: string, v: RepView): RepResult | unde
   if (key === "pagedown" || key === " ") return rep.open ? moveScroll(page) : undefined;
   if (key === "pageup" || key === "b") return rep.open ? moveScroll(-page) : undefined;
   if (!rep.open) {
-    if (up || down) return { rep: { ...rep, row: clamp(rep.row + (down ? 1 : -1), count - 1) } };
+    if (down && node) {
+      // Down goes through the versions that are shown, then on to the next step.
+      if (at.ver + 1 < shownOf(node.node)) return { rep: { ...rep, row: at.row, ver: at.ver + 1 } };
+      return { rep: { ...rep, row: clamp(at.row + 1, count - 1), ver: -1 } };
+    }
+    if (up && node) {
+      if (at.ver >= 0) return { rep: { ...rep, row: at.row, ver: at.ver - 1 } };
+      const before = stats?.nodes[at.row - 1];
+      if (!before) return { rep };
+      return { rep: { ...rep, row: at.row - 1, ver: shownOf(before.node) - 1 } };
+    }
     if (key === "enter" && count > 0) return { rep: { ...rep, open: true, scroll: 0 } };
     return undefined;
   }
   if (key === "n" || key === "p") {
-    return { rep: { ...rep, row: clamp(rep.row + (key === "n" ? 1 : -1), count - 1), scroll: 0 } };
+    const by = key === "n" ? 1 : -1;
+    // On a version, the next and the previous are the versions of the same step.
+    if (at.ver >= 0 && node) {
+      const last = versionsIn(stats, node.node).length - 1;
+      return { rep: { ...rep, ver: clamp(at.ver + by, last), scroll: 0 } };
+    }
+    return { rep: { ...rep, row: clamp(at.row + by, count - 1), ver: -1, scroll: 0 } };
   }
   if (up || down) return moveScroll(down ? 1 : -1);
   return undefined;
@@ -340,10 +385,10 @@ function stepsBody(stats: PipelineStats, rep: RepState, width: number): Body {
   out.push(
     dim(`${fit("", nameWidth)}${columns.map((c) => ` ${c.title.padStart(c.width)}`).join("")}`),
   );
-  const at = clamp(rep.row, stats.nodes.length - 1);
+  const cursor = cursorOf(rep, stats);
   let anchor = 0;
   for (const [i, n] of stats.nodes.entries()) {
-    const on = i === at;
+    const on = i === cursor.row && cursor.ver === -1;
     if (on) anchor = out.length;
     const versions = versionsOf(n.node);
     const open = rep.expanded.includes(n.node);
@@ -364,9 +409,11 @@ function stepsBody(stats: PipelineStats, rep: RepState, width: number): Body {
     if (!open) continue;
     for (const [k, v] of versions.entries()) {
       const what = v.changed.length > 0 ? v.changed.join("+") : "first";
-      // The mark of the present definition stands where the cursor stands, so it is never cut off.
+      // The mark of the present definition stands next to the cursor, so it is never cut off.
       const now = v.current ? green("◀") : " ";
-      const name = `  ${now} ${bold(`v${v.index}`)} ${dim(`${day(v.firstSeen)} ${what}`)}`;
+      const here = i === cursor.row && cursor.ver === k;
+      if (here) anchor = out.length;
+      const name = `${here ? cyan("❯") : " "} ${now} ${bold(`v${v.index}`)} ${dim(`${day(v.firstSeen)} ${what}`)}`;
       out.push(
         fit(
           `${fit(name, nameWidth)}${cellsOf(columns, v, versions[k - 1], v.attempts < FEW)}`,
@@ -398,24 +445,12 @@ function bar(share: number, cells = 12): string {
   return `${"█".repeat(filled)}${dim("░".repeat(cells - filled))}`;
 }
 
-function detailBody(stats: PipelineStats, rep: RepState, width: number): Body {
-  const n = stats.nodes[clamp(rep.row, stats.nodes.length - 1)];
-  if (!n) return { lines: [dim("No steps.")] };
+/** What a step, or one version of it, shows in detail. */
+type Numbers = Omit<NodeStats, "node" | "elsewhere">;
+
+/** The numbers of a step or of a version: time, how its attempts ended and why, findings, people, cost. */
+function metricLines(n: Numbers, width: number): string[] {
   const out: string[] = [];
-  const at = stats.nodes.indexOf(n) + 1;
-  out.push(
-    `${bold(n.node)} ${dim(`· ${n.gate ? "a person decides" : "step"} · ${at} of ${stats.nodes.length}`)}`,
-  );
-  if (n.attempts === 0) {
-    out.push(
-      dim(
-        n.elsewhere > 0
-          ? `Nothing ran on the present definition yet. ${plural(n.elsewhere, "attempt")} ran on older ones: press a.`
-          : "This step never ran.",
-      ),
-    );
-    return { lines: out };
-  }
   out.push(
     dim(
       `${plural(n.runs, "run")} · ${plural(n.attempts, "attempt")} (${n.perRun.toFixed(1)} per run)` +
@@ -482,6 +517,44 @@ function detailBody(stats: PipelineStats, rep: RepState, width: number): Body {
       ),
     );
   }
+  return out;
+}
+
+/** A line cut to the width, keeping its indent on the lines it continues on. */
+function wrapKeeping(line: string, width: number): string[] {
+  const indent = /^\s*/.exec(line)?.[0] ?? "";
+  const parts = wrapText(line.trim(), Math.max(10, width - indent.length - 1));
+  return parts.length === 0 ? [""] : parts.map((part) => `${indent}${part}`);
+}
+
+/** A unified diff in colour; a long line is wrapped under its marker. */
+function diffLines(diff: string[], width: number): string[] {
+  const paint = (mark: string) =>
+    mark === "+" ? green : mark === "-" ? red : mark === "@" ? cyan : dim;
+  return diff.flatMap((line) => {
+    if (line.startsWith("@@")) return [cyan(line)];
+    const mark = line[0] ?? " ";
+    const parts = wrapKeeping(line.slice(1), width - 2);
+    return parts.map((part, i) => paint(mark)(`${i === 0 ? mark : " "} ${part}`));
+  });
+}
+
+function nodeDetail(stats: PipelineStats, n: NodeStats, row: number, width: number): Body {
+  const out: string[] = [];
+  out.push(
+    `${bold(n.node)} ${dim(`· ${n.gate ? "a person decides" : "step"} · ${row + 1} of ${stats.nodes.length}`)}`,
+  );
+  if (n.attempts === 0) {
+    out.push(
+      dim(
+        n.elsewhere > 0
+          ? `Nothing ran on the present definition yet. ${plural(n.elsewhere, "attempt")} ran on older ones: press a.`
+          : "This step never ran.",
+      ),
+    );
+    return { lines: out };
+  }
+  out.push(...metricLines(n, width));
   if (n.elsewhere > 0) {
     out.push(
       "",
@@ -493,9 +566,53 @@ function detailBody(stats: PipelineStats, rep: RepState, width: number): Body {
   return { lines: out };
 }
 
+/** One definition of a step: what it changed, the numbers of the attempts on it, and what it said. */
+function versionDetail(
+  n: NodeStats,
+  versions: NodeVersion[],
+  k: number,
+  data: StatsData,
+  width: number,
+): Body {
+  const v = versions[k];
+  if (!v) return { lines: [dim("No such version.")] };
+  const before = versions[k - 1];
+  const out: string[] = [];
+  out.push(
+    `${bold(n.node)} ${dim(`· v${v.index} · ${day(v.firstSeen)} · ${k + 1} of ${versions.length} definitions`)}${v.current ? green(" ◀ the present one") : ""}`,
+  );
+  const text = data.definitions[definitionKey(n.node, v.definition)];
+  const was = before ? data.definitions[definitionKey(n.node, before.definition)] : undefined;
+  if (before) {
+    out.push(dim(`changed from v${before.index}: ${v.changed.join(", ") || "nothing seen"}`));
+    out.push("", dim(`WHAT CHANGED SINCE v${before.index}`));
+    if (text && was) {
+      const diff = unifiedDiff(was.join("\n"), text.join("\n"));
+      out.push(...(diff.length > 0 ? diffLines(diff, width) : [dim("The text is the same.")]));
+    } else {
+      out.push(dim("The text of these definitions is not kept."));
+    }
+  } else {
+    out.push(dim("the first definition seen"));
+  }
+  out.push("", ...metricLines(v, width));
+  out.push("", dim("THE DEFINITION"));
+  if (text) out.push(...text.flatMap((line) => wrapKeeping(line, width)));
+  else out.push(dim("Its text is not kept: the runs that kept it are gone."));
+  return { lines: out };
+}
+
+function detailBody(stats: PipelineStats, rep: RepState, data: StatsData, width: number): Body {
+  const at = cursorOf(rep, stats);
+  const n = stats.nodes[at.row];
+  if (!n) return { lines: [dim("No steps.")] };
+  if (at.ver >= 0) return versionDetail(n, versionsIn(stats, n.node), at.ver, data, width);
+  return nodeDetail(stats, n, at.row, width);
+}
+
 function bodyOf(rep: RepState, data: StatsData, width: number): Body {
   const stats = statsOf(rep, data);
-  return rep.open ? detailBody(stats, rep, width) : stepsBody(stats, rep, width);
+  return rep.open ? detailBody(stats, rep, data, width) : stepsBody(stats, rep, width);
 }
 
 function headOf(rep: RepState, slot: StatsSlot | undefined, width: number): string[] {
@@ -564,6 +681,9 @@ export function repHints(rep: RepState, card: boolean): string {
     return `${bold("↑↓")} select   ${bold("Enter")} open   ${bold("a")} scope   ${bold("Tab")} menu   ${bold("q")} quit`;
   }
   const tail = `   ${bold("a")} scope   ${bold("z")} zoom   ${bold("Esc")} ${rep.open ? "back" : "list"}`;
-  if (rep.open) return `${bold("↑↓")} scroll   ${bold("n/p")} next/prev step${tail}`;
-  return `${bold("↑↓")} step   ${bold("→")} versions   ${bold("←")} hide   ${bold("v")} all   ${bold("Enter")} read the step${tail}`;
+  if (rep.open) {
+    const what = rep.ver >= 0 ? "version" : "step";
+    return `${bold("↑↓")} scroll   ${bold("n/p")} next/prev ${what}${tail}`;
+  }
+  return `${bold("↑↓")} step   ${bold("→")} versions   ${bold("←")} hide   ${bold("v")} all   ${bold("Enter")} read it${tail}`;
 }

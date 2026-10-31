@@ -9,6 +9,7 @@ import {
   type RunState,
 } from "@kodel-ai/pipeline-core";
 import { stripAnsi, visibleLength } from "../src/tui/ansi";
+import { definitionKey } from "../src/tui/definition-text";
 import { demoSessions } from "../src/tui/demo";
 import { demoStats } from "../src/tui/demo-stats";
 import { createStatsLoader, type StatsSource } from "../src/tui/stats-load";
@@ -182,10 +183,40 @@ describe("the versions of a step, under it in the table", () => {
     expect(m.rep.expanded).toEqual([]);
   });
 
-  test("the cursor stays on the steps, and the versions do not take a row of their own", () => {
+  test("down goes through the versions that are shown and then on to the next step", () => {
+    const shown = reading([...onImpl, "right"]);
+    expect([shown.rep.row, shown.rep.ver]).toEqual([2, -1]);
+    const first = press(shown, ["down"]);
+    expect([first.rep.row, first.rep.ver]).toEqual([2, 0]);
+    expect(screen(first)).toMatch(/❯ {3}v1/);
+    const last = press(first, ["down"]);
+    expect([last.rep.row, last.rep.ver]).toEqual([2, 1]);
+    const next = press(last, ["down"]);
+    expect([next.rep.row, next.rep.ver]).toEqual([3, -1]);
+    expect(screen(next)).toMatch(/❯ ● verify/);
+  });
+
+  test("up from the step below lands on the last version that is shown", () => {
+    const m = reading([...onImpl, "right", "down", "down", "down", "up"]);
+    expect([m.rep.row, m.rep.ver]).toEqual([2, 1]);
+    expect([press(m, ["up"]).rep.row, press(m, ["up"]).rep.ver]).toEqual([2, 0]);
+    expect([press(m, ["up", "up"]).rep.ver]).toEqual([-1]);
+  });
+
+  test("hidden versions are skipped: down goes straight to the next step", () => {
+    const m = reading([...onImpl, "down"]);
+    expect([m.rep.row, m.rep.ver]).toEqual([3, -1]);
+  });
+
+  test("the left key on a version hides them and puts the cursor on the step", () => {
+    const m = reading([...onImpl, "right", "down", "left"]);
+    expect([m.rep.row, m.rep.ver]).toEqual([2, -1]);
+    expect(m.rep.expanded).toEqual([]);
+  });
+
+  test("the right key on a version does nothing", () => {
     const m = reading([...onImpl, "right", "down"]);
-    expect(m.rep.row).toBe(3);
-    expect(screen(m)).toMatch(/❯ ● verify/);
+    expect(press(m, ["right"]).rep).toEqual(m.rep);
   });
 
   test("the versions of a step do not change with the scope", () => {
@@ -197,6 +228,87 @@ describe("the versions of a step, under it in the table", () => {
         .find((l) => l.includes("v1"))
         ?.split("│")[1];
     expect(v1(all)).toBe(v1(current));
+  });
+});
+
+describe("the detail of a version", () => {
+  // impl is the third row; its versions are v1 (before) and v2 (the present one)
+  const onV1 = ["enter", "down", "down", "right", "down", "enter"];
+  const onV2 = ["enter", "down", "down", "right", "down", "down", "enter"];
+
+  test("Enter on a version opens it: what changed, the numbers, and the definition", () => {
+    const text = screen(reading(onV2));
+    expect(text).toContain("v2");
+    expect(text).toContain("the present one");
+    expect(text).toContain("WHAT CHANGED SINCE v1");
+    expect(text).toContain("+   Do not run the whole suite");
+    expect(text).toContain("HOW ATTEMPTS ENDED");
+  });
+
+  test("the text of the definition is there, below the numbers", () => {
+    const m = reading(onV2);
+    const all = render(m, { cols: 130, rows: 120 }).map(stripAnsi).join("\n");
+    expect(all.indexOf("HOW ATTEMPTS ENDED")).toBeLessThan(all.indexOf("THE DEFINITION"));
+    expect(all).toContain("Implement the approved plan.");
+    expect(all).toContain("check: diff");
+  });
+
+  test("the first version has nothing before it to be compared with", () => {
+    const text = screen(reading(onV1));
+    expect(text).toContain("the first definition seen");
+    expect(text).not.toContain("WHAT CHANGED");
+  });
+
+  test("n and p go between the versions of the step, and stop at the ends", () => {
+    let m = reading(onV1);
+    expect(m.rep.ver).toBe(0);
+    m = press(m, ["n"]);
+    expect(m.rep.ver).toBe(1);
+    expect(screen(m)).toContain("2 of 2 definitions");
+    expect(press(m, ["n"]).rep.ver).toBe(1);
+    expect(press(m, ["p"]).rep.ver).toBe(0);
+    expect(press(m, ["p", "p"]).rep.ver).toBe(0);
+  });
+
+  test("Esc comes back to the table with the cursor on the version", () => {
+    const m = press(reading(onV2), ["escape"]);
+    expect(m.rep.open).toBe(false);
+    expect([m.rep.row, m.rep.ver]).toEqual([2, 1]);
+    expect(screen(m)).toMatch(/❯ ◀ v2/);
+  });
+
+  test("the hints say that n and p go between versions", () => {
+    expect(screen(reading(onV2))).toContain("next/prev version");
+    expect(screen(reading(["enter", "enter"]))).toContain("next/prev step");
+  });
+
+  test("a definition whose text is not kept says so, and the numbers stay", () => {
+    let m = reading(onV2);
+    m = withStats(m, "dev", {
+      status: "ready",
+      data: { ...demoStats("dev"), definitions: {} },
+    });
+    const text = render(m, { cols: 130, rows: 120 }).map(stripAnsi).join("\n");
+    expect(text).toContain("The text of these definitions is not kept");
+    expect(text).toContain("Its text is not kept");
+    expect(text).toContain("HOW ATTEMPTS ENDED");
+  });
+
+  test("a version has the numbers of its own attempts, not the step's", () => {
+    const v1 = render(reading(onV1), { cols: 130, rows: 120 }).map(stripAnsi).join("\n");
+    const v2 = render(reading(onV2), { cols: 130, rows: 120 }).map(stripAnsi).join("\n");
+    const attempts = (t: string) => /(\d+) attempts \(/.exec(t)?.[1];
+    expect(attempts(v1)).not.toBe(attempts(v2));
+  });
+
+  test("on a narrow terminal no line is wider than the screen", () => {
+    let m = reading(onV2, NARROW);
+    for (const keys of [[], ["p"], ["pagedown"]]) {
+      m = press(m, keys, NARROW);
+      for (const line of render(m, NARROW)) {
+        expect(visibleLength(line)).toBeLessThanOrEqual(NARROW.cols);
+      }
+    }
   });
 });
 
@@ -294,16 +406,21 @@ describe("createStatsLoader", () => {
           state: { status } as RunState,
         })),
       open: async (runId) => {
-        opened.push(runId);
         const found = runs.find(([id]) => id === runId);
         if (!found || over.broken?.includes(runId)) {
           return {
             report: async () => {
+              opened.push(runId);
               throw new Error("damaged");
             },
           };
         }
-        return { report: async () => found[2] };
+        return {
+          report: async () => {
+            opened.push(runId);
+            return found[2];
+          },
+        };
       },
       resolveSource: async () => (over.missingSpec ? undefined : { spec }),
     };
@@ -352,5 +469,129 @@ describe("createStatsLoader", () => {
     const pressed = press(blind, ["a"]);
     expect(pressed.notice).toContain("cannot be read");
     expect(pressed.rep.scope).toBe("current");
+  });
+});
+
+describe("the text of the definitions of a step", () => {
+  const pipeline = (prompt: string) =>
+    parsePipeline(
+      [
+        "name: p",
+        "nodes:",
+        "  - slug: work",
+        "    kind: agent",
+        `    prompt: ${prompt}`,
+        "edges: []",
+        "",
+      ].join("\n"),
+    );
+  const before = pipeline("do it");
+  const now = pipeline("do it, and be brief");
+  const fingerprint = (text: string) => `h:${text}`;
+  const definitionOf = (spec: PipelineSpec) => {
+    const forms = canonicalNode(spec, spec.nodes[0] as PipelineSpec["nodes"][number]);
+    return {
+      work: fingerprint(forms.work),
+      checks: fingerprint(forms.checks),
+      routing: fingerprint(forms.routing),
+    };
+  };
+
+  function report(id: string, spec: PipelineSpec): RunReport {
+    const attempt: AttemptReport = {
+      attempt: 1,
+      seconds: 10,
+      outcome: "passed",
+      definition: definitionOf(spec),
+    };
+    return {
+      runId: id,
+      task: id,
+      slug: id,
+      status: "completed",
+      total_s: 10,
+      work_s: 10,
+      waiting_s: 0,
+      nodes: [{ node: "work", gate: false, attempts: [attempt], seconds: 10 }],
+      restarts: 0,
+      pauses: 0,
+      feedback: 0,
+      refused: 0,
+      refusals: [],
+      extra_attempts: 0,
+      pipeline_changes: [],
+      agent_decisions: [],
+      checks: [],
+      prompts: { not_collected: true },
+    };
+  }
+
+  const runs: [string, PipelineSpec][] = [
+    ["r1", before],
+    ["r2", now],
+    ["r3", now],
+  ];
+
+  function source(kept: boolean, calls: string[] = [], only?: string): StatsSource {
+    return {
+      runSummaries: async () =>
+        runs
+          .filter(([runId]) => only === undefined || runId === only)
+          .map(([runId]) => ({
+            meta: { runId, pipeline: "p", createdAt: Number(runId.slice(1)) },
+            state: { status: "completed" } as RunState,
+          })),
+      open: async (runId) => {
+        const spec = runs.find(([id]) => id === runId)?.[1] as PipelineSpec;
+        return {
+          report: async () => report(runId, spec),
+          ...(kept
+            ? {
+                keptVersions: async () => {
+                  calls.push(runId);
+                  return [spec];
+                },
+              }
+            : {}),
+        };
+      },
+      resolveSource: async () => ({ spec: now }),
+    };
+  }
+
+  test("each definition that a step had is found by its fingerprints, as lines", async () => {
+    const data = await createStatsLoader(source(true), fingerprint)("p");
+    const old = data.definitions[definitionKey("work", definitionOf(before))];
+    const present = data.definitions[definitionKey("work", definitionOf(now))];
+    expect(old).toContain("prompt: do it");
+    expect(present).toContain("prompt: do it, and be brief");
+    expect(old).toContain("kind: agent");
+  });
+
+  test("the search ends when every definition is found", async () => {
+    const calls: string[] = [];
+    await createStatsLoader(source(true, calls), fingerprint)("p");
+    expect(calls).toEqual(["r1", "r2"]);
+  });
+
+  test("a run that is over is not asked for its kept versions twice", async () => {
+    const calls: string[] = [];
+    const load = createStatsLoader(source(true, calls), fingerprint);
+    await load("p");
+    await load("p");
+    expect(calls).toEqual(["r1", "r2"]);
+  });
+
+  test("a source that cannot read the kept versions gives numbers without texts", async () => {
+    const data = await createStatsLoader(source(false), fingerprint)("p");
+    expect(data.definitions).toEqual({});
+    expect(data.all.versions[0]?.versions).toHaveLength(2);
+  });
+
+  test("a step that never changed has no text looked up", async () => {
+    const calls: string[] = [];
+    const data = await createStatsLoader(source(true, calls, "r2"), fingerprint)("p");
+    expect(calls).toEqual([]);
+    expect(data.definitions).toEqual({});
   });
 });

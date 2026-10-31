@@ -6,6 +6,7 @@ import {
   type StatsRun,
   summarizePipeline,
 } from "@kodel-ai/pipeline-core";
+import { definitionKey } from "./definition-text";
 import type { StatsData } from "./stats-load";
 
 const HOUR = 3600_000;
@@ -234,5 +235,38 @@ export function demoStats(pipeline: string): StatsData {
     definitionsKnown: true,
     current: summarizePipeline(runs, { scope: "current", ...options }),
     all: summarizePipeline(runs, { scope: "all", ...options }),
+    definitions: pipeline === "dev" ? DEFINITIONS : {},
   };
 }
+
+const IMPL_BEFORE = [
+  "kind: agent",
+  "attempts: 10, 3 failures in a row",
+  "on_fail: failed",
+  "prompt:",
+  "  Implement the approved plan.",
+  "  Keep the change small.",
+  "check: diff",
+  '  paths: ["packages/"]',
+  "→ verify",
+  "→ plan  when blocking_findings",
+];
+
+const IMPL_NOW = [
+  "kind: agent",
+  "attempts: 10, 3 failures in a row",
+  "on_fail: failed",
+  "prompt:",
+  "  Implement the approved plan.",
+  "  Keep the change small.",
+  "  Do not run the whole suite: run the tests of what you changed.",
+  "check: diff",
+  '  paths: ["packages/"]',
+  "→ verify",
+  "→ plan  when blocking_findings",
+];
+
+const DEFINITIONS: Record<string, string[]> = {
+  [definitionKey("impl", OLD_IMPL)]: IMPL_BEFORE,
+  [definitionKey("impl", NOW_IMPL)]: IMPL_NOW,
+};
