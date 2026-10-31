@@ -253,6 +253,40 @@ describe("the definitions of a step", () => {
     expect(impl?.versions[1]).toMatchObject({ runs: 1, attempts: 1, failed: 0 });
   });
 
+  test("a gate's versions say how many rejections each had, and how many said why", () => {
+    const gate = (def: AttemptReport["definition"], reasons: (string | undefined)[]) =>
+      reasons.map((reason, i) =>
+        attempt(i + 1, {
+          definition: def,
+          outcome: "rejected",
+          failure: { source: "human", reason: reason ?? "" },
+          decision: { outcome: "rejected", ...(reason ? { reason } : {}) },
+        }),
+      );
+    const s = summarizePipeline(
+      [
+        run("a", 1, [node("approve", gate(DEF_A, ["fix it", undefined]), true)]),
+        run("b", 2, [node("approve", gate(DEF_B, ["no tests"]), true)]),
+      ],
+      { scope: "all" },
+    );
+    expect(s.versions[0]?.versions.map((v) => v.decisions)).toEqual([
+      { rejected: 2, rejectedWithReason: 1 },
+      { rejected: 1, rejectedWithReason: 1 },
+    ]);
+  });
+
+  test("a step that nobody decides has no decisions in its versions", () => {
+    const s = summarizePipeline(
+      [
+        run("a", 1, [node("impl", [attempt(1)])]),
+        run("b", 2, [node("impl", [attempt(1, { definition: DEF_B })])]),
+      ],
+      { scope: "all" },
+    );
+    expect(s.versions[0]?.versions[0]?.decisions).toBeUndefined();
+  });
+
   test("a step with one definition has no versions to compare", () => {
     const s = summarizePipeline([run("a", 1, [node("impl", [attempt(1)])])], { scope: "all" });
     expect(s.versions).toEqual([]);

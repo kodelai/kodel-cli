@@ -127,18 +127,76 @@ describe("the Steps tab", () => {
   });
 });
 
-describe("the Versions tab", () => {
-  test("a step that changed shows its versions, which one is the present, and the change", () => {
-    const text = screen(reading(["enter", "right"]));
-    expect(text).toContain("impl");
-    expect(text).toContain("v1");
-    expect(text).toContain("v2");
-    expect(text).toContain("now");
-    expect(text).toContain("vs before");
+describe("the versions of a step, under it in the table", () => {
+  // impl is the third row, and the only step of the sample that changed its definition
+  const onImpl = ["enter", "down", "down"];
+
+  test("there is no tab of versions", () => {
+    const text = screen(reading(["enter"]));
+    expect(text).not.toContain("Versions");
+    expect(text).not.toContain("Steps  ");
   });
 
-  test("a step that never changed is not listed", () => {
-    expect(screen(reading(["enter", "right"]))).not.toContain("final-approval");
+  test("a step that changed is marked with how many definitions it had, and they are hidden", () => {
+    const text = screen(reading(onImpl));
+    expect(text).toMatch(/impl ▸2/);
+    expect(text).not.toContain("v1");
+  });
+
+  test("the right key shows the versions with the numbers of the columns, the present one marked", () => {
+    const text = screen(reading([...onImpl, "right"]));
+    expect(text).toMatch(/impl ▾2/);
+    const lines = text.split("\n");
+    const v1 = lines.find((l) => l.includes("v1"));
+    const v2 = lines.find((l) => l.includes("v2"));
+    expect(v1).toMatch(/v1 \d\d-\d\d first/);
+    expect(v2).toMatch(/◀ v2 \d\d-\d\d work/);
+    // the same columns as the step: runs, tries, time, back
+    expect(v2).toMatch(/\d+\s+\d\.\d\s+\S+\s+\S+\s+\d+%/);
+  });
+
+  test("a version is green or red where it is better or worse than the one before", () => {
+    const raw = render(reading([...onImpl, "right"]), SIZE).join("\n");
+    const v2 = raw.split("\n").find((l) => stripAnsi(l).includes("v2 "));
+    expect(v2).toContain("\u001b[32m");
+  });
+
+  test("the left key hides them, and once more goes back to the list", () => {
+    const shown = reading([...onImpl, "right"]);
+    const hidden = press(shown, ["left"]);
+    expect(screen(hidden)).not.toContain("v1");
+    expect(hidden.focus).toBe("card");
+    expect(press(hidden, ["left"]).focus).toBe("list");
+  });
+
+  test("v shows the versions of every step, and again hides them", () => {
+    const shown = reading(["enter", "v"]);
+    expect(screen(shown)).toContain("v2");
+    expect(screen(press(shown, ["v"]))).not.toContain("v2");
+  });
+
+  test("a step that never changed says so instead of opening", () => {
+    // final-approval is the sixth row
+    const m = reading(["enter", "down", "down", "down", "down", "down", "right"]);
+    expect(m.notice).toContain("one definition only");
+    expect(m.rep.expanded).toEqual([]);
+  });
+
+  test("the cursor stays on the steps, and the versions do not take a row of their own", () => {
+    const m = reading([...onImpl, "right", "down"]);
+    expect(m.rep.row).toBe(3);
+    expect(screen(m)).toMatch(/❯ ● verify/);
+  });
+
+  test("the versions of a step do not change with the scope", () => {
+    const current = screen(reading([...onImpl, "right"]));
+    const all = screen(reading([...onImpl, "right", "a"]));
+    const v1 = (t: string) =>
+      t
+        .split("\n")
+        .find((l) => l.includes("v1"))
+        ?.split("│")[1];
+    expect(v1(all)).toBe(v1(current));
   });
 });
 

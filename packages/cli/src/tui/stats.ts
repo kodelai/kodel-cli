@@ -1,9 +1,9 @@
-/** The Report screen: how a pipeline fares over its runs, step by step, and across its versions. */
-import type { NodeStats, NodeVersions, PipelineStats } from "@kodel-ai/pipeline-core";
+/** The Report screen: how a pipeline fares over its runs, step by step, and across the versions of a step. */
+import type { NodeStats, NodeVersion, PipelineStats, Spread } from "@kodel-ai/pipeline-core";
 import { bold, cyan, dim, fit, green, red, stripAnsi, wrapText, yellow } from "./ansi";
 import type { PipeEntry } from "./pipelines";
 import type { StatsData } from "./stats-load";
-import { duration, strip } from "./tabs";
+import { duration } from "./tabs";
 
 export type StatsSlot =
   | { status: "loading" }
@@ -13,26 +13,29 @@ export type StatsSlot =
 export interface RepState {
   /** The pipeline shown. */
   selected: string;
-  /** An index into `REP_TABS`. */
-  tab: number;
   /** The step the table is on. */
   row: number;
   /** The step is opened and read in full. */
   open: boolean;
+  /** The steps whose versions are shown under them in the table. */
+  expanded: string[];
   /** `current`: the attempts on the definitions the pipeline has now. `all`: every attempt. */
   scope: "current" | "all";
   scroll: number;
 }
 
-export const REP_TABS = ["Steps", "Versions"] as const;
-const STEPS = 0;
-const VERSIONS = 1;
-
 /** Fewer attempts than this and a number says little. */
 const FEW = 5;
 
 export function initialRepState(names: string[]): RepState {
-  return { selected: names[0] ?? "", tab: STEPS, row: 0, open: false, scope: "current", scroll: 0 };
+  return {
+    selected: names[0] ?? "",
+    row: 0,
+    open: false,
+    expanded: [],
+    scope: "current",
+    scroll: 0,
+  };
 }
 
 /** The pipelines that have a file: one that is only proposed has no runs. */
@@ -97,17 +100,29 @@ export function repKey(rep: RepState, key: string, v: RepView): RepResult | unde
     return undefined;
   }
   const stats = data ? statsOf(rep, data) : undefined;
+  const count = stats?.nodes.length ?? 0;
+  const node = stats?.nodes[clamp(rep.row, count - 1)];
+  const versioned = (name: string) => stats?.versions.some((g) => g.node === name) ?? false;
   const close = (): RepResult => ({ rep: { ...rep, open: false, scroll: 0 } });
   switch (key) {
     case "escape":
       return rep.open ? close() : { rep, focus: "list" };
     case "left":
       if (rep.open) return close();
-      return rep.tab === STEPS
-        ? { rep, focus: "list" }
-        : { rep: { ...rep, tab: STEPS, scroll: 0 } };
+      if (node && rep.expanded.includes(node.node)) {
+        return { rep: { ...rep, expanded: rep.expanded.filter((x) => x !== node.node) } };
+      }
+      return { rep, focus: "list" };
     case "right":
-      return rep.open ? { rep } : { rep: { ...rep, tab: VERSIONS, scroll: 0 } };
+      if (rep.open || !node || rep.expanded.includes(node.node)) return { rep };
+      if (!versioned(node.node)) return { rep, notice: "This step has had one definition only." };
+      return { rep: { ...rep, expanded: [...rep.expanded, node.node] } };
+    case "v": {
+      if (rep.open) return undefined;
+      const names = (stats?.versions ?? []).map((g) => g.node);
+      const every = names.length > 0 && names.every((x) => rep.expanded.includes(x));
+      return { rep: { ...rep, expanded: every ? [] : names } };
+    }
     default:
   }
   const lines = data ? bodyOf(rep, data, v.width).lines.length : 0;
@@ -115,18 +130,17 @@ export function repKey(rep: RepState, key: string, v: RepView): RepResult | unde
   const moveScroll = (by: number): RepResult => ({
     rep: { ...rep, scroll: clamp(rep.scroll + by, lines - v.room) },
   });
-  const scrolling = rep.open || rep.tab === VERSIONS;
-  if (key === "pagedown" || key === " ") return scrolling ? moveScroll(page) : undefined;
-  if (key === "pageup" || key === "b") return scrolling ? moveScroll(-page) : undefined;
-  const count = stats?.nodes.length ?? 0;
-  if (rep.tab === STEPS && !rep.open) {
+  if (key === "pagedown" || key === " ") return rep.open ? moveScroll(page) : undefined;
+  if (key === "pageup" || key === "b") return rep.open ? moveScroll(-page) : undefined;
+  if (!rep.open) {
     if (up || down) return { rep: { ...rep, row: clamp(rep.row + (down ? 1 : -1), count - 1) } };
     if (key === "enter" && count > 0) return { rep: { ...rep, open: true, scroll: 0 } };
+    return undefined;
   }
-  if (rep.open && (key === "n" || key === "p")) {
+  if (key === "n" || key === "p") {
     return { rep: { ...rep, row: clamp(rep.row + (key === "n" ? 1 : -1), count - 1), scroll: 0 } };
   }
-  if (scrolling && (up || down)) return moveScroll(down ? 1 : -1);
+  if (up || down) return moveScroll(down ? 1 : -1);
   return undefined;
 }
 
@@ -183,28 +197,57 @@ export function emptyReport(): string[] {
   ];
 }
 
+/** What a row of the table is made of: a step, or one version of a step. */
+interface Metrics {
+  runs: number;
+  attempts: number;
+  perRun: number;
+  failed: number;
+  seconds: Spread;
+  findings: { attempts: number; rows: number };
+  decisions?: { rejected: number; rejectedWithReason: number } | undefined;
+  usage: { attempts: number; usd: number };
+}
+
 interface Column {
   key: string;
   title: string;
   width: number;
-  cell: (n: NodeStats) => { text: string; style?: (s: string) => string };
+  cell: (m: Metrics) => { text: string; style?: (s: string) => string };
+  /** For a version: lower is better, and how big a change has to be to count. */
+  trend?: { value: (m: Metrics) => number; least: (before: number) => number };
 }
 
-const backStyle = (n: NodeStats) => {
-  const share = n.attempts === 0 ? 0 : n.failed / n.attempts;
-  return share >= 0.4 ? red : share >= 0.15 ? yellow : (s: string) => s;
+const share = (m: Metrics) => (m.attempts === 0 ? 0 : m.failed / m.attempts);
+
+const backStyle = (n: Metrics) => {
+  const s = share(n);
+  return s >= 0.4 ? red : s >= 0.15 ? yellow : (text: string) => text;
 };
 
 const COLUMNS: Column[] = [
   { key: "runs", title: "runs", width: 4, cell: (n) => ({ text: String(n.runs) }) },
-  { key: "tries", title: "tries", width: 5, cell: (n) => ({ text: n.perRun.toFixed(1) }) },
-  { key: "time", title: "time", width: 7, cell: (n) => ({ text: secs(n.seconds.median) }) },
+  {
+    key: "tries",
+    title: "tries",
+    width: 5,
+    cell: (n) => ({ text: n.perRun.toFixed(1) }),
+    trend: { value: (m) => m.perRun, least: (b) => 0.1 * b },
+  },
+  {
+    key: "time",
+    title: "time",
+    width: 7,
+    cell: (n) => ({ text: secs(n.seconds.median) }),
+    trend: { value: (m) => m.seconds.median, least: (b) => 0.1 * b },
+  },
   { key: "p90", title: "p90", width: 7, cell: (n) => ({ text: secs(n.seconds.p90) }) },
   {
     key: "back",
     title: "back",
     width: 5,
     cell: (n) => ({ text: percent(n.failed, n.attempts), style: backStyle(n) }),
+    trend: { value: share, least: () => 0.05 },
   },
   {
     key: "finds",
@@ -254,9 +297,45 @@ interface Body {
   anchor?: number;
 }
 
+const day = (ms: number) => new Date(ms).toISOString().slice(5, 10);
+
+/** The cells of a row; a version is painted by how it differs from the one before it. */
+function cellsOf(
+  columns: Column[],
+  m: Metrics,
+  before: Metrics | undefined,
+  dimmed: boolean,
+): string {
+  return columns
+    .map((c) => {
+      const { text, style } = c.cell(m);
+      const padded = text.padStart(c.width);
+      if (dimmed) return ` ${dim(padded)}`;
+      if (before && c.trend && before.attempts >= 3 && m.attempts >= 3) {
+        const was = c.trend.value(before);
+        const change = c.trend.value(m) - was;
+        if (Math.abs(change) >= c.trend.least(was)) return ` ${(change < 0 ? green : red)(padded)}`;
+      }
+      return ` ${style ? style(padded) : padded}`;
+    })
+    .join("");
+}
+
 function stepsBody(stats: PipelineStats, rep: RepState, width: number): Body {
   const out: string[] = [];
-  const nameWidth = Math.min(28, 4 + stats.nodes.reduce((n, s) => Math.max(n, s.node.length), 4));
+  const versionsOf = (name: string): NodeVersion[] =>
+    stats.versions.find((g) => g.node === name)?.versions ?? [];
+  const versionLabel = (v: NodeVersion) =>
+    `    v${v.index} ${day(v.firstSeen)} ${v.changed.length > 0 ? v.changed.join("+") : "first"}`;
+  // The column is as wide as the longest name or version label, up to a limit.
+  const nameWidth = Math.min(
+    28,
+    Math.max(
+      ...stats.nodes.map((s) => 4 + s.node.length + (versionsOf(s.node).length > 0 ? 3 : 0)),
+      ...stats.nodes.flatMap((s) => versionsOf(s.node).map((v) => versionLabel(v).length)),
+      8,
+    ),
+  );
   const columns = columnsFor(nameWidth, width);
   out.push(
     dim(`${fit("", nameWidth)}${columns.map((c) => ` ${c.title.padStart(c.width)}`).join("")}`),
@@ -266,30 +345,43 @@ function stepsBody(stats: PipelineStats, rep: RepState, width: number): Body {
   for (const [i, n] of stats.nodes.entries()) {
     const on = i === at;
     if (on) anchor = out.length;
+    const versions = versionsOf(n.node);
+    const open = rep.expanded.includes(n.node);
     const glyph = n.gate ? yellow("◆") : dim("●");
-    const label = `${on ? cyan("❯") : " "} ${glyph} ${on ? bold(n.node) : n.node}`;
+    const fold = versions.length > 0 ? dim(` ${open ? "▾" : "▸"}${versions.length}`) : "";
+    const label = `${on ? cyan("❯") : " "} ${glyph} ${on ? bold(n.node) : n.node}${fold}`;
     if (n.attempts === 0) {
       const where =
         n.elsewhere > 0
           ? `none on the present definition yet (${n.elsewhere} on older ones)`
           : "never ran";
       out.push(fit(`${fit(label, nameWidth)}${dim(` ${where}`)}`, width));
-      continue;
+    } else {
+      out.push(
+        fit(`${fit(label, nameWidth)}${cellsOf(columns, n, undefined, n.attempts < FEW)}`, width),
+      );
     }
-    const few = n.attempts < FEW;
-    const cells = columns
-      .map((c) => {
-        const { text, style } = c.cell(n);
-        const padded = text.padStart(c.width);
-        return ` ${few ? dim(padded) : style ? style(padded) : padded}`;
-      })
-      .join("");
-    out.push(fit(`${fit(label, nameWidth)}${cells}`, width));
+    if (!open) continue;
+    for (const [k, v] of versions.entries()) {
+      const what = v.changed.length > 0 ? v.changed.join("+") : "first";
+      // The mark of the present definition stands where the cursor stands, so it is never cut off.
+      const now = v.current ? green("◀") : " ";
+      const name = `  ${now} ${bold(`v${v.index}`)} ${dim(`${day(v.firstSeen)} ${what}`)}`;
+      out.push(
+        fit(
+          `${fit(name, nameWidth)}${cellsOf(columns, v, versions[k - 1], v.attempts < FEW)}`,
+          width,
+        ),
+      );
+    }
   }
   out.push("");
   const total = stats.attempts.total;
   const notes = [
     "◆ a person decides: its time is the wait. back: attempts that failed or were rejected. tries: attempts per run. finds: findings per attempt that reported. why: rejections that said why.",
+    stats.versions.length > 0
+      ? "▸3 the step has had 3 definitions: → shows them, ← hides them, v all. ◀ the present one. A version is green or red where it is better or worse than the one before."
+      : "",
     stats.attempts.withUsage < total
       ? `The cost is known for ${stats.attempts.withUsage} of ${total} attempts.`
       : "",
@@ -401,79 +493,12 @@ function detailBody(stats: PipelineStats, rep: RepState, width: number): Body {
   return { lines: out };
 }
 
-const delta = (
-  before: number,
-  after: number,
-  lowerIsBetter: boolean,
-  text: (n: number) => string,
-) => {
-  const same = Math.abs(after - before) < 1e-9;
-  const paint = same ? dim : after < before === lowerIsBetter ? green : red;
-  return `${text(before)}→${paint(text(after))}`;
-};
-
-function versionsBody(stats: PipelineStats, width: number): Body {
-  if (stats.versions.length === 0) {
-    return { lines: [dim("No step has changed its definition in these runs.")] };
-  }
-  const out: string[] = [];
-  const day = (ms: number) => new Date(ms).toISOString().slice(5, 10);
-  for (const [i, group] of stats.versions.entries()) {
-    if (i > 0) out.push("");
-    out.push(bold(group.node));
-    out.push(...versionLines(group, day, width));
-  }
-  out.push(
-    "",
-    ...wrapText(
-      "A version is a definition of the step: its work, its checks, its routing. Every attempt is counted here, whatever a says. back: attempts that failed or were rejected.",
-      width - 1,
-    ).map(dim),
-  );
-  return { lines: out };
-}
-
-function versionLines(group: NodeVersions, day: (ms: number) => string, width: number): string[] {
-  const out: string[] = [];
-  for (const [i, v] of group.versions.entries()) {
-    const what = v.changed.length > 0 ? v.changed.join("+") : "first seen";
-    const now = v.current ? green(" ◀ now") : "";
-    out.push(fit(`  ${bold(`v${v.index}`)} ${dim(day(v.firstSeen))} ${dim(what)}${now}`, width));
-    out.push(
-      fit(
-        dim(
-          `     ${plural(v.attempts, "attempt")} · ${v.perRun.toFixed(1)} per run · back ${percent(v.failed, v.attempts)} · median ${secs(v.seconds.median)}` +
-            (v.usage.attempts > 0 ? ` · ${money(v.usage.usd / v.usage.attempts)} per try` : ""),
-        ),
-        width,
-      ),
-    );
-    const before = group.versions[i - 1];
-    if (before && before.attempts >= 3 && v.attempts >= 3) {
-      const fails = (x: typeof v) => (x.attempts === 0 ? 0 : x.failed / x.attempts);
-      out.push(
-        fit(
-          `     ${dim("vs before:")} tries ${delta(before.perRun, v.perRun, true, (n) => n.toFixed(1))} · back ${delta(fails(before), fails(v), true, (n) => `${Math.round(n * 100)}%`)} · time ${delta(before.seconds.median, v.seconds.median, true, secs)}`,
-          width,
-        ),
-      );
-    }
-  }
-  return out;
-}
-
 function bodyOf(rep: RepState, data: StatsData, width: number): Body {
   const stats = statsOf(rep, data);
-  if (rep.tab === VERSIONS) return versionsBody(stats, width);
   return rep.open ? detailBody(stats, rep, width) : stepsBody(stats, rep, width);
 }
 
-function headOf(
-  rep: RepState,
-  slot: StatsSlot | undefined,
-  width: number,
-  focused: boolean,
-): string[] {
+function headOf(rep: RepState, slot: StatsSlot | undefined, width: number): string[] {
   const out: string[] = [fit(bold(rep.selected), width)];
   const data = readyOf(slot);
   if (data) {
@@ -504,14 +529,6 @@ function headOf(
       );
     }
   }
-  out.push(
-    strip(
-      REP_TABS.map((t) => ({ text: t, styled: t })),
-      rep.tab,
-      width,
-      focused,
-    ).line,
-  );
   return out;
 }
 
@@ -522,7 +539,7 @@ export function repCard(
   height: number,
   focused: boolean,
 ): string[] {
-  const head = headOf(rep, slot, width, focused);
+  const head = headOf(rep, slot, width);
   const room = Math.max(1, height - head.length);
   let body: Body;
   const data = readyOf(slot);
@@ -539,7 +556,7 @@ export function repCard(
 
 /** The lines the card has for its body, for the keys that scroll. */
 export function headHeight(rep: RepState, slot: StatsSlot | undefined, width: number): number {
-  return headOf(rep, slot, width, true).length;
+  return headOf(rep, slot, width).length;
 }
 
 export function repHints(rep: RepState, card: boolean): string {
@@ -548,6 +565,5 @@ export function repHints(rep: RepState, card: boolean): string {
   }
   const tail = `   ${bold("a")} scope   ${bold("z")} zoom   ${bold("Esc")} ${rep.open ? "back" : "list"}`;
   if (rep.open) return `${bold("↑↓")} scroll   ${bold("n/p")} next/prev step${tail}`;
-  if (rep.tab === VERSIONS) return `${bold("←→")} tabs   ${bold("↑↓")} scroll${tail}`;
-  return `${bold("←→")} tabs   ${bold("↑↓")} step   ${bold("Enter")} read the step${tail}`;
+  return `${bold("↑↓")} step   ${bold("→")} versions   ${bold("←")} hide   ${bold("v")} all   ${bold("Enter")} read the step${tail}`;
 }

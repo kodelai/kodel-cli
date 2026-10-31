@@ -87,6 +87,8 @@ export interface NodeVersion {
   seconds: Spread;
   findings: { attempts: number; rows: number };
   usage: { attempts: number; usd: number };
+  /** At a gate: the rejections, and how many of them said why. */
+  decisions?: { rejected: number; rejectedWithReason: number };
 }
 
 export interface NodeVersions {
@@ -374,6 +376,16 @@ function versionsOf(ordered: StatsRun[], order: string[], options: StatsOptions)
               attempts: used.length,
               usd: used.reduce((s, a) => s + (a.usage?.usd ?? 0), 0),
             },
+            ...(g.attempts.some((a) => a.decision)
+              ? {
+                  decisions: {
+                    rejected: g.attempts.filter((a) => a.decision?.outcome === "rejected").length,
+                    rejectedWithReason: g.attempts.filter(
+                      (a) => a.decision?.outcome === "rejected" && a.decision.reason !== undefined,
+                    ).length,
+                  },
+                }
+              : {}),
           };
         }),
       },
