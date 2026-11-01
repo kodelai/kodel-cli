@@ -81,7 +81,8 @@ const NEAR_FUTURE_MS = 60_000;
 
 /** Bounded like the memos of the usage count, so one busy run cannot make another forget. */
 const MAIN_MEMO_CAP = 32;
-const CHILD_MEMO_CAP = 48;
+// As many as the sessions a run keeps a cursor for, so a pass that visits them in order does not push each out before its turn.
+const CHILD_MEMO_CAP = MAX_TOOL_CALL_SESSIONS;
 const RUN_CAP = 8;
 
 interface StreamMemo extends RunStartMemo {
@@ -448,7 +449,7 @@ export class ToolCallsWriter {
       ...(event.input_bytes === undefined ? {} : { in_bytes: event.input_bytes }),
       ...(event.input_preview === undefined || ctx.previewChars === 0
         ? {}
-        : { preview: event.input_preview.slice(0, ctx.previewChars) }),
+        : { preview: event.input_preview }),
       ...(parent === undefined ? {} : { subagent: session }),
       ...(where === undefined ? {} : { node: where.node, attempt: where.attempt }),
       ...(where?.shared === true ? { shared: true as const } : {}),

@@ -45,7 +45,10 @@ export const TOOL_CALLS_FAILURES = [
   "unreadable",
   "busy",
   "agent_unsupported",
-  /** The run has journaled as many `tool_calls_recorded` as it may: nothing more is recorded. */
+  /**
+   * The run has journaled as many `tool_calls_recorded` as it may, or keeps a cursor for as many sessions as it may (a
+   * stream past that is skipped): nothing more is recorded for it.
+   */
   "cap",
   /** The run's own account refused a record: the pass stopped. */
   "record_refused",

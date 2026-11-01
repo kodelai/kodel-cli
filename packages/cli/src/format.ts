@@ -228,13 +228,17 @@ function toolCallsAttemptLine(
   label: string,
   attempt: ToolCallsAttempt,
   plain: (text: string) => string,
+  /** Rows were cut: a call with no result may have finished, and what is counted from the rows kept is a part. */
+  cut: boolean,
 ): string {
   const parts = [`${attempt.calls} call(s) (${toolList(attempt.by_tool, plain)})`];
   if (attempt.failed > 0) parts.push(`${attempt.failed} failed`);
-  if (attempt.open > 0) parts.push(`${attempt.open} open`);
+  if (attempt.open > 0) {
+    parts.push(`${attempt.open} open${cut ? " (or finished after the rows were cut)" : ""}`);
+  }
   if (attempt.shared > 0) parts.push(`${attempt.shared} shared with another open step`);
   const own = attempt.lines.filter((l) => l.own === true).length;
-  if (own > 0) parts.push(`${own} of the engine's own`);
+  if (own > 0) parts.push(`${own} of the engine's own${cut ? " (of the rows kept)" : ""}`);
   const servers = [
     ...new Set(attempt.lines.flatMap((l) => (l.server === undefined ? [] : [l.server]))),
   ];
@@ -255,7 +259,11 @@ export function toolCallsLines(
   if (report === undefined) return [];
   if ("not_collected" in report) return [`tool calls: not_collected (${report.reason})`];
   if ("cannot_read" in report) {
-    return [`tool calls: cannot read (written in format ${plain(report.format)}, upgrade kodel)`];
+    // `format` is a format number, or `reason X` for a reason of a failure that this kodel does not know
+    const what = report.format.startsWith("reason ")
+      ? `a reason of a newer kodel (${plain(report.format.slice(7))})`
+      : `written in format ${plain(report.format)}`;
+    return [`tool calls: cannot read (${what}, upgrade kodel)`];
   }
   const lines = ["tool calls (what the agent's own log says; not verified):"];
   for (const attempt of report.attempts) {
@@ -264,11 +272,14 @@ export function toolCallsLines(
         `${plain(attempt.node ?? "?")} #${attempt.attempt ?? "?"}`,
         attempt,
         plain,
+        report.rows_cut,
       ),
     );
   }
   if (report.unattributed !== undefined) {
-    lines.push(toolCallsAttemptLine("outside every step", report.unattributed, plain));
+    lines.push(
+      toolCallsAttemptLine("outside every step", report.unattributed, plain, report.rows_cut),
+    );
   }
   if (report.rows_cut) {
     lines.push(

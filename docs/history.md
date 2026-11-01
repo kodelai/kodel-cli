@@ -585,8 +585,7 @@ attempt after a retry or in a fork, because usage credits what a pass reads to t
 has ended. So these are not in the record: the final response of the last agent step (with its hand-in call), of a session that
 ended between steps (a new chat after a gate, `/clear`, a restart), of each subagent's log, and of a step whose last pass was
 skipped. A line of the log over 8 MB is dropped by the line reader, and a call or result on it is not recorded (the record counts
-`skipped` lines, not the calls; a line that is not JSON is counted too, and a read again from the start after a restart counts the same lines again); between 1 MB and 8 MB only the size of the value is kept, and an input over 256 KB of JSON has no
-preview. The report says what is missing. A call that was still running when its step ended (a background tool), or that was
+`skipped` lines, not the calls; a line that is not JSON is counted too, and a read again from the start (after a restart, a held pass, a log found changed or a memo that was let go) counts the same lines again); an input over 256 KB of JSON has no preview and keeps only its size. The report says what is missing. A call that was still running when its step ended (a background tool), or that was
 interrupted, stays `open`; the result that comes later is recorded and joins it. A Claude Code session forked with
 `--fork-session` copies the history with the same ids and is recorded again, as in usage. The result of an own call says nothing
 of whether its step passed: the engine answers a failed check as a normal result. Another MCP server that has a tool of the same
@@ -597,11 +596,11 @@ one message start and end together, so each reads as long as the slowest. `out_b
 before the store redacts, so approximately), and past it a record carries counts only (32 tool names, the rest under `other`), so
 a loop stays visible while durations and failures are unknown (`rows_cut`). The state holds a cursor per session and numbers,
 never text or names. The journal is read whole by every pass, `status`, `report`, `completeStep` and every poll of `kodel wait`:
-this adds up to about 1 MB to a journal that is about 150 KB without it. Time before a step is judged: today the lock wait (5 s),
+this adds about 1 MB of rows and, at worst, the counts of up to 1 000 records (a few MB) to a journal that is about 150 KB without it. Time before a step is judged: today the lock wait (5 s),
 the copy (30 s), the wait for the step's call (2 s) and the count of usage (10 s) can take 47 s; this pass is chained after them
 with a budget of 5 s of its own (52 s together). It does not wait for the step's call in the log, never fails a step, and has no
 timer: nothing is recorded between step ends. Where a run begins in a log is searched once for the usage count and this pass
-together. A pass that stops for time records what it read and marks the log as not read to its end (`complete: false`); the next
+together. A stream found changed under its cursor (a log that was rewritten or truncated) is not read again, and a cursor it left behind keeps the report at `complete: false` for the rest of the run. A pass that stops for time records what it read and marks the log as not read to its end (`complete: false`); the next
 pass reads on. So does a pass that meets a call that began after the pass did (by at most a minute: a worker goes on writing its
 own log while another worker's step is handed in): rows are never rewritten, so such a call is left for the next pass, which
 places it by its own start; a call further in the future than that (a clock that is wrong, or a log that is not true) is recorded
@@ -626,5 +625,5 @@ The golden run with tool calls is `fixtures/tool-calls-run/`
 Reasons nothing is shown: `not_captured`, `disabled`, `session_unknown`, `log_missing`, `refused`, `unreadable`, `busy`,
 `agent_unsupported` and `no_calls`. A step run by another engine than the agent of the session (TASK-WKJ4) will have no calls
 in this log; a reason `engine_step` comes with it. A pass says `cap` once when the run has journaled as many records as it may
-(nothing more is recorded), and `record_refused` when the run itself refused a record (an id it does not accept, or it went away):
+(nothing more is recorded), or keeps a cursor for as many sessions as it may (64, each subagent is one: a stream past that is skipped and its calls are not recorded; a later `cap` of the first kind is not said again, since a reason is said once), and `record_refused` when the run itself refused a record (an id it does not accept, or it went away):
 the pass stops, and the next one starts again from the cursor.

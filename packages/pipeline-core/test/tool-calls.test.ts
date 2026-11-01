@@ -674,20 +674,162 @@ describe("zkrh the report of tool calls", () => {
 describe("zkrh the pure parts stay pure and information only", () => {
   const read = (path: string) => readFile(fileURLToPath(new URL(path, import.meta.url)), "utf8");
 
-  test("zkrh_tool_calls_never_feed_check_route_or_gate", async () => {
-    // the files that decide a step import nothing of the tool-call records
-    for (const name of ["checks", "next-step", "result", "registry", "pipeline-diff"]) {
-      const source = ts.createSourceFile(
-        `${name}.ts`,
-        await read(`../src/${name}.ts`),
-        ts.ScriptTarget.ES2022,
-        true,
-      );
-      const imports = source.statements
-        .filter(ts.isImportDeclaration)
-        .map((s) => (ts.isStringLiteral(s.moduleSpecifier) ? s.moduleSpecifier.text : ""));
-      for (const from of imports) expect(from).not.toMatch(/tool-calls/);
+  /** Every module a file imports from: static imports (type-only too), re-exports and dynamic `import()`. */
+  async function importsOf(name: string): Promise<string[]> {
+    const source = ts.createSourceFile(
+      name,
+      await read(`../src/${name}`),
+      ts.ScriptTarget.ES2023,
+      true,
+    );
+    const modules: string[] = [];
+    const visit = (node: ts.Node): void => {
+      if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+        modules.push(node.moduleSpecifier.text);
+      } else if (
+        ts.isExportDeclaration(node) &&
+        node.moduleSpecifier !== undefined &&
+        ts.isStringLiteral(node.moduleSpecifier)
+      ) {
+        modules.push(node.moduleSpecifier.text);
+      } else if (
+        ts.isCallExpression(node) &&
+        node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+        node.arguments[0] !== undefined &&
+        ts.isStringLiteral(node.arguments[0])
+      ) {
+        modules.push(node.arguments[0].text);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+    return modules;
+  }
+
+  test("zkrh_decision_files_do_not_import_tool_calls", async () => {
+    // the checks, the router, the node handlers, the result check, the registry, the pipeline and the service
+    for (const name of [
+      "checks.ts",
+      "next-step.ts",
+      "nodes.ts",
+      "result.ts",
+      "registry.ts",
+      "pipeline.ts",
+      "pipeline-diff.ts",
+      "executor.ts",
+      "service.ts",
+    ]) {
+      const found = (await importsOf(name)).filter((m) => /^\.\/tool-calls(-record)?$/.test(m));
+      expect(found, `${name} imports ${found.join(", ")}`).toEqual([]);
     }
+  });
+
+  test("zkrh_run_ts_takes_only_the_accounting_of_records_and_reads_the_state_key_only_to_keep_it", async () => {
+    // run.ts routes and judges gates: it may import the record schemas and the state (to keep the account) and not the
+    // placement, the join or the report; and it reads `.toolCalls` only in the methods that keep the account
+    const found = (await importsOf("run.ts")).filter((m) => /^\.\/tool-calls(-record)?$/.test(m));
+    expect(found).toEqual(["./tool-calls-record"]);
+    const source = ts.createSourceFile(
+      "run.ts",
+      await read("../src/run.ts"),
+      ts.ScriptTarget.ES2023,
+      true,
+    );
+    const readers = new Set<string>();
+    const visit = (node: ts.Node, method: string): void => {
+      let here = method;
+      if (ts.isMethodDeclaration(node) && ts.isIdentifier(node.name)) here = node.name.text;
+      if (ts.isPropertyAccessExpression(node) && node.name.text === "toolCalls") readers.add(here);
+      ts.forEachChild(node, (child) => visit(child, here));
+    };
+    visit(source, "<top>");
+    const allowed = new Set(["start", "toolCallsRecorded", "toolCallsFailed"]);
+    const outside = [...readers].filter((name) => !allowed.has(name));
+    expect(outside, `.toolCalls read in ${outside.join(", ")}`).toEqual([]);
+    expect(readers.size).toBeGreaterThan(0);
+  });
+
+  test("zkrh_tool_calls_never_feed_check_route_or_gate", () => {
+    // the same scripted run with the pass absent, switched off, recording, recording lies, and failing: what was decided
+    // (outcomes, journal names apart from this feature's, effects, status, active steps) is the same
+    type Mode = "none" | "off" | "rows" | "lies" | "hostile";
+    const trace = (mode: Mode): unknown[] => {
+      const out: unknown[] = [];
+      let state: RunState | undefined;
+      const send = (event: RunEvent) => {
+        const result = decide(spec, state, event, 0);
+        if (!result.ok) {
+          out.push({ event: event.type, refused: result.error.code });
+          return;
+        }
+        state = result.state;
+        if (event.type === "tool_calls_recorded" || event.type === "tool_calls_failed") return;
+        out.push({
+          event: event.type,
+          noop: result.noop === true,
+          effects: result.effects.map((effect) => effect.type),
+          journal: result.journal.map((r) => r.event),
+          status: state.status,
+          active: state.active.map((v) => `${v.node}:${v.attempt}:${v.phase}`),
+        });
+      };
+      const history = defaultHistory();
+      if (mode !== "none") {
+        history.tool_calls =
+          mode === "off" ? { enabled: false, preview_chars: 200 } : defaultToolCalls();
+      }
+      send({ type: "start", runId: "r", task: "t", specHash: "h", history });
+      const pass = (attempt: number) => {
+        if (mode === "none" || mode === "off") return;
+        if (mode === "hostile") {
+          send({
+            type: "tool_calls_recorded",
+            session: "s1",
+            node: "write",
+            attempt,
+            calls: { nonsense: true } as never,
+            cursor: { last_seq: 1, last_key: HEX },
+          });
+          send({ type: "tool_calls_failed", reason: "unreadable" });
+          return;
+        }
+        const lie = mode === "lies";
+        send({
+          type: "tool_calls_recorded",
+          session: "s1",
+          node: "write",
+          attempt,
+          calls: payload({
+            rows: [
+              call({
+                id: `id-${String(attempt).padStart(12, "0")}`,
+                tool: lie ? "pipeline_complete_step" : "Bash",
+                own: lie ? true : undefined,
+                node: lie ? "approve" : "write",
+                attempt: lie ? 99 : attempt,
+              }),
+              result({ id: `id-${String(attempt).padStart(12, "0")}`, ok: !lie }),
+            ],
+            counts: { [lie ? "approve:99" : `write:${attempt}`]: { Bash: 1 } },
+          }),
+          cursor: { last_seq: attempt, last_key: HEX },
+        });
+      };
+      pass(1);
+      send({ type: "agent_completed", node: "write", attempt: 1 });
+      send({ type: "human_decided", node: "approve", decision: "rejected", reason: "again" });
+      pass(2);
+      send({ type: "agent_completed", node: "write", attempt: 2 });
+      send({ type: "human_decided", node: "approve", decision: "approved" });
+      return out;
+    };
+    const base = trace("none");
+    expect(base.length).toBeGreaterThan(4);
+    for (const mode of ["off", "rows", "lies", "hostile"] as const) {
+      expect(trace(mode), mode).toEqual(base);
+    }
+    // the run went through the gate twice and ended
+    expect(JSON.stringify(base)).toContain('"status":"completed"');
   });
 
   test("zkrh_core_has_no_io_clock_or_crypto", async () => {

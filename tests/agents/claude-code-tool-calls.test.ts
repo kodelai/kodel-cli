@@ -11,6 +11,7 @@ import {
   runAgentTurn,
   type Sandbox,
 } from "./harness";
+import type { Fixture } from "./pipelines";
 
 /**
  * The tool calls of a run, on a real Claude Code: one headless turn in a throwaway Kodel project, then the run's record
@@ -51,6 +52,37 @@ function theRun() {
   })();
   return shared;
 }
+
+/** Two agent steps and then a gate: the first is not the last, so its block holds the hand-in call of the step too. */
+const TWO_STEPS: Fixture = {
+  pipeline: [
+    "name: twostep",
+    "nodes:",
+    "  - slug: write",
+    "    kind: agent",
+    "    prompt: |",
+    "      Task: {{task}}",
+    "      Create the file hello.txt in the repository root containing exactly the word hello. Change nothing else.",
+    "    checks:",
+    '      - { kind: diff, paths: ["hello.txt"], mode: changed_only }',
+    "  - slug: polish",
+    "    kind: agent",
+    "    prompt: |",
+    "      Append a second line with the word world to hello.txt. Change nothing else.",
+    "    checks:",
+    '      - { kind: diff, paths: ["hello.txt"], mode: changed_only }',
+    "  - slug: approve",
+    "    kind: human",
+    "    prompt: Is hello.txt right?",
+    "edges:",
+    "  - { from: write, to: polish }",
+    "  - { from: polish, to: approve }",
+    "",
+  ].join("\n"),
+};
+
+let twoSandbox: Sandbox | undefined;
+afterAll(() => twoSandbox?.cleanup());
 
 describe("Claude Code, the tool calls of a run", () => {
   scenario(
@@ -128,5 +160,30 @@ describe("Claude Code, the tool calls of a run", () => {
       expect("unverified" in report).toBe(true);
     },
     600_000,
+  );
+
+  scenario(
+    "zkrh_real_run_every_non_last_agent_node_has_a_tool_block",
+    async () => {
+      twoSandbox = makeSandbox({ fixture: TWO_STEPS });
+      const turn = await runAgentTurn({
+        sandbox: twoSandbox,
+        prompt: "Please create hello.txt for me using the twostep pipeline.",
+        allowedTools: ["mcp__kodel", "Read", "Write", "Edit", "Glob", "Grep"],
+      });
+      const why = `\n${describeCalls(turn)}\n${turn.finalText}`;
+      const runs = await humanHost(twoSandbox).runSummaries();
+      expect(runs.length, `the agent did not start exactly one run${why}`).toBe(1);
+      const run = await humanHost(twoSandbox).open(runs[0]?.meta.runId as string);
+      const calls = (await run?.report())?.tool_calls;
+      if (calls === undefined || !("attempts" in calls))
+        throw new Error(`${JSON.stringify(calls)}${why}`);
+      // the step that is not the last has a block, and in it the call that handed it in; the last one may lack its own
+      const first = calls.attempts.find((a) => a.node === "write");
+      expect(first, `no block for the first agent step${why}`).toBeDefined();
+      expect(first?.lines.map((l) => l.tool) ?? [], why).toContain("pipeline_complete_step");
+      expect(first?.lines.map((l) => l.tool) ?? [], why).toContain("Write");
+    },
+    900_000,
   );
 });

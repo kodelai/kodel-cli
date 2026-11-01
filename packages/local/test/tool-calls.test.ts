@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -18,7 +18,7 @@ import {
   type ToolCallsPayload,
   toolCallsReport,
 } from "@kodel-ai/pipeline-core";
-import { ClaudeLogBuilder } from "../../testkit/src";
+import { ClaudeLogBuilder, installClaudeSession } from "../../testkit/src";
 import {
   FileStore,
   LocalPipelineHost,
@@ -31,6 +31,10 @@ import {
   UsageWriter,
 } from "../src";
 import { claudeCodeCollector } from "../src/history/claude-code/collector";
+
+// A rig starts a run, with git and a worktree-less host, and a step end runs three passes: a test takes seconds, and on a
+// slow machine (Windows CI) more than the 5 s that bun gives by default.
+setDefaultTimeout(60_000);
 
 const SESSION = "66666666-6666-4666-8666-666666666666";
 const T0 = Date.parse("2026-10-21T10:00:00.000Z");
@@ -506,9 +510,9 @@ describe("zkrh the pass that records tool calls", () => {
     await r.run.completeStep("b", 1);
     const ids = (await callsOf(r)).map((c) => c.id);
     expect(new Set(ids).size).toBe(ids.length);
-    const tools = (await callsOf(r)).map((c) => c.tool);
-    expect(tools).toEqual(
-      expect.arrayContaining(["pipeline_start", "Bash", "pipeline_complete_step"]),
+    // every call the log released, once: the open response at the end (the Edit) is not among them
+    expect(ids.sort()).toEqual(
+      ["toolu_start", "toolu_bash", "toolu_done_a"].map((id) => rowId(SESSION, id)).sort(),
     );
     const report = await reportOf(r);
     if (!("attempts" in report)) throw new Error(JSON.stringify(report));
@@ -1147,6 +1151,62 @@ describe("zkrh the pass, what the second review asked for", () => {
     expect(calls.find((c) => c.tool === "Bash")).toMatchObject({ node: "a", attempt: 1 });
     expect(calls.find((c) => c.tool === "pipeline_complete_step")).toMatchObject({ node: "a" });
     expect(calls.find((c) => c.tool === "Edit")).toMatchObject({ node: "b", attempt: 1 });
+  });
+
+  test("zkrh_saved_real_session_matches_raw_tool_use_ids_through_the_pass", async () => {
+    // The saved session (the shapes of a real Claude Code log, sanitized) is read through the whole pass; the reference is
+    // its raw file, read with none of the code under test. The saved session does not know this run, so its
+    // pipeline_next_step call is given the run's id, which is what proves the run's first call to the pass.
+    const FIXTURE_SESSION = "11111111-1111-4111-8111-111111111111";
+    const r = await rig({ session: FIXTURE_SESSION });
+    const path = await installClaudeSession({ configDir: claude, cwd: dir });
+    const raw = (await readFile(path, "utf8")).split("\n");
+    const parsed = raw.map((line) => {
+      try {
+        return JSON.parse(line) as { message?: { id?: string; content?: unknown } };
+      } catch {
+        return undefined;
+      }
+    });
+    type Block = { type?: string; id?: string; name?: string; input?: unknown };
+    const blocksOf = (entry: (typeof parsed)[number]): Block[] => {
+      const content = entry?.message?.content;
+      return Array.isArray(content) ? (content as Block[]) : [];
+    };
+    const uses = (entry: (typeof parsed)[number]) =>
+      blocksOf(entry).filter((b) => b.type === "tool_use");
+    const proving = parsed.findIndex((e) =>
+      uses(e).some((b) => String(b.name).endsWith("pipeline_next_step")),
+    );
+    expect(proving).toBeGreaterThan(0);
+    // the reference: every tool_use from the run's first call on, but those of the response still open at the end of the log
+    const lastResponse = [...parsed].reverse().find((e) => e?.message?.id !== undefined)
+      ?.message?.id;
+    const expected = parsed
+      .slice(proving)
+      .flatMap((e) => (e?.message?.id === lastResponse ? [] : uses(e)))
+      .map((b) => b.id as string);
+    expect(expected.length).toBeGreaterThan(0);
+    const given = raw.map((line, i) => {
+      const entry = parsed[i];
+      if (entry === undefined) return line;
+      for (const block of blocksOf(entry)) {
+        if (block.type === "tool_use" && String(block.name).endsWith("pipeline_next_step")) {
+          block.input = { run_id: r.runId };
+        }
+      }
+      return JSON.stringify(entry);
+    });
+    await writeFile(path, given.join("\n"));
+    nowMs = Date.parse("2026-10-21T10:05:00.000Z");
+    await r.run.completeStep("a", 1);
+    const recorded = (await callsOf(r)).map((c) => c.id).sort();
+    expect(recorded).toEqual(expected.map((id) => rowId(FIXTURE_SESSION, id)).sort());
+    // and the results of those calls joined their calls
+    const report = await reportOf(r);
+    if (!("attempts" in report)) throw new Error(JSON.stringify(report));
+    expect(report.attempts.flatMap((a) => a.lines).every((l) => l.ok !== undefined)).toBe(true);
+    expect(report.unjoined).toBe(0);
   });
 
   test("zkrh_first_attempt_starts_at_the_runs_first_call", async () => {

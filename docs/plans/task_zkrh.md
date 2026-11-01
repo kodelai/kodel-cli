@@ -250,7 +250,7 @@ format and every format has a codec), so:
   as `record_refused`); a held pass does not count `skipped` lines (the next pass reads them again); the label of `skipped` says "could not be read (over
   the limit, or not JSON)"; the docs say what is true of an older kodel (format 2 reads and keeps the key, only format 1 and the config refuse), that every
   call in a fork whose steps are worked one by one is also `shared`, and that a call held by the main log and a subagent file is two rows when read in two passes.
-- **The tests, counted** (a script compared the 147 `zkrh_` names of the acceptance section with the test files): 71 are there under the same name. These
+- **The tests, counted** (a script compared the 147 `zkrh_` names of the acceptance section with the test files): 72 are there under the same name. These
   are there under another name: `zkrh_agent_log_off_or_metadata_stores_no_preview_but_sizes` and `zkrh_works_with_usage_off` (in
   `zkrh_works_with_agent_log_off_and_usage_off_and_stores_no_preview`), `zkrh_preview_chars_zero_stores_no_preview` (in `zkrh_previews_only_when_agent_log_full`),
   `zkrh_config_edit_mid_run_keeps_frozen_value`, `zkrh_cursor_skips_credited_after_restart` and `zkrh_hand_in_call_recorded_after_server_restart` (in
@@ -265,6 +265,12 @@ format and every format has a codec), so:
   seeded `zkrh_rows_plus_unattributed_equal_all_calls`), the report's `zkrh_report_marks_unverified`, `zkrh_report_says_rows_cut_and_skipped` and `zkrh_report_longest_3`
   (in `zkrh_report_block_text` and `zkrh_report_marks_shared_cut_skipped_unjoined_and_incomplete`), `zkrh_end_of_run_loses_what_follows_the_last_pass` (in `zkrh_agent_running_at_run_end`),
   `zkrh_golden_events_and_hashes_untouched` (the existing format tests: `hashes.json` and the golden event files are not changed), `zkrh_duration_from_timestamps` (the `ms` asserted in the join test).
+- **Changed after the third review of the build:** the routing invariant has a real test now (`zkrh_tool_calls_never_feed_check_route_or_gate` runs the same scripted run with the pass
+  absent, switched off, recording, recording lies and failing, and compares what was decided; two more tests read the imports of the code that decides and the places `run.ts` reads
+  `.toolCalls`); a pass-level twin on the saved session (`zkrh_saved_real_session_matches_raw_tool_use_ids_through_the_pass`, with the raw file as the reference) next to the collector-level one;
+  the slow tests of the pass have a default timeout of 60 s; the budget test compares the whole id set; the memo of subagent logs holds as many as a run has cursors; the preview is not cut a
+  second time; the docs and the CLI say the true things about the 64 sessions, the 256 KB preview limit (there is no 1 MB limit), the size of the journal, the lines counted again after a held pass,
+  a stream found changed, and calls that finished after the rows were cut.
 - **Not built, left for a follow-up** (the names of the plan with no test at all): at pass level a real fork (`zkrh_fork_placement_on_a_hand_written_fork_fixture`,
   `zkrh_fork_in_gate_wait_while_other_branch_open_is_not_unattributed`, `zkrh_mixed_run_sequential_fork_sequential`, `zkrh_fork_second_pass_busy_is_caught_up_later`,
   `zkrh_fork_three_workers_race_for_the_lock`, `zkrh_real_fork_run_marks_shared`; the placement of a fork is tested in the pure code only) and the e2e
@@ -280,7 +286,7 @@ format and every format has a codec), so:
   `zkrh_refused_hand_in_then_retry_adds_rows_once`, `zkrh_pipeline_change_wait_charged_to_the_attempt`, `zkrh_attribution_agrees_with_outside_spans_on_the_usage_fixtures`),
   the ends of a run (`zkrh_last_step_final_response_absent_and_said`, `zkrh_session_ended_between_steps_final_response_absent_and_said`, `zkrh_subagent_final_response_absent`: said in the docs and the
   report, not asserted per case), `zkrh_counts_split_main_and_subagent`, `zkrh_subagents_counted_when_tool_log_false`, `zkrh_parallel_mode_task_calls_read_open`; the documented limits that have no test
-  (`zkrh_forked_session_copies_rows_documented`, `zkrh_removed_and_readded_node_collision_documented`, `zkrh_hash_collision_by_a_hex_rule_documented`); and the two real-agent names
-  `zkrh_real_run_every_non_last_agent_node_has_a_tool_block` and `zkrh_real_fork_run_marks_shared` (the file has `zkrh_real_run_lists_edit_and_bash`, `zkrh_real_run_matches_raw_log` and
-  `zkrh_real_run_block_says_what_is_not_recorded`). A pass that runs out of time before it has read one event and has no stored cursor yet writes nothing, so nothing marks that log as behind. The
+  (`zkrh_forked_session_copies_rows_documented`, `zkrh_removed_and_readded_node_collision_documented`, `zkrh_hash_collision_by_a_hex_rule_documented`); and the real-agent name
+  `zkrh_real_fork_run_marks_shared` (the file has `zkrh_real_run_lists_edit_and_bash`, `zkrh_real_run_matches_raw_log`, `zkrh_real_run_every_non_last_agent_node_has_a_tool_block` on a two-step pipeline, and
+  `zkrh_real_run_block_says_what_is_not_recorded`; none was run). A pass that runs out of time before it has read one event and has no stored cursor yet writes nothing, so nothing marks that log as behind. The
   env-gated real-agent scenarios were written and **not run** (`tests/agents/claude-code-tool-calls.test.ts`).
