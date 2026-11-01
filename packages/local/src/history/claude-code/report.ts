@@ -1,7 +1,9 @@
 /**
  * Two narrow reads of the Claude Code logs of a project for a person looking at a run: what the agent last
- * wrote (in full, not the preview the history events keep) and what the run cost in tokens. Both only read,
- * both look at the sessions that began in the run's working directory, and nothing here is stored.
+ * wrote (in full, not the preview the history events keep) and what it said and did while the run went on.
+ * Both only read, and nothing here is stored. They read the sessions the engine says belong to the run, or,
+ * for a run that has none on record, the sessions that began in its working directory. What a run cost in
+ * tokens is not read here: the engine measures that, and the report of the run has it.
  */
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -17,15 +19,6 @@ export interface AgentReport {
   ts: number;
 }
 
-export interface AgentUsage {
-  /** Input, output and cache, summed the way the history format says they add up. */
-  tokens: number;
-  /** What the logs reported, when they report a cost at all. */
-  cost?: number;
-  /** The run shares its directory with other work, so the sessions counted may not all be its own. */
-  approx: boolean;
-}
-
 export interface LogOptions {
   /** The project root. */
   root: string;
@@ -33,6 +26,14 @@ export interface LogOptions {
   workdir: string;
   /** Claude Code's data directory; `CLAUDE_CONFIG_DIR` or `~/.claude` when not given. */
   configDir?: string;
+  /**
+   * The sessions the engine copied the log of for this run. When there are some, these are the sessions that
+   * are read, wherever they began: the agent of a run that works in a worktree is often a session that began
+   * in the project's own directory. Without them, the sessions that began in the run's directory are read.
+   */
+  sessionIds?: string[];
+  /** Project redaction rules, applied to what is read on top of the built-in ones. */
+  rules?: RedactRule[];
 }
 
 /** Sessions looked at for one run: the most recently written ones are the ones that matter. */
@@ -55,21 +56,28 @@ function textOf(content: unknown): string {
     .join("\n");
 }
 
-/** The sessions that began inside `workdir` and were written to at or after `from`, newest first. */
+/**
+ * The sessions of the run that were written to at or after `from`, newest first: the ones the engine names,
+ * or, when it names none, the ones that began inside `workdir`.
+ */
 async function sessionsOf(options: LogOptions, from: number): Promise<SessionRef[]> {
   const { root, workdir } = options;
   if (!(await isKodelProject(root))) return [];
   const store = join(options.configDir ?? claudeConfigDir(), "projects");
+  const named = new Set(options.sessionIds ?? []);
   const home = await realOrSelf(workdir);
   const found: { ref: SessionRef; mtime: number }[] = [];
   for (const ref of await locateClaudeSessions(root, store)) {
     if (ref.parent_session_id !== undefined) continue;
+    if (named.size > 0 && !named.has(ref.session_id)) continue;
     const mtime = await stat(ref.path)
       .then((s) => s.mtimeMs)
       .catch(() => 0);
     if (mtime < from) continue;
-    const cwd = ref.cwd ?? (await firstCwd(ref.path));
-    if (cwd === undefined || !isInside(home, await realOrSelf(cwd))) continue;
+    if (named.size === 0) {
+      const cwd = ref.cwd ?? (await firstCwd(ref.path));
+      if (cwd === undefined || !isInside(home, await realOrSelf(cwd))) continue;
+    }
     found.push({ ref, mtime });
   }
   return found
@@ -152,7 +160,9 @@ export async function agentLog(
   const calls = new Map<string, AgentLogEntry>();
   for (const ref of refs) {
     try {
-      for await (const event of collector.read(ref, window)) {
+      for await (const event of collector.read(ref, window, {
+        capture: { rules: options.rules ?? [] },
+      })) {
         const ts = Date.parse(event.ts);
         if (event.kind === "message") {
           entries.push({
@@ -189,41 +199,4 @@ export async function agentLog(
   }
   entries.sort((a, b) => a.ts - b.ts);
   return entries.slice(-(options.limit ?? LOG_LIMIT));
-}
-
-/** Tokens (and cost, when the logs say) of the sessions in the run's directory between `from` and `to`. */
-export async function agentUsage(
-  options: LogOptions & { from: number; to: number },
-): Promise<AgentUsage | undefined> {
-  const refs = await sessionsOf(options, options.from);
-  if (refs.length === 0) return undefined;
-  const collector = claudeCodeCollector(
-    options.configDir === undefined ? {} : { configDir: options.configDir },
-  );
-  const window = {
-    from: new Date(options.from).toISOString(),
-    to: new Date(options.to).toISOString(),
-  };
-  let tokens = 0;
-  let cost = 0;
-  let priced = false;
-  for (const ref of refs) {
-    try {
-      for await (const event of collector.read(ref, window)) {
-        if (event.kind !== "usage") continue;
-        const cached = event.semantics === "overlap" ? 0 : event.cache_read;
-        tokens += event.input + event.output + event.cache_write + cached;
-        const amount = event.cost?.amount;
-        if (amount !== undefined) {
-          cost += amount;
-          priced = true;
-        }
-      }
-    } catch {
-      // A log that cannot be read adds nothing; the numbers are an approximation either way.
-    }
-  }
-  const root = await realOrSelf(options.root);
-  const approx = (await realOrSelf(options.workdir)) === root;
-  return { tokens, ...(priced ? { cost } : {}), approx };
 }

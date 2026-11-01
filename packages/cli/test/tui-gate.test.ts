@@ -5,8 +5,55 @@ import type {
   PipelineSpec,
   ResultReport,
   RunState,
+  UsageReport,
 } from "@kodel-ai/pipeline-core";
-import { addComment, type GateRun, loadDiff, loadGateDetail, removeComment } from "../src/tui/gate";
+import {
+  addComment,
+  type GateRun,
+  loadDiff,
+  loadGateDetail,
+  removeComment,
+  tokensOf,
+} from "../src/tui/gate";
+
+/** What the engine measured of the agent's use: tokens, and an estimate of the cost. */
+function measured(over: {
+  complete?: boolean;
+  usd?: number | null;
+  partial?: boolean;
+}): UsageReport {
+  const line = {
+    tokens: {
+      input: 12_000,
+      output: 100_000,
+      cache_read: 300_000,
+      cache_write: 0,
+      cache_write_1h: 0,
+      api_calls: 40,
+    },
+    cost: {
+      usd: over.usd === undefined ? 3.4 : over.usd,
+      basis: "computed" as const,
+      partial: over.partial ?? false,
+      config: false,
+      long_context: false,
+    },
+    models: {},
+    last_open: false,
+    incomplete: false,
+    subagent: false,
+    dedupe_overflow: false,
+  };
+  return {
+    estimate: true,
+    revisions: ["2026-10-01"],
+    total: line,
+    lower_bound: true,
+    complete: over.complete ?? true,
+    attempts: [],
+    failed: [],
+  };
+}
 
 const NOW = Date.UTC(2026, 9, 27, 15, 0, 0);
 const MIN = 60_000;
@@ -163,7 +210,7 @@ interface Fake {
   after?: Awaited<ReturnType<GateRun["changesSinceGate"]>>;
   reports?: Record<string, ResultReport>;
   said?: { text: string; ts: number } | undefined;
-  tokens?: { tokens: number; cost?: number; approx: boolean } | undefined;
+  usage?: UsageReport | undefined;
   log?: { ts: number; kind: "text" | "you" | "call" | "subagent"; text: string }[] | undefined;
   /** Every call to `reportResult`, in order. */
   written?: { node: string; attempt: number; raw: unknown; replace: boolean }[];
@@ -180,7 +227,9 @@ const run = (fake: Fake = {}): GateRun => ({
   changesSinceGate: async () => fake.after ?? { kind: "changes", files: {} },
   resultsOf: async (n, a) => fake.reports?.[`${n}:${a}`],
   agentReport: async () => fake.said,
-  agentTokens: async () => fake.tokens,
+  report: async () => ({
+    usage: fake.usage ?? { not_collected: true, reason: "not_captured" },
+  }),
   agentLog: async () => fake.log,
   diffOf: async (path) =>
     path === "a.ts" ? { text: "@@ -1 +1 @@\n-x\n+y", truncated: false } : undefined,
@@ -376,7 +425,7 @@ describe("tui gate detail", () => {
   });
 
   test("the numbers: time at work and waiting for a person, steps, repeats, tokens", async () => {
-    const d = await load({ tokens: { tokens: 412_000, cost: 3.4, approx: true } });
+    const d = await load({ usage: measured({ complete: false }) });
     expect(d?.metrics).toMatchObject({
       waitMs: 10 * MIN + 37 * MIN,
       workMs: 90 * MIN - 47 * MIN,
@@ -386,6 +435,21 @@ describe("tui gate detail", () => {
       tokens: { total: 412_000, cost: 3.4, approx: true },
     });
     expect((await load())?.metrics.tokens).toBeUndefined();
+  });
+
+  test("the tokens are the engine's: input, output and cache, exact once the log was read to its end", () => {
+    expect(tokensOf(measured({}))).toEqual({ tokens: 412_000, cost: 3.4, approx: false });
+    expect(tokensOf(measured({ complete: false }))?.approx).toBe(true);
+  });
+
+  test("a cost that is only a part of the cost, or that no price gives, is not shown as the cost", () => {
+    expect(tokensOf(measured({ partial: true }))).toEqual({ tokens: 412_000, approx: false });
+    expect(tokensOf(measured({ usd: null }))).toEqual({ tokens: 412_000, approx: false });
+  });
+
+  test("a run whose usage was not recorded has no tokens", () => {
+    expect(tokensOf({ not_collected: true, reason: "disabled" })).toBeUndefined();
+    expect(tokensOf({ cannot_read: true, format: "9" })).toBeUndefined();
   });
 
   test("changes are counted by file and line, the biggest first", async () => {
@@ -516,8 +580,8 @@ describe("tui gate detail", () => {
         agentReport: async () => {
           throw new Error("log unreadable");
         },
-        agentTokens: async () => {
-          throw new Error("log unreadable");
+        report: async () => {
+          throw new Error("journal unreadable");
         },
       }),
     };

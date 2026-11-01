@@ -5,6 +5,7 @@ import type {
   PipelineSpec,
   ResultReport,
   RunState,
+  UsageReport,
 } from "@kodel-ai/pipeline-core";
 import { logLines } from "./load";
 import type {
@@ -39,7 +40,8 @@ export interface GateRun {
   changesSinceGate(node: string): Promise<Changes>;
   resultsOf(node: string, attempt: number): Promise<ResultReport | undefined>;
   agentReport?(since: number): Promise<{ text: string; ts: number } | undefined>;
-  agentTokens?(): Promise<{ tokens: number; cost?: number; approx: boolean } | undefined>;
+  /** The report of the run: what the engine measured of the agent's use is in it. */
+  report?(): Promise<{ usage: UsageReport }>;
   agentLog?(): Promise<LogEntry[] | undefined>;
   diffOf?(path: string): Promise<{ text: string; truncated: boolean } | undefined>;
   reportResult?(
@@ -116,7 +118,10 @@ async function build(
     gate ? run.resultsOf(node, attempt).catch(() => undefined) : undefined,
     readReports(run, journal),
     waiting ? run.agentReport?.(since ?? state.startedAt).catch(() => undefined) : undefined,
-    run.agentTokens?.().catch(() => undefined),
+    run
+      .report?.()
+      .then((r) => tokensOf(r.usage))
+      .catch(() => undefined),
     run.agentLog?.().catch(() => undefined),
   ]);
   const visits = visitsOf(spec, journal, reports, node, gate ? attempt : undefined, now);
@@ -356,6 +361,24 @@ function latestChecks(visits: Visit[]): CheckLine[] {
 function checkCounts(visits: Visit[]): Pick<Metrics, "checksPassed" | "checksTotal"> {
   const checks = latestChecks(visits);
   return { checksPassed: checks.filter((c) => c.passed).length, checksTotal: checks.length };
+}
+
+/**
+ * The tokens of the run as the engine measured them, and the estimate of their cost when every
+ * model had a price. The engine counts up to its last pass, so this is a lower bound; it is marked
+ * as approximate when the log was not read to its end.
+ */
+export function tokensOf(
+  usage: UsageReport,
+): { tokens: number; cost?: number; approx: boolean } | undefined {
+  if (!("estimate" in usage)) return undefined;
+  const t = usage.total.tokens;
+  const cost = usage.total.cost.usd;
+  return {
+    tokens: t.input + t.output + t.cache_read + t.cache_write,
+    ...(cost === null || usage.total.cost.partial ? {} : { cost }),
+    approx: !usage.complete,
+  };
 }
 
 function metricsOf(

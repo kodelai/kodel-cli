@@ -103,9 +103,7 @@ import {
 import {
   type AgentLogEntry,
   type AgentReport,
-  type AgentUsage,
   agentLog,
-  agentUsage,
   lastAgentReport,
 } from "./history/claude-code/report";
 import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integrity";
@@ -1880,33 +1878,29 @@ export class LocalRun {
     );
   }
 
-  /** What the agent last wrote in the run's directory at or after `since`: the report it gives at a gate. */
-  async agentReport(since: number): Promise<AgentReport | undefined> {
-    return lastAgentReport({
+  /**
+   * Where the agent's logs of this run are read: the sessions the engine copied the log of, when it did,
+   * else the sessions that began in the run's directory. What is read has the project's secrets taken out.
+   */
+  private async logOptions(state: RunState) {
+    return {
       root: this.host.options.root,
       workdir: await this.cwd(),
-      since,
+      sessionIds: Object.keys(state.agentLog?.sessions ?? {}),
       rules: this.host.rules,
-    });
+    };
+  }
+
+  /** What the agent last wrote in the run's sessions at or after `since`: the report it gives at a gate. */
+  async agentReport(since: number): Promise<AgentReport | undefined> {
+    return lastAgentReport({ ...(await this.logOptions(await this.state())), since });
   }
 
   /** What the agent said and which tools it called while the run went on, when its logs can be read. */
   async agentLog(): Promise<AgentLogEntry[] | undefined> {
     const state = await this.state();
     return agentLog({
-      root: this.host.options.root,
-      workdir: await this.cwd(),
-      from: state.startedAt,
-      to: state.finishedAt ?? this.host.clock(),
-    });
-  }
-
-  /** The tokens the agent used in the run's directory since the run began, when its logs can be read. */
-  async agentTokens(): Promise<AgentUsage | undefined> {
-    const state = await this.state();
-    return agentUsage({
-      root: this.host.options.root,
-      workdir: await this.cwd(),
+      ...(await this.logOptions(state)),
       from: state.startedAt,
       to: state.finishedAt ?? this.host.clock(),
     });

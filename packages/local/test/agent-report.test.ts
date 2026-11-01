@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claudeFolderName, installClaudeSession } from "../../testkit/src/history-fixtures";
-import { agentLog, agentUsage, lastAgentReport } from "../src/history";
+import { agentLog, lastAgentReport } from "../src/history";
 
 let base: string;
 let root: string;
@@ -123,24 +123,66 @@ describe("the agent's last report", () => {
   });
 });
 
-describe("the tokens of a run", () => {
-  test("they are summed from the usage the logs report, within the time of the run", async () => {
-    await installClaudeSession({ configDir, cwd: workdir });
-    const used = await agentUsage({ root, workdir, configDir, from: 0, to: Date.now() });
-    expect(used?.tokens).toBeGreaterThan(0);
-    expect(used?.approx).toBe(false);
-    const none = await agentUsage({ root, workdir, configDir, from: 0, to: 1 });
-    expect(none?.tokens).toBe(0);
+describe("the sessions the engine names", () => {
+  const said = (id: string, words: string) =>
+    entry("assistant", "2026-10-27T10:30:00.000Z", text(id, words), { cwd: root });
+
+  test("a session that began in the project's own directory is the run's when the engine names it", async () => {
+    await install([said("m1", "From the session at the root.")], root, "main");
+    // by the directory the run works in, this session is not its own
+    expect(await lastAgentReport({ root, workdir, configDir, since: 0 })).toBeUndefined();
+    const found = await lastAgentReport({
+      root,
+      workdir,
+      configDir,
+      since: 0,
+      sessionIds: ["main"],
+    });
+    expect(found?.text).toBe("From the session at the root.");
   });
 
-  test("a run that works in the project's own directory is marked as approximate", async () => {
-    await installClaudeSession({ configDir, cwd: root });
-    const used = await agentUsage({ root, workdir: root, configDir, from: 0, to: Date.now() });
-    expect(used?.approx).toBe(true);
+  test("only the sessions it names are read", async () => {
+    await install([said("m1", "Mine.")], root, "mine");
+    await install([said("m2", "Somebody else's.")], root, "other");
+    const found = await lastAgentReport({
+      root,
+      workdir,
+      configDir,
+      since: 0,
+      sessionIds: ["mine"],
+    });
+    expect(found?.text).toBe("Mine.");
+    const log = await agentLog({
+      root,
+      workdir,
+      configDir,
+      from: 0,
+      to: Date.now(),
+      sessionIds: ["mine"],
+    });
+    expect(log?.map((e) => e.text)).toEqual(["Mine."]);
   });
 
-  test("no session, no numbers", async () => {
-    expect(await agentUsage({ root, workdir, configDir, from: 0, to: Date.now() })).toBeUndefined();
+  test("a name that matches no session gives nothing, not the sessions of the directory", async () => {
+    await install([said("m1", "In the directory.")]);
+    expect(
+      await lastAgentReport({ root, workdir, configDir, since: 0, sessionIds: ["gone"] }),
+    ).toBeUndefined();
+  });
+
+  test("what the log shows has the secrets the rules know taken out", async () => {
+    await install([said("m1", "The key is sekret-123.")], root, "main");
+    const log = await agentLog({
+      root,
+      workdir,
+      configDir,
+      from: 0,
+      to: Date.now(),
+      sessionIds: ["main"],
+      rules: [{ name: "test", pattern: /sekret-\d+/g, replace: () => "[hidden]" }],
+    });
+    expect(log?.map((e) => e.text).join(" ")).toContain("[hidden]");
+    expect(log?.map((e) => e.text).join(" ")).not.toContain("sekret-123");
   });
 });
 
