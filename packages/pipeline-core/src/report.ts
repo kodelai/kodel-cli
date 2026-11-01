@@ -5,6 +5,7 @@
 import type { JournalRecord, RunState } from "./run";
 import { runSlug } from "./slug";
 import type { TaskSize } from "./task-size";
+import { type ToolCallsReport, toolCallsReport } from "./tool-calls";
 import { type UsageLine, type UsageReport, usageReport } from "./usage-report";
 
 export interface AttemptReport {
@@ -248,6 +249,8 @@ export interface RunReport {
   agent_log: AgentLogReport;
   /** Tokens and the estimated cost of the agent's use, per attempt and for the run. */
   usage: UsageReport;
+  /** What the agent called, per attempt, from the agent's own log (information only, `unverified`). */
+  tool_calls?: ToolCallsReport;
 }
 
 const seconds = (from: number, to: number) => Math.max(0, Math.round((to - from) / 100) / 10);
@@ -653,6 +656,7 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
     prompts: state.served === undefined ? { not_collected: true } : { served },
     agent_log: agentLogReport(state, lastAgentStep),
     usage,
+    tool_calls: toolCallsReport(state, journal),
   };
 }
 

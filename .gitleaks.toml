@@ -9,6 +9,7 @@ useDefault = true
 description = "Hash chains (sha256) in machine-written run records kept as fixtures"
 paths = [
   '''^fixtures/usage-run/''',
+  '''^fixtures/tool-calls-run/''',
   '''^fixtures/agent-log/''',
 ]
 

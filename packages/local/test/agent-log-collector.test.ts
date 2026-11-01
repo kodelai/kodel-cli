@@ -147,6 +147,9 @@ describe("t3bk2 collector options: metadata mode", () => {
     "cache_read",
     "cache_write",
     "cache_write_1h",
+    // A size, and a closed word of the reader's own: neither carries text of the log.
+    "input_bytes",
+    "error_type",
     "reasoning",
     "semantics",
     "request_id",

@@ -43,6 +43,8 @@ export interface ClaudeState {
   capture: CaptureOptions | undefined;
   /** `usage` events carry the 1-hour part of the cache writes (`ReadOptions.usageDetail`). */
   usageDetail?: boolean;
+  /** `tool_call` events carry the size of the input and `tool_result` errors a type (`ReadOptions.toolDetail`). */
+  toolDetail?: boolean;
   /** Events at the start of the last entry's output that ended a response (the rest belong to the open one). */
   flushedCount: number;
   /** How many leading events of the last entry's output are settled: not part of a response still being written. */
@@ -94,6 +96,32 @@ const isObject = (value: unknown): value is Json =>
 const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
 const count = (value: unknown): number =>
   typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+
+/** A tool input over this many characters of JSON keeps only its size (`ReadOptions.toolDetail`). */
+export const TOOL_PREVIEW_MAX_JSON = 256 * 1024;
+
+export const TOOL_ERROR_TYPES = ["error", "denied", "interrupted", "hook_blocked"] as const;
+export type ToolErrorType = (typeof TOOL_ERROR_TYPES)[number];
+
+/**
+ * Why a tool result that is an error is one, from the shapes Claude Code writes: a person's interruption, a hook of the
+ * project that blocked the call (`PreToolUse:<Tool> hook error`), a permission that was refused, or anything else. Only the
+ * start of the text is looked at, and a text that does not match falls to `error`, never to another value.
+ */
+export function errorTypeOf(text: string): ToolErrorType {
+  const head = text.slice(0, 300);
+  if (/^\s*\[Request interrupted by user/.test(head)) return "interrupted";
+  if (/^\s*PreToolUse:\S+ hook error/.test(head)) return "hook_blocked";
+  if (
+    /^\s*(?:<tool_use_error>\s*)?(?:Permission (?:for this action|to use \S+)\b|The user doesn't want to proceed)/.test(
+      head,
+    ) ||
+    /^\s*<tool_use_error>[^\n]{0,160}denied by your permission settings/.test(head)
+  ) {
+    return "denied";
+  }
+  return "error";
+}
 
 /** Most events held back behind one response; a log that holds more ends the response early instead. */
 const HELD_CAP = 5_000;
@@ -287,10 +315,12 @@ function normalizeEntry(entry: unknown, state: ClaudeState): DraftEvent[] {
         }
         state.calls.set(id, { started: ts, description });
         const server = name.startsWith("mcp__") ? name.split("__")[1] : undefined;
+        const inputJson = input === undefined ? undefined : (JSON.stringify(input) ?? "");
+        // A value over the limit costs the read nothing more than its size: it is not flattened and redacted to be cut.
+        const tooBig =
+          state.toolDetail === true && (inputJson?.length ?? 0) > TOOL_PREVIEW_MAX_JSON;
         const shownInput =
-          input === undefined
-            ? undefined
-            : preview(state, "tool_input", JSON.stringify(input) ?? "");
+          inputJson === undefined || tooBig ? undefined : preview(state, "tool_input", inputJson);
         out.push({
           ...base,
           kind: "tool_call",
@@ -298,6 +328,9 @@ function normalizeEntry(entry: unknown, state: ClaudeState): DraftEvent[] {
           name,
           ...(server === undefined || server === "" ? {} : { mcp_server: server }),
           ...(shownInput === undefined ? {} : { input_preview: shownInput }),
+          ...(state.toolDetail === true && inputJson !== undefined
+            ? { input_bytes: Buffer.byteLength(inputJson) }
+            : {}),
           started: ts,
         });
       }
@@ -332,6 +365,9 @@ function normalizeEntry(entry: unknown, state: ClaudeState): DraftEvent[] {
       kind: "tool_result",
       id,
       ok: block["is_error"] !== true,
+      ...(state.toolDetail === true && block["is_error"] === true
+        ? { error_type: errorTypeOf(output) }
+        : {}),
       ended: ts,
       ...(duration === undefined || duration < 0 ? {} : { duration_ms: duration }),
       size: Buffer.byteLength(output),

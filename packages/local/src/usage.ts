@@ -57,6 +57,7 @@ import { AGENT_ID } from "./history/claude-code/normalize";
 import { hasStepCall } from "./history/claude-code/window";
 import {
   proveRunStart,
+  type RunStartCache,
   type RunStartMemo,
   SAFE_SESSION,
   SessionFinder,
@@ -278,6 +279,8 @@ export interface UsageWriterOptions {
   collector?: (configDir: string) => AgentHistoryCollector;
   /** How long one pass may read before it keeps what it has. */
   budgetMs?: number;
+  /** What was found about where a run begins in a log, shared with the other writers of the host. */
+  runStarts?: RunStartCache;
 }
 
 export interface UsageResult {
@@ -504,7 +507,7 @@ export class UsageWriter {
         proven += 1;
         continue;
       }
-      if (!(await proveRunStart(run.runId, memo))) continue;
+      if (!(await proveRunStart(run.runId, memo, this.options.runStarts))) continue;
       proven += 1;
       // The response that makes the call of this step may not be in the log yet.
       await this.awaitStepCall(ctx, candidate.path);

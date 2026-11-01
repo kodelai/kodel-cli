@@ -4,6 +4,7 @@ import type {
   PipelineSpec,
   RunReport,
   TokenSummary,
+  ToolCallsAttempt,
   UsageLine,
 } from "@kodel-ai/pipeline-core";
 
@@ -215,6 +216,93 @@ export function usageLines(report: RunReport["usage"], plain: (text: string) => 
   return lines;
 }
 
+/** The tools of an attempt as `Bash 6, Edit 4`, the most called first; the rest is counted together. */
+function toolList(byTool: Record<string, number>, plain: (text: string) => string): string {
+  const sorted = Object.entries(byTool).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const shown = sorted.slice(0, 6).map(([tool, n]) => `${plain(tool)} ${n}`);
+  const rest = sorted.slice(6).reduce((sum, [, n]) => sum + n, 0);
+  return rest > 0 ? [...shown, `${rest} more`].join(", ") : shown.join(", ");
+}
+
+function toolCallsAttemptLine(
+  label: string,
+  attempt: ToolCallsAttempt,
+  plain: (text: string) => string,
+  /** Rows were cut: a call with no result may have finished, and what is counted from the rows kept is a part. */
+  cut: boolean,
+): string {
+  // Rows are kept up to 200 per attempt and none past the budget: what is counted from them is a part when either held.
+  const partial = cut || attempt.omitted > 0;
+  const parts = [`${attempt.calls} call(s) (${toolList(attempt.by_tool, plain)})`];
+  if (attempt.failed > 0) parts.push(`${attempt.failed} failed`);
+  if (attempt.open > 0) {
+    parts.push(`${attempt.open} open${cut ? " (or finished after the rows were cut)" : ""}`);
+  }
+  if (attempt.shared > 0) parts.push(`${attempt.shared} shared with another open step`);
+  const own = attempt.lines.filter((l) => l.own === true).length;
+  if (own > 0) parts.push(`${own} of the engine's own${partial ? " (of the rows kept)" : ""}`);
+  const servers = [
+    ...new Set(attempt.lines.flatMap((l) => (l.server === undefined ? [] : [l.server]))),
+  ];
+  if (servers.length > 0) parts.push(`MCP: ${servers.map(plain).join(", ")}`);
+  const longest = attempt.longest.map((l) => `${plain(l.tool)} ${formatDuration(l.ms / 1000)}`);
+  return `  ${label}: ${parts.join(", ")}${longest.length > 0 ? `; longest: ${longest.join(", ")}` : ""}`;
+}
+
+/**
+ * What the agent called, as lines of text: counts per attempt, failures, open calls and the longest ones; every row is in
+ * `report --json`. It is what the agent's own log said (it can be edited), so it is said `unverified`, and what no pass
+ * ever reads is said too.
+ */
+export function toolCallsLines(
+  report: RunReport["tool_calls"],
+  plain: (text: string) => string,
+): string[] {
+  if (report === undefined) return [];
+  if ("not_collected" in report) return [`tool calls: not_collected (${report.reason})`];
+  if ("cannot_read" in report) {
+    // `format` is a format number, or `reason X` for a reason of a failure that this kodel does not know
+    const what = report.format.startsWith("reason ")
+      ? `a reason of a newer kodel (${plain(report.format.slice(7))})`
+      : `written in format ${plain(report.format)}`;
+    return [`tool calls: cannot read (${what}, upgrade kodel)`];
+  }
+  const lines = ["tool calls (what the agent's own log says; not verified):"];
+  for (const attempt of report.attempts) {
+    lines.push(
+      toolCallsAttemptLine(
+        `${plain(attempt.node ?? "?")} #${attempt.attempt ?? "?"}`,
+        attempt,
+        plain,
+        report.rows_cut,
+      ),
+    );
+  }
+  if (report.unattributed !== undefined) {
+    lines.push(
+      toolCallsAttemptLine("outside every step", report.unattributed, plain, report.rows_cut),
+    );
+  }
+  if (report.rows_cut) {
+    lines.push(
+      "  rows were left out for want of room: durations and failures are unknown for the rest",
+    );
+  }
+  if (report.skipped > 0)
+    lines.push(
+      `  ${report.skipped} line(s) of the log could not be read (over the limit, or not JSON)`,
+    );
+  if (report.unjoined > 0) lines.push(`  ${report.unjoined} result(s) have no call in the record`);
+  if (!report.complete) lines.push("  the log was not read to its end yet");
+  if (report.failed.length > 0) {
+    lines.push(`  not recorded: ${report.failed.map(plain).join(", ")}`);
+  }
+  lines.push(
+    "  the final response of the last step, and of a session that ended between steps, is never recorded; the result of an own call says nothing of whether its step passed",
+  );
+  return lines;
+}
+
 export function formatDuration(seconds: number): string {
   const whole = Math.round(seconds);
   if (whole < 60) return `${whole} s`;
@@ -388,6 +476,7 @@ export function formatReport(
       : "prompts: not_collected",
     agentLogLine(report.agent_log),
     ...usageLines(report.usage, plain),
+    ...toolCallsLines(report.tool_calls, plain),
   );
   const failures = report.nodes.flatMap((node) =>
     node.attempts

@@ -14,5 +14,6 @@ export * from "./storage";
 export * from "./storage-paths";
 export * from "./store";
 export * from "./tasks";
+export * from "./tool-calls";
 export * from "./usage";
 export * from "./worktree";

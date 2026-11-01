@@ -47,8 +47,46 @@ export interface RunStartMemo {
   searchedSize?: number;
 }
 
-/** Whether the log of `memo` has a call of the run, and where the run begins in it; the answer is kept in `memo`. */
-export async function proveRunStart(runId: string, memo: RunStartMemo): Promise<boolean> {
+/**
+ * What was found about where a run begins in a log, shared by the writers of one host (the count of usage and the record of
+ * tool calls), so that a log that grew is searched once per step end and not once per writer. Only the answer is shared:
+ * each writer keeps its own reading state.
+ */
+export class RunStartCache {
+  private readonly entries = new Map<string, Pick<RunStartMemo, "start" | "searchedSize">>();
+  private static readonly CAP = 256;
+
+  get(runId: string, path: string): Pick<RunStartMemo, "start" | "searchedSize"> | undefined {
+    return this.entries.get(`${runId}\u0000${path}`);
+  }
+
+  set(runId: string, path: string, memo: Pick<RunStartMemo, "start" | "searchedSize">): void {
+    const key = `${runId}\u0000${path}`;
+    this.entries.delete(key);
+    this.entries.set(key, { start: memo.start, searchedSize: memo.searchedSize });
+    while (this.entries.size > RunStartCache.CAP) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest === undefined) break;
+      this.entries.delete(oldest);
+    }
+  }
+
+  forget(runId: string): void {
+    for (const key of [...this.entries.keys()]) {
+      if (key.startsWith(`${runId}\u0000`)) this.entries.delete(key);
+    }
+  }
+}
+
+/**
+ * Whether the log of `memo` has a call of the run, and where the run begins in it; the answer is kept in `memo` (and in
+ * `cache`, when given, for the other writers of the host).
+ */
+export async function proveRunStart(
+  runId: string,
+  memo: RunStartMemo,
+  cache?: RunStartCache,
+): Promise<boolean> {
   if (memo.start) return true;
   let size: number;
   try {
@@ -56,9 +94,21 @@ export async function proveRunStart(runId: string, memo: RunStartMemo): Promise<
   } catch {
     return false;
   }
+  const known = cache?.get(runId, memo.path);
+  if (known?.start) {
+    memo.start = known.start;
+    memo.searchedSize = known.searchedSize;
+    return true;
+  }
   if (memo.start === null && memo.searchedSize === size) return false;
+  if (known?.start === null && known.searchedSize === size) {
+    memo.start = null;
+    memo.searchedSize = size;
+    return false;
+  }
   memo.searchedSize = size;
   memo.start = (await findRunStart(memo.path, runId)) ?? null;
+  cache?.set(runId, memo.path, memo);
   return memo.start !== null;
 }
 

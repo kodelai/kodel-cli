@@ -530,3 +530,99 @@ model, and reports a page whose places disagree on one price of a row (a stale m
 a changed row), but a change of several prices at once while an old mention remains is not caught. A request
 over a model's own `long_context_tokens` (200 000 unless the table says otherwise, 100 000 for `claude-haiku-5-5`) is flagged, and
 the higher price of such requests is not modelled.
+
+## Tool calls (`tool_calls_recorded`)
+
+Each run records what its agent called: every tool call and every tool result, per attempt of an agent node, with the name,
+the time it started, how long it took, whether it ended in an error, the size of its input and of its result, the MCP server
+and whether a subagent made it. It is built in TASK-ZKRH on the collectors above, and it is information only: the rows are
+what the agent's **own log** says (the agent can edit it), so the report says `unverified`, and nothing here feeds a check, a
+route or a gate. Claude Code only; any other client reads `not_collected: agent_unsupported`.
+
+```yaml
+history:
+  tool_calls:
+    enabled: true       # false writes nothing and does not read the agent's log
+    preview_chars: 200  # the cut of the preview of a call's input; 0 stores none; at most 2000
+```
+
+**It has its own switch.** `agent_log: false` and `usage: false` do not stop it; only `tool_calls: false` does. `history.tool_log`
+is the switch of the hooks (TASK-R7AF) and has no effect here. The keys are frozen at the start of the run
+(`run_started.history.tool_calls`); a run without them reads `not_captured`. An engine that does not know the key refuses the
+whole project config, because `history` is strict: a team on mixed versions of kodel has to upgrade together.
+
+**What is stored.** A pass runs at the end of each agent step, after the copy of the agent's log and the count of usage and
+under the same lock, before the step is judged. It reads only what is new in the log and journals it as rows in
+`tool_calls_recorded`: a row for a call (`k: c`: the id, the tool, the server, `own` for a tool of the engine itself, the start,
+`in_bytes`, the preview, `subagent`, and the attempt it belongs to) and a row for its result (`k: r`: the end, `ms`, `ok`, `err`,
+`out_bytes`). The pass pairs nothing: the reader of the log releases a call and its result at different moments, so each is
+recorded when it comes and `kodel report` joins them by id. A call with no result row is `open`. The ids are hashed from the
+session and the id in the log. Calls of a subagent come from its own log file and are marked with its id. `err` is one of
+`error`, `denied`, `interrupted` and `hook_blocked`, matched on the start of the text of an error result; anything else is
+`error`. `report --json` has every row (up to 200 per attempt; the rest is counted as `omitted`), and `kodel report` has the
+counts per tool, the failed and open ones and the three longest.
+
+**Previews are in the journal.** A preview of a call's input (a command, a path, the content of a write) is stored only when the
+agent's own conversation log is kept as `full` text (`history.agent_log`), and never more than `preview_chars`. It is redacted
+first and cut after, and the store redacts it again, but `redact` does not catch every secret (see "The agent log"). The journal
+is sealed and is committed when the project tracks `.kodel/runs`, and a project that ignores only `.kodel/runs/*/agent_log`
+commits the previews too: set `preview_chars: 0` there. With `agent_log` off or in `metadata` mode no preview is stored; the sizes
+and the names are.
+
+**Which attempt.** A call belongs to the step of the first hand-in (`agent_completed`) at or after the time it started, and to
+the step being handed in now when no hand-in follows: usage's rule, placed by time and not by the pass that read it. So the
+hand-in call of a step, which the reader releases only when the next response starts, is read by the pass of the next step and is
+still put with the step it ended. A call made while the run waits at a gate or a pause and no agent step is open, before the
+run's first call, or in the future, is `unattributed`. In a fork several agent steps are open at once in one session and the log
+cannot tell the branches apart: a call that started while more than one was open is credited to the step handed in first and
+marked `shared`: also in a fork whose steps the agent works one by one, where every branch is open from the start of the fork and the place is in fact exact. A step that was never handed in (superseded, canceled) takes no calls: they go to the next hand-in. While a
+pipeline change waits for a person the agent may keep working in the step's phase; those calls are charged to the step, as the
+tokens of usage are. A pass that gets `busy` (in a fork a second hand-in waits for the lock only a few seconds) loses nothing:
+the next pass reads everything since its cursor and places each call by its own start. Tokens and calls can differ in one
+attempt after a retry or in a fork, because usage credits what a pass reads to the step handed in.
+
+**What is never recorded.** The reader releases a response only when the next one starts, and a pass writes nothing to a run that
+has ended. So these are not in the record: the final response of the last agent step (with its hand-in call), of a session that
+ended between steps (a new chat after a gate, `/clear`, a restart), of each subagent's log, and of a step whose last pass was
+skipped. A line of the log over 8 MB is dropped by the line reader, and a call or result on it is not recorded (the record counts
+`skipped` lines, not the calls; a line that is not JSON is counted too, and a read again from the start (after a restart, a held pass, a log found changed or a memo that was let go) counts the same lines again, and a pass with no new rows does not write a record for them alone); an input over 256 KB of JSON has no preview and keeps only its size. The report says what is missing. A call that was still running when its step ended (a background tool), or whose result is not in the log, stays `open` (an interrupted call has an error result: it is failed, `err: interrupted`); the result that comes later is recorded and joins it. A Claude Code session forked with
+`--fork-session` copies the history with the same ids and is recorded again, as in usage. The result of an own call says nothing
+of whether its step passed: the engine answers a failed check as a normal result. A tool of another MCP server, or of the agent, whose
+bare name is one of the engine's is marked `own` too (the row shows the server). Durations are wall time from the log: calls made in
+one message start and end together, so each reads as long as the slowest. `out_bytes` (the size of a result) counts text blocks only.
+
+**Bounded.** At most 200 rows in a record and 1 000 records in a run; the rows of a run are budgeted at about 768 KB (counted
+before the store redacts, so approximately), and past it a record carries counts only, so
+a loop stays visible while durations and failures are unknown (`rows_cut`). In every record, rows or not, the counts hold at most 32 tool names and the rest is under `other` (the rows keep the real name). The state holds a cursor per session and numbers,
+never text or names. The journal is read whole by every pass, `status`, `report`, `completeStep` and every poll of `kodel wait`:
+this adds about 1 MB of rows and, at worst, the counts of up to 1 000 records (a few MB) to a journal that is about 150 KB without it. Time before a step is judged: today the lock wait (5 s),
+the copy (30 s), the wait for the step's call (2 s) and the count of usage (10 s) can take 47 s; this pass is chained after them
+with a budget of 5 s of its own (52 s together). It does not wait for the step's call in the log, never fails a step, and has no
+timer: nothing is recorded between step ends. Where a run begins in a log is searched once for the usage count and this pass
+together. A stream found changed under its cursor (a log that was rewritten or truncated) is not read again in that process (after a restart it is read and refused again), and a cursor it left behind keeps the report at `complete: false` for the rest of the run. A pass that stops for time records what it read and marks the log as not read to its end (`complete: false`); the next
+pass reads on. So does a pass that meets a call that began after the pass did (by at most a minute: a worker goes on writing its
+own log while another worker's step is handed in): rows are never rewritten, so such a call is left for the next pass, which
+places it by its own start; a call further in the future than that (a clock that is wrong, or a log that is not true) is recorded
+as `unattributed`. Once the rows of a run pass their budget no rows come back, however small a later record is. A call that the
+main log and a subagent's own file both hold is recorded once in a pass (not across passes: read in two passes it is two rows under two sessions). A subagent's log whose first entry has no time yet (a file just created) is said `unreadable`, once for the run, as in usage. An attempt past the 64 a record can
+count is counted with the unattributed calls, and its rows say so.
+
+**Format.** The records exist in run-state format 2 and format 1 alike (the codec of format 1 keeps `toolCalls` and the events
+as it keeps `usage`): `tool_calls_recorded` and `tool_calls_failed` in the journal, `toolCalls` in the state,
+`run_started.history.tool_calls`, and, only for a read made for this pass, `input_bytes` on a `tool_call` event and `error_type` on
+a `tool_result` event (never written into the stored copy of the agent's log, so the events the other readers get and the
+golden fixtures are unchanged). The payload carries its own `v` (`calls.v`); a record of a format this engine does not know, or a
+reason it does not know, reads as "cannot read (written in format X)", never as "modified" and never as "no calls". A field added
+to a record later bumps `calls.v`. An engine from before this change that goes on with a run of format 2 reads it, since the
+current codec keeps what it does not know: the old `summarizeRun` ignores the two events and the state key stays as it was, so
+the cursor then lags and a later pass of this engine catches up from the start of the run's log. A run of format 1 never holds the
+key in practice (new runs start in format 2, and a run that was going has no `history.tool_calls`); the format-1 entries are for
+completeness, and an engine from before this change refuses a format-1 state that holds `toolCalls` as "cannot read".
+The golden run with tool calls is `fixtures/tool-calls-run/`
+(its README says when it moves under the frozen formats).
+
+Reasons nothing is shown: `not_captured`, `disabled`, `session_unknown`, `log_missing`, `refused`, `unreadable`, `busy`,
+`agent_unsupported` and `no_calls`. A step run by another engine than the agent of the session (TASK-WKJ4) will have no calls
+in this log; a reason `engine_step` comes with it. A pass says `cap` once when the run has journaled as many records as it may
+(nothing more is recorded), or keeps a cursor for as many sessions as it may (64, each subagent is one: a stream past that is skipped and its calls are not recorded; a later `cap` of the first kind is not said again, since a reason is said once), and `record_refused` when the run itself refused a record (an id it does not accept, or it went away):
+the pass stops, and the next one starts again from the cursor.
