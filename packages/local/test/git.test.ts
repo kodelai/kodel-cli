@@ -57,6 +57,65 @@ describe("snapshots", () => {
   });
 });
 
+describe("the patch of one file", () => {
+  const changedTwo = async () => {
+    await write("a.txt", lines(5));
+    await write("b.txt", lines(5));
+    const s = new GitSnapshotter(dir);
+    const before = await s.snapshot();
+    await write("a.txt", `${lines(5)}added a\n`);
+    await write("b.txt", `${lines(5)}added b\n`);
+    return { s, before, after: await s.snapshot() };
+  };
+
+  test("it is the diff of that file only", async () => {
+    const { s, before, after } = await changedTwo();
+    const { text, truncated } = await s.patch(before, after, "a.txt");
+    expect(text).toContain("+added a");
+    expect(text).not.toContain("added b");
+    expect(truncated).toBe(false);
+  });
+
+  test("a path that leaves the repository, or is empty, is refused", async () => {
+    const { s, before, after } = await changedTwo();
+    for (const path of ["", "/etc/passwd", "../outside", "a/../../b"]) {
+      await expect(s.patch(before, after, path)).rejects.toThrow("not a path inside");
+    }
+  });
+
+  test("a path that looks like an option is a path, not an option", async () => {
+    const { s, before, after } = await changedTwo();
+    const out = join(dir, "written");
+    const { text } = await s.patch(before, after, `--output=${out}`);
+    expect(text).toBe("");
+    await expect(readdir(out)).rejects.toThrow();
+  });
+
+  test("a diff that is too long is cut, and says so", async () => {
+    const { s, before, after } = await changedTwo();
+    const cut = await s.patch(before, after, "a.txt", 30);
+    expect(cut.truncated).toBe(true);
+    expect(cut.text).toHaveLength(30);
+  });
+
+  test("it is redacted before it is cut, so that no part of a secret is left at the cut", async () => {
+    await write("k.txt", "start\n");
+    const s = new GitSnapshotter(dir);
+    const before = await s.snapshot();
+    // the token sits where the cut falls
+    await write("k.txt", `start\n${"x".repeat(40)}SECRET-TOKEN-ABCDEFGHIJ${"y".repeat(60)}\n`);
+    const after = await s.snapshot();
+    const redact = (text: string) => text.replace(/SECRET-TOKEN-[A-Z]+/g, "[redacted]");
+    const full = await s.patch(before, after, "k.txt", 10_000, redact);
+    expect(full.text).toContain("[redacted]");
+    // wherever the cut falls, what remains holds no piece of the token
+    for (let at = 50; at < 150; at += 3) {
+      const cut = await s.patch(before, after, "k.txt", at, redact);
+      expect(cut.text).not.toMatch(/SECR/);
+    }
+  });
+});
+
 describe("changes since a snapshot", () => {
   test("an untracked file counts all its lines", async () => {
     await write("keep.txt", "x\n");

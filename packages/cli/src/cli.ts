@@ -9,6 +9,7 @@ import { stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import {
   findProjectRoot,
+  hashSource,
   LocalPipelineHost,
   loadAgentHints,
   loadConfig,
@@ -706,6 +707,52 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       } catch {
         env.out("next:      cannot be worked out from this state (it is not readable as a run)\n");
       }
+    });
+
+  program
+    .command("tui")
+    .description("Open the terminal UI: the runs of this project, and what waits for you")
+    .option("--demo", "show sample runs instead of this project's")
+    .option("--mouse", "start with the mouse on (the m key turns it on and off)")
+    .action(async (opts: { demo?: boolean; mouse?: boolean }) => {
+      requireHuman();
+      const { runTui } = await import("./tui/run");
+      if (opts.demo) {
+        const {
+          demoAddComment,
+          demoDeleteComment,
+          demoDiff,
+          demoGateDetail,
+          demoRunningDetail,
+          demoSessions,
+        } = await import("./tui/demo");
+        // One start time for the whole run, so the sample waits keep their identity and only age.
+        const base = Date.now();
+        await runTui(process.stdin, process.stdout, async () => demoSessions(base), "demo", {
+          mouse: opts.mouse === true,
+          loadDetail: async (runId) =>
+            demoGateDetail(runId, base) ?? demoRunningDetail(runId, base),
+          loadDiff: (_runId, path) => demoDiff(path),
+          addComment: (runId, _node, _attempt, comment) => demoAddComment(runId, comment),
+          deleteComment: (runId, _node, _attempt, index) => demoDeleteComment(runId, index),
+          loadStats: async (pipeline) => (await import("./tui/demo-stats")).demoStats(pipeline),
+        });
+        return;
+      }
+      const { loadSessions } = await import("./tui/load");
+      const { addComment, loadDiff, loadRunDetail, removeComment } = await import("./tui/gate");
+      const { createStatsLoader } = await import("./tui/stats-load");
+      const h = await host();
+      const loadStats = createStatsLoader(h, hashSource);
+      await runTui(process.stdin, process.stdout, () => loadSessions(h, Date.now()), "project", {
+        mouse: opts.mouse === true,
+        loadDetail: (runId) => loadRunDetail(h, runId),
+        loadDiff: (runId, path) => loadDiff(h, runId, path),
+        addComment: (runId, node, attempt, comment) => addComment(h, runId, node, attempt, comment),
+        deleteComment: (runId, node, attempt, index) =>
+          removeComment(h, runId, node, attempt, index),
+        loadStats: (pipeline) => loadStats(pipeline),
+      });
     });
 
   program
