@@ -16,6 +16,8 @@ import {
   DEFAULT_STALE_MS,
   decide,
   decodeJournalRecord,
+  defaultAgentLog,
+  defaultHistory,
   encodeJournalRecord,
   encodeRunState,
   type JournalRecord,
@@ -589,6 +591,83 @@ describe("t41 an event the engine does not know", () => {
       expect(canonical(encodeJournalRecord(decoded))).toBe(canonical(foreign));
       const withIt = [...journal.slice(0, -1), foreign, before];
       expect(canonical(summarizeRun(state, withIt))).toBe(canonical(summarizeRun(state, journal)));
+    }
+  });
+});
+
+describe("t41 the event that names a session", () => {
+  test("t41_session_named_event_is_v2_only", () => {
+    expect(V2_ONLY_EVENTS).toContain("agent_session_named");
+    expect(V1_EVENTS).not.toContain("agent_session_named");
+    expect(capabilitiesOf(1).sessionNames).toBe(false);
+    expect(capabilitiesOf(2).sessionNames).toBe(true);
+    const record = {
+      v: 1,
+      seq: 3,
+      ts: 3,
+      event: "agent_session_named",
+      session: "s1",
+      name: "n",
+    } as JournalRecord;
+    expect(refusal(() => encodeJournalRecord(record)).code).toBe("UNSUPPORTED_FORMAT_FEATURE");
+    expect(encodeJournalRecord({ ...record, v: 2 })).toEqual({ ...record, v: 2 });
+  });
+
+  test("t41_session_named_is_a_quiet_no_op_in_format_1", () => {
+    const history = defaultHistory();
+    history.agent_log = defaultAgentLog();
+    const event = { ...start(), history } as RunEvent;
+    const state = v1Start(AGENT_THEN_COMMAND, event);
+    expect(state.v).toBe(1);
+    expect(state.agentLog).toBeDefined();
+    const before = JSON.stringify(encodeRunState(state));
+    const result = decide(
+      AGENT_THEN_COMMAND,
+      state,
+      { type: "agent_session_named", session: "s1", name: "n", name_hash: "a".repeat(64) },
+      5,
+    );
+    // not a refusal from the codec, which would offer the agent an upgrade it does not need
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.noop).toBe(true);
+      expect(result.journal).toEqual([]);
+      expect(JSON.stringify(encodeRunState(result.state))).toBe(before);
+    }
+  });
+
+  test("t41_session_name_additions_change_no_decision", () => {
+    // The field of the executor and the event, on a golden run of format 2: stripped, the run reports
+    // and reads the same; written back, it is as it was read.
+    for (const run of fixtureRuns("v2")) {
+      const state = readRunState(run.state, run.id);
+      const journal = run.journal.map((line) => decodeJournalRecord(JSON.parse(line)));
+      const first = journal[0];
+      if (first === undefined) continue;
+      const withName = journal.map((r) =>
+        r.event === "run_started" && typeof r.executor === "object" && r.executor !== null
+          ? ({
+              ...r,
+              executor: { ...r.executor, session_name: { value: "a name", source: "derived" } },
+            } as JournalRecord)
+          : r,
+      );
+      const event = {
+        v: state.v,
+        seq: first.seq,
+        ts: first.ts,
+        event: "agent_session_named",
+        session: "s-1",
+        name: "a name",
+      } as JournalRecord;
+      const extended = [withName[0] as JournalRecord, event, ...withName.slice(1)];
+      expect(canonical(summarizeRun(state, extended))).toBe(
+        canonical(summarizeRun(state, journal)),
+      );
+      for (const record of extended) {
+        const wire = JSON.parse(JSON.stringify(record)) as JournalRecord;
+        expect(canonical(encodeJournalRecord(decodeJournalRecord(wire)))).toBe(canonical(wire));
+      }
     }
   });
 });

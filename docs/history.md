@@ -314,6 +314,20 @@ default).
 - **It is display text, not the agent's word.** It comes from a file the agent's session can write, so it decides
   nothing, and kodel never names a run by it alone. It is stripped of control, bidirectional and zero-width
   characters and cut at 120 characters.
+- **A rename shows without a call of the agent.** The copy of the agent's log (`history.agent_log`, every
+  `interval_s` seconds while the run goes, and at the end of each step) looks at the name of every session that is
+  proven to belong to the run (its log calls the run's tools) and journals `agent_session_named` (`session`,
+  `name`) when it is not the name journaled last. The state keeps only the sha256 of that name
+  (`agentLog.nameHashes`), never the text, because the state is not redacted. The event is written only when
+  `history.executor` and `history.agent_log` are on (also in `metadata` mode), only for a run of format 2, and
+  there is no limit to how many are written: one per session per pass at most, and only on a change. A session
+  that was proven and has a name gets one on the first pass of every run.
+- **When it does not.** The run is `running` (a paused or finished run keeps its last name); the server that
+  holds the timer is alive and has seen a call of the run since it started (after a restart, `/resume` or a restart
+  of Claude Code nothing is journaled until the agent calls); `interval_s` is not 0 (then only at the end of a
+  step); fewer than 4000 `agent_log_saved` events were journaled (the timer stops there; it counts saves, not time);
+  with `storage: home` the copy sees only the session of the environment of the server; a cleared title is not
+  journaled, so the old name stays; a stopped stream is not looked at.
 - **Limits.** A session that was renamed has the name in its log every few KB; one that was not may have it farther
   back than the last 512 KB, and then there is no name. No log, no name. After `/clear` or `/resume` the server still
   names the session it started in (`observed-env`), so it is that session's name that is recorded.

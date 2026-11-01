@@ -15,6 +15,7 @@ export const V2_CAPABILITIES: FormatCapabilities = {
   visitSpec: true,
   keepsDeclaredAfterFailedCheck: true,
   firstDuplicateEdgeWins: false,
+  sessionNames: true,
   pipelineFeatures: ["join"],
 };
 

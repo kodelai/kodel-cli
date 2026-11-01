@@ -28,6 +28,8 @@ export interface FormatCapabilities {
   keepsDeclaredAfterFailedCheck: boolean;
   /** Two edges for one `(from, when)` with no `join` in a snapshot written in this format: the first wins. */
   firstDuplicateEdgeWins: boolean;
+  /** The event that names a session of the agent (`agent_session_named`). Format 1 never wrote it. */
+  sessionNames: boolean;
   /** The pipeline features a snapshot of this format can use. */
   pipelineFeatures: readonly PipelineFeature[];
 }

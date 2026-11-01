@@ -33,6 +33,20 @@ New text always meets today's rules: two edges for one label with no `join` stay
 file, in a proposal and in a change you apply. Only a pipeline already kept with an old run is read the
 old way.
 
+## The name of a session
+
+Kodel journals the name of the agent's session next to its id: the field `session_name` in the `executor` of
+`run_started`, `step_served` and `agent_completed`, and the event `agent_session_named` (see
+`docs/history.md`). Neither decides a step, and nothing is rewritten:
+
+- A run of format 1 is unchanged. Format 1 has no place for the event (`sessionNames` is false for it, and the
+  copy of the agent's log does not offer it); the field in `executor` is written to its records as to any other.
+- A run of format 2 that was going when kodel was updated gets names from then on, one event per named session on
+  the first pass of the copy of the agent's log. Records already written are not rewritten.
+- An older kodel that works on the same run ignores the event and the field. It counts the event as a sign of
+  life, so a run whose agent is stuck, in a session that is renamed, looks alive to it. If it rewrites the
+  `agentLog` of the state it drops the hashes of the names, and the newer kodel journals a name again.
+
 ## Limits that a newer kodel cannot lift in an older one
 
 If an older kodel (a session you have not restarted, a `kodel` older on your `PATH`) works on the same

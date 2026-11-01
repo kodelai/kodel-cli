@@ -468,3 +468,68 @@ describe("t3bk2 the account of bytes per visit", () => {
     expect(result.state.agentLog?.bytes).toBe(500);
   });
 });
+
+describe("t41 the name of a session in the run machine", () => {
+  const HASH_A = "a".repeat(64);
+  const HASH_B = "b".repeat(64);
+  const named = (
+    over: Partial<Extract<RunEvent, { type: "agent_session_named" }>> = {},
+  ): RunEvent => ({
+    type: "agent_session_named",
+    session: "s1",
+    name: "fix the list",
+    name_hash: HASH_A,
+    ...over,
+  });
+
+  test("t41_session_named_journals_a_change_and_keeps_only_the_hash", () => {
+    const first = apply(started(), named({ name: "name-marker-7f3a" }));
+    expect(first.journal).toMatchObject([
+      { event: "agent_session_named", session: "s1", name: "name-marker-7f3a" },
+    ]);
+    expect(first.state.agentLog?.nameHashes).toEqual({ s1: HASH_A });
+    // the state is not redacted, so it holds no text of the name
+    expect(JSON.stringify(first.state)).not.toContain("name-marker-7f3a");
+    // the same hash again is a quiet no-op: nothing is journaled twice
+    const again = apply(first.state, named({ name: "name-marker-7f3a" }));
+    expect(again.noop).toBe(true);
+    expect(again.journal).toEqual([]);
+    // a change, and the old name back, are each one event
+    const second = apply(first.state, named({ name: "other", name_hash: HASH_B }));
+    expect(second.journal).toHaveLength(1);
+    const back = apply(second.state, named());
+    expect(back.journal).toHaveLength(1);
+    expect(back.state.agentLog?.nameHashes).toEqual({ s1: HASH_A });
+  });
+
+  test("t41_session_named_keeps_a_hash_per_session", () => {
+    const one = apply(started(), named());
+    const two = apply(one.state, named({ session: "s2" }));
+    expect(two.journal).toHaveLength(1);
+    expect(two.state.agentLog?.nameHashes).toEqual({ s1: HASH_A, s2: HASH_A });
+  });
+
+  test("t41_session_named_handler_validates", () => {
+    const cases: [string, Partial<Extract<RunEvent, { type: "agent_session_named" }>>][] = [
+      ["a session id that is not an id", { session: "../x" }],
+      ["a hash that is not a hash", { name_hash: "xyz" }],
+      ["a name with a control character", { name: "bad\u0000name" }],
+      ["a name with a bidirectional control", { name: "bad\u202ename" }],
+      ["a name that is too long", { name: "x".repeat(121) }],
+      ["an empty name", { name: "" }],
+    ];
+    for (const [what, over] of cases) {
+      const result = apply(started(), named(over));
+      expect(result.noop, what).toBe(true);
+      expect(result.journal, what).toEqual([]);
+      expect(result.state.agentLog?.nameHashes, what).toBeUndefined();
+    }
+  });
+
+  test("t41_session_named_needs_a_run_that_copies_the_log_and_is_running", () => {
+    const without = apply(started(false), named());
+    expect(without.noop).toBe(true);
+    const canceled = apply(started(), { type: "cancel" }).state;
+    expect(apply(canceled, named()).journal).toEqual([]);
+  });
+});
