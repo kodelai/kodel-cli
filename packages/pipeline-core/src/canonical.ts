@@ -95,12 +95,20 @@ export function canonicalPipeline(spec: PipelineSpec): string {
  * not make an old run unreadable. An unknown `version` is said as such ("written in format X"), not
  * as a modified file.
  *
- * The fork and join rules (`validateParallel`) run here too: every snapshot of run-state format 2
- * was written under them. A later tightening of those rules must be kept out of this path (an
- * exemption in the snapshot registry, as for removed fields), or it would make a kept run unreadable.
+ * The fork and join rules (`validateParallel`) run here for a snapshot of run-state format 2: it was
+ * written under them. A snapshot of format 1 was written before forks and ran the first of two equal
+ * edges, so it is read that way (`firstDuplicateEdgeWins`); the caller says which it is, by the format
+ * of the journal line that introduced the snapshot. A later tightening of the rules must keep the old
+ * rule for the snapshots written before it, or it would make a kept run unreadable.
  */
-export function parseSnapshot(source: string): PipelineSpec {
-  return parsePipeline(source, { registry: snapshotRegistry() });
+export function parseSnapshot(
+  source: string,
+  options: { firstDuplicateEdgeWins?: boolean } = {},
+): PipelineSpec {
+  return parsePipeline(source, {
+    registry: snapshotRegistry(),
+    ...(options.firstDuplicateEdgeWins ? { firstDuplicateEdgeWins: true } : {}),
+  });
 }
 
 /**

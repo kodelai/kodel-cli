@@ -1,0 +1,468 @@
+/**
+ * A run of run-state format 1 goes on in format 1 (TASK-5ZCN, decision T-41): the real engine of
+ * `12f8578` made the fixtures in `fixtures/formats/v1-open/`; here the current engine continues them.
+ * The copy of a fixture gets a real working directory (the fixture holds a placeholder, which does
+ * not exist) and a fresh integrity directory; nothing else is changed.
+ */
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, join as pathJoin, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parsePipeline, parseSnapshot } from "@kodel-ai/pipeline-core";
+import { LocalPipelineHost } from "../src";
+import { FileStore } from "../src/store";
+
+const FORMATS = resolve(
+  fileURLToPath(import.meta.url),
+  "..",
+  "..",
+  "..",
+  "..",
+  "fixtures",
+  "formats",
+);
+const GATE = "r_0mvxulus6_0m28";
+const PAUSED = "r_0mvxulvel_5xgk";
+const DUP_EDGE = "r_0mvxulxyp_gmed";
+
+let tmp: string;
+let root: string;
+
+const runDir = (id: string) => join(root, ".kodel", "runs", id);
+const readJson = async (path: string) =>
+  JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+const journalLines = async (id: string) =>
+  (await readFile(join(runDir(id), "journal.jsonl"), "utf8"))
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((line) => JSON.parse(line) as { v: number; event: string; seq: number });
+
+beforeEach(async () => {
+  tmp = await mkdtemp(join(tmpdir(), "kodel v1-continue-"));
+  root = join(tmp, "repo");
+  await mkdir(root, { recursive: true });
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
+  git("init", "-q");
+  git("config", "user.email", "t@example.com");
+  git("config", "user.name", "T");
+  git("commit", "-q", "--allow-empty", "-m", "initial");
+});
+afterEach(async () => {
+  await rm(tmp, { recursive: true, force: true });
+});
+
+/** A fixture run copied into the store, its workdir (a placeholder in the fixture) made real. */
+async function copyFixture(id: string): Promise<void> {
+  await cp(join(FORMATS, "v1-open", id), runDir(id), { recursive: true });
+  const statePath = join(runDir(id), "state.json");
+  const state = await readJson(statePath);
+  await writeFile(statePath, `${JSON.stringify({ ...state, workdir: root }, null, 2)}\n`);
+  const metaPath = join(runDir(id), "meta.json");
+  const meta = await readJson(metaPath);
+  if (typeof meta.workdir === "string") {
+    await writeFile(metaPath, `${JSON.stringify({ ...meta, workdir: root }, null, 2)}\n`);
+  }
+}
+
+const hostFor = () =>
+  new LocalPipelineHost({ root, heartbeatMs: 0, integrityDir: join(tmp, "integrity") });
+
+describe("a run of format 1 goes on in format 1", () => {
+  test("t41_d8_v1_first_step_is_not_refused: a gate decision enters the next step", async () => {
+    await copyFixture(GATE);
+    const before = (await journalLines(GATE)).length;
+    const run = await hostFor().open(GATE);
+    expect(run).toBeDefined();
+    const decision = await run?.decideHuman("approve", "approved");
+    expect(decision?.ok).toBe(true);
+    // still format 1: the state and every line of the journal, old and new
+    const state = await readJson(join(runDir(GATE), "state.json"));
+    expect(state.v).toBe(1);
+    expect("pauses" in state).toBe(false);
+    const lines = await journalLines(GATE);
+    expect(lines.length).toBeGreaterThan(before);
+    expect(lines.every((line) => line.v === 1)).toBe(true);
+    // nothing from a later format was written into the state
+    for (const visit of (state.active as Record<string, unknown>[]) ?? []) {
+      expect("spec" in visit).toBe(false);
+      expect("fork" in visit).toBe(false);
+    }
+    expect(await readdir(runDir(GATE))).toContain("journal.jsonl");
+  });
+
+  const FORKED = [
+    "version: 1",
+    "name: forked",
+    "nodes:",
+    "  - { slug: a, kind: agent, prompt: a }",
+    "  - { slug: x, kind: agent, prompt: x }",
+    "  - { slug: y, kind: agent, prompt: y }",
+    "  - { slug: m, kind: agent, prompt: m, join: all }",
+    "edges:",
+    "  - { from: a, to: x }",
+    "  - { from: a, to: y }",
+    "  - { from: x, to: m }",
+    "  - { from: y, to: m }",
+    "",
+  ].join("\n");
+
+  /** The path and the hash of every file under a directory, to see that nothing was written. */
+  async function snapshot(dir: string): Promise<Record<string, string>> {
+    const out: Record<string, string> = {};
+    for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      const path = pathJoin(entry.parentPath, entry.name);
+      out[relative(dir, path)] = createHash("sha256")
+        .update(await readFile(path))
+        .digest("hex");
+    }
+    return out;
+  }
+
+  test("t41_d2_v1_refuses_a_join_before_anything_is_written", async () => {
+    await copyFixture(PAUSED);
+    const run = await hostFor().open(PAUSED);
+    expect(run).toBeDefined();
+    const before = await snapshot(runDir(PAUSED));
+    // proposed by the agent: refused at the proposal, with the way up named in the text
+    const proposed = await run?.proposeChange({ yaml: FORKED, summary: "fork it" });
+    expect(proposed?.ok).toBe(false);
+    if (proposed && !proposed.ok) {
+      expect(proposed.code).toBe("UNSUPPORTED_FORMAT_FEATURE");
+      expect(proposed.message).toContain("run-state format 1");
+      expect(proposed.message).toContain("upgrade");
+    }
+    // accepted by a person (a file edit): refused before the new version is kept with the run
+    const accepted = await run?.acceptChange({ source: "file", text: FORKED });
+    expect(accepted?.ok).toBe(false);
+    if (accepted && !accepted.ok) expect(accepted.error.code).toBe("UNSUPPORTED_FORMAT_FEATURE");
+    // not one byte of the run changed, and no copy of the refused pipeline was kept
+    expect(await snapshot(runDir(PAUSED))).toEqual(before);
+  });
+
+  test("t41_v1_paused_run_resumes_and_stays_format_1", async () => {
+    await copyFixture(PAUSED);
+    const run = await hostFor().open(PAUSED);
+    const decision = await run?.resume();
+    expect(decision?.ok).toBe(true);
+    await run?.waitForRest(10_000);
+    const state = await readJson(join(runDir(PAUSED), "state.json"));
+    expect(state.v).toBe(1);
+    expect("pauses" in state).toBe(false);
+    const lines = await journalLines(PAUSED);
+    expect(lines.some((line) => line.event === "run_resumed")).toBe(true);
+    expect(lines.every((line) => line.v === 1)).toBe(true);
+    // whatever the run did after, the file is one the format can hold: it opens again
+    expect(await hostFor().open(PAUSED)).toBeDefined();
+  });
+
+  test("t41_v1_dup_edge_run_opens_with_its_snapshot_read_the_old_way", async () => {
+    // the fixture was made by the old engine, which entered `first`: its kept pipeline is read the
+    // old way, and the run opens and reports on it (the routing itself is run against the same
+    // pipeline and recording in format-codecs.test.ts, t41_d1_fixture_3_routes_to_the_target_...)
+    await copyFixture(DUP_EDGE);
+    const run = await hostFor().open(DUP_EDGE);
+    const spec = await run?.currentSpec();
+    expect(spec?.firstDuplicateEdgeWins).toBe(true);
+    const state = await run?.state();
+    expect(state?.active.map((v) => v.node)).toEqual(["first"]);
+    // and it is what the old engine recorded for the same run
+    const recording = JSON.parse(
+      await readFile(join(FORMATS, "v1-open", "routing-result.json"), "utf8"),
+    ) as { target_entered: string; target_attempt: number };
+    const entered = state?.active.find((v) => v.node === recording.target_entered);
+    expect(entered?.attempt).toBe(recording.target_attempt);
+  });
+
+  test("t41_snapshot_unchecked_journal_is_read_by_the_state_format", async () => {
+    // an upgraded run whose upgrade mark is gone, beside journal lines that claim format 1: the
+    // lines are not believed, so an edited `v` cannot switch the old reading rule on
+    const run = await trustedGateRun();
+    await run.migrate();
+    const path = join(runDir(GATE), "journal.jsonl");
+    const lines = (await readFile(path, "utf8")).trim().split("\n");
+    await writeFile(path, `${lines.filter((l) => !l.includes('"run_migrated"')).join("\n")}\n`);
+    const reopened = await hostFor().open(GATE);
+    expect((await reopened?.currentSpec())?.firstDuplicateEdgeWins).toBeFalsy();
+    // and with the mark back, the same journal is believed
+    await writeFile(path, `${lines.join("\n")}\n`);
+    const believed = await hostFor().open(GATE);
+    expect((await believed?.currentSpec())?.firstDuplicateEdgeWins).toBe(true);
+  });
+
+  test("t41_migrate_repairs_a_lost_mark_in_a_fresh_process", async () => {
+    const run = await trustedGateRun();
+    await run.migrate();
+    const path = join(runDir(GATE), "journal.jsonl");
+    const lines = (await readFile(path, "utf8")).trim().split("\n");
+    await writeFile(path, `${lines.slice(0, -1).join("\n")}\n`);
+    // a new process has no cached pipeline: the repair the refusal names has to be able to run
+    const fresh = await hostFor().open(GATE);
+    expect((await fresh?.migrate())?.status).toBe("marked");
+    expect((await journalLines(GATE)).at(-1)).toMatchObject({ v: 2, event: "run_migrated" });
+  });
+
+  test("t41_d3_meta_format_1_run_is_read_not_continued", async () => {
+    await copyFixture(DUP_EDGE);
+    const metaPath = join(runDir(DUP_EDGE), "meta.json");
+    const meta = await readFile(metaPath, "utf8");
+    await writeFile(metaPath, meta.replace('"v": 2', '"v": 1'));
+    const store = new FileStore({ root: join(root, ".kodel") });
+    // a lookup of the latest run passes it over; it never reaches a start or a report
+    expect(await store.findLatest("dup-edge", "add a small helper")).toBeUndefined();
+    // when it is still open it blocks a new run, and says why
+    const peek = await store.peekState(DUP_EDGE);
+    if (peek?.status === "running" || peek?.status === "paused") {
+      await expect(store.findActive("dup-edge", "add a small helper")).rejects.toMatchObject({
+        code: "UNSUPPORTED_FORMAT",
+      });
+    } else {
+      expect(await store.findActive("dup-edge", "add a small helper")).toBeUndefined();
+    }
+  });
+
+  /** The files of a run other than its state and its journal: the ones an upgrade must not touch. */
+  const others = async (id: string) => {
+    const all = await snapshot(runDir(id));
+    delete all["state.json"];
+    delete all["journal.jsonl"];
+    return all;
+  };
+
+  /** A gate run that this machine has written, so its state is one it vouches for. */
+  async function trustedGateRun() {
+    await copyFixture(GATE);
+    const run = await hostFor().open(GATE);
+    if (!run) throw new Error("the fixture does not open");
+    // sent back: the run is open again at its first step, and this machine has written its state
+    expect((await run.decideHuman("approve", "rejected", "needs work")).ok).toBe(true);
+    return run;
+  }
+
+  test("t41_d2_migrate_takes_an_open_v1_run_to_the_current_format", async () => {
+    const run = await trustedGateRun();
+    const journalBefore = await readFile(join(runDir(GATE), "journal.jsonl"), "utf8");
+    const othersBefore = await others(GATE);
+
+    const result = await run.migrate();
+    expect(result).toEqual({ status: "migrated", from: 1, to: 2 });
+
+    const state = await readJson(join(runDir(GATE), "state.json"));
+    expect(state.v).toBe(2);
+    expect(Array.isArray(state.pauses)).toBe(true);
+    // the earlier lines are byte for byte as they were; one line is added, of the newest format
+    const journalAfter = await readFile(join(runDir(GATE), "journal.jsonl"), "utf8");
+    expect(journalAfter.startsWith(journalBefore)).toBe(true);
+    const added = journalAfter.slice(journalBefore.length).trim().split("\n");
+    expect(added).toHaveLength(1);
+    expect(JSON.parse(added[0] ?? "")).toMatchObject({
+      v: 2,
+      event: "run_migrated",
+      from: 1,
+      to: 2,
+    });
+    // nothing else of the run was touched
+    expect(await others(GATE)).toEqual(othersBefore);
+
+    // the run reads as one: a journal of two formats, a state of the newest
+    const reopened = await hostFor().open(GATE);
+    expect((await reopened?.state())?.v).toBe(2);
+    const lines = await journalLines(GATE);
+    expect(new Set(lines.map((line) => line.v))).toEqual(new Set([1, 2]));
+    expect((await reopened?.report())?.runId).toBe(GATE);
+    // what the older format could not hold is no longer refused for its format
+    const proposed = await reopened?.proposeChange({ yaml: FORKED, summary: "fork it" });
+    if (proposed && !proposed.ok) expect(proposed.code).not.toBe("UNSUPPORTED_FORMAT_FEATURE");
+  });
+
+  test("t41_migrate_is_idempotent_and_writes_a_missing_mark", async () => {
+    const run = await trustedGateRun();
+    expect((await run.migrate()).status).toBe("migrated");
+    const after = await snapshot(runDir(GATE));
+    expect((await run.migrate()).status).toBe("already_current");
+    expect(await snapshot(runDir(GATE))).toEqual(after);
+    // a crash between the two writes: the state is of the newest format and the line is lost
+    const path = join(runDir(GATE), "journal.jsonl");
+    const lines = (await readFile(path, "utf8")).trim().split("\n");
+    await writeFile(path, `${lines.slice(0, -1).join("\n")}\n`);
+    expect((await run.migrate()).status).toBe("marked");
+    const last = (await journalLines(GATE)).at(-1);
+    expect(last).toMatchObject({ v: 2, event: "run_migrated" });
+    expect((await run.migrate()).status).toBe("already_current");
+  });
+
+  test("t41_migrate_refuses_what_it_should_and_changes_nothing", async () => {
+    /** The refusal, and every file of the run exactly as it was before the call. */
+    const refuses = async (
+      run: { migrate(): Promise<unknown> } | undefined,
+      code: string,
+    ): Promise<void> => {
+      const unchanged = await snapshot(runDir(GATE));
+      await expect(run?.migrate()).rejects.toMatchObject({ code });
+      expect(await snapshot(runDir(GATE))).toEqual(unchanged);
+    };
+    // a state this machine never recorded: it cannot tell whether it was changed
+    await copyFixture(GATE);
+    const fresh = await hostFor().open(GATE);
+    await refuses(fresh, "INVALID_ARGUMENTS");
+
+    // a finished run is read as it is
+    await rm(runDir(GATE), { recursive: true });
+    await cp(join(FORMATS, "v1", "r_0mviewgvl_i1ig"), runDir("r_0mviewgvl_i1ig"), {
+      recursive: true,
+    });
+    const finished = await hostFor().open("r_0mviewgvl_i1ig");
+    const finishedBefore = await snapshot(runDir("r_0mviewgvl_i1ig"));
+    await expect(finished?.migrate()).rejects.toMatchObject({ code: "NODE_NOT_RUNNING" });
+    expect(await snapshot(runDir("r_0mviewgvl_i1ig"))).toEqual(finishedBefore);
+
+    // a state changed after kodel wrote it
+    await rm(runDir("r_0mviewgvl_i1ig"), { recursive: true });
+    const run = await trustedGateRun();
+    const statePath = join(runDir(GATE), "state.json");
+    const original = await readFile(statePath, "utf8");
+    await writeFile(
+      statePath,
+      `${JSON.stringify({ ...(JSON.parse(original) as object), trail: ["x"] }, null, 2)}\n`,
+    );
+    await refuses(run, "STATE_MODIFIED_EXTERNALLY");
+    await writeFile(statePath, original);
+
+    // a run with no kept pipeline (a meta of the format before pipelines were kept)
+    const metaPath = join(runDir(GATE), "meta.json");
+    const meta = await readFile(metaPath, "utf8");
+    await writeFile(metaPath, meta.replace('"v": 2', '"v": 1'));
+    await refuses(run, "UNSUPPORTED_FORMAT");
+    await writeFile(metaPath, meta);
+
+    // a change of the pipeline that waits for the person
+    const state = await readJson(statePath);
+    const kept = await readFile(
+      join(runDir(GATE), "specs", `${String(state.specHash)}.yaml`),
+      "utf8",
+    );
+    const pipelineFile = join(root, String(state.pipelineFile));
+    await mkdir(dirname(pipelineFile), { recursive: true });
+    // a change in what the pipeline means (a prompt), not in a comment or its description
+    await writeFile(pipelineFile, kept.replace("Make the change.", "Make the change, carefully."));
+    expect(await run.pendingChange()).toBeDefined();
+    await refuses(run, "PIPELINE_CHANGE_REFUSED");
+  });
+
+  test("t41_a_state_older_than_its_journal_cannot_be_read", async () => {
+    // an older process wrote its state back from memory after the run was upgraded
+    const run = await trustedGateRun();
+    const statePath = join(runDir(GATE), "state.json");
+    const old = await readFile(statePath, "utf8");
+    await run.migrate();
+    await writeFile(statePath, old);
+    const error = await hostFor()
+      .open(GATE)
+      .then(
+        () => undefined,
+        (e: unknown) => e as { code?: string; message?: string },
+      );
+    expect(error?.code).toBe("UNSUPPORTED_FORMAT");
+    expect(error?.message).toContain("journal records a newer format");
+    expect(error?.message).not.toContain("modified");
+  });
+
+  test("t41_reading_changes_no_byte: open, state and report leave every file as it was", async () => {
+    await copyFixture(PAUSED);
+    const before = await snapshot(runDir(PAUSED));
+    const run = await hostFor().open(PAUSED);
+    await run?.state();
+    await run?.report();
+    await (await hostFor().open(PAUSED))?.report();
+    expect(await snapshot(runDir(PAUSED))).toEqual(before);
+  });
+
+  test("t41_v1_encode_redacts_journal: a secret handed in at a gate does not reach the v1 journal", async () => {
+    const token = `ghp_${"A1b2C3d4E5".repeat(4)}`;
+    await copyFixture(GATE);
+    const run = await hostFor().open(GATE);
+    await run?.decideHuman("approve", "rejected", `use ${token} to push`);
+    const journal = await readFile(join(runDir(GATE), "journal.jsonl"), "utf8");
+    expect(journal).not.toContain(token);
+    expect((await journalLines(GATE)).every((line) => line.v === 1)).toBe(true);
+  });
+
+  test("t41_d3_missing_spec_is_still_modified: a lost kept pipeline is not called unreadable", async () => {
+    await copyFixture(DUP_EDGE);
+    const dir = join(runDir(DUP_EDGE), "specs");
+    for (const name of await readdir(dir)) await rm(join(dir, name));
+    await expect(hostFor().open(DUP_EDGE)).rejects.toMatchObject({
+      code: "STATE_MODIFIED_EXTERNALLY",
+    });
+  });
+
+  test("t41_d1_new_text_duplicate_edge_is_an_error: only a snapshot of an old run is read the old way", async () => {
+    await copyFixture(DUP_EDGE);
+    const state = await readJson(join(runDir(DUP_EDGE), "state.json"));
+    const kept = await readFile(
+      join(runDir(DUP_EDGE), "specs", `${String(state.specHash)}.yaml`),
+      "utf8",
+    );
+    expect(() => parsePipeline(kept)).toThrow();
+    expect(parseSnapshot(kept, { firstDuplicateEdgeWins: true }).firstDuplicateEdgeWins).toBe(true);
+  });
+
+  test("t41_d1_migrate_keeps_snapshot_semantics: a duplicate-edge snapshot still reads first-wins after the upgrade", async () => {
+    await copyFixture(DUP_EDGE);
+    const run = await hostFor().open(DUP_EDGE);
+    if (!run) throw new Error("the fixture does not open");
+    // a harmless recorded event, so this machine has written (and vouches for) the state
+    expect((await run.apply({ type: "acknowledge", note: "t" })).ok).toBe(true);
+    expect((await run.migrate()).status).toBe("migrated");
+    const reopened = await hostFor().open(DUP_EDGE);
+    const spec = await reopened?.currentSpec();
+    expect(spec?.firstDuplicateEdgeWins).toBe(true);
+    expect((await reopened?.state())?.active.map((v) => v.node)).toEqual(["first"]);
+  });
+
+  test("t41_snapshot_crash_before_the_naming_line_still_opens: the state names a version no line names yet", async () => {
+    // a crash between the write of the state and the append of `pipeline_accepted`
+    await copyFixture(PAUSED);
+    const path = join(runDir(PAUSED), "journal.jsonl");
+    const lines = (await readFile(path, "utf8")).trim().split("\n");
+    const state = await readJson(join(runDir(PAUSED), "state.json"));
+    const kept = lines.filter((l) => !l.includes(`"to":"${String(state.specHash)}"`));
+    expect(kept.length).toBe(lines.length - 1);
+    await writeFile(path, `${kept.join("\n")}\n`);
+    const run = await hostFor().open(PAUSED);
+    expect((await run?.currentSpec())?.nodes.length).toBeGreaterThan(0);
+  });
+
+  test("t41_migrate_repairs_a_lost_mark_for_a_duplicate_edge_snapshot", async () => {
+    // the pipeline the old format accepted and today's rules reject, and an upgrade that stopped
+    // after the state was written: the run opens, and `kodel migrate` can still write the mark
+    await copyFixture(DUP_EDGE);
+    const run = await hostFor().open(DUP_EDGE);
+    if (!run) throw new Error("the fixture does not open");
+    expect((await run.apply({ type: "acknowledge", note: "t" })).ok).toBe(true);
+    expect((await run.migrate()).status).toBe("migrated");
+    const path = join(runDir(DUP_EDGE), "journal.jsonl");
+    const lines = (await readFile(path, "utf8")).trim().split("\n");
+    await writeFile(path, `${lines.slice(0, -1).join("\n")}\n`);
+    const fresh = await hostFor().open(DUP_EDGE);
+    expect((await fresh?.currentSpec())?.firstDuplicateEdgeWins).toBe(true);
+    expect((await fresh?.migrate())?.status).toBe("marked");
+    expect((await journalLines(DUP_EDGE)).at(-1)).toMatchObject({ v: 2, event: "run_migrated" });
+  });
+
+  test("t41_kept_versions_lists_a_duplicate_edge_snapshot_of_a_v1_run", async () => {
+    // the versions of a step that the report of the terminal UI shows are read by the rules of the
+    // format they were written in: a snapshot that today's rules reject is still a version the run had
+    await copyFixture(DUP_EDGE);
+    const run = await hostFor().open(DUP_EDGE);
+    const versions = await run?.keptVersions();
+    expect(versions?.map((v) => v.name)).toEqual(["dup-edge"]);
+    expect(versions?.[0]?.firstDuplicateEdgeWins).toBe(true);
+    // and the two-version run (an accepted change) lists both
+    await copyFixture(PAUSED);
+    expect((await (await hostFor().open(PAUSED))?.keptVersions())?.length).toBe(2);
+  });
+});

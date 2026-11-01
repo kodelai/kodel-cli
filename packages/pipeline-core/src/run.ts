@@ -18,6 +18,9 @@ import { canonicalNode, checkIdOf, type NodeForms, stableJson } from "./canonica
 import { type ChangesRef, changesField, isTreeId, MAX_CHANGES_ERROR } from "./changes";
 import { type ErrorCode, KodelError } from "./errors";
 import type { EngineRecord, ExecutorRecord } from "./executor";
+import { cannotHoldError, withRunId } from "./formats/messages";
+import { capabilitiesOf, encodeJournalRecord, encodeRunState } from "./formats/registry";
+import type { FormatCapabilities } from "./formats/types";
 import type { HistoryConfig } from "./history-config";
 import type { NodeSpec, PipelineSpec } from "./pipeline";
 import { type AcceptEffect, diffPipelines, standingOf } from "./pipeline-diff";
@@ -38,7 +41,7 @@ import {
   usageCursorSchema,
   usageDeltaSchema,
 } from "./usage-record";
-import { RECORD_VERSION } from "./version";
+import { RECORD_VERSION, type RecordVersion } from "./version";
 
 export const DEFAULT_STALE_MS = 30_000;
 export const DEFAULT_MAX_RESTARTS = 3;
@@ -291,7 +294,8 @@ export interface Pause {
 }
 
 export interface RunState {
-  v: typeof RECORD_VERSION;
+  /** The stored format the run lives in (`formats/`): it is read and written in it to the end. */
+  v: RecordVersion;
   runId: string;
   task: string;
   /**
@@ -686,6 +690,13 @@ export type RunEvent =
     }
   /** Carry a paused branch on; `node` picks the pause when more than one branch is paused. */
   | { type: "resume"; node?: string }
+  /**
+   * A person upgraded the run to the newest stored format (`kodel migrate`). The only event that
+   * changes the format a run lives in, and only that command builds it: no tool of the agent does.
+   * `from` is given only to write the mark of an upgrade that was made without it (the state was
+   * written and the journal line was not).
+   */
+  | { type: "run_migrated"; from?: RecordVersion }
   | { type: "cancel" }
   /**
    * The patch of the whole run, or why there is none. Applied once the run has finished, like
@@ -733,7 +744,7 @@ export type Effect =
   | { type: "await_human"; node: string; attempt: number; prompt: string; instructions?: string };
 
 export interface JournalRecord {
-  v: typeof RECORD_VERSION;
+  v: RecordVersion;
   seq: number;
   ts: number;
   event: string;
@@ -752,6 +763,13 @@ export type Decision =
        * here, not only in the journal, whose claim records stop at a limit.
        */
       claimed?: { node: string; renewed: boolean };
+      /**
+       * The state and the journal records as the format of the run stores them, ready to write. A
+       * store writes these and nothing else, so a model can never be written under the wrong `v`;
+       * when the format cannot hold the outcome the decision is a refusal and nothing is written.
+       * Absent for a repeat (`noop`), which writes nothing.
+       */
+      encoded?: { state: unknown; journal: Record<string, unknown>[] };
     }
   | { ok: false; error: KodelError };
 
@@ -834,7 +852,22 @@ class Machine {
 
   private log(event: string, data: Record<string, unknown> = {}) {
     this.s.seq += 1;
-    this.journal.push({ v: RECORD_VERSION, seq: this.s.seq, ts: this.now, event, ...data });
+    this.journal.push({ v: this.s.v, seq: this.s.seq, ts: this.now, event, ...data });
+  }
+
+  /** What the format the run lives in can hold and which behaviours it keeps. */
+  private get caps(): FormatCapabilities {
+    return capabilitiesOf(this.s.v);
+  }
+
+  /**
+   * The pipeline version a command or a check is issued under. A format that stores it keeps it on
+   * the visit (a result naming another version is then dropped); one that does not leaves the
+   * visit alone, and the result is judged against the version of the run, as it always was there.
+   */
+  private issuedUnder(visit: Visit): string {
+    if (this.caps.visitSpec) visit.spec = this.s.specHash;
+    return this.s.specHash;
   }
 
   private get ended(): boolean {
@@ -1026,7 +1059,7 @@ class Machine {
       checkIndex: 0,
       restarts: 0,
       startedAt: this.now,
-      spec: this.s.specHash,
+      ...(this.caps.visitSpec ? { spec: this.s.specHash } : {}),
     };
     this.s.active.push(visit);
     run.status = begin.needs === "human" ? "waiting" : rework ? "rework" : "running";
@@ -1082,8 +1115,7 @@ class Machine {
       expect: begin.expect,
       restart,
     };
-    visit.spec = this.s.specHash;
-    effect.spec = visit.spec;
+    effect.spec = this.issuedUnder(visit);
     if (node.timeout !== undefined) effect.timeout = node.timeout;
     return effect;
   }
@@ -1116,7 +1148,6 @@ class Machine {
             ? `attempt:${visit.visitId}:${visit.attempt}`
             : undefined;
     visit.heartbeatAt = this.now;
-    visit.spec = this.s.specHash;
     const effect: Effect = {
       type: "run_check",
       node: node.slug,
@@ -1125,7 +1156,7 @@ class Machine {
       kind: check.kind,
       params,
       restart,
-      spec: visit.spec,
+      spec: this.issuedUnder(visit),
     };
     if (baseline !== undefined) effect.baseline = baseline;
     this.effects.push(effect);
@@ -1170,7 +1201,9 @@ class Machine {
       this.restartFailed(node);
       return;
     }
-    const edges = this.spec.edges.filter((e) => e.from === node.slug && e.when === label);
+    const matching = this.spec.edges.filter((e) => e.from === node.slug && e.when === label);
+    // A snapshot written before forks took the first of two equal edges: that is the route, not a fork.
+    const edges = this.spec.firstDuplicateEdgeWins ? matching.slice(0, 1) : matching;
     if (edges.length >= 2) {
       this.fork(
         node,
@@ -1635,6 +1668,7 @@ class Machine {
       return;
     }
     if (event.type === "resume") return this.resume(event.node);
+    if (event.type === "run_migrated") return this.migrated(event);
     if (event.type === "pipeline_accepted") return this.acceptPipeline(event);
     if (event.type === "tick" || event.type === "heartbeat") {
       if (this.s.status !== "running") throw new Repeat();
@@ -1719,7 +1753,11 @@ class Machine {
             }
           }
           visit.declared = event.outcome;
-          this.run(event.node).declared = event.outcome;
+          // Kept on the node so a recheck after a failed check ends with it; a format that never
+          // kept it (format 1) goes on deciding as its engine did.
+          if (this.caps.keepsDeclaredAfterFailedCheck) {
+            this.run(event.node).declared = event.outcome;
+          }
         } else {
           delete this.run(event.node).declared;
         }
@@ -1935,6 +1973,9 @@ class Machine {
    */
   private claim(event: Extract<RunEvent, { type: "step_claimed" }>) {
     if (this.s.status !== "running") throw fail("NODE_NOT_RUNNING", `the run is ${this.s.status}`);
+    // A format without claims holds no worker's hold: the answer is "no step to take", which is
+    // what a caller already handles (`none`), not a refusal that offers an upgrade it does not need.
+    if (!this.caps.claims) throw new Repeat();
     const open = this.s.active.filter((v) => v.phase === "agent");
     const held = open.filter((v) => liveClaim(this.s.nodes[v.node], this.now) !== undefined);
     // Judged against the requested step's own claim: a worker holding two steps renews either.
@@ -2193,7 +2234,7 @@ class Machine {
   }
 
   private reissue(visit: Visit) {
-    visit.spec = this.s.specHash;
+    this.issuedUnder(visit);
     if (visit.phase === "engine")
       this.effects.push(this.commandEffect(this.node(visit.node), visit, true));
     else this.emitCheck(visit, true);
@@ -2204,6 +2245,39 @@ class Machine {
     this.takePause((p) => p.node === node || p.blocked?.from === node);
   }
 
+  /**
+   * The run moves to the newest format: from here its state and its journal lines are of that
+   * format (the earlier lines keep theirs), and what the older format could not hold is open to it.
+   * Refused while an engine answers for a step (the older process that has it would write its old
+   * state back); a run already in the newest format changes nothing, unless the mark of the upgrade
+   * is missing, which is then written.
+   */
+  private migrated(event: Extract<RunEvent, { type: "run_migrated" }>) {
+    if (this.ended) {
+      throw fail(
+        "NODE_NOT_RUNNING",
+        `the run is ${this.s.status}; only a run that is going is upgraded`,
+      );
+    }
+    const busy = this.s.active.find(
+      (v) => v.heartbeatAt !== undefined && this.now - v.heartbeatAt < this.staleMs,
+    );
+    if (busy?.heartbeatAt !== undefined) {
+      throw fail(
+        "INVALID_ARGUMENTS",
+        `an engine is working on "${busy.node}" (it answered ${Math.round((this.now - busy.heartbeatAt) / 1000)} s ago); close it, or wait until it has stopped, then upgrade the run`,
+      );
+    }
+    if (this.s.v === RECORD_VERSION) {
+      if (event.from === undefined) throw new Repeat();
+      this.log("run_migrated", { from: event.from, to: RECORD_VERSION });
+      return;
+    }
+    const from = this.s.v;
+    this.s.v = RECORD_VERSION;
+    this.log("run_migrated", { from, to: RECORD_VERSION });
+  }
+
   private acceptPipeline(event: Extract<RunEvent, { type: "pipeline_accepted" }>) {
     if (this.s.specHash === event.to) throw new Repeat();
     if (this.s.specHash !== event.from) {
@@ -2211,6 +2285,14 @@ class Machine {
         "PIPELINE_CHANGE_REFUSED",
         "the run is no longer on the version this change was made from",
       );
+    }
+    // A pipeline the format of the run cannot parse is refused before anything is looked at: the
+    // kept copy of it would be unreadable by the engine that wrote the run.
+    if (
+      this.spec.nodes.some((n) => n.join !== undefined) &&
+      !this.caps.pipelineFeatures.includes("join")
+    ) {
+      throw cannotHoldError(this.s.v, "a pipeline with a fork and a join", this.s.runId);
     }
     // Before the change itself is judged: a change worked out for another standing may well be
     // acceptable still, but it is not the one the person looked at.
@@ -2257,8 +2339,9 @@ class Machine {
       this.applyEffect(effect);
     }
     // What is still running was not touched by the change (a touched running step is refused, a
-    // suspended one restarted or rechecked above): its work keeps the version it was issued under
-    // (`Visit.spec`), so its result is not dropped for naming that version.
+    // suspended one restarted or rechecked above). Where the format keeps `Visit.spec`, its work keeps
+    // the version it was issued under, so its result is not dropped for naming that version; in
+    // format 1 it has none, and a result naming the old version is dropped as stale, as it was.
   }
 
   private applyEffect(effect: AcceptEffect) {
@@ -2318,7 +2401,7 @@ class Machine {
         restarts: 0,
         heartbeatAt: this.now,
         startedAt: this.now,
-        spec: this.s.specHash,
+        ...(this.caps.visitSpec ? { spec: this.s.specHash } : {}),
       };
       this.s.active.push(reopened);
       this.log("checks_rerun", { node: effect.node, attempt: run.attempt });
@@ -2461,11 +2544,26 @@ export function decide(
     }
     throw error;
   }
+  // Encoded before anything is returned, so a store cannot write half of a decision: a state or a
+  // record the format of the run cannot hold refuses the whole decision.
+  let encoded: { state: unknown; journal: Record<string, unknown>[] };
+  try {
+    encoded = {
+      state: encodeRunState(draft),
+      journal: machine.journal.map(
+        (record) => encodeJournalRecord(record) as Record<string, unknown>,
+      ),
+    };
+  } catch (error) {
+    if (error instanceof KodelError) return { ok: false, error: withRunId(error, draft.runId) };
+    throw error;
+  }
   return {
     ok: true,
     state: draft,
     effects: machine.effects,
     journal: machine.journal,
+    encoded,
     ...(machine.claimed === undefined ? {} : { claimed: machine.claimed }),
   };
 }

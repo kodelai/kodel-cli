@@ -19,7 +19,11 @@ import {
   type ChangeSet,
   type ChangesRef,
   type CheckVerdict,
+  CURRENT_RECORD_VERSION,
+  cannotHoldError,
+  cannotHoldMessage,
   canonicalPipeline,
+  capabilitiesOf,
   claimedStepsOpen,
   cleanExecutorText,
   clientOf,
@@ -55,7 +59,7 @@ import {
   type PipelineSpec,
   type ProposeOutcome,
   parsePipeline,
-  parseSnapshot,
+  type RecordVersion,
   type RedactRule,
   type ResultReport,
   type RunEvent,
@@ -1009,7 +1013,7 @@ export class LocalRun {
    * hash. The run's state names the version it is on, so what a run does follows what was accepted,
    * not what this process happened to be started with.
    */
-  async specFor(hash: string): Promise<PipelineSpec> {
+  async specFor(hash: string, introducing = false): Promise<PipelineSpec> {
     if (hash === this.host.specHash) return this.host.spec;
     const known = this.versions.get(hash);
     if (known) return known;
@@ -1020,7 +1024,7 @@ export class LocalRun {
         `the pipeline of run ${this.runId} is not the one it is pinned to (its kept copy was changed or is missing); restore it before going on`,
       );
     }
-    const spec = parseSnapshot(text);
+    const spec = await this.host.store.parseKept(this.runId, hash, text, { introducing });
     this.versions.set(hash, spec);
     return spec;
   }
@@ -1234,7 +1238,9 @@ export class LocalRun {
       const text = await this.host.store.readSpec(this.runId, hash);
       if (text === undefined) continue;
       try {
-        specs.push(parseSnapshot(text));
+        // By the rules of the format the version was written in: a snapshot of an older run may hold
+        // what today's rules reject (two equal edges), and it is still a version the run had.
+        specs.push(await this.host.store.parseKept(this.runId, hash, text));
       } catch (error) {
         if (!(error instanceof KodelError)) throw error;
       }
@@ -1288,6 +1294,18 @@ export class LocalRun {
       }
       throw error;
     }
+    // Refused here, not only when the person accepts it: a proposal the run's format cannot hold
+    // would stop the run at the end of its step for a change nobody could apply.
+    if (
+      spec.nodes.some((n) => n.join !== undefined) &&
+      !capabilitiesOf(state.v).pipelineFeatures.includes("join")
+    ) {
+      return {
+        ok: false,
+        code: "UNSUPPORTED_FORMAT_FEATURE",
+        message: cannotHoldMessage(state.v, "a pipeline with a fork and a join", this.runId),
+      };
+    }
     const current = await this.currentSpec(state);
     if (canonicalPipeline(spec) === canonicalPipeline(current)) {
       return {
@@ -1333,11 +1351,23 @@ export class LocalRun {
     const state = await this.state();
     const before = await this.currentSpec(state);
     const to = hashSource(input.text);
+    let proposed: PipelineSpec;
     try {
-      parsePipeline(input.text);
+      proposed = parsePipeline(input.text);
     } catch (error) {
       if (error instanceof KodelError) return { ok: false, error };
       throw error;
+    }
+    // Before the new version is kept with the run: the format of the run must be able to hold it, or
+    // nothing is written (the machine refuses the same later, but by then the copy would be on disk).
+    if (
+      proposed.nodes.some((n) => n.join !== undefined) &&
+      !capabilitiesOf(state.v).pipelineFeatures.includes("join")
+    ) {
+      return {
+        ok: false,
+        error: cannotHoldError(state.v, "a pipeline with a fork and a join", this.runId),
+      };
     }
     await this.host.store.writeSpec(this.runId, to, input.text);
     if (input.source === "proposal") {
@@ -1680,7 +1710,9 @@ export class LocalRun {
       // with that other.
       const spec = !state
         ? this.host.spec
-        : await this.specFor(event.type === "pipeline_accepted" ? event.to : state.specHash);
+        : event.type === "pipeline_accepted"
+          ? await this.specFor(event.to, true)
+          : await this.specFor(state.specHash);
       const now = clock();
       let decision = decide(spec, state, event, now, engine);
       // The core reads no git; when this event ends the run, what git says is read here and the same
@@ -1700,11 +1732,15 @@ export class LocalRun {
       if (changed) {
         // The expected hash is recorded before the file changes and confirmed after, so a crash
         // between the two leaves a state that is still accepted, not one that looks tampered with.
-        const hash = await store.writeState(this.runId, decision.state, (next) =>
+        // What is written is what the codec of the run's format produced, never the model: a state
+        // the format cannot hold was refused by `decide` before this point, with nothing written.
+        const { encoded } = decision;
+        if (encoded === undefined) throw new Error("a decision to write carries nothing encoded");
+        const hash = await store.writeState(this.runId, encoded.state, (next) =>
           integrity.stage(this.runId, next),
         );
         await integrity.set(this.runId, hash);
-        await store.appendJournal(this.runId, decision.journal);
+        await store.appendJournal(this.runId, encoded.journal);
         const finished = ["completed", "failed", "canceled"].includes(decision.state.status);
         if (finished) {
           this.host.options.agentLogTickers?.stop(this.runId);
@@ -2951,6 +2987,72 @@ export class LocalRun {
       ...(full === undefined ? {} : { reason: full }),
       ...(byAgent === undefined ? {} : { byAgent }),
     });
+  }
+
+  /**
+   * Take the run to the newest stored format (`kodel migrate`, a person's command). One way: the
+   * older kodel will not read the run afterwards. Refused for a run that is over, a run whose state
+   * this machine does not vouch for (modified, or never recorded here), a run with no kept
+   * pipeline, and a run with a change of its pipeline waiting; the engine refuses it while an engine
+   * answers for a step. A run already in the newest format changes nothing, except that the mark of
+   * an upgrade whose journal line was lost is written.
+   */
+  async migrate(): Promise<
+    | { status: "migrated"; from: RecordVersion; to: RecordVersion }
+    | { status: "marked"; to: RecordVersion }
+    | { status: "already_current"; to: RecordVersion }
+  > {
+    await this.assertOurs();
+    const to = CURRENT_RECORD_VERSION;
+    const state = await this.state();
+    if (state.status !== "running" && state.status !== "paused") {
+      throw new KodelError(
+        "NODE_NOT_RUNNING",
+        `run ${this.runId} is ${state.status}; only a run that is going is upgraded, and a finished one is read as it is`,
+      );
+    }
+    const meta = await this.host.store.readMeta(this.runId);
+    const kept =
+      meta?.v === META_VERSION
+        ? await this.host.store.readSpec(this.runId, state.specHash)
+        : undefined;
+    if (kept === undefined || hashSource(kept) !== state.specHash) {
+      throw new KodelError(
+        "UNSUPPORTED_FORMAT",
+        `run ${this.runId} has no kept pipeline (it was written before pipelines were kept in versions, or its copy is missing): no kodel can continue it, so there is nothing to upgrade`,
+      );
+    }
+    const integrity = await this.integrityStatus();
+    if (integrity === "modified") {
+      throw new KodelError(
+        "STATE_MODIFIED_EXTERNALLY",
+        `the state of run ${this.runId} is not what kodel last wrote; it was changed outside kodel, and an upgrade would make that state the run's (look at it, and accept it with kodel ack first)`,
+      );
+    }
+    if (integrity === "unknown") {
+      throw new KodelError(
+        "INVALID_ARGUMENTS",
+        `this machine has never recorded the state of run ${this.runId}, so it cannot tell whether it was changed; continue the run once here (a decision at its gate, or a step), then upgrade it`,
+      );
+    }
+    if (state.v >= to) {
+      const journal = await this.journal();
+      const oldest = journal.reduce<RecordVersion>((v, r) => (r.v < v ? r.v : v), state.v);
+      const marked = journal.some((r) => r.event === "run_migrated");
+      if (oldest >= to || marked) return { status: "already_current", to };
+      const decision = await this.apply({ type: "run_migrated", from: oldest });
+      if (!decision.ok) throw decision.error;
+      return { status: "marked", to };
+    }
+    if (await this.pendingChange()) {
+      throw new KodelError(
+        "PIPELINE_CHANGE_REFUSED",
+        `a change of the pipeline of run ${this.runId} waits for you; accept it or drop it first (kodel pipeline changes show ${this.runId})`,
+      );
+    }
+    const decision = await this.apply({ type: "run_migrated" });
+    if (!decision.ok) throw decision.error;
+    return { status: "migrated", from: state.v, to };
   }
 
   /** `node`: which paused branch to carry on, when more than one is paused. */

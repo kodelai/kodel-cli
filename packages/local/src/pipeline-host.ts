@@ -27,7 +27,6 @@ import {
   type PipelineSpec,
   type PreparedTask,
   parsePipeline,
-  parseSnapshot,
   proposalNameProblem,
   type RunState,
   type RunTaskLink,
@@ -820,7 +819,7 @@ export class LocalPipelineHost implements PipelineHost {
     if ((meta.v as number) !== META_VERSION) {
       throw new KodelError(
         "UNSUPPORTED_FORMAT",
-        `run ${runId} was written before pipelines were kept in versions (meta format ${meta.v}, this kodel reads meta format ${META_VERSION}); finish it with the kodel that started it`,
+        `run ${runId} was written ${(meta.v as number) > META_VERSION ? "by a newer kodel" : "before pipelines were kept in versions"} (meta format ${meta.v}, this kodel reads meta format ${META_VERSION}); ${(meta.v as number) > META_VERSION ? "upgrade kodel" : "finish it with the kodel that started it"}`,
       );
     }
     const kept = await this.store.readSpec(runId, state.specHash);
@@ -831,7 +830,7 @@ export class LocalPipelineHost implements PipelineHost {
       );
     }
     try {
-      return { spec: parseSnapshot(kept), source: kept };
+      return { spec: await this.store.parseKept(runId, state.specHash, kept), source: kept };
     } catch (error) {
       if (!(error instanceof KodelError)) throw error;
       // A version that cannot be read is not a version that was modified; say which.

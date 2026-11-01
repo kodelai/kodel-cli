@@ -1,0 +1,14 @@
+{
+  "v": 1,
+  "node": "fix",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "089bf28a6fa18383d3ca6a18b0cffe1aada61220a0610de7683822daf1563dd2",
+  "answer": {
+    "slug": "fix",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "The test failed; fix the cause.",
+    "reentry_feedback": "\"test\" failed (command): the command exited with 1, expected 0"
+  }
+}

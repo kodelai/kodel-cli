@@ -1,0 +1,25 @@
+{
+  "engine_commit": "12f85788cc300f83421e17472ef3d115a8f590a5",
+  "run_id": "r_0mvxulvel_5xgk",
+  "what": "After the accepted change, while test #2 ran its command under the new pipeline version, a work_finished event (passed: true) carrying the OLD spec hash was applied with LocalRun.apply, the path the engine's own command results take. In format 1 only engine results (work_finished, check_finished) carry a spec hash; an agent's hand-in does not.",
+  "old_spec_hash": "120df0a3db1e320b",
+  "current_spec_hash": "da29f83267a1c020",
+  "event": {
+    "type": "work_finished",
+    "node": "test",
+    "attempt": 2,
+    "passed": true,
+    "reason": "",
+    "exit": 0,
+    "duration_ms": 1,
+    "specHash": "120df0a3db1e320b"
+  },
+  "decision": {
+    "ok": true,
+    "noop": true,
+    "journal_records": 0
+  },
+  "visit_still_running_after": true,
+  "journal_records_added": 0,
+  "verdict": "dropped: the old engine treats a result of another pipeline version as a repeat (ok, noop) and changes nothing; the real result of the new version decided the attempt"
+}

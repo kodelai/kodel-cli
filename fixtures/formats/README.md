@@ -2,15 +2,17 @@
 
 Run history is read by every later engine and is never rewritten (AGENTS.md, "Stored data and
 compatibility"). Each directory here, `v<N>/`, holds finished runs written by the real engine of
-run-state format N (the `v` of `state.json` and of the journal records): the host, the store, the
+run-state format N (the `v` of `state.json` and of the journal records); `v1-open/` holds open runs
+of format 1 (see its section). In each, the host, the store, the
 process executor and git did what they do in a run of `kodel mcp`; only the agent's part (the files
 written, the steps completed) was played by a script, and the person's decisions were made through
 the host methods the commands call (each section says how). The tests look at every run
-in every `v*/` directory with the current engine (`packages/local/test/formats.test.ts`,
-`packages/pipeline-core/test/formats.test.ts` and the `t40_` format tests in
-`packages/cli/test/cli.test.ts`): a run of the current format or a later one must open (`status` and
-`report` work), a run of format 1 must be refused with `UNSUPPORTED_FORMAT` naming its format (see
-below), and reading must not change a byte either way.
+in every directory here with the current engine (`packages/local/test/formats.test.ts`,
+`packages/pipeline-core/test/format-codecs.test.ts`, `packages/local/test/v1-continue.test.ts` and the
+`t41_` format tests in `packages/cli/test/cli.test.ts`): every run must open (`status` and `report`
+work), every codec must write a run back as it read it, an open run must go on in its own format,
+and reading must not change a byte. A directory is named `v<N>` or `v<N>-<tag>` (`<N>` is the
+format its codec reads); every format has a codec and a directory.
 
 ## `v1/`
 
@@ -18,16 +20,13 @@ Two runs of the `dev` pipeline: `r_0mvimyn54_tc9o` (a change of the pipeline acc
 3 gate decisions) and `r_0mviewgvl_i1ig` (feedback from the agent; 3 gate decisions). Each
 has `meta.json`, `state.json`, `journal.jsonl`, `snapshots.json`, `specs/` and `reports/`.
 
-**Format 1 is refused by design.** Forks (decision T-40) replaced `pause` by `pauses[]` and added
-`forks` and a fork attribution to visits; this was done before the first release, so no reader for
-format 1 is shipped (AGENTS.md, "Stored data and compatibility", the exception under rule 4). The
-runs stay here untouched to prove that the refusal is clear: `status`, `report`, `resume`,
-`pipeline_next_step`, `gate`, `ack`, `seal`, `wait` and `pipeline changes` say "run-state format 1
-by an older kodel; finish it with the kodel that started it", never "modified"; the run
-list shows them as `format 1`; `pipeline_start` passes a finished one over and refuses to start
-beside an open one (naming it: it must be finished before a new run starts for that task). An open
-one nobody wants to finish can be left: kodel has no command that cancels a run, and such a run
-blocks only a new run of its pipeline and task. `v1/history/` holds golden event streams of the agent's log, not runs.
+**Format 1 is read and written by its own codec** (AGENTS.md, "Stored data and compatibility", rule 5):
+a run of format 1 goes on in format 1 to its end, and `status`, `report` and the history read it.
+These two runs were written by an early build of the engine, before the published beta. Forks
+replaced `pause` by `pauses[]` and added `forks` and a fork attribution to visits; format 1 cannot
+hold them, so a run of that format that is asked for one is refused before anything is written
+(`UNSUPPORTED_FORMAT_FEATURE`), and the person can upgrade it with `kodel migrate`.
+`v1/history/` holds golden event streams of the agent's log, not runs.
 
 They were taken with `node scripts/take-format-fixture.mjs v1 <run dir> ...`, from the run
 directories under `.kodel/runs` (or `~/.kodel/projects/<project_id>/runs` with `storage: home`; the files are the same).
@@ -121,16 +120,65 @@ the guard test (`formats_no_fixture_holds_a_path_of_a_person_or_a_seal`) refuses
 as it refuses a path of a home directory, and the script scans the taken runs for a path of the
 machine or of the scratch directory.
 
+## `v1-open/`
+
+Three runs of run-state format 1 left **open** (not finished), written by the real engine of commit
+`12f85788cc300f83421e17472ef3d115a8f590a5` (format 1, before forks). They pin what a run that the
+beta left going looks like on disk, which `v1/` (finished runs only) does not. The directory name is `v<N>-<tag>`: it maps to the codec of format `<N>`, and the tests that walk the
+fixtures (`t41_registry_matches_fixture_directories`, the loop that opens every run) pick it up.
+
+How they were made: a scratch script in a checkout of that commit (`bun scripts/make-v1-open.mjs
+<out-dir>`, not part of this repository) drove `LocalPipelineHost` of that commit the way
+`scripts/take-v2-fixtures.mjs` does for format 2: a scratch git repository (author `Kodel Fixture
+<fixture@example.com>`, `worktree: { mode: auto }`, `history.agent_log` off, no `CLAUDE*` variable),
+every step handed out by `nextStep` with `serve`, the agent's files committed before `completeStep`,
+the commands (`node -e ...`) run by the real process executor in the run's worktree, and the person's
+acceptance of a change made through `pendingChange`/`acceptChange` (what `kodel pipeline changes apply`
+calls). The pipelines are tiny and written for these runs; each run's `specs/` holds them as they were.
+
+- `r_0mvxulus6_0m28` (`gate`): `impl` (agent) completed, then the run waits at the human gate
+  `approve`: `status: running`, one active visit `approve` #1 in phase `human`, the journal ends with
+  `gate_waiting`.
+- `r_0mvxulvel_5xgk` (`paused-change`): `impl`, then the command step `test` failed with
+  `max_consecutive_failures: 1` and the run paused (`run_paused`, `reason: consecutive`, `pause.blocked`
+  from `test` to `fix`). A person edited the run's pipeline file (a slower failing `test` command,
+  `max_consecutive_failures: 2`) and accepted it while paused: `pipeline_accepted` with
+  `source: file` and `effect: { kind: "reroute", node: "test" }` (the format-1 field; format 2 has
+  `effects[]`), two specs. The run went on to `fix`, `test` #2 failed on the new version and the run
+  paused again: `status: paused` with a `pause` object, nothing active. While `test` #2 was running,
+  a `work_finished` event (`passed: true`) carrying the **old** spec hash was applied through
+  `LocalRun.apply`, the path the engine's own command results take; `stale-result.json` records what
+  that engine decided: `ok: true, noop: true`, no journal record, the visit still running, i.e. a
+  result of another pipeline version is dropped as a repeat. (In format 1 only `work_finished` and
+  `check_finished` carry a spec hash; an agent's hand-in carries none.)
+- `r_0mvxulxyp_gmed` (`dup-edge`): the agent step `work` has `outcomes: [small]` and a command check
+  that fails the first time. `work` #1 was completed with the outcome `small` (`agent_completed`
+  `outcome: small`), the check failed (`check_finished` `passed: false`, `node_finished` `failed`,
+  `source: check:command`), `work` #2 was entered with that feedback, completed with `small` again and
+  passed. The pipeline has two edges `{ from: work, when: small }` (to `first`, then to `second`), no
+  `join`; the engine entered `first` (`node_entered first` #1), so the first edge won.
+  `routing-result.json` records the edges, the attempts and the target entered. The run is left open
+  at `first` #1 (served, not completed).
+
+`stale-result.json` and `routing-result.json` were written by the scratch script from the engine's
+own answers and journal; they are not run files. The runs were taken with
+`node scripts/take-format-fixture.mjs v1-open <run dir> <run dir> <run dir>` from the scratch
+repository's `.kodel/runs`, with the two JSON files already in the directory so that `hashes.json`
+covers them; as in `v1/`, the workdir is the placeholder `/kodel-fixture/workdir/<run id>`. An open run
+has no `seal.json`. Taking them left `v1/hashes.json` and `v2/hashes.json` byte for byte as they were.
+
 ## Later formats
 
 Add a directory when a change renames, removes or retypes a stored field (run state, journal
 records, the pipeline snapshot kept with a run, reports). The same change ships:
 
-1. a reader for the previous format that migrates in memory on read;
+1. a codec for the previous format: `decode` (the stored text into the engine's model), `encode` (back,
+   an allow-list that refuses what the format cannot hold) and its `capabilities`;
 2. a real run written by the engine *before* the change, taken with the script above into the new
-   directory, and the tests passing on it with the new reader.
+   directory (`v<N>` or `v<N>-<tag>`), and the tests passing on it: it opens, it is written back as
+   it was read, and an open one goes on in its own format.
 
-Keep every `v<N>/` as it is: `v1/` must keep being refused clearly, the others must keep opening.
+Keep every `v<N>/` as it is: every one of them must keep opening and, where it is open, going on.
 Adding an optional field, or one that only a newer run carries, needs no new directory; the test with
 an unknown field already pins that it is kept.
 

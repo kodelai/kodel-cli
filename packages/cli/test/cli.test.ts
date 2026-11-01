@@ -1448,7 +1448,7 @@ describe("a store made from the golden runs of the stored formats", () => {
     "formats",
     "v1",
   );
-  /** Two finished runs written in run-state format 1, which this kodel refuses to read. */
+  /** Two finished runs written in run-state format 1, which this kodel reads and writes in that format. */
   const RUNS = ["r_0mviewgvl_i1ig", "r_0mvimyn54_tc9o"];
 
   let outer: string;
@@ -1475,56 +1475,79 @@ describe("a store made from the golden runs of the stored formats", () => {
     dir = outer;
   });
 
-  /** What a command says about a run of format 1: the code and the format, never "modified". */
-  const expectRefusedClearly = (result: { code: number; out: string; err: string }) => {
-    expect(result.code).not.toBe(0);
-    expect(result.err).toContain("run-state format 1");
-    expect(result.err).toContain("older kodel");
+  /** What a command says about a run of format 1: whatever it says, it is not a refusal of the format. */
+  const expectNotFormatRefusal = (result: { code: number; out: string; err: string }) => {
+    expect(result.err).not.toContain("run-state format 1");
+    expect(result.err).not.toContain("older kodel");
     expect(result.err).not.toContain("modified");
     expect(result.err).not.toContain("TypeError");
   };
 
-  test("t40_status_list_marks_v1_runs", async () => {
+  test("t41_status_lists_v1_runs_like_others", async () => {
     const list = await cli("status");
     expect(list.code).toBe(0);
     for (const id of RUNS) expect(list.out).toContain(id);
     expect(list.out.match(/ dev /g)?.length).toBe(2);
-    expect(list.out.match(/format 1/g)?.length).toBe(2);
+    expect(list.out.match(/completed/g)?.length).toBe(2);
+    expect(list.out).not.toContain("format 1");
     expect(list.out).not.toContain("unreadable");
-    expect(list.out).not.toContain("completed");
   });
 
-  test("t40_status_json_says_format_1", async () => {
+  test("t41_status_json_lists_v1_runs_by_status", async () => {
     const parsed = JSON.parse((await cli("status", "--json")).out) as {
       runId: string;
       status: string;
     }[];
-    expect(parsed.map((r) => r.status)).toEqual(["format 1", "format 1"]);
+    expect(parsed.map((r) => r.status)).toEqual(["completed", "completed"]);
     expect(parsed.map((r) => r.runId).sort()).toEqual([...RUNS].sort());
   });
 
-  test("t40_v1_run_refused_clearly", async () => {
+  test("t41_v1_run_opens_where_it_was_refused", async () => {
     for (const id of RUNS) {
-      expectRefusedClearly(await cli("status", id));
-      expectRefusedClearly(await cli("report", id));
-      expectRefusedClearly(await cli("report", id, "--json"));
-      expectRefusedClearly(await cli("resume", id));
-      expectRefusedClearly(await cli("gate", "approve", id));
+      for (const args of [
+        ["status", id],
+        ["report", id],
+        ["report", id, "--json"],
+      ]) {
+        const result = await cli(...args);
+        expect(result.code, args.join(" ")).toBe(0);
+        expectNotFormatRefusal(result);
+      }
+      // the run is over: these say so, they do not say "format 1"
+      const resumed = await cli("resume", id);
+      expect(resumed.code).toBe(1);
+      expect(resumed.err).toContain("is not paused");
+      const gated = await cli("gate", "approve", id);
+      expect(gated.code).toBe(1);
+      expect(gated.err).toContain("is not waiting for a decision");
     }
   });
 
-  test("t40_v1_run_refused_by_ack_seal_wait_cancel_changes", async () => {
+  test("t41_v1_run_accepts_ack_seal_wait_changes", async () => {
+    // there is no command that cancels a run (TASK-9JTV); each of these answers as it does for a run
+    // of the current format, with its own exit code and words
     const id = RUNS[0] as string;
-    expectRefusedClearly(await cli("ack", id));
-    expectRefusedClearly(await cli("seal", id));
-    expectRefusedClearly(await cliAs({ pollMs: 10 }, "wait", id, "--timeout", "1"));
-    expectRefusedClearly(await cli("pipeline", "changes", "show", id));
-    expectRefusedClearly(await cli("pipeline", "changes", "history", id));
-    expectRefusedClearly(await cli("pipeline", "changes", "apply", id));
+    const done = async (code: number, outPart: string, errPart: string, ...args: string[]) => {
+      const result = await cliAs({ pollMs: 10 }, ...args);
+      expect(result.code, args.join(" ")).toBe(code);
+      expect(result.out + result.err, args.join(" ")).toContain(outPart || errPart);
+      expectNotFormatRefusal(result);
+    };
+    await done(0, `${id}: accepted`, "", "ack", id);
+    await done(0, `${id}: sealed`, "", "seal", id);
+    await done(0, "no change of the pipeline waits", "", "pipeline", "changes", "show", id);
+    await done(0, "started with", "", "pipeline", "changes", "history", id);
+    await done(1, "", "its pipeline cannot change now", "pipeline", "changes", "apply", id);
+    await done(1, "", "is not paused", "resume", id);
+    await done(1, "", "is not waiting for a decision", "gate", "approve", id);
+    const waited = await cliAs({ pollMs: 10 }, "wait", id, "--timeout", "1");
+    expect(waited.code).toBe(0);
+    expect(waited.out + waited.err).not.toBe("");
+    expectNotFormatRefusal(waited);
   });
 
-  test("t40_v2_fixtures_open", async () => {
-    // the real runs of this engine beside the refused ones: `status`, `report` and the history of
+  test("t41_v2_fixtures_open_beside_v1_runs", async () => {
+    // the real runs of this engine beside the runs of format 1: `status`, `report` and the history of
     // the pipeline read them, and the accepted change is shown with what it redid
     const V2 = join(V1, "..", "v2");
     const ids = ["r_0mvu1vxry_4ggv", "r_0mvu1w1ng_dk6c"];
@@ -1535,8 +1558,9 @@ describe("a store made from the golden runs of the stored formats", () => {
     const list = await cli("status");
     expect(list.code).toBe(0);
     for (const id of [...ids, ...forks]) expect(list.out).toContain(id);
-    expect(list.out.match(/completed/g)?.length).toBe(4);
-    expect(list.out.match(/format 1/g)?.length).toBe(2);
+    // the four of the current format and the two of format 1 beside them
+    expect(list.out.match(/completed/g)?.length).toBe(6);
+    expect(list.out).not.toContain("format 1");
     // the fork runs: the trail of the fork, and the pause of the branch that was resumed
     const [fork, paused] = forks as [string, string];
     expect((await cli("status", fork)).out).toContain(
@@ -1577,20 +1601,42 @@ describe("a store made from the golden runs of the stored formats", () => {
     expect((await cli("pipeline", "changes", "history", file)).out).not.toContain("then:");
   });
 
-  test("t40_report_without_run_picks_latest_readable", async () => {
-    // with only runs of format 1 there is nothing to report on
-    const none = await cli("report");
-    expect(none.code).not.toBe(0);
-    expect(none.err).not.toContain("no runs yet");
-    expect(none.err).toContain("no run this kodel can read: all 2 runs are in run-state format 1");
-    // a run of this kodel beside them is the one `report` picks
+  test("t41_d2_migrate_is_for_a_person_at_a_terminal_and_asks_first", async () => {
+    const id = RUNS[0] as string;
+    const statePath = join(dir, ".kodel", "runs", id, "state.json");
+    const before = await readFile(statePath, "utf8");
+    const script = await cliAs({ interactive: false }, "migrate", id);
+    expect(script.code).not.toBe(0);
+    expect(script.err).toContain("for a person at a terminal");
+    const engine = await cliAs({ environment: { KODEL_ENGINE: "1" } }, "migrate", id);
+    expect(engine.code).not.toBe(0);
+    expect(engine.err).toContain("will not run from a command the engine runs");
+    // asked first, and the question says what it costs; a "no" changes nothing
+    const declined = await cliAs({ answer: false }, "migrate", id);
+    expect(declined.code).not.toBe(0);
+    expect(declined.err).toContain("not confirmed, nothing was changed");
+    expect(declined.asked[0]).toContain("one way");
+    expect(declined.asked[0]).toContain("Close every older session");
+    // a finished run is read as it is
+    const finished = await cli("migrate", id);
+    expect(finished.code).not.toBe(0);
+    expect(finished.err).toContain("NODE_NOT_RUNNING");
+    expect(await readFile(statePath, "utf8")).toBe(before);
+  });
+
+  test("t41_report_without_run_picks_the_latest", async () => {
+    // with only runs of format 1 `report` reads the latest of them
+    const first = await cli("report");
+    expect(first.code).toBe(0);
+    expect(first.out).toMatch(/run r_0mv(iewgvl_i1ig|imyn54_tc9o) {2}completed/);
+    // a run of the current format beside them is the latest one
     const id = await runAtGate();
     const report = await cli("report");
     expect(report.code).toBe(0);
     expect(report.out).toContain(`run ${id}  running`);
     const list = await cli("status");
     expect(list.out).toContain(`${id}`);
-    expect(list.out.match(/format 1/g)?.length).toBe(2);
+    expect(list.out).not.toContain("format 1");
     expect(list.out).toContain("running at approve#1");
   });
 });

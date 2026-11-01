@@ -5,13 +5,18 @@
 import { KodelError } from "./errors";
 
 /**
- * Version stamped as `v` on the run state and the journal records (`engine.record_version` says
- * which one a run was started with). Format 2 brought forks: `pauses[]` instead of `pause`, `forks`,
- * a fork attribution on visits. A state of format 1 is refused with `UNSUPPORTED_FORMAT`, not read:
- * the break was made before the first release (AGENTS.md, "Stored data and compatibility"). The
- * seal, the served answers, proposals and `meta.json` have their own versions.
+ * The stored formats of a run: the `v` of `state.json` and of the journal records. A run is read and
+ * written in the format it started with (`formats/`); a new run starts in `RECORD_VERSION`.
  */
-export const RECORD_VERSION = 2;
+export type RecordVersion = 1 | 2;
+
+/**
+ * The format a new run starts in. Format 2 brought forks: `pauses[]` instead of `pause`, `forks`, a
+ * fork attribution on visits. Format 1 is still read and written, by its own codec (AGENTS.md,
+ * "Stored data and compatibility"). The seal, the served answers, proposals and `meta.json` have
+ * their own versions.
+ */
+export const RECORD_VERSION: RecordVersion = 2;
 
 /** Used when no `version` is given anywhere: a frozen baseline, not "current". */
 export const BASELINE_VERSION = "1.0.0";

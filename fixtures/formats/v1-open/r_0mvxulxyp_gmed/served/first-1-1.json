@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "node": "first",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "5b22c9afc7135e9b87d5cb1d515a6787de70cd9245132c1d8d8d7fab7eb77887",
+  "answer": {
+    "slug": "first",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "The first target of the outcome small."
+  }
+}

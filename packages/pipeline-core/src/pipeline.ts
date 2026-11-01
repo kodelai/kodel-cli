@@ -71,6 +71,12 @@ export interface PipelineSpec {
   entry: string;
   nodes: NodeSpec[];
   edges: EdgeSpec[];
+  /**
+   * Set on a snapshot written before forks: of two edges for one `(from, when)` the first is taken
+   * and the other is never (a run of run-state format 1 ran them so). Absent on every other spec,
+   * where such edges are a fork.
+   */
+  firstDuplicateEdgeWins?: true;
 }
 
 export type ParseResult =
@@ -81,6 +87,13 @@ export interface ParseOptions {
   registry?: Registry;
   /** The project's `version`, used when the pipeline has none. */
   configVersion?: string | number;
+  /**
+   * Read two edges for one `(from, when)` the way the engine of run-state format 1 ran them: the
+   * first one wins and the rest are never taken. The spec says so (`firstDuplicateEdgeWins`), so a run
+   * routes it that way whatever format the run lives in now. Set only for a snapshot written in that
+   * format (`parseSnapshot`); new text never gets it, so the duplicate stays an error there.
+   */
+  firstDuplicateEdgeWins?: boolean;
 }
 
 /** Placeholders a pipeline may use in its strings. */
@@ -469,7 +482,11 @@ export function validatePipeline(text: string, options: ParseOptions = {}): Pars
     // Over the valid edges, so one pass reports a bad edge and what the graph lacks besides. The
     // fork rules read the whole shape and would blame it for an edge that was dropped: they wait.
     validateGraph(c, nodes, edges, registry);
-    if (edges.length === rawEdges.length) validateParallel(c, nodes, edges, registry);
+    // A snapshot written before forks has none to validate: its second equal edge was ignored, not
+    // a branch, and the rules of forks must not make the run unreadable (AGENTS.md, rule 2).
+    if (!options.firstDuplicateEdgeWins && edges.length === rawEdges.length) {
+      validateParallel(c, nodes, edges, registry);
+    }
   }
 
   if (c.issues.length > 0) return failure(c);
@@ -478,6 +495,7 @@ export function validatePipeline(text: string, options: ParseOptions = {}): Pars
   if (!first) return failure(c);
   const spec: PipelineSpec = { version, name, entry: first.slug, nodes, edges };
   if (description !== undefined) spec.description = description;
+  if (options.firstDuplicateEdgeWins) spec.firstDuplicateEdgeWins = true;
   return { ok: true, spec };
 }
 

@@ -1,0 +1,23 @@
+version: 1
+name: dup-edge
+description: One outcome with two edges; the first one is taken.
+nodes:
+  - slug: work
+    kind: agent
+    outcomes: [small]
+    prompt: |
+      Task: {{task}}
+      Make the change. If it is small, finish with the outcome small.
+    checks:
+      - kind: command
+        command: node -e "const fs=require('fs');if(!fs.existsSync('.check-ran')){fs.writeFileSync('.check-ran','');process.exit(1)}"
+  - slug: first
+    kind: agent
+    prompt: The first target of the outcome small.
+  - slug: second
+    kind: agent
+    prompt: The second target of the outcome small.
+edges:
+  - { from: work, to: first, when: small }
+  - { from: work, to: second, when: small }
+  - { from: work, to: first }

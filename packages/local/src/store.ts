@@ -30,16 +30,22 @@ import {
 } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
 import {
+  CURRENT_RECORD_VERSION,
+  capabilitiesOf,
+  decodeJournalRecord,
   isChangesRef,
   isRunId,
   isTreeId,
   type JournalRecord,
   KodelError,
+  type PipelineSpec,
+  parseSnapshot,
   proposalNameProblem,
-  RECORD_VERSION,
+  type RecordVersion,
   type RedactRule,
   type ResultReport,
   type RunState,
+  readRunState,
   redactDeep,
   redactText,
 } from "@kodel-ai/pipeline-core";
@@ -463,6 +469,9 @@ export class FileStore {
       (m) => m.pipeline === pipeline && m.task === redactedTask && !this.isForeign(m),
     );
     for (const meta of candidates.reverse()) {
+      // A run kept before pipelines were versioned is read for lists and reports only: it cannot be
+      // reported on or carried on here, so a lookup for "the latest" passes it over.
+      if ((meta.v as number) !== META_VERSION) continue;
       let state: RunState | undefined;
       try {
         state = await this.readState(meta.runId);
@@ -505,6 +514,89 @@ export class FileStore {
     const dir = this.specsDir(runId);
     await mkdir(dir, { recursive: true, ...this.folderMode() });
     await this.writeAtomic(join(dir, specFileName(hash)), source);
+  }
+
+  /**
+   * The format a kept pipeline was written in: the `v` of the first journal line that names its hash
+   * (`run_started` for the version the run began with, `pipeline_accepted` for one it moved to).
+   * Nothing found means the journal does not say, and the pipeline is not read.
+   */
+  async snapshotFormat(runId: string, hash: string): Promise<RecordVersion | undefined> {
+    return (await this.snapshotFormats(runId, hash))?.format;
+  }
+
+  /**
+   * `format` is the one to read by; `claimed` is set when the journal claims an older one that is
+   * not vouched for: it is used only as a second try, after the state's own (strict) format fails.
+   */
+  private async snapshotFormats(
+    runId: string,
+    hash: string,
+  ): Promise<{ format: RecordVersion; claimed?: RecordVersion } | undefined> {
+    const records = await this.readJournal(runId);
+    const found = records.find(
+      (r) =>
+        (r.event === "run_started" && r.spec === hash) ||
+        (r.event === "pipeline_accepted" && r.to === hash),
+    )?.v;
+    if (found === undefined) return undefined;
+    // The journal can be written by the agent while the run is open, the state cannot. A line that
+    // claims an older format than the state is believed only beside the mark of a real upgrade.
+    // Without the mark the pipeline is read by the rules of the state's own format, which are the
+    // strict ones: an edited `v` cannot switch the old reading on and drop a branch.
+    const state = await this.readState(runId);
+    if (state && found < state.v) {
+      const vouched = records.some(
+        (r) => r.event === "run_migrated" && (r as { from?: unknown }).from === found,
+      );
+      return vouched ? { format: found } : { format: state.v, claimed: found };
+    }
+    return { format: found };
+  }
+
+  /**
+   * A kept pipeline, read by the rules of the format it was written in, never by today's alone.
+   * `introducing`: the text is the version the event being applied introduces, so no journal line
+   * names it yet; it is new text and meets today's rules. A version the journal already names keeps
+   * the format of the first line that did.
+   */
+  async parseKept(
+    runId: string,
+    hash: string,
+    text: string,
+    options: { introducing?: boolean } = {},
+  ): Promise<PipelineSpec> {
+    const formats = await this.snapshotFormats(runId, hash);
+    if (formats === undefined) {
+      if (options.introducing) return parseSnapshot(text);
+      // The state is protected and names the pipeline the run is on: a crash between the write of the
+      // state and the append of the line that names the version leaves exactly this. It is read by the
+      // rules of the state's own format, and the run opens.
+      const state = await this.readState(runId);
+      if (state && state.specHash === hash) {
+        return parseSnapshot(text, {
+          firstDuplicateEdgeWins: capabilitiesOf(state.v).firstDuplicateEdgeWins,
+        });
+      }
+      throw new KodelError(
+        "UNSUPPORTED_FORMAT",
+        `the journal of run ${runId} does not say which format its pipeline ${hash} was written in, so it cannot be read`,
+      );
+    }
+    try {
+      return parseSnapshot(text, {
+        firstDuplicateEdgeWins: capabilitiesOf(formats.format).firstDuplicateEdgeWins,
+      });
+    } catch (error) {
+      // An upgrade that stopped before its mark was written, for a pipeline the older format accepted
+      // and today's rules reject (a duplicate edge): the journal's claim is tried once the strict
+      // reading has failed. A pipeline that passes the strict rules never gets here, so a forged
+      // `v` cannot change how a valid pipeline of the current format is read.
+      if (formats.claimed === undefined || !(error instanceof KodelError)) throw error;
+      return parseSnapshot(text, {
+        firstDuplicateEdgeWins: capabilitiesOf(formats.claimed).firstDuplicateEdgeWins,
+      });
+    }
   }
 
   /** A kept version of the pipeline. It is parsed and checked again by whoever uses it. */
@@ -703,6 +795,16 @@ export class FileStore {
       (m) => m.pipeline === pipeline && m.task === redactedTask && !this.isForeign(m),
     );
     for (const meta of candidates.reverse()) {
+      if ((meta.v as number) !== META_VERSION) {
+        const peek = await this.peekState(meta.runId);
+        if (peek?.status === "running" || peek?.status === "paused") {
+          throw new KodelError(
+            "UNSUPPORTED_FORMAT",
+            `run ${meta.runId} ${(meta.v as number) > META_VERSION ? `was written by a newer kodel (meta format ${meta.v})` : `was written before pipelines were kept in versions (meta format ${meta.v})`}; left as it is, it still blocks a new run of this pipeline for this task: run ${meta.runId} must be finished before a new run starts for this task`,
+          );
+        }
+        continue;
+      }
       let state: RunState | undefined;
       try {
         state = await this.readState(meta.runId);
@@ -739,45 +841,43 @@ export class FileStore {
       if (isMissing(error)) return undefined;
       throw error;
     }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      throw new KodelError(
-        "STATE_MODIFIED_EXTERNALLY",
-        `the state of run ${runId} is not valid JSON; it was changed outside kodel`,
-      );
-    }
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      throw new KodelError(
-        "STATE_MODIFIED_EXTERNALLY",
-        `the state of run ${runId} is not a JSON object; it was changed outside kodel`,
-      );
-    }
-    const state = parsed as RunState;
-    // The format comes first, before anything reads a field: this is the one place a run of another
-    // run-state format is refused, and it is refused as such, never as a modified state. "Run-state
-    // format" so it is not taken for the format of `meta.json`, which has its own number.
-    const v: unknown = state.v;
-    if (typeof v !== "number") {
-      throw new KodelError(
-        "STATE_MODIFIED_EXTERNALLY",
-        `the state of run ${runId} has no run-state format version; it was changed outside kodel`,
-      );
-    }
-    if (v > RECORD_VERSION) {
-      throw new KodelError(
-        "UNSUPPORTED_FORMAT",
-        `run ${runId} was written by a newer kodel (run-state format ${v}, this kodel reads ${RECORD_VERSION}); upgrade kodel`,
-      );
-    }
-    if (v < RECORD_VERSION) {
-      throw new KodelError(
-        "UNSUPPORTED_FORMAT",
-        `run ${runId} was written in run-state format ${v} by an older kodel (this kodel reads ${RECORD_VERSION}); finish it with the kodel that started it, or leave it as it is (lists and reports pass it over)${await this.olderKodelNote()}`,
-      );
-    }
+    // The format comes first, before anything reads a field. A run of an older format is read and
+    // written by its own codec; one this kodel cannot read says so, and is never called "modified".
+    const state = readRunState(text, runId);
+    if (state.v < CURRENT_RECORD_VERSION) await this.assertJournalAgrees(runId, state);
     return { state, hash: sha256(text) };
+  }
+
+  /**
+   * A state must not be older than its own journal: a state of an older format beside a journal that
+   * holds records of a newer one, or the mark of an upgrade, is a state written back from memory by
+   * a process that did not see the upgrade. It is refused (never read as the older format, and not
+   * called "modified" either: the bytes are what they were written as).
+   */
+  private async assertJournalAgrees(runId: string, state: RunState): Promise<void> {
+    let text: string;
+    try {
+      text = await readFile(join(this.runDir(runId), "journal.jsonl"), "utf8");
+    } catch (error) {
+      if (isMissing(error)) return;
+      throw error;
+    }
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      let record: { v?: unknown; event?: unknown };
+      try {
+        record = JSON.parse(line) as { v?: unknown; event?: unknown };
+      } catch {
+        continue; // a torn last line is `readJournal`'s to judge
+      }
+      const newer = typeof record.v === "number" && record.v > state.v;
+      if (newer || record.event === "run_migrated") {
+        throw new KodelError(
+          "UNSUPPORTED_FORMAT",
+          `the state of run ${runId} is written in run-state format ${state.v} but its journal records a newer format or an upgrade; a process that did not see the upgrade wrote the old state back, so the run cannot be read as it is`,
+        );
+      }
+    }
   }
 
   /**
@@ -785,7 +885,7 @@ export class FileStore {
    * with an `agents:` block (forks), so the person is told to set it aside while they finish the run.
    * Read from the file's text, not parsed: this is a note on a refusal, never a reason for one.
    */
-  private async olderKodelNote(): Promise<string> {
+  async olderKodelNote(): Promise<string> {
     let text: string;
     try {
       text = await readFile(join(this.options.root, CONFIG_FILE), "utf8");
@@ -803,9 +903,10 @@ export class FileStore {
    */
   async writeState(
     runId: string,
-    state: RunState,
+    state: unknown,
     beforeWrite?: (hash: string) => Promise<void>,
   ): Promise<string> {
+    // `state` is what the codec of the run's format produced (`decide().encoded.state`), not a model.
     const text = `${JSON.stringify(state, null, 2)}\n`;
     const hash = sha256(text);
     await beforeWrite?.(hash);
@@ -866,7 +967,10 @@ export class FileStore {
 
   // journal
 
-  async appendJournal(runId: string, records: JournalRecord[]): Promise<void> {
+  async appendJournal(
+    runId: string,
+    records: ReadonlyArray<Record<string, unknown>>,
+  ): Promise<void> {
     if (records.length === 0) return;
     const lines = records
       .map((r) => {
@@ -904,8 +1008,9 @@ export class FileStore {
     const lines = text.split("\n").filter((line) => line.trim());
     const records: JournalRecord[] = [];
     for (const [i, line] of lines.entries()) {
+      let parsed: unknown;
       try {
-        records.push(JSON.parse(line) as JournalRecord);
+        parsed = JSON.parse(line);
       } catch {
         if (i === lines.length - 1) break;
         throw new KodelError(
@@ -913,6 +1018,9 @@ export class FileStore {
           `the journal of run ${runId} has a damaged record at line ${i + 1}; it was changed outside kodel`,
         );
       }
+      // Each line is read by its own `v`: a journal that holds the lines of two formats (a run
+      // upgraded by `kodel migrate`) reads as one.
+      records.push(decodeJournalRecord(parsed));
     }
     return records;
   }
