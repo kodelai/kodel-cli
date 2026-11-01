@@ -24,6 +24,7 @@ import {
   type PipelineSpec,
   type RunEvent,
   type RunState,
+  readRunState,
   validateReport,
 } from "@kodel-ai/pipeline-core";
 
@@ -315,7 +316,11 @@ export class MemoryEngine implements ScenarioEngine {
         this.journal.push(`refused:${result.error.code}`);
         continue;
       }
-      this.state = result.state;
+      // Held the way a store holds it: what the codec of the run's format produced, read back.
+      this.state =
+        result.encoded === undefined
+          ? result.state
+          : readRunState(JSON.stringify(result.encoded.state), result.state.runId);
       for (const record of result.journal) this.journal.push(record.event);
       for (const effect of result.effects) {
         const next = this.execute(effect);

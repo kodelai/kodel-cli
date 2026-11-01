@@ -1,9 +1,13 @@
-// Copy a finished run into fixtures/formats/v<N>/ for the golden-format tests.
+// Copy a run into fixtures/formats/<dir>/ for the golden-format tests.
 //
-//   node scripts/take-format-fixture.mjs <format> <run-dir> [<run-dir> ...]
+//   node scripts/take-format-fixture.mjs <dir, e.g. v2 or v1-open> <run-dir> [<run-dir> ...]
 //
 // A run directory is the same under `.kodel/runs` and under the home tree of `storage: home`
-// (`~/.kodel/projects/<project_id>/runs`): either can be named here.
+// (`~/.kodel/projects/<project_id>/runs`): either can be named here. The run may be finished or
+// still open (running or paused): its status is not looked at, and an open run has no seal.json to
+// leave out. Only the directory named is touched: its hashes.json is rewritten from the files in it
+// (runs and any other file put there, such as a note of what the engine decided), and no other
+// format directory is read or written.
 //
 // The only changes: the run's absolute workdir becomes a placeholder wherever it is written as it is
 // in the files that carry it (meta.json, state.json, the journal and served/*.json; a served answer

@@ -1,0 +1,15 @@
+version: 1
+name: gate
+description: Make a change, then a person looks at it.
+nodes:
+  - slug: impl
+    kind: agent
+    prompt: |
+      Task: {{task}}
+      Make the change.
+  - slug: approve
+    kind: human
+    prompt: Look at the change. Approve it, or reject it with a reason.
+edges:
+  - { from: impl, to: approve }
+  - { from: approve, to: impl, when: rejected }

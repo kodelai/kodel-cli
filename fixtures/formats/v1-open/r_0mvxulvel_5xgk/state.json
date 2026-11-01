@@ -1,0 +1,127 @@
+{
+  "v": 1,
+  "runId": "r_0mvxulvel_5xgk",
+  "task": "add a farewell function",
+  "specHash": "da29f83267a1c020",
+  "status": "paused",
+  "startedAt": 1793538655353,
+  "nodes": {
+    "impl": {
+      "slug": "impl",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 1
+    },
+    "test": {
+      "slug": "test",
+      "status": "failed",
+      "outcome": "failed",
+      "attempt": 2,
+      "consecutiveFailures": 2,
+      "extraAttempts": 0,
+      "visitId": 4,
+      "lastFailure": {
+        "source": "command",
+        "reason": "the command exited with 1, expected 0"
+      }
+    },
+    "fix": {
+      "slug": "fix",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 3
+    }
+  },
+  "active": [],
+  "trail": [
+    "impl",
+    "test",
+    "fix",
+    "test"
+  ],
+  "nextVisitId": 5,
+  "seq": 19,
+  "slug": "farewell-paused",
+  "workdir": "/kodel-fixture/workdir/r_0mvxulvel_5xgk",
+  "pipelineFile": ".kodel/pipelines/paused-change.yaml",
+  "history": {
+    "changes": {
+      "enabled": true,
+      "exclude": [],
+      "max_kb": 512
+    },
+    "output": {
+      "enabled": true,
+      "max_kb": 64
+    },
+    "prompts": {
+      "enabled": true
+    },
+    "executor": {
+      "enabled": true
+    },
+    "tool_log": {
+      "enabled": true
+    },
+    "agent_log": {
+      "enabled": false,
+      "mode": "full",
+      "preview_chars": {
+        "user": 4000,
+        "agent": 4000,
+        "tool_input": 4000,
+        "tool_result": 8000
+      },
+      "max_kb": 20480,
+      "interval_s": 10
+    },
+    "usage": {
+      "enabled": true,
+      "prices": {}
+    }
+  },
+  "engineVersion": "0.1.0",
+  "served": {
+    "impl:1": [
+      "17b1ea150ab3c441"
+    ],
+    "fix:1": [
+      "ae58f9cf2299c2b9"
+    ]
+  },
+  "usage": {
+    "sessions": {},
+    "attempts": {},
+    "unattributed": {
+      "models": {},
+      "passes": 0
+    },
+    "events": 0,
+    "failed": [
+      "agent_unsupported"
+    ],
+    "revisions": []
+  },
+  "servedEvents": 2,
+  "pause": {
+    "reason": "consecutive",
+    "node": "test",
+    "blocked": {
+      "from": "test",
+      "label": "failed",
+      "to": "fix",
+      "rework": false,
+      "feedback": {
+        "source": "command",
+        "reason": "the command exited with 1, expected 0",
+        "from": "test"
+      }
+    }
+  }
+}

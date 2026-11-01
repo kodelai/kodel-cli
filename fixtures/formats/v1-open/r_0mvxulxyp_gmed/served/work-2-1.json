@@ -1,0 +1,17 @@
+{
+  "v": 1,
+  "node": "work",
+  "attempt": 2,
+  "n": 1,
+  "prompt_hash": "ff603d760efbb0c70f7e3bfab3b9880b928bb785feb5994e1fbea4c2f83ec818",
+  "answer": {
+    "slug": "work",
+    "kind": "agent",
+    "attempt": 2,
+    "prompt": "Task: add a small helper\nMake the change. If it is small, finish with the outcome small.\n",
+    "reentry_feedback": "The previous attempt failed (check:command): the command exited with 1, expected 0 (work/command#1)",
+    "outcomes": [
+      "small"
+    ]
+  }
+}

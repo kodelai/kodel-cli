@@ -18,6 +18,9 @@ import { canonicalNode, checkIdOf, type NodeForms, stableJson } from "./canonica
 import { type ChangesRef, changesField, isTreeId, MAX_CHANGES_ERROR } from "./changes";
 import { type ErrorCode, KodelError } from "./errors";
 import type { EngineRecord, ExecutorRecord } from "./executor";
+import { cannotHoldMessage } from "./formats/messages";
+import { capabilitiesOf, encodeJournalRecord, encodeRunState } from "./formats/registry";
+import type { FormatCapabilities } from "./formats/types";
 import type { HistoryConfig } from "./history-config";
 import type { NodeSpec, PipelineSpec } from "./pipeline";
 import { type AcceptEffect, diffPipelines, standingOf } from "./pipeline-diff";
@@ -38,7 +41,7 @@ import {
   usageCursorSchema,
   usageDeltaSchema,
 } from "./usage-record";
-import { RECORD_VERSION } from "./version";
+import { RECORD_VERSION, type RecordVersion } from "./version";
 
 export const DEFAULT_STALE_MS = 30_000;
 export const DEFAULT_MAX_RESTARTS = 3;
@@ -291,7 +294,8 @@ export interface Pause {
 }
 
 export interface RunState {
-  v: typeof RECORD_VERSION;
+  /** The stored format the run lives in (`formats/`): it is read and written in it to the end. */
+  v: RecordVersion;
   runId: string;
   task: string;
   /**
@@ -733,7 +737,7 @@ export type Effect =
   | { type: "await_human"; node: string; attempt: number; prompt: string; instructions?: string };
 
 export interface JournalRecord {
-  v: typeof RECORD_VERSION;
+  v: RecordVersion;
   seq: number;
   ts: number;
   event: string;
@@ -752,6 +756,13 @@ export type Decision =
        * here, not only in the journal, whose claim records stop at a limit.
        */
       claimed?: { node: string; renewed: boolean };
+      /**
+       * The state and the journal records as the format of the run stores them, ready to write. A
+       * store writes these and nothing else, so a model can never be written under the wrong `v`;
+       * when the format cannot hold the outcome the decision is a refusal and nothing is written.
+       * Absent for a repeat (`noop`), which writes nothing.
+       */
+      encoded?: { state: unknown; journal: Record<string, unknown>[] };
     }
   | { ok: false; error: KodelError };
 
@@ -834,7 +845,22 @@ class Machine {
 
   private log(event: string, data: Record<string, unknown> = {}) {
     this.s.seq += 1;
-    this.journal.push({ v: RECORD_VERSION, seq: this.s.seq, ts: this.now, event, ...data });
+    this.journal.push({ v: this.s.v, seq: this.s.seq, ts: this.now, event, ...data });
+  }
+
+  /** What the format the run lives in can hold and which behaviours it keeps. */
+  private get caps(): FormatCapabilities {
+    return capabilitiesOf(this.s.v);
+  }
+
+  /**
+   * The pipeline version a command or a check is issued under. A format that stores it keeps it on
+   * the visit (a result naming another version is then dropped); one that does not leaves the
+   * visit alone, and the result is judged against the version of the run, as it always was there.
+   */
+  private issuedUnder(visit: Visit): string {
+    if (this.caps.visitSpec) visit.spec = this.s.specHash;
+    return this.s.specHash;
   }
 
   private get ended(): boolean {
@@ -1026,7 +1052,7 @@ class Machine {
       checkIndex: 0,
       restarts: 0,
       startedAt: this.now,
-      spec: this.s.specHash,
+      ...(this.caps.visitSpec ? { spec: this.s.specHash } : {}),
     };
     this.s.active.push(visit);
     run.status = begin.needs === "human" ? "waiting" : rework ? "rework" : "running";
@@ -1082,8 +1108,7 @@ class Machine {
       expect: begin.expect,
       restart,
     };
-    visit.spec = this.s.specHash;
-    effect.spec = visit.spec;
+    effect.spec = this.issuedUnder(visit);
     if (node.timeout !== undefined) effect.timeout = node.timeout;
     return effect;
   }
@@ -1116,7 +1141,6 @@ class Machine {
             ? `attempt:${visit.visitId}:${visit.attempt}`
             : undefined;
     visit.heartbeatAt = this.now;
-    visit.spec = this.s.specHash;
     const effect: Effect = {
       type: "run_check",
       node: node.slug,
@@ -1125,7 +1149,7 @@ class Machine {
       kind: check.kind,
       params,
       restart,
-      spec: visit.spec,
+      spec: this.issuedUnder(visit),
     };
     if (baseline !== undefined) effect.baseline = baseline;
     this.effects.push(effect);
@@ -1170,7 +1194,9 @@ class Machine {
       this.restartFailed(node);
       return;
     }
-    const edges = this.spec.edges.filter((e) => e.from === node.slug && e.when === label);
+    const matching = this.spec.edges.filter((e) => e.from === node.slug && e.when === label);
+    // A snapshot written before forks took the first of two equal edges: that is the route, not a fork.
+    const edges = this.spec.firstDuplicateEdgeWins ? matching.slice(0, 1) : matching;
     if (edges.length >= 2) {
       this.fork(
         node,
@@ -1719,7 +1745,11 @@ class Machine {
             }
           }
           visit.declared = event.outcome;
-          this.run(event.node).declared = event.outcome;
+          // Kept on the node so a recheck after a failed check ends with it; a format that never
+          // kept it (format 1) goes on deciding as its engine did.
+          if (this.caps.keepsDeclaredAfterFailedCheck) {
+            this.run(event.node).declared = event.outcome;
+          }
         } else {
           delete this.run(event.node).declared;
         }
@@ -1935,6 +1965,9 @@ class Machine {
    */
   private claim(event: Extract<RunEvent, { type: "step_claimed" }>) {
     if (this.s.status !== "running") throw fail("NODE_NOT_RUNNING", `the run is ${this.s.status}`);
+    // A format without claims holds no worker's hold: the answer is "no step to take", which is
+    // what a caller already handles (`none`), not a refusal that offers an upgrade it does not need.
+    if (!this.caps.claims) throw new Repeat();
     const open = this.s.active.filter((v) => v.phase === "agent");
     const held = open.filter((v) => liveClaim(this.s.nodes[v.node], this.now) !== undefined);
     // Judged against the requested step's own claim: a worker holding two steps renews either.
@@ -2193,7 +2226,7 @@ class Machine {
   }
 
   private reissue(visit: Visit) {
-    visit.spec = this.s.specHash;
+    this.issuedUnder(visit);
     if (visit.phase === "engine")
       this.effects.push(this.commandEffect(this.node(visit.node), visit, true));
     else this.emitCheck(visit, true);
@@ -2210,6 +2243,17 @@ class Machine {
       throw fail(
         "PIPELINE_CHANGE_REFUSED",
         "the run is no longer on the version this change was made from",
+      );
+    }
+    // A pipeline the format of the run cannot parse is refused before anything is looked at: the
+    // kept copy of it would be unreadable by the engine that wrote the run.
+    if (
+      this.spec.nodes.some((n) => n.join !== undefined) &&
+      !this.caps.pipelineFeatures.includes("join")
+    ) {
+      throw fail(
+        "UNSUPPORTED_FORMAT_FEATURE",
+        cannotHoldMessage(this.s.v, "a pipeline with a fork and a join"),
       );
     }
     // Before the change itself is judged: a change worked out for another standing may well be
@@ -2318,7 +2362,7 @@ class Machine {
         restarts: 0,
         heartbeatAt: this.now,
         startedAt: this.now,
-        spec: this.s.specHash,
+        ...(this.caps.visitSpec ? { spec: this.s.specHash } : {}),
       };
       this.s.active.push(reopened);
       this.log("checks_rerun", { node: effect.node, attempt: run.attempt });
@@ -2461,11 +2505,26 @@ export function decide(
     }
     throw error;
   }
+  // Encoded before anything is returned, so a store cannot write half of a decision: a state or a
+  // record the format of the run cannot hold refuses the whole decision.
+  let encoded: { state: unknown; journal: Record<string, unknown>[] };
+  try {
+    encoded = {
+      state: encodeRunState(draft),
+      journal: machine.journal.map(
+        (record) => encodeJournalRecord(record) as Record<string, unknown>,
+      ),
+    };
+  } catch (error) {
+    if (error instanceof KodelError) return { ok: false, error };
+    throw error;
+  }
   return {
     ok: true,
     state: draft,
     effects: machine.effects,
     journal: machine.journal,
+    encoded,
     ...(machine.claimed === undefined ? {} : { claimed: machine.claimed }),
   };
 }

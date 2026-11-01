@@ -116,7 +116,7 @@ The engine is meant to be shared with Kodel Server: the server implements the sa
 5. **Side effects behind traits** (clock, filesystem, process execution) so tests can fake them.
 6. **Humans decide trust.** Trust, gate decisions, `ack`, `seal` and accepting a change of a run's pipeline, or a new or changed pipeline outside a run, are never available as agent-callable MCP tools. The agent may propose (`pipeline_propose_change`); only a person's command puts it in place. The one exception is a project that turns it on in its config (`decisions.agent`, off by default, never for `ack`): the server's instructions then say when the agent may decide, and the journal marks it (`docs/decisions.md`).
 7. **Node kinds and check kinds are adapters.** Handlers sit behind traits and are registered by `kind`; the engine never matches on concrete kinds, so a plugin system can be added later without engine changes.
-8. **Formats are versioned** (`version` cascade for user files, `v` on every machine-written record). Never rewrite history on disk.
+8. **Formats are versioned** (`version` cascade for user files, `v` on every machine-written record). Never rewrite history on disk: the journal is the history and is only appended to; `state.json` is the run's current state and is written in the format the run lives in (a run keeps the format it started with; `kodel migrate` is the one change of it, made by a person).
 
 ## Stored data and compatibility
 
@@ -124,32 +124,53 @@ Two kinds of format, with different rules:
 
 - **User-written files** (pipelines, project config) carry `version`. A new engine may reject an old
   `version`, but only with a message that names the version and says what to do.
-- **Stored data** (run state, journal, the pipeline snapshot kept with each run, reports) is history.
-  It stays readable by every later engine, and it is never edited to make that true.
+- **Stored data** (run state, the journal, the pipeline snapshot kept with each run, reports) is
+  history. It stays readable by every later engine. The **journal** is only appended to; the **state**
+  of a run is its current state and is rewritten as the run goes on, but always in the format the run
+  started with.
+
+A run is **pinned to the format it started with** (`state.v`). Every stored format has one codec in
+`@kodel-ai/pipeline-core` (`formats/`): `decode` turns what the format stores into the model of the
+engine, `encode` turns the model back (an allow-list: it writes every field or refuses, and nothing is
+dropped), and `capabilities` says what the format can hold and which behaviours it keeps. The engine
+reads and writes each run through the codec of its format; a new run starts in the current format.
+`decide()` returns the encoded state and records, or a refusal, so a store writes what it is given and
+a model is never written under the wrong `v`. What a format cannot hold (format 1 has no forks, no
+claims and one pause) is refused **before anything is written** with `UNSUPPORTED_FORMAT_FEATURE`, and
+the answer tells the agent to offer the person `kodel migrate <run>`; the agent never runs it.
 
 For stored data:
 
-1. A change that renames, removes or retypes a stored field ships, in the same change, a reader for the
-   previous format that migrates **in memory on read**, and a golden fixture of a real old run in
-   `fixtures/formats/v<N>/` with a test that opens it with the current engine (`status`, `report`).
-2. A pipeline snapshot kept with a run is parsed by the reader of the format it was written in, never by
-   the current user-file parser. A user-file rule (a field removed, a stricter check) must not make an
-   old run unreadable.
-3. "Cannot read" and "was modified" are different errors. A run written in a format this engine does not
-   know says so ("written in format X, upgrade or migrate"); only a hash mismatch says it was modified.
-4. Before the first release, formats may break freely. At the first release, freeze what exists as v1:
-   add the golden fixtures above for it, and from then on rules 1-3 apply to every change.
+1. A change that renames, removes or retypes a stored field ships, in the same change, a **reader and a
+   writer** for the previous format (its codec), and a golden fixture of a real old run in
+   `fixtures/formats/v<N>/` (or `v<N>-<tag>/`) with tests that open it (`status`, `report`), write it
+   back as it was read, and let an open one go on in its own format.
+2. A pipeline snapshot kept with a run is parsed by the rules of the format it was written in, never by
+   the current user-file parser alone: the format is the `v` of the first journal line that names its
+   hash (`run_started`, `pipeline_accepted`). A rule tightened for new files must keep the old rule for
+   the snapshots written before it, so it cannot make an old run unreadable; new text always meets the
+   current rules.
+3. "Cannot read", "unsupported" and "was modified" are different errors. A run written in a format this
+   engine does not know says so ("written by a newer kodel, upgrade kodel"); a state that does not fit
+   its format is "cannot read" and names the field; only a hash mismatch says it was modified.
+4. Before the first release, a format that no published version wrote and no supported run uses may
+   break freely. Format 1 is written by the published beta and by the runs in flight, so it is
+   supported. A run from before pipelines were kept in versions (`meta.json` format 1) is read and
+   listed but cannot be continued by any engine. At the first release, freeze what exists.
+5. **A change of a stored format says what it does, in the same change:** it ships `decode`, `encode`,
+   `capabilities`, a real fixture and the round-trip test (a fixture directory for every codec, a key
+   table the compiler keeps complete for every field of the model and every journal event; the tests
+   `t41_registry_matches_fixture_directories` and `t41_model_and_event_key_tables_are_complete` fail
+   otherwise). A new field is a compatible addition only if an engine of the same version that ignores
+   it decides every step the same way **and** an older engine that writes the run back and drops it
+   leaves the newer engine deciding the same way; otherwise the version is bumped. A `decode` is never
+   removed; an `encode` only by an explicit decision after the first release. The release note
+   (`docs/run-formats.md`) says what a run in flight does after the change.
 
-One exception was made under rule 4, before the first release (decision T-40, forks in the run
-engine): run-state format 1 (`state.json` and the journal records with `v: 1`, written by
-`@kodel-ai/kodel@0.1.0-beta.0` and earlier; a beta is pre-release) was replaced by format 2 without
-a reader. The engine refuses a format-1 run with `UNSUPPORTED_FORMAT`, names the format and says to
-finish it with the kodel that started it. A run nobody wants to finish can be left as it is: it is
-refused, the run lists and `findLatest` pass it over, and it only blocks `pipeline_start` for the same
-pipeline and task (the refusal names the run and says it must be finished before a new run starts for
-that task). kodel has no command that cancels a run. The engine never guesses from the shape and never calls
-such a run modified, and `fixtures/formats/v1/` keeps the real runs that prove the refusal. The
-decision is refuted if a user outside this repository reports history lost to it.
+A run of format 1 keeps the behaviour its engine had where the codec says so (it keeps no `Visit.spec`,
+it does not keep a declared outcome after a failed check, it reads two equal edges as one); every
+other fix since applies to every run. The limits that a new engine cannot lift in an older one are in
+`docs/run-formats.md`.
 
 ## Decisions and tests
 

@@ -1,0 +1,119 @@
+{
+  "v": 1,
+  "runId": "r_0mvxulxyp_gmed",
+  "task": "add a small helper",
+  "specHash": "a1e955bccffbb65f",
+  "status": "running",
+  "startedAt": 1793538658666,
+  "nodes": {
+    "work": {
+      "slug": "work",
+      "status": "passed",
+      "outcome": "small",
+      "attempt": 2,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 1
+    },
+    "first": {
+      "slug": "first",
+      "status": "running",
+      "outcome": null,
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 2
+    },
+    "second": {
+      "slug": "second",
+      "status": "pending",
+      "outcome": null,
+      "attempt": 0,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 0
+    }
+  },
+  "active": [
+    {
+      "node": "first",
+      "attempt": 1,
+      "visitId": 2,
+      "phase": "agent",
+      "checkIndex": 0,
+      "restarts": 0,
+      "startedAt": 1793538659406
+    }
+  ],
+  "trail": [
+    "work",
+    "first"
+  ],
+  "nextVisitId": 3,
+  "seq": 14,
+  "slug": "small-helper",
+  "workdir": "/kodel-fixture/workdir/r_0mvxulxyp_gmed",
+  "pipelineFile": ".kodel/pipelines/dup-edge.yaml",
+  "history": {
+    "changes": {
+      "enabled": true,
+      "exclude": [],
+      "max_kb": 512
+    },
+    "output": {
+      "enabled": true,
+      "max_kb": 64
+    },
+    "prompts": {
+      "enabled": true
+    },
+    "executor": {
+      "enabled": true
+    },
+    "tool_log": {
+      "enabled": true
+    },
+    "agent_log": {
+      "enabled": false,
+      "mode": "full",
+      "preview_chars": {
+        "user": 4000,
+        "agent": 4000,
+        "tool_input": 4000,
+        "tool_result": 8000
+      },
+      "max_kb": 20480,
+      "interval_s": 10
+    },
+    "usage": {
+      "enabled": true,
+      "prices": {}
+    }
+  },
+  "engineVersion": "0.1.0",
+  "served": {
+    "work:1": [
+      "e59dded44e7e4056"
+    ],
+    "work:2": [
+      "ad434f7207bbd81b"
+    ],
+    "first:1": [
+      "c4c79a684440675d"
+    ]
+  },
+  "usage": {
+    "sessions": {},
+    "attempts": {},
+    "unattributed": {
+      "models": {},
+      "passes": 0
+    },
+    "events": 0,
+    "failed": [
+      "agent_unsupported"
+    ],
+    "revisions": []
+  },
+  "servedEvents": 3
+}

@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "node": "impl",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "8d1cc209cc540b37fcd8cc7bef46968091f8beb4e9e09c8019b88777a6e5b87f",
+  "answer": {
+    "slug": "impl",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "Task: add a greeting function\nMake the change.\n"
+  }
+}

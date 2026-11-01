@@ -1,0 +1,11 @@
+{
+  "v": 2,
+  "runId": "r_0mvxulxyp_gmed",
+  "pipeline": "dup-edge",
+  "task": "add a small helper",
+  "slug": "small-helper",
+  "specHash": "a1e955bccffbb65f",
+  "createdAt": 1793538658609,
+  "workdir": "/kodel-fixture/workdir/r_0mvxulxyp_gmed",
+  "branch": "kodel/r_0mvxulxyp_gmed"
+}

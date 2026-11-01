@@ -1,0 +1,57 @@
+{
+  "engine_commit": "12f85788cc300f83421e17472ef3d115a8f590a5",
+  "run_id": "r_0mvxulxyp_gmed",
+  "edges": [
+    {
+      "from": "work",
+      "to": "first",
+      "when": "small"
+    },
+    {
+      "from": "work",
+      "to": "second",
+      "when": "small"
+    },
+    {
+      "from": "work",
+      "to": "first"
+    }
+  ],
+  "outcome": "small",
+  "work_attempts": [
+    {
+      "attempt": 1,
+      "outcome": "failed",
+      "status": "failed",
+      "source": "check:command"
+    },
+    {
+      "attempt": 2,
+      "outcome": "small",
+      "status": "passed"
+    }
+  ],
+  "reentry_feedback_of_work_2": "The previous attempt failed (check:command): the command exited with 1, expected 0 (work/command#1)",
+  "target_entered": "first",
+  "target_attempt": 1,
+  "journal_enter_records": [
+    {
+      "seq": 2,
+      "event": "node_entered",
+      "node": "work",
+      "attempt": 1
+    },
+    {
+      "seq": 8,
+      "event": "node_entered",
+      "node": "work",
+      "attempt": 2
+    },
+    {
+      "seq": 13,
+      "event": "node_entered",
+      "node": "first",
+      "attempt": 1
+    }
+  ]
+}

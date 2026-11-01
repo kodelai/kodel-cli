@@ -27,7 +27,6 @@ import {
   type PipelineSpec,
   type PreparedTask,
   parsePipeline,
-  parseSnapshot,
   proposalNameProblem,
   type RunState,
   type RunTaskLink,
@@ -831,7 +830,7 @@ export class LocalPipelineHost implements PipelineHost {
       );
     }
     try {
-      return { spec: parseSnapshot(kept), source: kept };
+      return { spec: await this.store.parseKept(runId, state.specHash, kept), source: kept };
     } catch (error) {
       if (!(error instanceof KodelError)) throw error;
       // A version that cannot be read is not a version that was modified; say which.

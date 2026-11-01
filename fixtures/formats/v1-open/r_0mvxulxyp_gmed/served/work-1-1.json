@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "node": "work",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "6eb14c686e78fafb55ebe812b8825493142727fe5526076171337aef339b105c",
+  "answer": {
+    "slug": "work",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "Task: add a small helper\nMake the change. If it is small, finish with the outcome small.\n",
+    "outcomes": [
+      "small"
+    ]
+  }
+}

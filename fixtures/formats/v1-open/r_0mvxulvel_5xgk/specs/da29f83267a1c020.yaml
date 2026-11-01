@@ -1,0 +1,21 @@
+version: 1
+name: paused-change
+description: Make a change and test it; a failing test pauses the run.
+nodes:
+  - slug: impl
+    kind: agent
+    prompt: |
+      Task: {{task}}
+      Make the change.
+  - slug: test
+    kind: command
+    command: node -e "setTimeout(() => process.exit(1), 2500)"
+    timeout: 60
+    max_consecutive_failures: 2
+  - slug: fix
+    kind: agent
+    prompt: The test failed; fix the cause.
+edges:
+  - { from: impl, to: test }
+  - { from: test, to: fix, when: failed }
+  - { from: fix, to: test }
