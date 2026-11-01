@@ -1,4 +1,5 @@
 /** The terminal loop: alternate screen, raw keys, redraw on a key, a resize, a frame or new data. */
+import { neutralize } from "./ansi";
 import { MOUSE_OFF, MOUSE_ON, parseInput } from "./input";
 import type { Loaded } from "./load";
 import type { Comment, DiffState, GateDetail } from "./session";
@@ -42,6 +43,27 @@ export interface TuiOptions {
   loadStats?: (pipeline: string) => Promise<StatsData>;
 }
 
+/**
+ * What a chunk of input does to the model. A text pasted while a comment is typed arrives as one
+ * chunk: its first line break ends the comment, and what follows in the chunk is dropped rather than
+ * read as keys (a `q` in it would quit, a `d` and a `y` would delete a comment).
+ */
+export function applyInput(
+  start: Model,
+  chunk: string,
+  size: { cols: number; rows: number },
+): Model {
+  let model = start;
+  const typing = start.input !== null;
+  for (const event of parseInput(chunk)) {
+    model =
+      event.type === "key" ? update(model, event.name, size) : mouseUpdate(model, size, event);
+    if (model.quit) break;
+    if (typing && model.input === null) break;
+  }
+  return model;
+}
+
 export async function runTui(
   stdin: NodeJS.ReadStream,
   stdout: NodeJS.WriteStream,
@@ -72,7 +94,11 @@ export async function runTui(
     options
       .loadDetail(wanted.id)
       .then((detail) => {
-        if (detail) model = withDetail(model, key, detail);
+        if (detail) {
+          model = withDetail(model, key, detail);
+          // A file that is open is read again with the card: the effect is done at once.
+          flush();
+        }
       })
       .catch(() => undefined)
       .finally(() => {
@@ -152,7 +178,8 @@ export async function runTui(
       stdout.write(model.mouse ? MOUSE_ON : MOUSE_OFF);
       mouseSent = model.mouse;
     }
-    const lines = render(model, size());
+    // The screens make their lines safe as they fit them; this is the last look before the terminal.
+    const lines = render(model, size()).map(neutralize);
     stdout.write(lines.map((line, i) => `\u001b[${i + 1};1H${line}`).join(""));
   };
   // Always turned off on the way out, whatever was sent: a terminal left reporting the mouse
@@ -212,13 +239,7 @@ export async function runTui(
     };
     const onData = (chunk: string) => {
       const before = model.selected;
-      for (const event of parseInput(chunk)) {
-        model =
-          event.type === "key"
-            ? update(model, event.name, size())
-            : mouseUpdate(model, size(), event);
-        if (model.quit) break;
-      }
+      model = applyInput(model, chunk, size());
       if (model.quit) {
         finish();
         return;
