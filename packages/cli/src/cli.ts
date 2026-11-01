@@ -1234,10 +1234,13 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .option("--json", "print the report as JSON")
     .action(async (runId: string | undefined, opts: { json?: boolean }) => {
       const h = await host();
-      // The latest run whose state this kodel reads: one of an older format is skipped, not reported.
+      // The latest run whose state this kodel reads: one of an older format is skipped, not reported,
+      // and so is one kept before pipelines were versioned (meta format 1), which is listed only.
       const summaries = runId === undefined ? await h.runSummaries() : [];
-      const id = runId ?? // meta format 1: kept before pipelines were versioned, listed but not reported on without its id
-        summaries.filter((r) => r.state !== undefined && (r.meta.v as number) >= 2).at(-1)?.meta.runId;
+      const id =
+        runId ??
+        summaries.filter((r) => r.state !== undefined && (r.meta.v as number) >= 2).at(-1)?.meta
+          .runId;
       if (!id) {
         if (summaries.length === 0) throw new UserError("there are no runs yet");
         const formats = [
