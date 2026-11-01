@@ -124,8 +124,8 @@ machine or of the scratch directory.
 
 Three runs of run-state format 1 left **open** (not finished), written by the real engine of commit
 `12f85788cc300f83421e17472ef3d115a8f590a5` (format 1, before forks). They pin what a run that the
-beta left going looks like on disk, which `v1/` (finished runs only) does not. The directory name does
-not match `v<N>`, so the tests that walk `v*/` by format number do not pick it up.
+beta left going looks like on disk, which `v1/` (finished runs only) does not. The directory name is `v<N>-<tag>`: it maps to the codec of format `<N>`, and the tests that walk the
+fixtures (`t41_registry_matches_fixture_directories`, the loop that opens every run) pick it up.
 
 How they were made: a scratch script in a checkout of that commit (`bun scripts/make-v1-open.mjs
 <out-dir>`, not part of this repository) drove `LocalPipelineHost` of that commit the way

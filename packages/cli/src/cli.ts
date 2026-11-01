@@ -1239,7 +1239,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const summaries = runId === undefined ? await h.runSummaries() : [];
       const id =
         runId ??
-        summaries.filter((r) => r.state !== undefined && (r.meta.v as number) >= 2).at(-1)?.meta
+        summaries.filter((r) => r.state !== undefined && (r.meta.v as number) === 2).at(-1)?.meta
           .runId;
       if (!id) {
         if (summaries.length === 0) throw new UserError("there are no runs yet");

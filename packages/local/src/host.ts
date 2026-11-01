@@ -2937,12 +2937,6 @@ export class LocalRun {
         `this machine has never recorded the state of run ${this.runId}, so it cannot tell whether it was changed; continue the run once here (a decision at its gate, or a step), then upgrade it`,
       );
     }
-    if (await this.pendingChange()) {
-      throw new KodelError(
-        "PIPELINE_CHANGE_REFUSED",
-        `a change of the pipeline of run ${this.runId} waits for you; accept it or drop it first (kodel pipeline changes show ${this.runId})`,
-      );
-    }
     if (state.v >= to) {
       const journal = await this.journal();
       const oldest = journal.reduce<RecordVersion>((v, r) => (r.v < v ? r.v : v), state.v);
@@ -2951,6 +2945,12 @@ export class LocalRun {
       const decision = await this.apply({ type: "run_migrated", from: oldest });
       if (!decision.ok) throw decision.error;
       return { status: "marked", to };
+    }
+    if (await this.pendingChange()) {
+      throw new KodelError(
+        "PIPELINE_CHANGE_REFUSED",
+        `a change of the pipeline of run ${this.runId} waits for you; accept it or drop it first (kodel pipeline changes show ${this.runId})`,
+      );
     }
     const decision = await this.apply({ type: "run_migrated" });
     if (!decision.ok) throw decision.error;

@@ -530,18 +530,16 @@ export class FileStore {
     )?.v;
     if (found === undefined) return undefined;
     // The journal can be written by the agent while the run is open, the state cannot. A line that
-    // claims an older format than the state is believed only beside the mark of a real upgrade;
-    // otherwise an edited `v` would switch an old reading rule on for a run that never had it.
+    // claims an older format than the state is believed only beside the mark of a real upgrade.
+    // Without the mark the pipeline is read by the rules of the state's own format, which are the
+    // strict ones: an edited `v` cannot switch the old reading on and drop a branch, and a run whose
+    // upgrade stopped before its mark was written still opens, so `kodel migrate` can write the mark.
     const state = await this.readState(runId);
-    if (
-      state &&
-      found < state.v &&
-      !records.some((r) => r.event === "run_migrated" && (r as { from?: unknown }).from === found)
-    ) {
-      throw new KodelError(
-        "UNSUPPORTED_FORMAT",
-        `the journal of run ${runId} says its pipeline ${hash} was written in run-state format ${found}, but the run is in format ${state.v} and was never upgraded (or the upgrade stopped before its mark was written: 'kodel migrate ${runId}' in a terminal writes it), so the journal cannot be trusted and the pipeline cannot be read`,
+    if (state && found < state.v) {
+      const vouched = records.some(
+        (r) => r.event === "run_migrated" && (r as { from?: unknown }).from === found,
       );
+      return vouched ? found : state.v;
     }
     return found;
   }
@@ -772,7 +770,7 @@ export class FileStore {
         if (peek?.status === "running" || peek?.status === "paused") {
           throw new KodelError(
             "UNSUPPORTED_FORMAT",
-            `run ${meta.runId} was written before pipelines were kept in versions (meta format ${meta.v}); left as it is, it still blocks a new run of this pipeline for this task: run ${meta.runId} must be finished before a new run starts for this task`,
+            `run ${meta.runId} ${(meta.v as number) > META_VERSION ? `was written by a newer kodel (meta format ${meta.v})` : `was written before pipelines were kept in versions (meta format ${meta.v})`}; left as it is, it still blocks a new run of this pipeline for this task: run ${meta.runId} must be finished before a new run starts for this task`,
           );
         }
         continue;

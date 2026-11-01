@@ -438,6 +438,42 @@ describe("t41 a run of format 1 takes its next step", () => {
   });
 });
 
+describe("t41 the kept pipeline of the duplicate-edge fixture routes as the old engine did", () => {
+  test("t41_d1_fixture_3_routes_to_the_target_the_old_engine_recorded", () => {
+    const dir = join(FORMATS, "v1-open", "r_0mvxulxyp_gmed");
+    const recording = JSON.parse(
+      readFileSync(join(FORMATS, "v1-open", "routing-result.json"), "utf8"),
+    ) as { outcome: string; target_entered: string; target_attempt: number };
+    const specFile = readdirSync(join(dir, "specs")).find((name) => name.endsWith(".yaml"));
+    const spec = parseSnapshot(readFileSync(join(dir, "specs", specFile ?? ""), "utf8"), {
+      firstDuplicateEdgeWins: true,
+    });
+    let state = v1Start(spec);
+    const entered: string[] = [];
+    const step = (event: RunEvent, at: number) => {
+      const done = decide(spec, state, event, at);
+      if (!done.ok) throw done.error;
+      state = done.state;
+      for (const r of done.journal) if (r.event === "node_entered") entered.push(String(r.node));
+    };
+    // the recorded run: the check failed on the first attempt and passed on the second
+    step({ type: "agent_completed", node: "work", attempt: 1, outcome: recording.outcome }, 1);
+    step(
+      { type: "check_finished", node: "work", attempt: 1, index: 0, passed: false, reason: "x" },
+      2,
+    );
+    step({ type: "agent_completed", node: "work", attempt: 2, outcome: recording.outcome }, 3);
+    step(
+      { type: "check_finished", node: "work", attempt: 2, index: 0, passed: true, reason: "" },
+      4,
+    );
+    expect(entered.at(-1)).toBe(recording.target_entered);
+    expect(state.active.map((v) => [v.node, v.attempt])).toEqual([
+      [recording.target_entered, recording.target_attempt],
+    ]);
+  });
+});
+
 describe("t41 what format 1 cannot hold is refused by the encoder, nothing is dropped", () => {
   const paused = () =>
     readRunState(fixtureRuns("v1-open").find((r) => r.id === "r_0mvxulvel_5xgk")?.state ?? "", "x");

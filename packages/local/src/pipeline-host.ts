@@ -819,7 +819,7 @@ export class LocalPipelineHost implements PipelineHost {
     if ((meta.v as number) !== META_VERSION) {
       throw new KodelError(
         "UNSUPPORTED_FORMAT",
-        `run ${runId} was written before pipelines were kept in versions (meta format ${meta.v}, this kodel reads meta format ${META_VERSION}); finish it with the kodel that started it`,
+        `run ${runId} was written ${(meta.v as number) > META_VERSION ? "by a newer kodel" : "before pipelines were kept in versions"} (meta format ${meta.v}, this kodel reads meta format ${META_VERSION}); ${(meta.v as number) > META_VERSION ? "upgrade kodel" : "finish it with the kodel that started it"}`,
       );
     }
     const kept = await this.store.readSpec(runId, state.specHash);
