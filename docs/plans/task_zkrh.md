@@ -218,3 +218,28 @@ The fifth critique and the earlier ones, by what became of them:
   `.kodel/runs/*/agent_log` only, and already says `usage` and `tool_calls` read the log themselves (52A8).
 - Related tasks read: TASK-V75E (done), TASK-WKJ4 (engine profiles; a step run by another engine has no calls in the host log), TASK-KP9C (batch of parallel agent nodes; workers are subagents with their own logs),
   TASK-R7AF (hooks).
+
+## As built (where the plan and `main` disagree, and what was left)
+
+Written at the end of the implementation. `main` moved on while the plan was being made (usage, forks, storage, and T-41: a run keeps its
+format and every format has a codec), so:
+
+- **Format.** The plan said the records exist only in run-state format 2 and format 1 is refused. After T-41 a run of format 1 is supported:
+  the codec of format 1 keeps `toolCalls` and the two events like `usage` (`STATE_TABLE`, `OPAQUE_KEYS`, `V1_EVENTS`), format 2 stores the model
+  as it is, and `docs/run-formats.md` says what a run in flight does (nothing to migrate; a run started before reads `not_captured`).
+  The golden run is in `fixtures/tool-calls-run/` (format 2).
+- **The report** is made in `summarizeRun` with the usage report, from the journal that is already read there, not by a lazy host method:
+  `status` also builds it. `RunReport.tool_calls` is optional like `task_size`.
+- **Cursor of a long pass.** A pass that reads more than 200 rows writes several records; each part carries the cursor of its last row, so a
+  record the run refuses never moves the cursor past rows that were not recorded.
+- **`skipped`** (lines the line reader dropped) is the count of the read, put on the first record of a pass; after a restart the read starts at
+  the run's beginning and may count the same lines again.
+- **`usage.ts`** changed only by the `runStarts` option (the shared `RunStartCache` of `session-finder.ts`); its tests are unchanged.
+- **The offline twin** (`zkrh_saved_real_session_matches_raw_tool_use_ids`) runs at the collector: it compares every `tool_use` and
+  `tool_result` id of the saved session and its subagent with what the reader gives, with no collector code on the reference side. The
+  pass-level comparison with a raw log is the env-gated `zkrh_real_run_matches_raw_log`.
+- **Not built, left for a follow-up** (named in the plan, not needed for the behaviour): real fork runs (`zkrh_fork_*` on a hand-written fork
+  fixture, `zkrh_real_fork_run_marks_shared`, the e2e through the real `PipelineService`), the tests of the lock in a fork (`busy`, three
+  workers), the bounded-time tests with a slow reader and with a journal at its cap, the config validation tests of `preview_chars` beyond
+  the schema bound, a test that `attempt` collisions after a node is removed and added again are documented only, and the CLI test of the
+  report on Windows line endings. The env-gated real-agent scenarios were written and **not run** (`tests/agents/claude-code-tool-calls.test.ts`).

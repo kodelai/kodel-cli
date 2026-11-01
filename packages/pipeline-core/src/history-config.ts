@@ -25,7 +25,10 @@ export interface HistoryConfig {
   prompts: { enabled: boolean };
   /** What the executor ran. */
   executor: { enabled: boolean };
-  /** The agent's tool calls. */
+  /**
+   * The switch of the hooks' log of tool calls (TASK-R7AF) and of the tool events in the copy of the agent's log. It has no
+   * effect on `tool_calls`, which reads the log itself.
+   */
   tool_log: { enabled: boolean };
   /**
    * The agent's conversation log of the run. Absent in a run started before it existed (read as "not captured") and

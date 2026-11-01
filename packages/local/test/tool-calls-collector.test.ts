@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { HistoryEvent, ReadOptions, SessionRef } from "@kodel-ai/pipeline-core";
-import { ClaudeLogBuilder } from "../../testkit/src";
+import { ClaudeLogBuilder, installClaudeSession } from "../../testkit/src";
 import { claudeCodeCollector } from "../src/history";
 import {
   errorTypeOf,
@@ -172,5 +173,57 @@ describe("tool call detail of the Claude Code reader (TASK-ZKRH)", () => {
     expect(preview.length).toBeGreaterThan(0);
     expect(preview).not.toContain("ghp_");
     expect(preview).not.toContain(token.slice(0, 12));
+  });
+
+  test("zkrh_saved_real_session_matches_raw_tool_use_ids", async () => {
+    // The saved session (and its subagents) is read for its raw tool_use and tool_result ids with none of the collector's code;
+    // what this shows in CI is that the reader loses and adds no call and no result. The ids in the stored rows are hashes of
+    // these (`rowId`), so the pass cannot lose one either that the reader gives.
+    const FIXTURE = fileURLToPath(
+      new URL("../../../fixtures/history/claude-code/v2.1.306/", import.meta.url),
+    );
+    const root = await project();
+    await installClaudeSession({ configDir, cwd: root });
+    const files = [
+      join(FIXTURE, "session.jsonl"),
+      ...(await readdir(join(FIXTURE, "subagents")))
+        .filter((n) => n.endsWith(".jsonl"))
+        .map((n) => join(FIXTURE, "subagents", n)),
+    ];
+    const uses = new Set<string>();
+    const results = new Set<string>();
+    for (const file of files) {
+      for (const line of (await readFile(file, "utf8")).split("\n")) {
+        if (line.trim() === "") continue;
+        let entry: { message?: { content?: unknown } };
+        try {
+          entry = JSON.parse(line) as { message?: { content?: unknown } };
+        } catch {
+          // the saved session has a line that is not JSON on purpose; the reader skips it too
+          continue;
+        }
+        const content = entry.message?.content;
+        if (!Array.isArray(content)) continue;
+        for (const block of content as { type?: string; id?: string; tool_use_id?: string }[]) {
+          if (block.type === "tool_use" && block.id !== undefined) uses.add(block.id);
+          if (block.type === "tool_result" && block.tool_use_id !== undefined) {
+            results.add(block.tool_use_id);
+          }
+        }
+      }
+    }
+    expect(uses.size).toBeGreaterThan(0);
+    const collector = claudeCodeCollector({ configDir });
+    const refs = await collector.locate(root);
+    const seenCalls = new Set<string>();
+    const seenResults = new Set<string>();
+    for (const ref of refs) {
+      for await (const event of collector.read(ref, undefined, { toolDetail: true })) {
+        if (event.kind === "tool_call") seenCalls.add(event.id);
+        if (event.kind === "tool_result") seenResults.add(event.id);
+      }
+    }
+    expect([...seenCalls].sort()).toEqual([...uses].sort());
+    expect([...seenResults].sort()).toEqual([...results].sort());
   });
 });

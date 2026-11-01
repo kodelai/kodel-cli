@@ -73,6 +73,16 @@ generic unknown-key error). Accepting both keys in pipeline files, with an error
 proposed in a follow-up task. No kept pipeline of a supported run uses `format:`, so the reader of kept
 pipelines does not accept it.
 
+## Tool calls (TASK-ZKRH)
+
+The record of the agent's tool calls adds an optional `toolCalls` key to `state.json`, two journal events
+(`tool_calls_recorded`, `tool_calls_failed`) and `tool_calls` to `run_started.history`, in format 1 and in
+format 2 alike (the codec of format 1 keeps them as it keeps `usage`). A run that was going when kodel was
+updated has no `tool_calls` in its frozen history, so it reads `not_captured` and goes on as before; a run
+started after the update records tool calls. An older kodel that goes on with such a run keeps `toolCalls`
+as it is and does not update it, and refuses a project config that has `history.tool_calls` (the `history`
+section is strict). Nothing here needs `kodel migrate`.
+
 ## When the formats change again
 
 A change of a stored format ships a codec for the previous one, a real fixture and the tests, and
