@@ -12,11 +12,12 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "format": "biome format --write .",
-    "test": "bun test",
+    "test": "node scripts/test.mjs",
     "test:agents": "KODEL_AGENT_TESTS=1 bun test tests/agents --timeout 900000",
     "test:agents:stats": "bun tests/agents/run-stats.ts",
     "build": "bun run --cwd packages/cli build",
-    "check:artifact": "node scripts/check-artifact.mjs"
+    "check:artifact": "node scripts/check-artifact.mjs",
+    "check:licenses": "node scripts/check-licenses.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.0",

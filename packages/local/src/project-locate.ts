@@ -118,6 +118,23 @@ export async function locateProject(
   };
 }
 
+/**
+ * A project root as one spelling for the same checkout: the real path (a symlink or a case the
+ * system folds is one folder), and a linked git worktree of a project is its main checkout. It is
+ * what `--root` and `KODEL_ROOT` (used as given by `locateProject`) are brought to wherever the
+ * checkout has to be told from another one: the run records, the folder of the proposals.
+ */
+export async function canonicalRoot(root: string): Promise<string> {
+  const real = await realOrSelf(root);
+  const topText = await gitOut(["rev-parse", "--show-toplevel"], real);
+  const top = topText === undefined ? undefined : await realOrSelf(topText);
+  if (top === undefined || !isInside(top, real)) return real;
+  const main = await mainCheckout(real);
+  if (main === undefined) return real;
+  const mapped = join(main, relative(top, real));
+  return (await hasMarker(mapped)) ? mapped : real;
+}
+
 function isInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));

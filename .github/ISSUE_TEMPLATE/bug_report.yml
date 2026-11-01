@@ -1,0 +1,48 @@
+name: Bug report
+description: Something does not work as the README or the command help says
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for trying Kodel. For a security problem please do not use this form: see SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Kodel version
+      description: The output of `kodel --version`.
+    validations:
+      required: true
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Coding agent
+      options: [Claude Code, Codex, OpenCode, Other]
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and Node version
+      placeholder: macOS 15, Node 22.19
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The commands or the prompts, in order.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: What `kodel status <run>` or the failing command printed. Please remove secrets first.
+      render: text

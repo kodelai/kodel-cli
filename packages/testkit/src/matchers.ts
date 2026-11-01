@@ -35,12 +35,12 @@ const builtins: Matcher[] = [
     }),
   },
   {
-    key: "waitingGate",
+    key: "waitingGates",
     apply: (s, expected) => ({
-      ok: s.waitingGate === expected,
+      ok: same(s.waitingGates, expected),
       expected,
-      actual: s.waitingGate,
-      detail: "the human node the run waits on",
+      actual: s.waitingGates,
+      detail: "the human nodes the run waits on",
     }),
   },
   {

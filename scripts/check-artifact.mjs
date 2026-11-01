@@ -15,11 +15,27 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { checkForkRun } from "./check-artifact-fork.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const artifact = join(root, "packages/cli/dist/kodel.js");
 const pkg = JSON.parse(readFileSync(join(root, "packages/cli/package.json"), "utf8"));
 const BUDGET_BYTES = 5 * 1024 * 1024;
+
+// Everything the checks run writes its history under this base (`KODEL_STATE_DIR`), never under the
+// real home of whoever runs the script. Children inherit it through the environment.
+// `fail` exits at once, so the folders are removed on exit and not only in `finally`.
+const temps = [];
+process.on("exit", () => {
+  for (const dir of temps) rmSync(dir, { recursive: true, force: true });
+});
+const tempDir = (prefix) => {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  temps.push(dir);
+  return dir;
+};
+const stateBase = tempDir("kodel-artifact-state-");
+process.env.KODEL_STATE_DIR = stateBase;
 
 const fail = (msg) => {
   console.error(`artifact check failed: ${msg}`);
@@ -52,6 +68,7 @@ for (const line of [
   "A pipeline is one YAML file",
   "Which check for which job",
   "Complete pipelines. Replace the commands",
+  "A checklist for a pipeline that exists",
 ]) {
   if (!built.includes(line)) fail(`the documentation line "${line}" is not in the artifact`);
 }
@@ -68,7 +85,23 @@ const hookSize = statSync(hookArtifact).size;
 if (hookSize > HOOK_BUDGET_BYTES)
   fail(`hook bundle size ${hookSize} exceeds budget ${HOOK_BUDGET_BYTES}`);
 
-const project = mkdtempSync(join(tmpdir(), "kodel-artifact-"));
+// storage_hook_bundle_clean_and_in_budget: the hook reads `storage` with a small line matcher. Parsing the
+// config with yaml/zod or opening the store would blow the budget above, so the built text must not hold them.
+const hookText = readFileSync(hookArtifact, "utf8");
+// `config.yaml` is a file name the hook reads, so only an import of the module counts for yaml.
+const banned = [
+  ["the yaml module", /(require\(|from\s*)["']yaml["']/],
+  ["zod", /zod/],
+  ["minimatch", /minimatch/],
+  // The store is what the hook must not pull in: its class, and the lock and the start lock it keeps.
+  ["the store", /class FileStore\b|withStartLock|start\.lock/],
+];
+for (const [name, pattern] of banned) {
+  if (pattern.test(hookText))
+    fail(`storage_hook_bundle_clean_and_in_budget: the hook bundle contains ${name}`);
+}
+
+const project = tempDir("kodel-artifact-");
 try {
   mkdirSync(join(project, ".kodel"));
   writeFileSync(join(project, ".kodel", "config.yaml"), "version: 1\n");
@@ -141,11 +174,12 @@ const { Client } = await import(sdkPath("client/index.js"));
 const { StdioClientTransport } = await import(sdkPath("client/stdio.js"));
 
 async function runOnce(outputEnabled) {
-  const dir = mkdtempSync(join(tmpdir(), "kodel-artifact-run-"));
+  const dir = tempDir("kodel-artifact-run-");
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [artifact, "--root", dir, "mcp"],
     cwd: dir,
+    env: { ...process.env },
     stderr: "ignore",
   });
   const client = new Client({ name: "check-artifact", version: "0" });
@@ -209,5 +243,255 @@ if (kept.join() !== "first-1-command.txt,second-1-command.txt") {
 }
 const none = await runOnce(false);
 if (none.length > 0) fail(`history.output.enabled false still wrote: ${none.join()}`);
+
+// A run of the built file on plain Node keeps the patch of each hand-in and of the run (TASK-36TW):
+// with a rework (a check that fails once), the files survive `git gc --prune=now`, and with
+// `history.changes.enabled: false` there is no `changes/` at all.
+async function runChanges(enabled) {
+  const dir = mkdtempSync(join(tmpdir(), "kodel-artifact-changes-"));
+  const git = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [artifact, "--root", dir, "mcp"],
+    cwd: dir,
+    env: { ...process.env },
+    stderr: "ignore",
+  });
+  const client = new Client({ name: "check-artifact", version: "0" });
+  try {
+    git("init", "-q");
+    git("config", "user.email", "check@example.com");
+    git("config", "user.name", "Check");
+    writeFileSync(join(dir, "base.txt"), "base\n");
+    mkdirSync(join(dir, ".kodel", "pipelines"), { recursive: true });
+    writeFileSync(
+      join(dir, ".kodel", "config.yaml"),
+      `version: 1\nworktree: { mode: off }\nhistory: { changes: { enabled: ${enabled} } }\n`,
+    );
+    writeFileSync(
+      join(dir, ".kodel", "pipelines", "p.yaml"),
+      [
+        "name: p",
+        "nodes:",
+        "  - slug: first",
+        "    kind: agent",
+        "    prompt: first",
+        "    checks:",
+        // fails the first time and leaves a marker, passes the second time
+        "      - { kind: command, command: node check.js }",
+        "  - slug: second",
+        "    kind: agent",
+        "    prompt: second",
+        "edges:",
+        "  - { from: first, to: second }",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(dir, "check.js"),
+      "const fs = require('node:fs');\nif (!fs.existsSync('marker')) { fs.writeFileSync('marker', ''); process.exit(1); }\n",
+    );
+    git("add", "-A");
+    git("commit", "-q", "-m", "base");
+    await client.connect(transport);
+    const call = async (name, args) => {
+      const result = await client.callTool({ name, arguments: args });
+      return JSON.parse(result.content[0].text);
+    };
+    const started = await call("pipeline_start", {
+      task: "keep the changes",
+      pipeline: "p",
+      cwd: dir,
+      title: "keep-changes",
+    });
+    if (!started.run_id) fail(`the run did not start: ${JSON.stringify(started)}`);
+    const handIn = async (slug, attempt, file) => {
+      writeFileSync(join(dir, file), `${file}\n`);
+      const done = await call("pipeline_complete_step", {
+        run_id: started.run_id,
+        node_slug: slug,
+        attempt,
+      });
+      if (done.ok === false) fail(`${slug} was refused: ${JSON.stringify(done)}`);
+    };
+    await handIn("first", 1, "one.txt");
+    await handIn("first", 2, "two.txt");
+    await handIn("second", 1, "three.txt");
+    for (let i = 0; i < 40; i += 1) {
+      const next = await call("pipeline_next_step", { run_id: started.run_id, wait_s: 1 });
+      if (next.done) break;
+      if (i === 39) fail(`the run did not finish: ${JSON.stringify(next)}`);
+    }
+    const changes = join(dir, ".kodel", "runs", started.run_id, "changes");
+    // The end patch is written in the background after the run ended.
+    for (let i = 0; i < 40 && enabled && !existsSync(join(changes, "run.patch")); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    const list = () => (existsSync(changes) ? readdirSync(changes).sort() : []);
+    const before = list();
+    git("gc", "-q", "--prune=now");
+    const text = (file) => readFileSync(join(changes, file), "utf8");
+    return {
+      before,
+      after: list(),
+      first2: enabled ? text("first-2.patch") : "",
+      run: enabled ? text("run.patch") : "",
+    };
+  } finally {
+    await client.close().catch(() => {});
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const withChanges = await runChanges(true);
+const expectedChanges = ["first-1.patch", "first-2.patch", "run.patch", "second-1.patch"];
+if (withChanges.before.join() !== expectedChanges.join()) {
+  fail(`the patches of the run are not as expected: ${withChanges.before.join() || "(nothing)"}`);
+}
+if (withChanges.after.join() !== expectedChanges.join()) fail("the patches did not survive git gc");
+if (!withChanges.first2.includes("two.txt") || withChanges.first2.includes("one.txt"))
+  fail("the patch of the second attempt is not the work of that attempt");
+for (const file of ["one.txt", "two.txt", "three.txt"]) {
+  if (!withChanges.run.includes(file)) fail(`run.patch does not mention ${file}`);
+}
+const withoutChanges = await runChanges(false);
+if (withoutChanges.after.length > 0) {
+  fail(`history.changes.enabled false still wrote: ${withoutChanges.after.join()}`);
+}
+
+// A run with a fork on plain Node (T-40): two command branches at the same time, both failing once, a
+// join told of both that restarts them; `status` and `report` open the run and show the fork.
+const fork = await checkForkRun(artifact, { Client, StdioClientTransport, fail });
+console.log(
+  `fork run ${fork.runId}: ${fork.events.length} journal records, critical path ${fork.report.critical_path[0].branch} ${fork.report.critical_path[0].seconds} s`,
+);
+
+// `storage: home`: the runs, the start lock and the session index live under the state base and nothing of
+// them in the repository. `kodel gate` refuses to run without a terminal, so the scenario stops at the
+// waiting gate (as the scenario above stops where a person is needed) and checks what `status` says.
+// A failure inside the scenario throws, so that its `finally` closes the server it started and removes
+// its folders; `process.exit` would leave the child of `kodel mcp` running.
+const bail = (msg) => {
+  throw new Error(msg);
+};
+
+async function runHome() {
+  const dir = tempDir("kodel-artifact-home-");
+  const base = tempDir("kodel-artifact-home-state-");
+  const id = "check-aaaa1111";
+  const place = join(base, "projects", id);
+  const env = { ...process.env, KODEL_STATE_DIR: base };
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [artifact, "--root", dir, "mcp"],
+    cwd: dir,
+    env,
+    stderr: "ignore",
+  });
+  const client = new Client({ name: "check-artifact", version: "0" });
+  try {
+    const git = (...args) =>
+      execFileSync(
+        "git",
+        ["-c", "user.name=check", "-c", "user.email=check@example.com", ...args],
+        { cwd: dir, stdio: "ignore" },
+      );
+    git("init", "-q");
+    mkdirSync(join(dir, ".kodel", "pipelines"), { recursive: true });
+    writeFileSync(
+      join(dir, ".kodel", "config.yaml"),
+      ["version: 1", "worktree: { mode: off }", "storage: home", `project_id: ${id}`, ""].join(
+        "\n",
+      ),
+    );
+    writeFileSync(
+      join(dir, ".kodel", "pipelines", "p.yaml"),
+      [
+        "version: 1",
+        "name: p",
+        "nodes:",
+        "  - slug: work",
+        "    kind: agent",
+        "    prompt: do the work",
+        "  - slug: approve",
+        "    kind: human",
+        "    prompt: look at it",
+        "edges:",
+        "  - { from: work, to: approve }",
+        "  - { from: approve, to: work, when: rejected }",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(join(dir, "README.md"), "check\n");
+    git("add", ".");
+    git("commit", "-q", "-m", "init");
+
+    await client.connect(transport);
+    const call = async (name, args) => {
+      const result = await client.callTool({ name, arguments: args });
+      return JSON.parse(result.content[0].text);
+    };
+    const started = await call("pipeline_start", {
+      task: "keep it at home",
+      pipeline: "p",
+      cwd: dir,
+      title: "keep-at-home",
+    });
+    if (!started.run_id) bail(`storage home: the run did not start: ${JSON.stringify(started)}`);
+    const step = await call("pipeline_next_step", { run_id: started.run_id, wait_s: 1 });
+    const done = await call("pipeline_complete_step", {
+      run_id: started.run_id,
+      node_slug: "work",
+      attempt: step.attempt ?? 1,
+      summary: "done",
+    });
+    if (done.ok === false) bail(`storage home: the step did not complete: ${JSON.stringify(done)}`);
+    const waiting = await call("pipeline_next_step", { run_id: started.run_id, wait_s: 1 });
+    if (waiting.waiting?.reason !== "gate" || waiting.waiting?.node_slug !== "approve")
+      bail(`storage home: the run does not wait at the gate: ${JSON.stringify(waiting)}`);
+
+    const status = spawnSync(process.execPath, [artifact, "--root", dir, "status"], {
+      cwd: dir,
+      env,
+      encoding: "utf8",
+    });
+    const shown = `${status.stdout}${status.stderr}`;
+    if (status.status !== 0) bail(`storage home: kodel status failed: ${shown}`);
+    if (shown.includes(base)) bail(`storage home: kodel status prints the state base: ${shown}`);
+    if (!status.stdout.includes(started.run_id) || !status.stdout.includes("approve"))
+      bail(`storage home: kodel status does not show the run at the gate: ${shown}`);
+
+    if (!existsSync(join(place, "runs", started.run_id)))
+      bail(`storage home: no run folder in ${join(place, "runs")}`);
+    if (existsSync(join(dir, ".kodel", "runs")))
+      bail("storage home: the project has a .kodel/runs folder");
+
+    const hook = spawnSync(process.execPath, [hookArtifact, "claude-code"], {
+      cwd: dir,
+      env,
+      input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "home-1", cwd: dir }),
+      encoding: "utf8",
+    });
+    if (hook.status !== 0 || hook.stdout !== "" || hook.stderr !== "")
+      bail(
+        `storage home: the hook must exit 0 and say nothing: ${hook.status} ${hook.stdout}${hook.stderr}`,
+      );
+    const index = join(place, "sessions.jsonl");
+    if (!existsSync(index) || !readFileSync(index, "utf8").includes('"home-1"'))
+      bail(`storage home: the hook did not record the session in ${index}`);
+    if (existsSync(join(dir, ".kodel", "sessions.jsonl")))
+      bail("storage home: the hook wrote .kodel/sessions.jsonl into the project");
+  } finally {
+    await client.close().catch(() => {});
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(base, { recursive: true, force: true });
+  }
+}
+
+try {
+  await runHome();
+} catch (error) {
+  fail(error instanceof Error ? error.message : String(error));
+}
 
 console.log(`artifact ok under node ${process.version}: ${size} bytes, version ${version}`);

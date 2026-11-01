@@ -1,0 +1,9 @@
+{
+  "v": 2,
+  "runId": "r_0mvqeq4tq_fsjv",
+  "pipeline": "two",
+  "task": "add a --json flag to the status command",
+  "slug": "add-a-json-flag-to-the-status-command",
+  "specHash": "ecb79800c8fdeaea",
+  "createdAt": 1793088717038
+}

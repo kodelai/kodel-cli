@@ -1,0 +1,38 @@
+# A fork whose test branch pauses: test has one attempt, and its failure route pauses the branch.
+version: 1
+name: fork-pause
+description: Make a change, verify and test it at the same time; a failing test pauses its branch.
+nodes:
+  - slug: impl
+    kind: agent
+    prompt: |
+      Task: {{task}}
+      Make the change. Add or update tests for the changed behavior.
+  - slug: verify
+    kind: command
+    command: node -e "setTimeout(() => process.exit(0), 2500)"
+    timeout: 600
+  - slug: test
+    kind: command
+    command: node -e "const fs=require('fs');if(!fs.existsSync('.test-ran')){fs.writeFileSync('.test-ran','');process.exit(1)}"
+    timeout: 900
+    max_attempts: 1
+    max_consecutive_failures: 1
+  - slug: fix-test
+    kind: agent
+    prompt: The test failed; fix the cause, then the test runs again.
+  - slug: fix
+    kind: agent
+    join: all
+    prompt: |
+      Verify and test ran at the same time on your change. If a branch failed, the feedback names it
+      and says why: fix the cause, then finish with the outcome restart_failed so that only the failed
+      steps run again. If both passed, finish normally.
+edges:
+  - { from: impl, to: verify }
+  - { from: impl, to: test }
+  - { from: verify, to: fix }
+  - { from: verify, to: fix, when: failed }
+  - { from: test, to: fix }
+  - { from: test, to: fix-test, when: failed }
+  - { from: fix-test, to: test }

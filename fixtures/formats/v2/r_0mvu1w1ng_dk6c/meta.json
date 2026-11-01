@@ -1,0 +1,11 @@
+{
+  "v": 2,
+  "runId": "r_0mvu1w1ng_dk6c",
+  "pipeline": "dev",
+  "task": "Document the kodel wait command in the README",
+  "slug": "document-the-kodel-wait-command-in-the-r",
+  "specHash": "18d2fb74eedc72de",
+  "createdAt": 1793309022556,
+  "workdir": "/kodel-fixture/workdir/r_0mvu1w1ng_dk6c",
+  "branch": "kodel/r_0mvu1w1ng_dk6c"
+}

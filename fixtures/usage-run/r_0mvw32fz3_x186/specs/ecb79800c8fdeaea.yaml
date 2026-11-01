@@ -1,0 +1,10 @@
+name: two
+nodes:
+  - slug: a
+    kind: agent
+    prompt: do a
+  - slug: b
+    kind: agent
+    prompt: do b
+edges:
+  - { from: a, to: b }

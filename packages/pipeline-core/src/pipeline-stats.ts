@@ -64,6 +64,8 @@ export interface NodeStats {
   /** Over the attempts that recorded their usage. */
   usage: {
     attempts: number;
+    /** How many of those attempts have a price (a model without one has none); `usd` is over these. */
+    priced: number;
     usd: number;
     input: number;
     output: number;
@@ -161,7 +163,15 @@ function describeAttempts(
   const outcomes: Record<string, number> = {};
   const failures = new Map<string, { source: string; reason: string; n: number }>();
   const findings = { attempts: 0, rows: 0, bySeverity: {} as Record<string, number> };
-  const usage = { attempts: 0, usd: 0, input: 0, output: 0, cache_read: 0, cache_write: 0 };
+  const usage = {
+    attempts: 0,
+    priced: 0,
+    usd: 0,
+    input: 0,
+    output: 0,
+    cache_read: 0,
+    cache_write: 0,
+  };
   const decisions = { approved: 0, rejected: 0, rejectedWithReason: 0, reasons: [] as string[] };
   let failed = 0;
   for (const a of attempts) {
@@ -179,13 +189,17 @@ function describeAttempts(
     if (rows !== undefined) {
       findings.attempts++;
       findings.rows += rows;
-      for (const [severity, n] of Object.entries(a.findings ?? {})) {
+      // Rows that a host did not count by severity are still rows: the breakdown adds up to the total.
+      for (const [severity, n] of Object.entries(a.findings ?? { unspecified: rows })) {
         findings.bySeverity[severity] = (findings.bySeverity[severity] ?? 0) + n;
       }
     }
     if (a.usage) {
       usage.attempts++;
-      usage.usd += a.usage.usd;
+      if (a.usage.usd !== null) {
+        usage.priced++;
+        usage.usd += a.usage.usd;
+      }
       usage.input += a.usage.input;
       usage.output += a.usage.output;
       usage.cache_read += a.usage.cache_read;
@@ -279,7 +293,15 @@ export function summarizePipeline(runs: StatsRun[], options: StatsOptions): Pipe
           failures: [],
           seconds: EMPTY,
           findings: { attempts: 0, rows: 0, bySeverity: {} },
-          usage: { attempts: 0, usd: 0, input: 0, output: 0, cache_read: 0, cache_write: 0 },
+          usage: {
+            attempts: 0,
+            priced: 0,
+            usd: 0,
+            input: 0,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+          },
           elsewhere: elsewhere.get(name) ?? 0,
         },
       ];

@@ -3,11 +3,25 @@ import {
   type AttemptReport,
   type NodeForms,
   type NodeReport,
+  type RunReport,
   type StatsRun,
   summarizePipeline,
 } from "@kodel-ai/pipeline-core";
 import { definitionKey } from "./definition-text";
 import type { StatsData } from "./stats-load";
+
+/** The parts of a run report that these samples have nothing to say about. */
+const NO_EXTRAS: Pick<
+  RunReport,
+  "busy_wall_s" | "forks" | "critical_path" | "failed_branches" | "agent_log" | "usage"
+> = {
+  busy_wall_s: 0,
+  forks: [],
+  critical_path: [],
+  failed_branches: false,
+  agent_log: { not_collected: true, reason: "not_captured" },
+  usage: { not_collected: true, reason: "not_captured" },
+};
 
 const HOUR = 3600_000;
 const DAY = 24 * HOUR;
@@ -218,6 +232,7 @@ function devRuns(): StatsRun[] {
         agent_decisions: [],
         checks: [],
         prompts: { not_collected: true },
+        ...NO_EXTRAS,
       },
     });
   }

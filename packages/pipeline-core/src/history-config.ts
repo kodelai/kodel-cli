@@ -4,8 +4,14 @@
  * at all. A run whose `run_started` has no `history` was started before the section existed.
  */
 import { minimatch } from "minimatch";
+import type { PricesOverride } from "./price-table";
 
-/** Every category of sensitive data the engine can write into a run's history, each with a switch. */
+/**
+ * Every category of sensitive data the engine can write into a run's history, each with a plain `enabled`
+ * switch. The agent's conversation log (`agent_log`) is the most sensitive one and has a section of its own with
+ * more keys (`AgentLogConfig`); it is not in this list and, unlike these, it is optional in `HistoryConfig`.
+ * Usage (`usage`) is the same: tokens and an estimated cost, with a price override, in a section of its own.
+ */
 export const HISTORY_CATEGORIES = ["changes", "output", "prompts", "executor", "tool_log"] as const;
 
 export type HistoryCategory = (typeof HISTORY_CATEGORIES)[number];
@@ -21,6 +27,66 @@ export interface HistoryConfig {
   executor: { enabled: boolean };
   /** The agent's tool calls. */
   tool_log: { enabled: boolean };
+  /**
+   * The agent's conversation log of the run. Absent in a run started before it existed (read as "not captured") and
+   * in a host that did not ask for it; the project config always fills it (`DEFAULT_AGENT_LOG`).
+   */
+  agent_log?: AgentLogConfig;
+  /**
+   * What the run records of the agent's token use and its estimated cost. Absent in a run started before it existed
+   * (read as "not captured"); the project config always fills it (`defaultUsage`).
+   */
+  usage?: UsageConfig;
+}
+
+/**
+ * `enabled: false` writes nothing and does not read the agent's log. `prices` replaces the shipped price of a model
+ * whole (all four prices); it is frozen with the rest of the section when the run starts.
+ */
+export interface UsageConfig {
+  enabled: boolean;
+  prices: PricesOverride;
+}
+
+export const DEFAULT_USAGE: UsageConfig = { enabled: true, prices: {} };
+
+/** A copy of the defaults, so no caller shares or changes the constant. */
+export function defaultUsage(): UsageConfig {
+  return { enabled: DEFAULT_USAGE.enabled, prices: {} };
+}
+
+export const AGENT_LOG_MODES = ["full", "metadata"] as const;
+export type AgentLogMode = (typeof AGENT_LOG_MODES)[number];
+
+/** The kinds of text whose length is capped, as the keys of `preview_chars`. */
+export const AGENT_LOG_KINDS = ["user", "agent", "tool_input", "tool_result"] as const;
+export type AgentLogKind = (typeof AGENT_LOG_KINDS)[number];
+
+/**
+ * What a run keeps of the agent's conversation (`agent_log/` of the run folder): normalized events, never the raw
+ * log. `full` keeps redacted text previews cut to `preview_chars` (a kind with `0` keeps none); `metadata` keeps
+ * types, times, models, usage, tool names and sizes and no text. `max_kb` bounds the bytes of a run, split by step;
+ * `interval_s` is the time between copies while the run goes (`0`: only at the end of a step).
+ */
+export interface AgentLogConfig {
+  enabled: boolean;
+  mode: AgentLogMode;
+  preview_chars: Record<AgentLogKind, number>;
+  max_kb: number;
+  interval_s: number;
+}
+
+export const DEFAULT_AGENT_LOG: AgentLogConfig = {
+  enabled: true,
+  mode: "full",
+  preview_chars: { user: 4_000, agent: 4_000, tool_input: 4_000, tool_result: 8_000 },
+  max_kb: 20_480,
+  interval_s: 10,
+};
+
+/** A copy of the defaults, so no caller shares or changes the constant. */
+export function defaultAgentLog(): AgentLogConfig {
+  return { ...DEFAULT_AGENT_LOG, preview_chars: { ...DEFAULT_AGENT_LOG.preview_chars } };
 }
 
 export const DEFAULT_HISTORY: HistoryConfig = {

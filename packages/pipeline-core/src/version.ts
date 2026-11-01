@@ -4,8 +4,14 @@
  */
 import { KodelError } from "./errors";
 
-/** Version stamped as `v` on every machine-written record. */
-export const RECORD_VERSION = 1;
+/**
+ * Version stamped as `v` on the run state and the journal records (`engine.record_version` says
+ * which one a run was started with). Format 2 brought forks: `pauses[]` instead of `pause`, `forks`,
+ * a fork attribution on visits. A state of format 1 is refused with `UNSUPPORTED_FORMAT`, not read:
+ * the break was made before the first release (AGENTS.md, "Stored data and compatibility"). The
+ * seal, the served answers, proposals and `meta.json` have their own versions.
+ */
+export const RECORD_VERSION = 2;
 
 /** Used when no `version` is given anywhere: a frozen baseline, not "current". */
 export const BASELINE_VERSION = "1.0.0";

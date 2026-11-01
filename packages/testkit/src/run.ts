@@ -123,6 +123,16 @@ export async function runScenario(
         }
       }
     }
+    const early = (engine.refusedFollowUps?.() ?? []).filter((r) => !r.afterEnd);
+    if (early.length > 0 && scenario.allowRefusedFollowUps !== true) {
+      return report({
+        step: scenario.steps.length - 1,
+        kind: "engine",
+        expected: "no follow-up refused while the run goes",
+        actual: early,
+        detail: early.map((r) => `${r.event} refused: ${r.code} ${r.message}`).join("; "),
+      });
+    }
     return report();
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);

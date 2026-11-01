@@ -265,6 +265,17 @@ function visitsOf(
         a.ok = r.status === "passed";
         a.to = r.ts;
         if (a.enteredAt > 0) a.ms = r.ts - a.enteredAt;
+        // A try that failed with no check or command saying why (a timeout, the agent's own failure) is
+        // told why by the record that closes it. A person's rejection has its words in the decision.
+        if (
+          !a.ok &&
+          a.reason === undefined &&
+          a.decision === undefined &&
+          typeof r.reason === "string" &&
+          r.reason !== ""
+        ) {
+          a.reason = r.reason;
+        }
         break;
     }
   }

@@ -2,8 +2,21 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_HISTORY, HISTORY_CATEGORIES, KodelError } from "@kodel-ai/pipeline-core";
-import { CONFIG_FILE, DEFAULT_WORKTREE_DIR, HISTORY_SECTION_KEYS, loadConfig } from "../src";
+import {
+  DEFAULT_AGENT_LOG,
+  DEFAULT_HISTORY,
+  DEFAULT_USAGE,
+  defaultAgentLog,
+  HISTORY_CATEGORIES,
+  KodelError,
+} from "@kodel-ai/pipeline-core";
+import {
+  CONFIG_FILE,
+  DEFAULT_AGENTS,
+  DEFAULT_WORKTREE_DIR,
+  HISTORY_SECTION_KEYS,
+  loadConfig,
+} from "../src";
 
 let dir: string;
 beforeEach(async () => {
@@ -41,7 +54,9 @@ describe("the project config", () => {
         on_run: { mode: "auto" },
         adapters: {},
       },
-      history: DEFAULT_HISTORY,
+      history: { ...DEFAULT_HISTORY, agent_log: DEFAULT_AGENT_LOG, usage: DEFAULT_USAGE },
+      agents: { subagents: "auto", max_parallel: 8, claim_ttl_s: 900 },
+      storage: "project",
     });
   });
 
@@ -190,11 +205,12 @@ describe("the project config", () => {
 
 describe("the history section", () => {
   test("history_defaults_when_there_is_no_file_or_no_section", async () => {
-    expect((await loadConfig(dir)).history).toEqual(DEFAULT_HISTORY);
+    const defaults = { ...DEFAULT_HISTORY, agent_log: DEFAULT_AGENT_LOG, usage: DEFAULT_USAGE };
+    expect((await loadConfig(dir)).history).toEqual(defaults);
     await write("version: 1\n");
-    expect((await loadConfig(dir)).history).toEqual(DEFAULT_HISTORY);
+    expect((await loadConfig(dir)).history).toEqual(defaults);
     await write("history: {}\n");
-    expect((await loadConfig(dir)).history).toEqual(DEFAULT_HISTORY);
+    expect((await loadConfig(dir)).history).toEqual(defaults);
   });
 
   test("history_every_key_is_read_and_the_rest_keep_their_defaults", async () => {
@@ -215,6 +231,8 @@ describe("the history section", () => {
       prompts: { enabled: false },
       executor: { enabled: false },
       tool_log: { enabled: false },
+      agent_log: DEFAULT_AGENT_LOG,
+      usage: DEFAULT_USAGE,
     });
     await write("history:\n  changes: { exclude: ['a/**'] }\n");
     expect((await loadConfig(dir)).history.changes).toEqual({
@@ -271,12 +289,183 @@ describe("the history section", () => {
   test("every_history_category_has_a_switch", async () => {
     // The categories the engine can write, the section of the schema and the defaults must list the
     // same ones, and each must have an `enabled` key.
-    expect([...HISTORY_SECTION_KEYS].sort()).toEqual([...HISTORY_CATEGORIES].sort());
+    // `agent_log` and `usage` are the sections with more than a switch (mode, caps, interval; the price override) and are listed apart
+    expect([...HISTORY_SECTION_KEYS].sort()).toEqual(
+      [...HISTORY_CATEGORIES, "agent_log", "usage"].sort(),
+    );
     expect(Object.keys(DEFAULT_HISTORY).sort()).toEqual([...HISTORY_CATEGORIES].sort());
     for (const category of HISTORY_CATEGORIES) {
       expect(DEFAULT_HISTORY[category].enabled).toBe(true);
       await write(`history:\n  ${category}: { enabled: false }\n`);
       expect((await loadConfig(dir)).history[category].enabled).toBe(false);
     }
+  });
+});
+
+describe("the agent_log section", () => {
+  const agentLog = async (yaml: string) => (await loadConfig(dir)).history.agent_log;
+
+  test("t3bk2_defaults", async () => {
+    // on, full, the caps and the bound decided for it, a copy every 10 seconds
+    expect(await agentLog("")).toEqual({
+      enabled: true,
+      mode: "full",
+      preview_chars: { user: 4_000, agent: 4_000, tool_input: 4_000, tool_result: 8_000 },
+      max_kb: 20_480,
+      interval_s: 10,
+    });
+    await write("history:\n  agent_log: {}\n");
+    expect(await agentLog("")).toEqual(DEFAULT_AGENT_LOG);
+    // a copy of the defaults, not the constant
+    expect(defaultAgentLog()).not.toBe(DEFAULT_AGENT_LOG);
+    expect(defaultAgentLog().preview_chars).not.toBe(DEFAULT_AGENT_LOG.preview_chars);
+  });
+
+  test("t3bk2_every_key_is_read", async () => {
+    await write(
+      [
+        "history:",
+        "  agent_log:",
+        "    enabled: false",
+        "    mode: metadata",
+        "    preview_chars: { agent: 100, tool_result: 0 }",
+        "    max_kb: 64",
+        "    interval_s: 0",
+        "",
+      ].join("\n"),
+    );
+    expect(await agentLog("")).toEqual({
+      enabled: false,
+      mode: "metadata",
+      preview_chars: { user: 4_000, agent: 100, tool_input: 4_000, tool_result: 0 },
+      max_kb: 64,
+      interval_s: 0,
+    });
+  });
+
+  test("t3bk2_preview_chars_as_one_number", async () => {
+    await write("history:\n  agent_log: { preview_chars: 200 }\n");
+    expect((await agentLog(""))?.preview_chars).toEqual({
+      user: 200,
+      agent: 200,
+      tool_input: 200,
+      tool_result: 200,
+    });
+    await write("history:\n  agent_log: { preview_chars: 0 }\n");
+    expect((await agentLog(""))?.preview_chars).toEqual({
+      user: 0,
+      agent: 0,
+      tool_input: 0,
+      tool_result: 0,
+    });
+  });
+
+  test("t3bk2_config_rejects_bad_values", async () => {
+    for (const bad of [
+      "max_kb: 0",
+      "max_kb: -1",
+      "max_kb: 1.5",
+      "mode: everything",
+      "interval_s: -1",
+      "interval_s: 2.5",
+      "interval_s: 100000",
+      "preview_chars: -1",
+      "preview_chars: 1.5",
+      "preview_chars: 99999999",
+      "preview_chars: { agent: -5 }",
+      "preview_chars: { thought: 5 }",
+      "enable: false",
+    ]) {
+      const error = await failure(`history:\n  agent_log: { ${bad} }\n`);
+      expect(error.code).toBe("CONFIG_INVALID");
+      expect(error.message).toContain("history.agent_log");
+    }
+  });
+});
+
+describe("t40 the agents section", () => {
+  test("t40_config_agents_defaults", async () => {
+    expect((await loadConfig(dir)).agents).toEqual({
+      subagents: "auto",
+      max_parallel: 8,
+      claim_ttl_s: 900,
+    });
+    await write("agents: {}\n");
+    expect((await loadConfig(dir)).agents).toEqual(DEFAULT_AGENTS);
+    expect(DEFAULT_AGENTS).toEqual({ subagents: "auto", max_parallel: 8, claim_ttl_s: 900 });
+  });
+
+  test("t40_config_agents_block_parses", async () => {
+    await write("agents:\n  subagents: yes\n  max_parallel: 3\n  claim_ttl_s: 120\n");
+    expect((await loadConfig(dir)).agents).toEqual({
+      subagents: "yes",
+      max_parallel: 3,
+      claim_ttl_s: 120,
+    });
+    await write("agents:\n  subagents: no\n");
+    expect((await loadConfig(dir)).agents).toEqual({ ...DEFAULT_AGENTS, subagents: "no" });
+  });
+
+  test("t40_config_agents_bad_values_refused", async () => {
+    expect((await failure("agents:\n  subagents: maybe\n")).message).toContain("agents.subagents");
+    expect((await failure("agents:\n  max_parallel: 0\n")).message).toContain(
+      "agents.max_parallel",
+    );
+    expect((await failure("agents:\n  max_parallel: 1.5\n")).message).toContain(
+      "agents.max_parallel",
+    );
+    expect((await failure("agents:\n  claim_ttl_s: 0\n")).message).toContain("agents.claim_ttl_s");
+    expect((await failure("agents:\n  claim_ttl_s: 100000\n")).message).toContain(
+      "agents.claim_ttl_s",
+    );
+    expect((await failure("agents:\n  parallel: true\n")).message).toContain("parallel");
+    expect((await failure("agents: true\n")).message).toContain("agents");
+  });
+});
+
+describe("the usage section", () => {
+  const usage = async () => (await loadConfig(dir)).history.usage;
+  const PRICE = "{ input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 }";
+
+  test("t9jrs_usage_config_defaults", async () => {
+    // on, with no override; with no file, an empty file and an empty section alike
+    expect(await usage()).toEqual({ enabled: true, prices: {} });
+    await write("");
+    expect(await usage()).toEqual({ enabled: true, prices: {} });
+    await write("history:\n  usage: {}\n");
+    expect(await usage()).toEqual({ enabled: true, prices: {} });
+    await write("history:\n  usage: { enabled: false }\n");
+    expect(await usage()).toEqual({ enabled: false, prices: {} });
+  });
+
+  test("t9jrs_usage_config_reads_a_price_override_per_model", async () => {
+    await write(
+      `history:\n  usage:\n    prices:\n      claude-sonnet-5-5: ${PRICE}\n      my-model: { input: 1, output: 2, cache_read: 0.1, cache_write: 1.2, cache_write_1h: 2 }\n`,
+    );
+    expect((await usage())?.prices).toEqual({
+      "claude-sonnet-5-5": { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 },
+      "my-model": { input: 1, output: 2, cache_read: 0.1, cache_write: 1.2, cache_write_1h: 2 },
+    });
+  });
+
+  test("t9jrs_usage_config_refuses_what_is_not_a_price_or_a_safe_id", async () => {
+    const many = Array.from({ length: 65 }, (_, i) => `      m${i}: ${PRICE}`).join("\n");
+    for (const bad of [
+      "enabled: yes please",
+      "unknown_key: 1",
+      "prices: { m: { input: 1, output: 1, cache_read: 1 } }",
+      "prices: { m: { input: -1, output: 1, cache_read: 1, cache_write: 1 } }",
+      "prices: { m: { input: .inf, output: 1, cache_read: 1, cache_write: 1 } }",
+      "prices: { m: { input: 1, output: 1, cache_read: 1, cache_write: 1, surprise: 1 } }",
+      `prices: { 'has space': ${PRICE} }`,
+      `prices: { '../x': ${PRICE} }`,
+      "prices: [1, 2]",
+    ]) {
+      const error = await failure(`history:\n  usage: { ${bad} }\n`);
+      expect(error.code).toBe("CONFIG_INVALID");
+      expect(error.message).toContain("history.usage");
+    }
+    const tooMany = await failure(`history:\n  usage:\n    prices:\n${many}\n`);
+    expect(tooMany.code).toBe("CONFIG_INVALID");
   });
 });

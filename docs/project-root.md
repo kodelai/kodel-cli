@@ -1,8 +1,10 @@
 # How the project is found
 
 A **project** is a folder with a committed `.kodel/config.yaml` (`kodel init` writes it). Its runs,
-tasks, pipelines and config live in the `.kodel` folder there. One function decides which project a
-command, the MCP server or the pipeline host works on, so they always agree.
+tasks, pipelines and config live in the `.kodel` folder there, except that with `storage: home` in the config the
+runs, the proposals made outside a run, `start.lock` and the session index live under
+`~/.kodel/projects/<project_id>/` (see [Where the history is kept](history.md#where-the-history-is-kept)). One
+function decides which project a command, the MCP server or the pipeline host works on, so they always agree.
 
 Order:
 

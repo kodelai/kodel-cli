@@ -322,13 +322,13 @@ describe("the hook log", () => {
 });
 
 describe("registration", () => {
-  test("the_installed_kodel_gets_the_small_hook_bin_and_any_other_server_command_hook_for_mcp", () => {
-    expect(hookCommand("kodel mcp", "claude-code")).toBe("kodel-hook claude-code");
+  test("the_installed_kodel_gets_the_small_hook_bin_and_any_other_command_gets_hook_after_it", () => {
+    expect(hookCommand("kodel", "claude-code")).toBe("kodel-hook claude-code");
     expect(hookCommand("  kodel  ", "opencode")).toBe("kodel-hook opencode");
-    expect(hookCommand("bun packages/cli/src/main.ts mcp", "codex")).toBe(
+    expect(hookCommand("bun packages/cli/src/main.ts", "codex")).toBe(
       "bun packages/cli/src/main.ts hook codex",
     );
-    expect(hookCommand("npx kodel@1 mcp", "codex")).toBe("npx kodel@1 hook codex");
+    expect(hookCommand("npx kodel@1", "codex")).toBe("npx kodel@1 hook codex");
   });
 
   test("a_kodel_hook_is_told_by_the_end_of_its_command", () => {

@@ -46,7 +46,7 @@ const node = (slug: string, status: string, attempt = 1) => ({
 
 function state(over: Partial<RunState> = {}): RunState {
   return {
-    v: 1,
+    v: 2,
     runId: "r_1",
     status: "running",
     startedAt: NOW - 90 * MIN,
@@ -65,7 +65,7 @@ function state(over: Partial<RunState> = {}): RunState {
 }
 
 const rec = (event: string, minutesAgo: number, rest: Record<string, unknown> = {}) =>
-  ({ v: 1, seq: 1, ts: NOW - minutesAgo * MIN, event, ...rest }) as JournalRecord;
+  ({ v: 2, seq: 1, ts: NOW - minutesAgo * MIN, event, ...rest }) as JournalRecord;
 
 const JOURNAL: JournalRecord[] = [
   rec("node_entered", 80, { node: "plan", attempt: 1, rework: false }),
@@ -247,6 +247,28 @@ describe("tui gate detail", () => {
     expect(testOne?.log.join("\n")).toContain("command_finished");
     expect(d?.visits[2]?.attempt).toMatchObject({ ok: false, reason: "too many lines" });
     expect(d?.visits[3]?.attempt).toMatchObject({ ok: true, ms: 4 * MIN });
+  });
+
+  test("a try that failed with no check or command to say why is told why by the record that closes it", async () => {
+    const journal = JOURNAL.filter(
+      (r) => !(r.event === "check_finished" && r.node === "impl" && r.attempt === 1),
+    ).map((r) =>
+      r.event === "node_finished" && r.node === "impl" && r.attempt === 1
+        ? ({ ...r, source: "timeout", reason: "took longer than 900 s" } as JournalRecord)
+        : r,
+    );
+    const d = await load({ journal });
+    expect(d?.visits[2]?.attempt).toMatchObject({ ok: false, reason: "took longer than 900 s" });
+  });
+
+  test("the closing record does not take the place of what a check said", async () => {
+    const journal = JOURNAL.map((r) =>
+      r.event === "node_finished" && r.node === "impl" && r.attempt === 1
+        ? ({ ...r, reason: "the step failed" } as JournalRecord)
+        : r,
+    );
+    const d = await load({ journal });
+    expect(d?.visits[2]?.attempt).toMatchObject({ reason: "too many lines" });
   });
 
   test("the try the gate is on counts its time up to now", async () => {

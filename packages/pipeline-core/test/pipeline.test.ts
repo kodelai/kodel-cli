@@ -323,6 +323,24 @@ describe("graph rules", () => {
   test("an edge from a node to itself", () => {
     expectIssue(VALID.replace("from: work, to: build", "from: work, to: work"), "to itself");
   });
+
+  test("t40_one_bad_edge_does_not_hide_the_graph_problems", () => {
+    // one pass reports everything: the bad edge, and what the graph of the valid edges lacks
+    const text =
+      `${VALID.replace("edges:", "  - slug: lost\n    kind: agent\n    prompt: p\nedges:")}`
+        .replace("to: nowhere }", "to: nowhere }")
+        .replace(
+          "  - { from: build, to: work, when: failed }\n",
+          "  - { from: build, to: nowhere, when: failed }\n",
+        );
+    const { issues } = problems(text);
+    const messages = issues.map((i) => i.message);
+    expect(messages.some((m) => m.includes('unknown node "nowhere"'))).toBe(true);
+    expect(messages.some((m) => m.includes('node "lost" is unreachable'))).toBe(true);
+    expect(
+      messages.some((m) => m.includes('can fail with "failed" but has no outgoing edge')),
+    ).toBe(true);
+  });
 });
 
 describe("placeholders", () => {

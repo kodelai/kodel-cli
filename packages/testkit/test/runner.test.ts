@@ -30,7 +30,7 @@ const state = (over: Partial<ScenarioState> = {}): ScenarioState => ({
   ],
   trail: ["plan", "plan-approval"],
   journal: ["run_started"],
-  waitingGate: "plan-approval",
+  waitingGates: ["plan-approval"],
   ...over,
 });
 
@@ -77,7 +77,7 @@ describe("validateScenario", () => {
       .expect([
         matcher("attempts", { bild: 1 }),
         matcher("trail", ["plan", "nope"]),
-        matcher("waitingGate", "ghost"),
+        matcher("waitingGates", ["ghost"]),
       ])
       .build();
     const text = problems(s).join("\n");
@@ -85,7 +85,7 @@ describe("validateScenario", () => {
     expect(text).toContain('names unknown node "plan-aproval"');
     expect(text).toContain('attempts names unknown node "bild"');
     expect(text).toContain('trail names unknown node "nope"');
-    expect(text).toContain('waitingGate names unknown node "ghost"');
+    expect(text).toContain('waitingGates names unknown node "ghost"');
   });
 
   test("a human decision must target a human node", () => {
@@ -134,7 +134,7 @@ describe("runScenario", () => {
       .on(humanApprove("plan-approval"))
       .expect([
         matcher("runStatus", "running"),
-        matcher("waitingGate", "plan-approval"),
+        matcher("waitingGates", ["plan-approval"]),
         matcher("attempts", { plan: 2 }),
         matcher("trail", ["plan", "plan-approval"]),
         matcher("executed", ["plan"]),
@@ -299,5 +299,33 @@ describe("isSubset", () => {
     expect(isSubset({ a: 1 }, { b: undefined })).toBe(true);
     expect(isSubset("x", { a: 1 })).toBe(false);
     expect(isSubset([1, 2], [1, 2])).toBe(true);
+  });
+});
+
+describe("refused follow-ups", () => {
+  const engineWith = (afterEnd: boolean): ScenarioEngine => ({
+    name: "refusing",
+    start: async () => ({ runId: "r" }),
+    applyEvent: async () => {},
+    readState: async () => state(),
+    refusedFollowUps: () => [
+      { event: "work_finished", code: "NODE_NOT_RUNNING", message: "no", afterEnd },
+    ],
+  });
+
+  test("t40_scenario_fails_on_a_follow_up_refused_while_the_run_goes", async () => {
+    const report = await runScenario(simple(), engineWith(false));
+    expect(report.ok).toBe(false);
+    expect(report.divergence?.kind).toBe("engine");
+    expect(report.divergence?.detail).toContain("work_finished refused: NODE_NOT_RUNNING");
+    // one refused after the end is the end, not a stall
+    expect((await runScenario(simple(), engineWith(true))).ok).toBe(true);
+    // and a scenario that expects one says so
+    const allowed = defineScenario("t/allowed")
+      .pipeline(PIPELINE)
+      .allowRefusedFollowUps()
+      .expect([])
+      .build();
+    expect((await runScenario(allowed, engineWith(false))).ok).toBe(true);
   });
 });

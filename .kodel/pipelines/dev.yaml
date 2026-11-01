@@ -143,6 +143,12 @@ nodes:
       Keep changes within the plan. Add or update tests for the changed behavior.
       Follow the conventions in AGENTS.md (English only, no `any`, Biome style).
 
+      After this step the engine itself runs the steps `verify` (typecheck and lint), `test` (the full
+      suite) and `build`. Do not run the full test suite, lint or build yourself, and do not let a
+      subagent do it: run only the tests of the files you touched, and typecheck. If you hand work to
+      a subagent, put this rule into its brief. If `test` fails, the feedback names the failing tests:
+      rerun only those files.
+
       If you were sent back because of conflicts with main (the feedback lists the conflicting files,
       from the sync step or from the pull request): commit your work on the run's branch
       (`git add -A && git commit -s`), then `git fetch origin main && git merge --signoff origin/main`
@@ -162,7 +168,7 @@ nodes:
   - slug: test
     kind: command
     command: "bun test"
-    expected_duration: 60
+    expected_duration: 360
     timeout: 900
 
   - slug: build

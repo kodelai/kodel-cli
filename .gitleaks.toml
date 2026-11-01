@@ -1,0 +1,28 @@
+title = "kodel"
+
+[extend]
+useDefault = true
+
+# Each entry names a file that holds a value which only looks like a secret. Keep the list short and
+# specific: a path that is broad would hide a real secret.
+[[allowlists]]
+description = "Hash chains (sha256) in machine-written run records kept as fixtures"
+paths = [
+  '''^fixtures/usage-run/''',
+  '''^fixtures/agent-log/''',
+]
+
+[[allowlists]]
+description = "Made-up secrets that the redaction tests must find"
+paths = [
+  '''^packages/pipeline-core/test/redact\.test\.ts$''',
+  '''^packages/local/test/changes-review\.test\.ts$''',
+  '''^packages/testkit/test/run-task\.test\.ts$''',
+]
+
+# Both must hold: this file and this value, so another value in the same file is still checked.
+[[allowlists]]
+description = "A made-up claim token of the fork tests (a counting string, not a key)"
+condition = "AND"
+paths = ['''^packages/pipeline-core/test/fork-steps\.test\.ts$''']
+regexes = ['''0123456789abcdef0123456789abcdef''']

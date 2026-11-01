@@ -165,11 +165,12 @@ export function repKey(rep: RepState, key: string, v: RepView): RepResult | unde
     }
     default:
   }
-  const lines = data ? bodyOf(rep, data, v.width).lines.length : 0;
   const page = Math.max(1, v.room - 1);
-  const moveScroll = (by: number): RepResult => ({
-    rep: { ...rep, scroll: clamp(rep.scroll + by, lines - v.room) },
-  });
+  // The length of the body is worked out only by the keys that scroll it: it costs a diff or more.
+  const moveScroll = (by: number): RepResult => {
+    const lines = data ? bodyOf(rep, data, v.width).lines.length : 0;
+    return { rep: { ...rep, scroll: clamp(rep.scroll + by, lines - v.room) } };
+  };
   if (key === "pagedown" || key === " ") return rep.open ? moveScroll(page) : undefined;
   if (key === "pageup" || key === "b") return rep.open ? moveScroll(-page) : undefined;
   if (!rep.open) {
@@ -262,7 +263,7 @@ interface Metrics {
   seconds: Spread;
   findings: { attempts: number; rows: number };
   decisions?: { rejected: number; rejectedWithReason: number } | undefined;
-  usage: { attempts: number; usd: number };
+  usage: { attempts: number; priced: number; usd: number };
 }
 
 interface Column {
@@ -330,7 +331,7 @@ const COLUMNS: Column[] = [
     title: "$/try",
     width: 6,
     cell: (n) => ({
-      text: n.usage.attempts === 0 ? "–" : money(n.usage.usd / n.usage.attempts),
+      text: n.usage.priced === 0 ? "–" : money(n.usage.usd / n.usage.priced),
     }),
   },
 ];
@@ -517,7 +518,9 @@ function metricLines(n: Numbers, width: number): string[] {
     const u = n.usage;
     out.push("", dim("COST"));
     out.push(
-      `${u.attempts} of ${n.attempts} attempts recorded it: ${money(u.usd / u.attempts)} per attempt, ${money(u.usd)} in all`,
+      u.priced > 0
+        ? `${u.attempts} of ${n.attempts} attempts recorded it; an estimate of ${money(u.usd / u.priced)} per attempt, ${money(u.usd)} in all${u.priced < u.attempts ? ` (${u.priced} of them have a price)` : ""}`
+        : `${u.attempts} of ${n.attempts} attempts recorded it, but no price is known for their model`,
     );
     out.push(
       dim(
@@ -723,7 +726,7 @@ export function legendLines(width: number): string[] {
   );
   term(
     "$/try",
-    "What an attempt cost on average, over the attempts whose usage was recorded. A dash when none was.",
+    "What an attempt cost on average: an estimate, over the attempts whose usage was recorded and whose model has a price. A dash when none was.",
   );
   section("THE SIGNS");
   term("◆ ●", "A step where a person decides, and any other step.");

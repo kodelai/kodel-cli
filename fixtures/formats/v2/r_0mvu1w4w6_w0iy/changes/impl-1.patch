@@ -1,0 +1,9 @@
+# kodel-patch v1
+diff --git a/src/farewell.js b/src/farewell.js
+new file mode 100644
+--- /dev/null
++++ b/src/farewell.js
+@@ -0,0 +1,3 @@
++export function farewell(name) {
++  return `Goodbye, ${name}.`;
++}

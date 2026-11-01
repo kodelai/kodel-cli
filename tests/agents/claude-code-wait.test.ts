@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import {
   type AgentTurn,
   callsTo,
@@ -12,6 +11,7 @@ import {
   runAgentTurn,
   type Sandbox,
   TURN_TIMEOUT_MS,
+  waitForWatchers,
 } from "./harness";
 
 /**
@@ -83,24 +83,9 @@ async function waitForGate(sandbox: Sandbox, timeoutMs: number): Promise<string>
   throw new Error("the run never reached its human step");
 }
 
-/** Whether a `kodel wait <run>` process is running now (the agent started it). */
-function waitIsRunning(runId: string): boolean {
-  try {
-    execFileSync("pgrep", ["-f", `main.ts .* wait ${runId}`], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function waitUntilWatching(runId: string, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (waitIsRunning(runId)) return true;
-    await sleep(500);
-  }
-  return false;
-}
+/** Whether the agent has a `kodel wait <run>` process running within the time given. */
+const waitUntilWatching = (runId: string, timeoutMs: number) =>
+  waitForWatchers(runId, new Set(), 1, timeoutMs);
 
 describe("Claude Code, when the run waits for a person", () => {
   scenario(

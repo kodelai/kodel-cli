@@ -3,7 +3,7 @@ import { stripAnsi, visibleLength } from "../src/tui/ansi";
 import { demoGateDetail, demoRunningDetail, demoSessions } from "../src/tui/demo";
 import type { GateDetail, Session } from "../src/tui/session";
 import { formatAge } from "../src/tui/session";
-import { diffKey, duration } from "../src/tui/tabs";
+import { CODE, diffKey, duration, fileAt, itemCount } from "../src/tui/tabs";
 import {
   detailKey,
   hitTest,
@@ -1136,6 +1136,43 @@ describe("tui card of a run that is going on", () => {
     expect(press(read, "c").input).toBeNull();
     expect(press(withCard(), "enter", "c").input).toBeNull();
     expect(plain(render(press(withCard(), "enter"), SIZE)).at(-1)).not.toContain("comment");
+  });
+
+  test("when the card of a run that is going is read again, the open file is read again, and a failed read is forgotten", () => {
+    const base = press(withCard(), "enter", "right", "enter");
+    const path = fileAt(detail(), 0) as string;
+    const key = diffKey(going().id, path);
+    const text = { kind: "text" as const, text: "@@ -1 +1 @@\n-x\n+y\n", truncated: false };
+    const again = withDetail(withDiff(base, key, text), detailKey(going()), detail());
+    // what is shown stays until the new text arrives, and the new text is asked for
+    expect(again.diffs[key]).toMatchObject({ kind: "text" });
+    expect(again.effects).toContainEqual({ type: "load_diff", runId: going().id, path });
+    const failed = withDiff(base, key, { kind: "error", message: "git failed" });
+    expect(withDetail(failed, detailKey(going()), detail()).diffs[key]).toBeUndefined();
+  });
+
+  test("a file that is not open is not read again, and what was read of another run is kept", () => {
+    const closed = press(withCard(), "enter", "right");
+    expect(withDetail(closed, detailKey(going()), detail()).effects).toEqual([]);
+    const other = diffKey("r_other", "a.ts");
+    const kept = withDiff(closed, other, { kind: "error", message: "x" });
+    expect(withDetail(kept, detailKey(going()), detail()).diffs[other]).toEqual({
+      kind: "error",
+      message: "x",
+    });
+  });
+
+  test("the diff that is drawn is the diff that the keys act on, when the list of files has got shorter", () => {
+    const d = detail();
+    const last = fileAt(d, itemCount(d, CODE) - 1) as string;
+    const lines = Array.from({ length: 30 }, (_, i) => `+line ${i}`).join("\n");
+    const read = withDiff(
+      { ...press(withCard(), "enter", "right", "enter"), cursor: itemCount(d, CODE) + 3, line: 0 },
+      diffKey(going().id, last),
+      { kind: "text", text: `@@ -0,0 +1,30 @@\n${lines}\n`, truncated: false },
+    );
+    // the cursor is past the last file; the diff of the last file is on screen, so the keys move in it
+    expect(press(read, "down").line).toBeGreaterThan(read.line);
   });
 
   test("a and r mean nothing for a run that waits for no one", () => {

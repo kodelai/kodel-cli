@@ -6,7 +6,7 @@ import type { Document } from "yaml";
 import { isMap, isScalar, isSeq, LineCounter, parseDocument } from "yaml";
 import { z } from "zod";
 import { type ErrorCode, KodelError } from "./errors";
-import { defaultRegistry, type Registry } from "./registry";
+import { defaultRegistry, labelsOf, RESTART_FAILED, type Registry } from "./registry";
 import { MAX_SUPPORTED_MAJOR, parseVersion, resolveVersion } from "./version";
 
 export type Path = (string | number)[];
@@ -49,12 +49,17 @@ export interface NodeSpec {
   checks: CheckSpec[];
   /** Kind-specific parameters (`prompt`, `command`, `instructions`, ...). */
   params: Record<string, unknown>;
+  /**
+   * The node where the branches of a fork meet: it starts once every branch has arrived. A fork is
+   * two or more edges with the same `from` and `when`; nested forks are not supported.
+   */
+  join?: "all";
 }
 
 export interface EdgeSpec {
   from: string;
   to: string;
-  /** The outcome label that takes this edge. */
+  /** The outcome label that takes this edge. Several edges with the same `from` and `when` fork. */
   when: string;
 }
 
@@ -94,6 +99,7 @@ const GENERIC_NODE_FIELDS = new Set([
   "max_attempts",
   "on_fail",
   "checks",
+  "join",
 ]);
 
 const nonEmpty = z.string().min(1);
@@ -147,6 +153,12 @@ export const commonNodeShape = {
   max_attempts: positiveInt
     .optional()
     .describe("All attempts of the step in a run, rejections included."),
+  join: z
+    .literal("all")
+    .optional()
+    .describe(
+      "Where the branches of a fork meet (a fork: several edges with the same from and when). The step starts when every branch has arrived; an agent join may finish with restart_failed to run the failed branches again.",
+    ),
 };
 
 export const edgeSchema = z
@@ -448,11 +460,17 @@ export function validatePipeline(text: string, options: ParseOptions = {}): Pars
     if (data.name !== undefined) node.name = data.name as string;
     if (timeout !== undefined) node.timeout = timeout;
     if (expected !== undefined) node.expected_duration = expected;
+    if (data.join !== undefined) node.join = data.join as "all";
     nodes.push(node);
   });
 
   const edges = validateEdges(c, rawEdges, declared, nodes, registry);
-  if (nodes.length === rawNodes.length) validateGraph(c, nodes, edges, registry);
+  if (nodes.length === rawNodes.length) {
+    // Over the valid edges, so one pass reports a bad edge and what the graph lacks besides. The
+    // fork rules read the whole shape and would blame it for an edge that was dropped: they wait.
+    validateGraph(c, nodes, edges, registry);
+    if (edges.length === rawEdges.length) validateParallel(c, nodes, edges, registry);
+  }
 
   if (c.issues.length > 0) return failure(c);
 
@@ -472,6 +490,7 @@ function validateEdges(
 ): EdgeSpec[] {
   const bySlug = new Map(nodes.map((n) => [n.slug, n]));
   const edges: EdgeSpec[] = [];
+  const seen = new Set<string>();
   rawEdges.forEach((raw, j) => {
     const base: Path = ["edges", j];
     const parsed = edgeSchema.safeParse(raw);
@@ -500,8 +519,7 @@ function validateEdges(
     if (!ok) return;
 
     const source = bySlug.get(from);
-    const handler = source ? registry.node(source.kind) : undefined;
-    const labels = source && handler ? handler.labels(source) : undefined;
+    const labels = source ? labelsOf(registry, source) : undefined;
     const when = parsed.data.when ?? labels?.success[0] ?? "passed";
     if (labels) {
       const emits = [...new Set([...labels.success, ...labels.failure])];
@@ -513,9 +531,257 @@ function validateEdges(
         return;
       }
     }
+    if (when === RESTART_FAILED) {
+      // The engine itself runs the failed branches again on that outcome; `route` never follows an
+      // edge for it, so one would be dead.
+      c.add(
+        [...base, "when"],
+        `edge from "${from}" when "${RESTART_FAILED}" is never taken: the engine runs the failed branches again on that outcome itself; leave the edge out`,
+      );
+      return;
+    }
+    const key = JSON.stringify([from, to, when]);
+    if (seen.has(key)) {
+      c.add(base, `edge from "${from}" to "${to}" when "${when}" is listed twice`);
+      return;
+    }
+    seen.add(key);
     edges.push({ from, to, when });
   });
   return edges;
+}
+
+/** The nodes reachable from `start` along `edges`, not expanding the nodes in `stop` (they are not included). */
+function reachFrom(start: string[], edges: EdgeSpec[], stop: (slug: string) => boolean) {
+  const seen = new Set<string>();
+  const queue = start.filter((slug) => !stop(slug));
+  for (const slug of queue) seen.add(slug);
+  for (let slug = queue.shift(); slug !== undefined; slug = queue.shift()) {
+    for (const edge of edges) {
+      if (edge.from !== slug || seen.has(edge.to) || stop(edge.to)) continue;
+      seen.add(edge.to);
+      queue.push(edge.to);
+    }
+  }
+  return seen;
+}
+
+/**
+ * Where the branches of a fork lie: what lies after its join (up to the heads and the fork node: a
+ * loop from after the join back to the fork is the normal way to run a fork again), and each branch,
+ * which is what its head reaches without passing a join, the fork node or anything after the join.
+ * A branch whose head is the join itself has no steps. The validator judges a pipeline by these
+ * regions, and a change of a run's pipeline compares them (pipeline-diff.ts), so both read one shape.
+ */
+export function branchRegions(
+  edges: EdgeSpec[],
+  joins: ReadonlySet<string>,
+  from: string,
+  heads: string[],
+  join: string,
+): { after: Set<string>; branches: Set<string>[] } {
+  const after = reachFrom(
+    [join],
+    edges,
+    (slug) => slug !== join && (heads.includes(slug) || slug === from),
+  );
+  const branches = heads.map((head) =>
+    joins.has(head)
+      ? new Set<string>()
+      : reachFrom([head], edges, (slug) => joins.has(slug) || after.has(slug) || slug === from),
+  );
+  return { after, branches };
+}
+
+/**
+ * Forks and joins. Two or more edges with the same `from` and `when` start their targets together;
+ * the branches must all lead to one `join: all` node, stay apart from each other and from the rest
+ * of the pipeline, and not fork again. The rules are static so a run can never leave a branch open
+ * with nobody to wait for it.
+ */
+function validateParallel(c: Collector, nodes: NodeSpec[], edges: EdgeSpec[], registry: Registry) {
+  const index = new Map(nodes.map((n, i) => [n.slug, i]));
+  const atNode = (slug: string): Path => ["nodes", index.get(slug) ?? 0, "slug"];
+  const joins = new Set(nodes.filter((n) => n.join !== undefined).map((n) => n.slug));
+
+  const groups = new Map<string, number[]>();
+  edges.forEach((edge, j) => {
+    const key = JSON.stringify([edge.from, edge.when]);
+    groups.set(key, [...(groups.get(key) ?? []), j]);
+  });
+  const forks = [...groups.values()]
+    .filter((js) => js.length >= 2)
+    .map((js) => {
+      const first = edges[js[0] as number] as EdgeSpec;
+      return {
+        from: first.from,
+        when: first.when,
+        at: js,
+        heads: js.map((j) => (edges[j] as EdgeSpec).to),
+      };
+    });
+
+  const forkFroms = new Set<string>();
+  for (const fork of forks) {
+    if (forkFroms.has(fork.from)) {
+      c.add(
+        atNode(fork.from),
+        `node "${fork.from}" forks on more than one label; a node starts branches on one label only`,
+      );
+    }
+    forkFroms.add(fork.from);
+  }
+
+  const usedJoins = new Map<string, string>();
+  // Joins a fork leads to, even when that fork is refused: they are not "joins without a fork".
+  const claimed = new Set<string>();
+  for (const fork of forks) {
+    const { from, when, heads } = fork;
+    const at: Path = ["edges", fork.at[0] as number];
+    const where = `the fork at "${from}" ("${when}")`;
+    // What the branches reach without passing a join, loops and all: enough to see whether there is
+    // a join to speak of, and whether a branch forks again.
+    const loose = reachFrom(heads, edges, (slug) => joins.has(slug));
+    for (const head of heads) if (joins.has(head)) claimed.add(head);
+    for (const edge of edges) if (joins.has(edge.to) && loose.has(edge.from)) claimed.add(edge.to);
+    const reached = [...claimed].filter(
+      (join) => heads.includes(join) || edges.some((e) => e.to === join && loose.has(e.from)),
+    );
+    if (reached.length === 0) {
+      c.add(
+        at,
+        `node "${from}" has ${heads.length} edges for "${when}": they start all of those steps together (a fork), which needs a \`join: all\` node where the branches meet (a second edge with the same \`when\` used to be ignored)`,
+      );
+      continue;
+    }
+    const nested = [...loose].find((slug) => slug !== from && forkFroms.has(slug));
+    if (nested !== undefined) {
+      c.add(
+        atNode(nested),
+        `node "${nested}" forks inside a branch of ${where}; a fork inside a fork is not supported`,
+      );
+      continue;
+    }
+    if (reached.length > 1) {
+      c.add(
+        at,
+        `the branches of ${where} lead to several \`join: all\` nodes (${reached.map((j) => `"${j}"`).join(", ")}); a fork has one join`,
+      );
+      continue;
+    }
+    const join = reached[0] as string;
+    const other = usedJoins.get(join);
+    if (other !== undefined) {
+      c.add(
+        atNode(join),
+        `node "${join}" is the join of two forks ("${other}" and "${from}"); a join ends one fork`,
+      );
+      continue;
+    }
+    usedJoins.set(join, from);
+    // An edge out of a branch is a branch leaving, said below with the edge.
+    const { after, branches } = branchRegions(edges, joins, from, heads, join);
+    const inside = (slug: string) => branches.some((b) => b.has(slug));
+    const region = new Set(branches.flatMap((b) => [...b]));
+    // The edges alone do not say where a run starts: a run that started in a branch or at the join
+    // would reach the join with no instance of the fork and a branch never run.
+    const entry = nodes[0]?.slug;
+    if (entry !== undefined && (entry === join || region.has(entry))) {
+      const head = heads[branches.findIndex((b) => b.has(entry))];
+      c.add(
+        atNode(entry),
+        entry === join
+          ? `node "${entry}" is the first node of the pipeline and the join of ${where}; a run must start before the fork`
+          : `node "${entry}" is the first node of the pipeline and is in the branch "${head}" of ${where}; a run must start before the fork`,
+      );
+    }
+    const forkNode = nodes[index.get(from) ?? -1];
+    const onFailure = forkNode ? labelsOf(registry, forkNode)?.failure.includes(when) : false;
+
+    for (const [i, head] of heads.entries()) {
+      if (head === join && onFailure === true) {
+        // Such a branch arrives failed the moment the fork starts, and `restart_failed` would run
+        // the join itself again as a branch.
+        c.add(
+          ["edges", fork.at[i] as number],
+          `edge from "${from}" to "${join}" when "${when}" is a branch with no step of its own; on a failure label every branch of ${where} needs a step before the join`,
+        );
+      }
+      if (head !== join && (after.has(head) || head === from)) {
+        c.add(
+          ["edges", fork.at[i] as number],
+          `edge from "${from}" to "${head}" when "${when}" starts a branch at a step that is reached after the join "${join}" or is the fork node itself`,
+        );
+      }
+      for (let k = 0; k < i; k++) {
+        const shared = [...(branches[i] ?? [])].filter(
+          (slug) => slug !== join && branches[k]?.has(slug),
+        );
+        if (shared.length > 0) {
+          c.add(
+            atNode(shared[0] as string),
+            `node "${shared[0]}" is reached by two branches of ${where} ("${heads[k]}" and "${head}"); branches do not share steps`,
+          );
+        }
+      }
+    }
+    // The nodes of each branch from which the join can still be reached along the branch's own
+    // edges: a step that has edges but only loops (a -> b -> a) would hold the fork open for good.
+    const reaching = new Set<string>();
+    for (const edge of edges)
+      if (edge.to === join && region.has(edge.from)) reaching.add(edge.from);
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const edge of edges) {
+        if (!reaching.has(edge.to) || !region.has(edge.from) || reaching.has(edge.from)) continue;
+        reaching.add(edge.from);
+        grew = true;
+      }
+    }
+    for (const slug of region) {
+      const node = nodes[index.get(slug) ?? -1];
+      const success = node ? labelsOf(registry, node)?.success[0] : undefined;
+      const outs = edges.filter((e) => e.from === slug);
+      if (success !== undefined && !outs.some((e) => e.when === success)) {
+        c.add(
+          atNode(slug),
+          `node "${slug}" is in a branch of ${where} and has no edge for "${success}"; every branch must reach the join "${join}"`,
+        );
+      } else if (!reaching.has(slug)) {
+        const head = heads[branches.findIndex((b) => b.has(slug))];
+        c.add(
+          atNode(slug),
+          `node "${slug}" is in the branch "${head}" of ${where} and none of its ways on leads to the join "${join}"; the branch could never arrive`,
+        );
+      }
+      for (const edge of outs) {
+        if (edge.to === join || inside(edge.to)) continue;
+        c.add(
+          ["edges", edges.indexOf(edge)],
+          `edge from "${slug}" to "${edge.to}" leaves a branch of ${where}; a branch may only lead on inside itself or to the join "${join}"`,
+        );
+      }
+    }
+    for (const edge of edges) {
+      const entersBranch = inside(edge.to) || edge.to === join;
+      if (!entersBranch || inside(edge.from)) continue;
+      if (edge.from === from && edge.when === when) continue;
+      c.add(
+        ["edges", edges.indexOf(edge)],
+        edge.to === join
+          ? `edge from "${edge.from}" enters the join "${join}" from outside ${where}; only its branches arrive there`
+          : `edge from "${edge.from}" to "${edge.to}" enters a branch of ${where} from outside; a branch starts only at the fork`,
+      );
+    }
+  }
+
+  for (const join of joins) {
+    if (usedJoins.has(join) || claimed.has(join)) continue;
+    c.add(
+      atNode(join),
+      `node "${join}" has \`join: all\` but no fork leads to it (a fork is two or more edges with the same from and when)`,
+    );
+  }
 }
 
 function validateGraph(c: Collector, nodes: NodeSpec[], edges: EdgeSpec[], registry: Registry) {
@@ -537,12 +803,34 @@ function validateGraph(c: Collector, nodes: NodeSpec[], edges: EdgeSpec[], regis
   });
 
   // Every other way a node may end well (an agent's `outcomes`) must lead somewhere, and cannot also
-  // be a way to fail: an outcome nobody follows would end the run by accident.
+  // be a way to fail: an outcome nobody follows would end the run by accident. The reserved outcome
+  // of a join is the exception: the engine itself handles it, and nobody lists it.
   nodes.forEach((node, i) => {
     const handler = registry.node(node.kind);
     if (!handler) return;
-    const { success, failure } = handler.labels(node);
+    if (handler.labels(node).success.includes(RESTART_FAILED)) {
+      c.add(
+        ["nodes", i, "slug"],
+        `node "${node.slug}": "${RESTART_FAILED}" is reserved for a join (it is there on every \`join: all\` step of this kind); do not list it in outcomes`,
+      );
+    }
+    // A failure is never a decision to run the failed branches again: only the join's agent declares it.
+    if (node.on_fail === RESTART_FAILED) {
+      c.add(
+        ["nodes", i, "on_fail"],
+        `node "${node.slug}": "${RESTART_FAILED}" is reserved for the outcome a join declares; it cannot be an \`on_fail\` label`,
+      );
+    }
+    node.checks.forEach((check, k) => {
+      if (check.on_fail !== RESTART_FAILED) return;
+      c.add(
+        ["nodes", i, "checks", k, "on_fail"],
+        `node "${node.slug}", check ${k + 1}: "${RESTART_FAILED}" is reserved for the outcome a join declares; it cannot be an \`on_fail\` label`,
+      );
+    });
+    const { success, failure } = labelsOf(registry, node) ?? handler.labels(node);
     for (const label of success.slice(1)) {
+      if (label === RESTART_FAILED) continue;
       if (failure.includes(label)) {
         c.add(
           ["nodes", i, "slug"],

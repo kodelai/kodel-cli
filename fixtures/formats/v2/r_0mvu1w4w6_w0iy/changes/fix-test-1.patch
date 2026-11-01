@@ -1,0 +1,12 @@
+# kodel-patch v1
+diff --git a/tests/farewell.test.js b/tests/farewell.test.js
+new file mode 100644
+--- /dev/null
++++ b/tests/farewell.test.js
+@@ -0,0 +1,6 @@
++import { expect, test } from "bun:test";
++import { farewell } from "../src/farewell.js";
++
++test("farewell", () => {
++  expect(farewell("Ada")).toBe("Goodbye, Ada.");
++});

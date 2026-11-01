@@ -6,19 +6,34 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  AGENT_LOG_KINDS,
+  AGENT_LOG_MODES,
+  type AgentsConfig,
+  DEFAULT_AGENTS,
   DEFAULT_TASK_ON_RUN,
+  defaultAgentLog,
   defaultHistory,
+  defaultUsage,
   type HistoryConfig,
   isValidGlob,
   KodelError,
   MAX_SUPPORTED_MAJOR,
   parseVersion,
+  pricesOverrideSchema,
   TASK_ON_RUN_MODES,
   type TaskOnRunMode,
 } from "@kodel-ai/pipeline-core";
 import { parse } from "yaml";
 import { z } from "zod";
+import { MAX_PATCH_KB } from "./patch-text";
 import { CONFIG_FILE } from "./project-locate";
+import {
+  parseStorageLines,
+  projectIdProblem,
+  STORAGE_MODES,
+  type StorageMode,
+  StoragePathsError,
+} from "./storage-paths";
 
 export const DEFAULT_WORKTREE_DIR = ".kodel/worktrees";
 
@@ -88,7 +103,18 @@ export interface ProjectConfig {
   decisions: DecisionsConfig;
   tasks: TasksConfig;
   history: HistoryConfig;
+  /** How the open steps of a fork are worked, and how long a worker's hold on one lasts. */
+  agents: AgentsConfig;
+  /**
+   * Where runs, the proposals made outside a run, `start.lock` and the session index are kept:
+   * `project` (under `.kodel`, the default) or `home` (`~/.kodel/projects/<project_id>/`).
+   */
+  storage: StorageMode;
+  /** The stable name of the project's folder in `home` mode; it is committed, so a move keeps the history. */
+  project_id?: string;
 }
+
+export { DEFAULT_AGENTS };
 
 export const DEFAULT_WORKTREE: WorktreeConfig = { mode: "auto", dir: DEFAULT_WORKTREE_DIR };
 export const DEFAULT_PIPELINE: PipelineConfig = { uncommitted: "ask" };
@@ -112,6 +138,39 @@ const MAX_EXCLUDE_GLOBS = 256;
 // Whole kilobytes, at least one: 0 would mean "keep nothing", which is what `enabled: false` says.
 const maxKb = z.number().int().min(1);
 
+// A cap of characters is a whole number from 0 (the kind is left out) to a bound far above any real text.
+const previewChars = z.number().int().min(0).max(1_000_000);
+
+// One number for every kind, or a number per kind; a kind that is not named keeps its default.
+const agentLogSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    mode: z.enum(AGENT_LOG_MODES).optional(),
+    preview_chars: z
+      .union([
+        previewChars,
+        z
+          .object(
+            Object.fromEntries(AGENT_LOG_KINDS.map((kind) => [kind, previewChars.optional()])),
+          )
+          .strict(),
+      ])
+      .optional(),
+    max_kb: maxKb.optional(),
+    // Seconds between copies while the run goes; 0 copies only at the end of a step.
+    interval_s: z.number().int().min(0).max(3_600).optional(),
+  })
+  .strict();
+
+// `prices` is the shipped table's override: per model, all four prices, a safe id and a bound on how many, so what is
+// frozen into the run's state is never free text.
+const usageSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    prices: pricesOverrideSchema.optional(),
+  })
+  .strict();
+
 // Strict at every level like the rest: a misspelled category must not leave a switch on without the
 // person noticing, and a switch is the point of this section.
 const historySchema = z
@@ -123,7 +182,8 @@ const historySchema = z
           .array(z.string().refine(isValidGlob, { message: "not a valid glob" }))
           .max(MAX_EXCLUDE_GLOBS)
           .optional(),
-        max_kb: maxKb.optional(),
+        // A patch is read whole to be redacted, and the report reads it back: it has an upper bound.
+        max_kb: maxKb.max(MAX_PATCH_KB).optional(),
       })
       .strict()
       .optional(),
@@ -134,6 +194,8 @@ const historySchema = z
     prompts: z.object({ enabled: z.boolean().optional() }).strict().optional(),
     executor: z.object({ enabled: z.boolean().optional() }).strict().optional(),
     tool_log: z.object({ enabled: z.boolean().optional() }).strict().optional(),
+    agent_log: agentLogSchema.optional(),
+    usage: usageSchema.optional(),
   })
   .strict();
 
@@ -142,6 +204,12 @@ export const HISTORY_SECTION_KEYS = Object.keys(historySchema.shape);
 
 // Unknown keys are refused, not ignored: a misspelled `mode` must not leave the default in force
 // without the person noticing.
+const agentHintsSchema = z
+  .object({
+    wait: z.boolean().optional(),
+  })
+  .strict();
+
 const configSchema = z
   .object({
     version: z.union([z.number(), z.string()]).optional(),
@@ -158,12 +226,7 @@ const configSchema = z
       })
       .strict()
       .optional(),
-    agent_hints: z
-      .object({
-        wait: z.boolean().optional(),
-      })
-      .strict()
-      .optional(),
+    agent_hints: agentHintsSchema.optional(),
     decisions: z
       .object({
         dialog: z.boolean().optional(),
@@ -191,11 +254,38 @@ const configSchema = z
       .strict()
       .optional(),
     history: historySchema.optional(),
+    agents: z
+      .object({
+        subagents: z.enum(["auto", "yes", "no"]).optional(),
+        max_parallel: z.number().int().min(1).max(64).optional(),
+        claim_ttl_s: z.number().int().min(1).max(86_400).optional(),
+      })
+      .strict()
+      .optional(),
+    storage: z.enum(STORAGE_MODES as [StorageMode, ...StorageMode[]]).optional(),
+    project_id: z.string().optional(),
   })
   .strict();
 
 const invalid = (file: string, message: string) =>
   new KodelError("CONFIG_INVALID", `${file}: ${message}`);
+
+/**
+ * Only the `agent_hints` block of the config in `storeRoot`, for a reader that keeps going on a config
+ * that does not load: a bad value elsewhere must not undo a valid `wait: false`. The defaults when the
+ * block itself cannot be read.
+ */
+export async function loadAgentHints(storeRoot: string): Promise<AgentHintsConfig> {
+  try {
+    const raw: unknown = parse(await readFile(join(storeRoot, CONFIG_FILE), "utf8"));
+    const block =
+      raw !== null && typeof raw === "object" ? Reflect.get(raw, "agent_hints") : undefined;
+    const parsed = agentHintsSchema.safeParse(block ?? {});
+    return { wait: (parsed.success ? parsed.data.wait : undefined) ?? DEFAULT_AGENT_HINTS.wait };
+  } catch {
+    return { ...DEFAULT_AGENT_HINTS };
+  }
+}
 
 /** Read the config in `storeRoot`; the defaults when there is no file. */
 export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
@@ -212,7 +302,9 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
         agent_hints: { ...DEFAULT_AGENT_HINTS },
         decisions: { dialog: false, agent: { ...DEFAULT_DECISIONS.agent } },
         tasks: { ...DEFAULT_TASKS, on_run: { ...DEFAULT_TASKS.on_run }, adapters: {} },
-        history: defaultHistory(),
+        history: { ...defaultHistory(), agent_log: defaultAgentLog(), usage: defaultUsage() },
+        agents: { ...DEFAULT_AGENTS },
+        storage: "project",
       };
     }
     throw error;
@@ -241,6 +333,36 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
       );
     }
     throw invalid(file, `${first?.message ?? "invalid"}${keys}${where ? ` (at "${where}")` : ""}`);
+  }
+  // The hook reads these two keys with a line matcher (it cannot load this file within its budget),
+  // so a spelling the matcher cannot read is refused here: the hook and the server then cannot
+  // disagree about where the history goes.
+  try {
+    const lines = parseStorageLines(text);
+    // Both ways: what the parser read is what the matcher reads, and a line the matcher reads is
+    // the key the parser read (a line of the matcher's that is not the parser's key would be a
+    // setting for the hook and none for the server).
+    if (lines.storage !== parsed.data.storage) {
+      throw new StoragePathsError(
+        parsed.data.storage === undefined
+          ? `storage is a line the config does not read as that key; write it as "storage: home" or "storage: project" at the top level`
+          : `storage must be written as "storage: ${parsed.data.storage}" on a line of its own, not as a flow mapping, an anchor or a block`,
+      );
+    }
+    if (parsed.data.project_id !== undefined) {
+      const problem = projectIdProblem(parsed.data.project_id);
+      if (problem !== undefined) throw new StoragePathsError(`project_id ${problem}`);
+    }
+    if (lines.project_id !== parsed.data.project_id) {
+      throw new StoragePathsError(
+        parsed.data.project_id === undefined
+          ? `project_id is a line the config does not read as that key; write it as "project_id: my-app-k3f9a2x1" at the top level`
+          : `project_id must be written as "project_id: ${parsed.data.project_id}" on a line of its own`,
+      );
+    }
+  } catch (error) {
+    if (error instanceof StoragePathsError) throw invalid(file, error.message);
+    throw error;
   }
   let version: { version: string; major: number };
   try {
@@ -278,6 +400,13 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
       adapters: parsed.data.tasks?.adapters ?? {},
     },
     history: mergeHistory(parsed.data.history),
+    agents: {
+      subagents: parsed.data.agents?.subagents ?? DEFAULT_AGENTS.subagents,
+      max_parallel: parsed.data.agents?.max_parallel ?? DEFAULT_AGENTS.max_parallel,
+      claim_ttl_s: parsed.data.agents?.claim_ttl_s ?? DEFAULT_AGENTS.claim_ttl_s,
+    },
+    storage: parsed.data.storage ?? "project",
+    ...(parsed.data.project_id === undefined ? {} : { project_id: parsed.data.project_id }),
   };
 }
 
@@ -296,5 +425,30 @@ function mergeHistory(given: z.infer<typeof historySchema> | undefined): History
     prompts: { enabled: given?.prompts?.enabled ?? d.prompts.enabled },
     executor: { enabled: given?.executor?.enabled ?? d.executor.enabled },
     tool_log: { enabled: given?.tool_log?.enabled ?? d.tool_log.enabled },
+    agent_log: mergeAgentLog(given?.agent_log),
+    usage: {
+      enabled: given?.usage?.enabled ?? defaultUsage().enabled,
+      prices: given?.usage?.prices ?? {},
+    },
+  };
+}
+
+function mergeAgentLog(given: z.infer<typeof agentLogSchema> | undefined) {
+  const d = defaultAgentLog();
+  const chars = given?.preview_chars;
+  return {
+    enabled: given?.enabled ?? d.enabled,
+    mode: given?.mode ?? d.mode,
+    preview_chars:
+      typeof chars === "number"
+        ? { user: chars, agent: chars, tool_input: chars, tool_result: chars }
+        : {
+            user: chars?.user ?? d.preview_chars.user,
+            agent: chars?.agent ?? d.preview_chars.agent,
+            tool_input: chars?.tool_input ?? d.preview_chars.tool_input,
+            tool_result: chars?.tool_result ?? d.preview_chars.tool_result,
+          },
+    max_kb: given?.max_kb ?? d.max_kb,
+    interval_s: given?.interval_s ?? d.interval_s,
   };
 }

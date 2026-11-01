@@ -12,7 +12,7 @@ const MIN = 60_000;
 
 function state(over: Partial<RunState> = {}): RunState {
   return {
-    v: 1,
+    v: 2,
     runId: "r_1",
     task: "fix the wait timeout",
     specHash: "h",
@@ -35,7 +35,7 @@ const record = (
   minutesAgo: number,
   rest: Record<string, unknown> = {},
 ): JournalRecord => ({
-  v: 1,
+  v: 2,
   seq: 1,
   ts: NOW - minutesAgo * MIN,
   event,
@@ -135,7 +135,7 @@ describe("tui loading sessions", () => {
     const { session } = await one({
       state: state({
         status: "paused",
-        pause: { reason: "total", node: "implement" },
+        pauses: [{ reason: "total", node: "implement" }],
       } as Partial<RunState>),
       next: waitingNext({ reason: "paused", node_slug: "implement" }),
       journal: [record("run_paused", 7)],

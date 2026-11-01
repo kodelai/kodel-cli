@@ -15,6 +15,19 @@ import { demoStats } from "../src/tui/demo-stats";
 import { createStatsLoader, type StatsSource } from "../src/tui/stats-load";
 import { initialModel, type Model, render, takeEffects, update, withStats } from "../src/tui/view";
 
+/** The parts of a run report that these tests have nothing to say about. */
+const NO_EXTRAS: Pick<
+  RunReport,
+  "busy_wall_s" | "forks" | "critical_path" | "failed_branches" | "agent_log" | "usage"
+> = {
+  busy_wall_s: 0,
+  forks: [],
+  critical_path: [],
+  failed_branches: false,
+  agent_log: { not_collected: true, reason: "not_captured" },
+  usage: { not_collected: true, reason: "not_captured" },
+};
+
 const SIZE = { cols: 130, rows: 34 };
 const NARROW = { cols: 72, rows: 24 };
 
@@ -387,6 +400,7 @@ describe("createStatsLoader", () => {
       agent_decisions: [],
       checks: [],
       prompts: { not_collected: true },
+      ...NO_EXTRAS,
     } satisfies RunReport;
   }
 
@@ -607,6 +621,7 @@ describe("the text of the definitions of a step", () => {
       agent_decisions: [],
       checks: [],
       prompts: { not_collected: true },
+      ...NO_EXTRAS,
     };
   }
 

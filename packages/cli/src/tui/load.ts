@@ -212,7 +212,8 @@ function fromWaiting(base: Base, state: RunState, journal: JournalRecord[], w: W
     );
   }
   if (w.reason === "paused") {
-    const why = state.pause ? PAUSE_TEXT[state.pause.reason] : "the run stopped";
+    const pause = state.pauses?.[0];
+    const why = pause ? PAUSE_TEXT[pause.reason] : "the run stopped";
     return waiting(base, "paused", lastTs(journal, "run_paused") ?? sinceLast(journal, state), {
       step: "paused",
       headline: `Paused at «${w.node_slug}»: ${why}`,

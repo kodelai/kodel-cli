@@ -1,0 +1,63 @@
+# kodel-patch v1
+diff --git a/docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md b/docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md
+new file mode 100644
+--- /dev/null
++++ b/docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md
+@@ -0,0 +1,38 @@
++# A --json flag for kodel status
++
++## TL;DR
++
++- the status command prints the run list as JSON, point 1
++- the status command prints the run list as JSON, point 2
++- the status command prints the run list as JSON, point 3
++- the status command prints the run list as JSON, point 4
++- the status command prints the run list as JSON, point 5
++- the status command prints the run list as JSON, point 6
++- the status command prints the run list as JSON, point 7
++- the status command prints the run list as JSON, point 8
++- the status command prints the run list as JSON, point 9
++- the status command prints the run list as JSON, point 10
++- the status command prints the run list as JSON, point 11
++- the status command prints the run list as JSON, point 12
++
++## Decisions needed
++
++None.
++
++## Acceptance criteria and tests
++
++- status --json is covered by a CLI test, point 1
++- status --json is covered by a CLI test, point 2
++- status --json is covered by a CLI test, point 3
++- status --json is covered by a CLI test, point 4
++- status --json is covered by a CLI test, point 5
++- status --json is covered by a CLI test, point 6
++- status --json is covered by a CLI test, point 7
++- status --json is covered by a CLI test, point 8
++- status --json is covered by a CLI test, point 9
++- status --json is covered by a CLI test, point 10
++- status --json is covered by a CLI test, point 11
++
++## Rejected review findings
++
++None.
+diff --git a/packages/status/json.js b/packages/status/json.js
+new file mode 100644
+--- /dev/null
++++ b/packages/status/json.js
+@@ -0,0 +1,3 @@
++export function asJson(runs) {
++  return JSON.stringify(runs, null, 2);
++}
+diff --git a/tests/status-json.test.js b/tests/status-json.test.js
+new file mode 100644
+--- /dev/null
++++ b/tests/status-json.test.js
+@@ -0,0 +1,6 @@
++import { expect, test } from "bun:test";
++import { asJson } from "../packages/status/json.js";
++
++test("status --json lists the runs", () => {
++  expect(JSON.parse(asJson([{ runId: "r_1" }]))).toEqual([{ runId: "r_1" }]);
++});

@@ -59,7 +59,8 @@ beforeEach(async () => {
   root = await makeRepo();
 });
 afterEach(async () => {
-  for (const dir of cleanup.splice(0)) await rm(dir, { recursive: true, force: true });
+  for (const dir of cleanup.splice(0))
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 // A command node needs a way out when it fails, so there are two.
@@ -256,7 +257,8 @@ describe("reusing the worktree the agent is already in", () => {
       expect(workdir?.branch, what).toBe(`kodel/${run.runId}`);
       expect(worktreeCount(), what).toBe(expected);
     }
-  });
+    // six runs, each with a worktree of its own: more than the default 5 s when the machine is busy
+  }, 30_000);
 });
 
 describe("reusing is limited to the folder for worktrees, and never the root itself", () => {

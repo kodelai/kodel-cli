@@ -1,0 +1,37 @@
+# kodel-patch v1
+diff --git a/docs/plans/document_the_kodel_wait_command_in_the_readme.md b/docs/plans/document_the_kodel_wait_command_in_the_readme.md
+new file mode 100644
+--- /dev/null
++++ b/docs/plans/document_the_kodel_wait_command_in_the_readme.md
+@@ -0,0 +1,31 @@
++# Document kodel wait
++
++## TL;DR
++
++Nothing to change: the README documents the command already.
++
++## Evidence
++
++- README.md names kodel wait, point 1
++- README.md names kodel wait, point 2
++- README.md names kodel wait, point 3
++- README.md names kodel wait, point 4
++- README.md names kodel wait, point 5
++- README.md names kodel wait, point 6
++- README.md names kodel wait, point 7
++- README.md names kodel wait, point 8
++- README.md names kodel wait, point 9
++- README.md names kodel wait, point 10
++
++## Where the README says it
++
++- the section on waiting for a decision, point 1
++- the section on waiting for a decision, point 2
++- the section on waiting for a decision, point 3
++- the section on waiting for a decision, point 4
++- the section on waiting for a decision, point 5
++- the section on waiting for a decision, point 6
++- the section on waiting for a decision, point 7
++- the section on waiting for a decision, point 8
++- the section on waiting for a decision, point 9
++- the section on waiting for a decision, point 10

@@ -6,7 +6,7 @@
  * picks the run up from the files on disk.
  */
 import { execFileSync } from "node:child_process";
-import { appendFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -16,9 +16,15 @@ import {
   LocalHost,
   type LocalRun,
 } from "@kodel-ai/local";
-import { DEFAULT_STALE_MS, defaultHistory, type HistoryConfig } from "@kodel-ai/pipeline-core";
+import {
+  DEFAULT_STALE_MS,
+  defaultHistory,
+  type HistoryConfig,
+  KodelError,
+} from "@kodel-ai/pipeline-core";
 import type {
   Production,
+  RefusedFollowUp,
   ScenarioEngine,
   ScenarioEvent,
   ScenarioState,
@@ -41,6 +47,8 @@ function scenarioHistory(): HistoryConfig {
 
 export class LocalScenarioEngine implements ScenarioEngine {
   readonly name = "local";
+  /** `agents.max_parallel` of the project, written to its config when set. */
+  maxParallel: number | undefined;
 
   private dir = "";
   private host!: LocalHost;
@@ -53,6 +61,34 @@ export class LocalScenarioEngine implements ScenarioEngine {
   private written = 0;
   private reported = new Set<string>();
   private feedbackCount = 0;
+  /** Results of engine work the run refused, as the memory engine keeps them. */
+  private readonly refused: RefusedFollowUp[] = [];
+
+  refusedFollowUps(): RefusedFollowUp[] {
+    return [...this.refused];
+  }
+
+  /**
+   * The host saves the result of a command or a check through `apply`; one it refuses is kept, so
+   * a scenario fails on it as it does on the memory engine.
+   */
+  private watch(run: LocalRun): LocalRun {
+    const apply = run.apply.bind(run);
+    run.apply = async (event, options) => {
+      const decision = await apply(event, options);
+      if (!decision.ok && (event.type === "work_finished" || event.type === "check_finished")) {
+        const status = (await run.state().catch(() => undefined))?.status;
+        this.refused.push({
+          event: event.type,
+          code: decision.error.code,
+          message: decision.error.message,
+          afterEnd: status !== "running" && status !== "paused",
+        });
+      }
+      return decision;
+    };
+    return run;
+  }
 
   async start(context: StartContext): Promise<{ runId: string }> {
     this.context = context;
@@ -63,6 +99,13 @@ export class LocalScenarioEngine implements ScenarioEngine {
     git("config", "user.email", "scenario@example.com");
     git("config", "user.name", "Scenario");
     git("commit", "-q", "--allow-empty", "-m", "initial");
+    if (this.maxParallel !== undefined) {
+      await mkdir(join(this.dir, ".kodel"), { recursive: true });
+      await writeFile(
+        join(this.dir, ".kodel", "config.yaml"),
+        `agents:\n  max_parallel: ${this.maxParallel}\n`,
+      );
+    }
 
     this.host = new LocalHost(context.spec, {
       root: this.dir,
@@ -72,7 +115,7 @@ export class LocalScenarioEngine implements ScenarioEngine {
       runCommand: (command, options, ctx) => this.scriptedCommand(command, options, ctx),
     });
     const { run } = await this.host.start(context.task, { history: scenarioHistory() });
-    this.run = run;
+    this.run = this.watch(run);
     await this.drive();
     return { runId: run.runId };
   }
@@ -93,7 +136,7 @@ export class LocalScenarioEngine implements ScenarioEngine {
         // The process dies: its work stops silently, and a fresh host starts from the files.
         this.run.stop();
         await this.run.settle();
-        this.run = this.host.open(this.run.runId);
+        this.run = this.watch(this.host.open(this.run.runId));
         this.clock += (this.host.engine.staleMs ?? DEFAULT_STALE_MS) + 1_000;
         await this.run.tick();
         break;
@@ -124,12 +167,39 @@ export class LocalScenarioEngine implements ScenarioEngine {
           slug,
           Number(args.attempt),
           typeof args.summary === "string" ? args.summary : undefined,
+          undefined,
+          undefined,
+          typeof args.claim_token === "string" ? args.claim_token : undefined,
         );
         if (!result.ok)
           return { ok: false, code: result.error.code, message: result.error.message };
         await this.drive();
         const node = (await this.run.state()).nodes[slug];
         return { ok: true, advanced: node?.status === "passed", outcome: node?.outcome ?? null };
+      }
+      case "pipeline_take_step": {
+        try {
+          const outcome = await this.run.takeStep({
+            ...(typeof args.node_slug === "string" ? { node: args.node_slug } : {}),
+            ...(typeof args.claim_token === "string" ? { token: args.claim_token } : {}),
+          });
+          if (outcome.status === "none") return { ok: true, status: "none", next: outcome.next };
+          if (outcome.status === "taken" || outcome.status === "queued") {
+            return { ok: true, ...outcome };
+          }
+          return {
+            ok: true,
+            status: outcome.status,
+            node_slug: outcome.step.slug,
+            attempt: outcome.step.attempt,
+            claim_token: outcome.claim_token,
+          };
+        } catch (error) {
+          if (error instanceof KodelError) {
+            return { ok: false, code: error.code, message: error.message };
+          }
+          throw error;
+        }
       }
       case "pipeline_feedback": {
         const slug = typeof args.node_slug === "string" ? args.node_slug : undefined;
@@ -145,7 +215,20 @@ export class LocalScenarioEngine implements ScenarioEngine {
         return { ok: true, id: `f-${this.feedbackCount}` };
       }
       case "pipeline_next_step":
-        return { ok: true, ...(await this.run.nextStep({ serve: {} })) };
+        try {
+          return {
+            ok: true,
+            ...(await this.run.nextStep({
+              serve: {},
+              ...(typeof args.node_slug === "string" ? { nodeSlug: args.node_slug } : {}),
+            })),
+          };
+        } catch (error) {
+          if (error instanceof KodelError) {
+            return { ok: false, code: error.code, message: error.message };
+          }
+          throw error;
+        }
       default:
         return { ok: false, code: "UNKNOWN_TOOL", message: `unknown tool "${tool}"` };
     }
@@ -168,10 +251,9 @@ export class LocalScenarioEngine implements ScenarioEngine {
   async readState(): Promise<ScenarioState> {
     const state = await this.run.state();
     const journal = (await this.host.store.readJournal(this.run.runId)).map((r) => r.event);
-    const waiting = state.active.find((v) => v.phase === "human")?.node;
     return {
       runStatus: state.status,
-      ...(waiting === undefined ? {} : { waitingGate: waiting }),
+      waitingGates: state.active.filter((v) => v.phase === "human").map((v) => v.node),
       nodes: this.context.spec.nodes.map((node) => {
         const run = state.nodes[node.slug];
         return {

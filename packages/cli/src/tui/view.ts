@@ -214,7 +214,21 @@ export function initialModel(
 }
 
 export function withDetail(m: Model, key: string, detail: GateDetail): Model {
-  return { ...m, details: { ...m.details, [key]: detail } };
+  const next = { ...m, details: { ...m.details, [key]: detail } };
+  // A run that is going on changes under the person's eyes, so what was read of its files may be out
+  // of date: a read that failed is forgotten, and the file that is open is read again (what was shown
+  // stays until the new text arrives).
+  const runId = key.slice(0, key.lastIndexOf(":"));
+  if (m.sessions.find((s) => s.id === runId)?.status !== "running") return next;
+  const mine = `${runId}:`;
+  const diffs = Object.fromEntries(
+    Object.entries(m.diffs).filter(([k, d]) => !k.startsWith(mine) || d.kind === "text"),
+  );
+  const found = detailOf({ ...next, diffs });
+  if (next.tab !== CODE || !next.open || found?.s.id !== runId) return { ...next, diffs };
+  const path = fileAt(found.d, Math.min(next.cursor, itemCount(found.d, CODE) - 1));
+  if (path === undefined) return { ...next, diffs };
+  return { ...next, diffs, effects: [...next.effects, { type: "load_diff", runId, path }] };
 }
 
 export function withDiff(m: Model, key: string, diff: DiffState): Model {
@@ -586,7 +600,8 @@ function openDiff(
   found: { s: Session; d: GateDetail },
 ): { p: Prepared; path: string } | undefined {
   if (m.tab !== CODE || !m.open) return undefined;
-  const path = fileAt(found.d, m.cursor);
+  // The same file that is drawn: a list that has got shorter since leaves the cursor on the last.
+  const path = fileAt(found.d, Math.min(m.cursor, itemCount(found.d, CODE) - 1));
   const diff = path === undefined ? undefined : m.diffs[diffKey(found.s.id, path)];
   return path !== undefined && diff?.kind === "text"
     ? { p: prepare(diff, diff.text, path), path }

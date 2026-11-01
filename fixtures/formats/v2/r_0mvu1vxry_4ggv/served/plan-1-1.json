@@ -1,0 +1,17 @@
+{
+  "v": 1,
+  "node": "plan",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "f6e49356d6ea54e9a72f17db877629c0851bb405a98b89e762a2e78fdae5406b",
+  "answer": {
+    "slug": "plan",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "Task: Add a --json flag to kodel status so that scripts can read the list of runs\nRead AGENTS.md first. Explore the repository and write an implementation plan to\ndocs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md. Do not change any other file. If you can choose the model of a\nsubagent, do the exploring and the writing on the most capable one (fable).\n\nIf you were sent back (the feedback holds a person's rejection or the findings of the plan\ncritique), make the plan again with every point of it answered: fix the plan, or say in the\nsection \"Rejected review findings\" why a point does not hold.\n\nThe person reading the plan has little time, so the file goes from what matters to what does\nnot, and the top of it fits on one screen. Use these sections, in this order:\n\n1. `# <title>`, then `## TL;DR`: three to five lines: what is done, what it costs, what is risky.\n2. `## Decisions needed`: every open question, each with the options, your recommendation and\n   what you will do if the person does not answer. \"None\" if there are none. Do not hide a\n   question in the steps.\n3. `## Behaviour change`: what changes for a user of Kodel, in words.\n4. `## Risks and invariants`: what may break. Go through the Principles and \"Stored data and\n   compatibility\" in AGENTS.md and say for each that applies how the plan keeps it (does a stored\n   format change? does pipeline-core get I/O? is anything a person decides now open to the\n   agent?).\n5. `## Acceptance criteria and tests`: criteria that can be checked, and the name of the test for\n   each, with the decision id (`T-12`) in the name where one applies.\nThen a line `---` and what is read only in doubt:\n6. `## Steps`, 7. `## Affected files`, 8. `## Rejected review findings` (empty on the first pass),\n9. `## Findings in the code` (what you found and the plan rests on, with paths).\n\nIf you split the task or cut it down, say so in \"Decisions needed\". If, after looking, the task\nneeds no change (it is already done, or already true), write the plan file with only a TL;DR and\nthe evidence, and complete the step with the outcome nothing_to_change instead of the usual one.\nDo not use it to skip work that is needed.\n",
+    "outcomes": [
+      "nothing_to_change"
+    ],
+    "workdir": "[REDACTED:high-entropy].kodel/worktrees/r_0mvu1vxry_4ggv"
+  }
+}

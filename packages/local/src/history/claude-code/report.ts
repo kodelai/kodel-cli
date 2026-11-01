@@ -158,7 +158,7 @@ export async function agentLog(
           entries.push({
             ts,
             kind: event.role === "assistant" ? "text" : "you",
-            text: event.text_preview,
+            text: event.text_preview ?? "",
           });
         } else if (event.kind === "tool_call") {
           const entry: AgentLogEntry = {

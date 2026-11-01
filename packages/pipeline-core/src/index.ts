@@ -4,6 +4,7 @@
  */
 export * from "./agent-history";
 export * from "./canonical";
+export * from "./changes";
 export * from "./checks";
 export * from "./docs";
 export * from "./errors";
@@ -16,6 +17,7 @@ export * from "./next-step";
 export * from "./pipeline";
 export * from "./pipeline-diff";
 export * from "./pipeline-stats";
+export * from "./price-table";
 export * from "./redact";
 export * from "./registry";
 export * from "./render";
@@ -29,4 +31,7 @@ export * from "./slug";
 export * from "./task-service";
 export * from "./task-size";
 export * from "./tasks";
+export * from "./usage";
+export * from "./usage-record";
+export * from "./usage-report";
 export * from "./version";

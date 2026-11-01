@@ -1,5 +1,11 @@
 import type { PipelineProposalView } from "@kodel-ai/local";
-import type { NodeDiff, PipelineSpec, RunReport } from "@kodel-ai/pipeline-core";
+import type {
+  NodeDiff,
+  PipelineSpec,
+  RunReport,
+  TokenSummary,
+  UsageLine,
+} from "@kodel-ai/pipeline-core";
 
 const SHOWN_CHARS = 600;
 
@@ -118,6 +124,97 @@ export function formatProposal(
 }
 
 /** `45 s`, `2m 05s`, `1h 03m`: short enough for a table. */
+/**
+ * One line about the agent's log. The files are display data outside the seal: the line says `unverified`, and
+ * a failure is named by its reason, never as a file that was changed.
+ */
+export function agentLogLine(report: RunReport["agent_log"]): string {
+  if ("not_collected" in report) return `agent log: not_collected (${report.reason})`;
+  if (report.sessions === 0) {
+    return report.failed.length > 0
+      ? `agent log: not_collected (${report.failed.join(", ")})`
+      : "agent log: nothing copied yet";
+  }
+  const parts = [
+    `${report.sessions} session(s)`,
+    `${report.entries} entries`,
+    `${Math.ceil(report.bytes / 1024)} KB`,
+    `mode ${report.mode}`,
+    `copied ${report.passes.step} time(s) at the end of a step and ${report.passes.tick} on the timer`,
+  ];
+  if (report.cut > 0) parts.push(`${report.cut} event(s) left out for want of room`);
+  if (report.final_pass === false) parts.push("ended in the middle of a step");
+  if (report.failed.length > 0) parts.push(`not copied: ${report.failed.join(", ")}`);
+  return `agent log: ${parts.join(", ")} (unverified)`;
+}
+
+/** What a change of the pipeline did to the run, one entry per step it stood at: `restart impl, recheck b`. */
+export function formatEffects(
+  effects: { kind: string; node: string }[],
+  plain: (text: string) => string,
+): string {
+  if (effects.length === 0) return "nothing";
+  return effects.map((e) => `${plain(e.kind)} ${plain(e.node)}`).join(", ");
+}
+
+/** A known cost that is not zero never reads as `$0.0000`: below a hundredth of a cent it says so. */
+const dollars = (usd: number): string =>
+  usd > 0 && usd < 0.0001 ? "< $0.0001" : `$${usd.toFixed(usd < 1 ? 4 : 2)}`;
+
+const money = (usd: number | null, partial: boolean): string =>
+  usd === null ? "cost unknown" : `${partial ? "at least " : ""}${dollars(usd)}`;
+
+const tokenText = (t: TokenSummary): string =>
+  `${t.input} in, ${t.output} out, cache ${t.cache_read} read / ${t.cache_write} written (${t.cache_write_1h} for 1 h), ${t.api_calls} call(s)`;
+
+function usageFlags(line: UsageLine): string[] {
+  const flags: string[] = [];
+  if (line.cost.partial) flags.push("partial (a model without a price)");
+  if (line.cost.config) flags.push("priced from the config");
+  if (line.cost.long_context) flags.push("long context, cost may be low");
+  if (line.last_open) flags.push("last response counted as it stood");
+  if (line.incomplete) flags.push("incomplete");
+  if (line.subagent) flags.push("includes subagents");
+  if (line.dedupe_overflow) flags.push("repeats may be counted twice");
+  return flags;
+}
+
+/**
+ * The usage of the run as lines of text. Every cost is an estimate, said so, with the price table revisions; the
+ * total is a lower bound (use after the last pass is not recorded).
+ */
+export function usageLines(report: RunReport["usage"], plain: (text: string) => string): string[] {
+  if ("not_collected" in report) return [`usage: not_collected (${report.reason})`];
+  if ("cannot_read" in report) {
+    return [`usage: cannot read (written in format ${plain(report.format)}, upgrade kodel)`];
+  }
+  const total = report.total;
+  const flags = usageFlags(total);
+  const lines = [
+    `usage (estimate, price table ${report.revisions.map(plain).join(", ") || "none"}): ${money(total.cost.usd, total.cost.partial)}, ${tokenText(total.tokens)}`,
+    `  at least this much: use after the last step end is not recorded${report.complete ? "" : "; the log was not read to its end yet"}`,
+  ];
+  if (flags.length > 0) lines.push(`  ${flags.join("; ")}`);
+  for (const [model, usage] of Object.entries(total.models)) {
+    lines.push(
+      `  ${plain(model)}: ${money(usage.usd, usage.partial)}, ${usage.input} in, ${usage.output} out, ${usage.api_calls} call(s)`,
+    );
+  }
+  for (const attempt of report.attempts) {
+    const extra = usageFlags(attempt);
+    lines.push(
+      `  ${plain(attempt.node)} #${attempt.attempt}: ${money(attempt.cost.usd, attempt.cost.partial)}, ${tokenText(attempt.tokens)}${extra.length > 0 ? ` (${extra.join("; ")})` : ""}`,
+    );
+  }
+  if (report.unattributed !== undefined) {
+    lines.push(
+      `  outside every step (waiting for a person): ${money(report.unattributed.cost.usd, report.unattributed.cost.partial)}, ${tokenText(report.unattributed.tokens)}`,
+    );
+  }
+  if (report.failed.length > 0) lines.push(`  not recorded: ${report.failed.join(", ")}`);
+  return lines;
+}
+
 export function formatDuration(seconds: number): string {
   const whole = Math.round(seconds);
   if (whole < 60) return `${whole} s`;
@@ -154,8 +251,37 @@ export function formatReport(
   }
   lines.push(
     `total ${formatDuration(report.total_s)}: work ${formatDuration(report.work_s)}, ` +
-      `waiting for a person ${formatDuration(report.waiting_s)}`,
+      `waiting for a person ${formatDuration(report.waiting_s)}` +
+      (report.forks.length > 0 ? `, busy wall clock ${formatDuration(report.busy_wall_s)}` : ""),
   );
+  if (report.failed_branches) {
+    lines.push(
+      report.status === "completed"
+        ? "completed with failed branches: a join was entered after branches of a fork had failed"
+        : "branches of a fork failed before their join was entered",
+    );
+  }
+  for (const fork of report.forks) {
+    const path = report.critical_path.find((p) => p.fork === fork.fork);
+    const chain = path?.attempts.map((a) => `${plain(a.node)}#${a.attempt}`).join(" > ") ?? "";
+    lines.push(
+      `fork ${plain(fork.fork)} at ${plain(fork.from)} (${fork.branches.map(plain).join(", ")}) -> ${plain(fork.join)}` +
+        (fork.failed.length > 0 ? `; failed: ${fork.failed.map(plain).join(", ")}` : "") +
+        (fork.unfinished.length > 0
+          ? `; still going: ${fork.unfinished.map(plain).join(", ")}`
+          : ""),
+    );
+    if (path) {
+      lines.push(
+        `  critical path: branch ${plain(path.branch)} ${formatDuration(path.seconds)}${chain ? ` (${chain})` : ""}`,
+      );
+    }
+    for (const overlap of fork.overlaps) {
+      lines.push(
+        `  ${plain(overlap.branches[0])} and ${plain(overlap.branches[1])} ran together for ${formatDuration(overlap.seconds)}`,
+      );
+    }
+  }
   lines.push(
     `redone: ${report.extra_attempts} extra attempt(s); ${report.restarts} restart(s), ` +
       `${report.pauses} pause(s), ${report.feedback} note(s) from the agent, ` +
@@ -190,7 +316,7 @@ export function formatReport(
       );
       const how = change.source === "proposal" ? "the agent's proposal" : "a change in the file";
       lines.push(
-        `  ${when}  ${how}  ${steps.join(", ") || "no step differs"}  then: ${plain(change.effect)}` +
+        `  ${when}  ${how}  ${steps.join(", ") || "no step differs"}  then: ${formatEffects(change.effects, plain)}` +
           (change.by === "agent" ? "  (accepted by the agent on the person's instruction)" : "") +
           (change.reason ? `  (${plain(change.reason)})` : ""),
       );
@@ -260,6 +386,8 @@ export function formatReport(
     "served" in report.prompts
       ? `prompts: ${report.prompts.served} served`
       : "prompts: not_collected",
+    agentLogLine(report.agent_log),
+    ...usageLines(report.usage, plain),
   );
   const failures = report.nodes.flatMap((node) =>
     node.attempts

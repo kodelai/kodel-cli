@@ -1,0 +1,141 @@
+{
+  "v": 2,
+  "runId": "r_0mvu1w2tp_ssyf",
+  "task": "add a greeting function and its test",
+  "specHash": "9748a8298b465a49",
+  "status": "completed",
+  "startedAt": 1793309024134,
+  "nodes": {
+    "impl": {
+      "slug": "impl",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 1
+    },
+    "verify": {
+      "slug": "verify",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 2,
+      "fork": {
+        "id": "f1",
+        "branch": "verify"
+      }
+    },
+    "test": {
+      "slug": "test",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 2,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 5,
+      "fork": {
+        "id": "f1",
+        "branch": "test"
+      }
+    },
+    "fix": {
+      "slug": "fix",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 2,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 6,
+      "lastFailures": []
+    }
+  },
+  "active": [],
+  "trail": [
+    "impl",
+    "verify",
+    "test",
+    "fix",
+    "test",
+    "fix"
+  ],
+  "pauses": [],
+  "nextVisitId": 7,
+  "seq": 30,
+  "slug": "greeting-with-fork",
+  "workdir": "/kodel-fixture/workdir/r_0mvu1w2tp_ssyf",
+  "pipelineFile": ".kodel/pipelines/fork.yaml",
+  "history": {
+    "changes": {
+      "enabled": true,
+      "exclude": [],
+      "max_kb": 512
+    },
+    "output": {
+      "enabled": true,
+      "max_kb": 64
+    },
+    "prompts": {
+      "enabled": true
+    },
+    "executor": {
+      "enabled": true
+    },
+    "tool_log": {
+      "enabled": true
+    },
+    "agent_log": {
+      "enabled": false,
+      "mode": "full",
+      "preview_chars": {
+        "user": 4000,
+        "agent": 4000,
+        "tool_input": 4000,
+        "tool_result": 8000
+      },
+      "max_kb": 20480,
+      "interval_s": 10
+    }
+  },
+  "engineVersion": "0.1.0",
+  "served": {
+    "impl:1": [
+      "461c59ad3247ee0f"
+    ],
+    "fix:1": [
+      "ba91e12610d3b7fe"
+    ],
+    "fix:2": [
+      "35e1d7ecd20c2ae1"
+    ]
+  },
+  "servedEvents": 3,
+  "forks": {
+    "f1": {
+      "id": "f1",
+      "from": "impl",
+      "label": "passed",
+      "join": "fix",
+      "branches": [
+        "verify",
+        "test"
+      ],
+      "arrived": {
+        "verify": {
+          "node": "verify",
+          "label": "passed",
+          "seq": 14
+        },
+        "test": {
+          "node": "test",
+          "label": "passed",
+          "seq": 23
+        }
+      },
+      "joined": 2
+    }
+  },
+  "finishedAt": 1793309026517
+}

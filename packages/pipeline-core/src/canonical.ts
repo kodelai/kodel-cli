@@ -49,11 +49,20 @@ const workOf = (node: NodeSpec) => ({
   on_fail: node.on_fail,
 });
 
+const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
 const routingOf = (spec: PipelineSpec, node: NodeSpec) => ({
   edges: spec.edges
     .filter((e) => e.from === node.slug)
     .map((e) => ({ when: e.when, to: e.to }))
-    .sort((a, b) => (a.when + a.to < b.when + b.to ? -1 : 1)),
+    // By label, then by target: the edges of a fork share a label, and their order must not depend
+    // on the order they were written in. The sort used to be on label and target run together, so
+    // a node with two labels one of which starts the other ("pass", "passed") may have its edges
+    // in another order than before format 2, and its hashes differ with it: nothing stored in
+    // format 2 is compared with a hash taken before.
+    .sort((a, b) => compare(a.when, b.when) || compare(a.to, b.to)),
+  // Only a join carries the field: no other node's form gains a key.
+  ...(node.join === undefined ? {} : { join: node.join }),
   max_attempts: node.max_attempts,
   max_consecutive_failures: node.max_consecutive_failures,
 });
@@ -85,6 +94,10 @@ export function canonicalPipeline(spec: PipelineSpec): string {
  * changes, a reader for the old format can be put here and a rule that tightened for new files does
  * not make an old run unreadable. An unknown `version` is said as such ("written in format X"), not
  * as a modified file.
+ *
+ * The fork and join rules (`validateParallel`) run here too: every snapshot of run-state format 2
+ * was written under them. A later tightening of those rules must be kept out of this path (an
+ * exemption in the snapshot registry, as for removed fields), or it would make a kept run unreadable.
  */
 export function parseSnapshot(source: string): PipelineSpec {
   return parsePipeline(source, { registry: snapshotRegistry() });

@@ -10,6 +10,13 @@ import { plain } from "./plain";
 
 export const SHOWN_FILES = 10;
 
+/**
+ * Said under a gate's list of changes when other branches of a fork were active since the step was
+ * reached (the host's `note`): the tree is one, so whose write is whose cannot be told (T-40).
+ */
+export const SHARED_TREE_TEXT =
+  "Other branches were running while this step waited: some of these files may be theirs; the changes cannot be told apart in one working tree.";
+
 /** A change of the run's pipeline that waits, as the person reads it: where it came from, then what differs. */
 export async function describePendingChange(
   run: { currentSpec(): Promise<PipelineSpec> },
@@ -36,10 +43,18 @@ export async function describePendingChange(
 export function gateChangesText(found: ChangeReport): string | undefined {
   if (found.kind === "changes") {
     const files = Object.keys(found.files);
-    if (files.length === 0) return undefined;
+    // With no file changed yet the note still stands: other branches may write while the person
+    // reads. The agent's answer (`changes_note`) follows the same rule.
+    const shared = found.note === undefined ? [] : [SHARED_TREE_TEXT];
+    if (files.length === 0) return shared[0];
     const shown = files.slice(0, SHOWN_FILES).map((f) => `  ${plain(f)}`);
     const more = files.length > SHOWN_FILES ? [`  and ${files.length - SHOWN_FILES} more`] : [];
-    return `${files.length} file(s) changed since the run stopped here:\n${[...shown, ...more].join("\n")}`;
+    return [
+      `${files.length} file(s) changed since the run stopped here:`,
+      ...shown,
+      ...more,
+      ...shared,
+    ].join("\n");
   }
   if (found.kind === "unavailable") {
     return `WARNING: the engine cannot tell what changed since the run stopped here: ${plain(found.reason)}\nThe agent may have gone on working after its checks passed.`;

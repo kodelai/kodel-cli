@@ -1,0 +1,94 @@
+{
+  "v": 1,
+  "runId": "r_0mvqeq4tq_fsjv",
+  "task": "add a --json flag to the status command",
+  "specHash": "ecb79800c8fdeaea",
+  "status": "completed",
+  "startedAt": 1793088717049,
+  "nodes": {
+    "a": {
+      "slug": "a",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 1
+    },
+    "b": {
+      "slug": "b",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 2
+    }
+  },
+  "active": [],
+  "trail": ["a", "b"],
+  "nextVisitId": 3,
+  "seq": 11,
+  "slug": "add-a-json-flag-to-the-status-command",
+  "pipelineFile": ".kodel/pipelines/two.yaml",
+  "history": {
+    "changes": {
+      "enabled": true,
+      "exclude": [],
+      "max_kb": 512
+    },
+    "output": {
+      "enabled": true,
+      "max_kb": 64
+    },
+    "prompts": {
+      "enabled": true
+    },
+    "executor": {
+      "enabled": true
+    },
+    "tool_log": {
+      "enabled": true
+    },
+    "agent_log": {
+      "enabled": true,
+      "mode": "full",
+      "preview_chars": {
+        "user": 4000,
+        "agent": 4000,
+        "tool_input": 4000,
+        "tool_result": 8000
+      },
+      "max_kb": 20480,
+      "interval_s": 0
+    }
+  },
+  "engineVersion": "unknown",
+  "served": {},
+  "agentLog": {
+    "nodes": ["a", "b"],
+    "sessions": {
+      "55555555-5555-4555-8555-555555555555": {
+        "last_seq": 22,
+        "length": 6835,
+        "tail_hash": "17bf5f54cc5030cbbb96e706faeb9ee816a3a8e88c7b7e0d9fb17c5322ea4602",
+        "last_key": "bf0b61b05afc5c73af01af430b06556ce875c3a45051fd30748157729b96d4de",
+        "entries": 22
+      },
+      "agent-abc123": {
+        "last_seq": 2,
+        "length": 473,
+        "tail_hash": "d0e20de560c39c1d31cae7892cc30a751f2f203062e8694528045596175aa22e",
+        "last_key": "ee68c1bc2fba0d1f167ca7e743f684100f5d42342e2b579d6ea845ec902f04ab",
+        "entries": 2
+      }
+    },
+    "ticks": 0,
+    "steps": 3,
+    "bytes": 7308,
+    "cut": 0,
+    "failed": [],
+    "endedInStep": []
+  },
+  "finishedAt": 1793088717156
+}

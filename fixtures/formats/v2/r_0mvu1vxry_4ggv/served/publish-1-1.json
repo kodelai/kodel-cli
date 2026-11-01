@@ -1,0 +1,14 @@
+{
+  "v": 1,
+  "node": "publish",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "ef916f6a4e5e06eb7a1f13b3bc919654848ffae8183cb90bd04c8d5333d606c8",
+  "answer": {
+    "slug": "publish",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "The person approved the change. Publish it, from the run's worktree.\n1. Run `git status` and look at what changed. Commit everything the run changed: the code, the\n   plan docs/plans/add_a_json_flag_to_kodel_status_so_that_scripts_can_read_the.md, and the pipeline files in `.kodel/pipelines/` and `AGENTS.md`\n   if they changed. A file that does not belong to the task (a stray file, local settings, a\n   secret) is not committed: name it in your final message.\n2. Commit with `git commit -s`. The message is in English: a short imperative subject and a body\n   that says what changed and why, and ends with the attribution lines your instructions give.\n3. Push the branch of the run with `git push -u origin HEAD`. Never push to main.\n4. Open a draft pull request into main with `gh pr create --draft --base main`. Title and\n   description are in English: what changed, how it was tested, what is left out. End the\n   description with the attribution lines your instructions give. If a pull request for this\n   branch already exists (`gh pr view`), do not open another: the push above updated it.\n5. In your final message to the person give the link to the pull request and, as commands to\n   copy, how to remove this worktree and its branch once the pull request is merged or closed:\n   `git worktree remove <the absolute path of the worktree>` and `git branch -D <the branch>`,\n   to run from the main checkout of the repository, with the real path and branch. Do not run\n   them yourself.\n",
+    "workdir": "[REDACTED:high-entropy].kodel/worktrees/r_0mvu1vxry_4ggv"
+  }
+}

@@ -1,14 +1,32 @@
 import { describe, expect, test } from "bun:test";
 import {
   type AttemptReport,
+  addDelta,
+  buildDelta,
   type JournalRecord,
   type NodeReport,
+  newTotals,
+  newUsageState,
   type RunReport,
   type RunState,
   spread,
   summarizePipeline,
   summarizeRun,
+  type UsageEvent,
 } from "../src";
+
+/** The parts of a run report that these tests have nothing to say about. */
+const NO_EXTRAS: Pick<
+  RunReport,
+  "busy_wall_s" | "forks" | "critical_path" | "failed_branches" | "agent_log" | "usage"
+> = {
+  busy_wall_s: 0,
+  forks: [],
+  critical_path: [],
+  failed_branches: false,
+  agent_log: { not_collected: true, reason: "not_captured" },
+  usage: { not_collected: true, reason: "not_captured" },
+};
 
 const DEF_A = { work: "w1", checks: "c1", routing: "r1" };
 const DEF_B = { work: "w2", checks: "c1", routing: "r1" };
@@ -46,6 +64,7 @@ function run(id: string, at: number, nodes: NodeReport[], status = "completed") 
     agent_decisions: [],
     checks: [],
     prompts: { not_collected: true },
+    ...NO_EXTRAS,
   };
   return { runId: id, at, report };
 }
@@ -144,11 +163,14 @@ describe("findings, decisions and usage", () => {
       ],
       { scope: "all" },
     );
+    // the four rows of the report that the host did not count are not lost from the breakdown
     expect(s.nodes[0]?.findings).toEqual({
       attempts: 2,
       rows: 9,
-      bySeverity: { critical: 2, minor: 3 },
+      bySeverity: { critical: 2, minor: 3, unspecified: 4 },
     });
+    const parts = Object.values(s.nodes[0]?.findings.bySeverity ?? {}).reduce((a, b) => a + b, 0);
+    expect(parts).toBe(9);
   });
 
   test("at a gate: the decisions, and how many rejections said why", () => {
@@ -182,6 +204,20 @@ describe("findings, decisions and usage", () => {
     });
   });
 
+  test("an attempt whose model has no price is counted in tokens, but not in dollars", () => {
+    const priced = { input: 10, output: 20, cache_read: 0, cache_write: 0, calls: 1, usd: 0.5 };
+    const unpriced = { ...priced, usd: null };
+    const s = summarizePipeline(
+      [
+        run("a", 1, [
+          node("impl", [attempt(1, { usage: priced }), attempt(2, { usage: unpriced })]),
+        ]),
+      ],
+      { scope: "all" },
+    );
+    expect(s.nodes[0]?.usage).toMatchObject({ attempts: 2, priced: 1, usd: 0.5, input: 20 });
+  });
+
   test("usage is summed over the attempts that recorded it", () => {
     const usage = { input: 10, output: 20, cache_read: 30, cache_write: 40, calls: 2, usd: 0.5 };
     const s = summarizePipeline(
@@ -190,6 +226,7 @@ describe("findings, decisions and usage", () => {
     );
     expect(s.nodes[0]?.usage).toEqual({
       attempts: 1,
+      priced: 1,
       usd: 0.5,
       input: 10,
       output: 20,
@@ -329,8 +366,37 @@ describe("the definitions of a step", () => {
 });
 
 describe("summarizeRun reads usage and a person's decision", () => {
-  const state = {
+  // What the agent used: as the engine keeps it, for the attempt 1 of the step "work", with no price.
+  const usage = newUsageState();
+  const totals = newTotals();
+  const used = (over: Partial<UsageEvent>): UsageEvent => ({
     v: 1,
+    agent: "claude-code",
+    agent_version: "2.1.306",
+    session_id: "s",
+    seq: 1,
+    ts: "2026-10-21T10:00:00.000Z",
+    kind: "usage",
+    model: "claude-sonnet-5-5",
+    input: 1_000,
+    output: 100,
+    cache_read: 30,
+    cache_write: 4,
+    reasoning: 0,
+    semantics: "additive",
+    message_id: "m1",
+    ...over,
+  });
+  addDelta(
+    totals,
+    buildDelta([used({}), used({ message_id: "m2", input: 500 })], {
+      table: { format: 1, revision: "2026-10-01", models: {} },
+    }),
+  );
+  usage.attempts["work:1"] = totals;
+  usage.revisions.push("2026-10-01");
+  const state = {
+    v: 2,
     runId: "r1",
     task: "t",
     specHash: "h",
@@ -342,9 +408,10 @@ describe("summarizeRun reads usage and a person's decision", () => {
     trail: [],
     nextVisitId: 1,
     seq: 1,
+    usage,
   } as unknown as RunState;
   const at = (ts: number, event: string, rest: Record<string, unknown> = {}): JournalRecord => ({
-    v: 1,
+    v: 2,
     seq: ts,
     ts,
     event,
@@ -356,28 +423,6 @@ describe("summarizeRun reads usage and a person's decision", () => {
     at(5000, "gate_decided", { node: "approve", decision: "rejected", reason: "fix it" }),
     at(5000, "node_finished", { node: "approve", attempt: 1, outcome: "rejected" }),
     at(6000, "node_entered", { node: "work", attempt: 1 }),
-    at(7000, "usage_recorded", {
-      node: "work",
-      attempt: 1,
-      delta: {
-        models: {
-          a: {
-            input: 1,
-            output: 2,
-            cache_read: 3,
-            cache_write: 4,
-            api_calls: 5,
-            computed_usd: 0.25,
-          },
-          b: { input: 10, output: 20, reported_usd: 0.5, computed_usd: 0 },
-        },
-      },
-    }),
-    at(8000, "usage_recorded", {
-      node: "work",
-      attempt: 1,
-      delta: { models: { a: { input: 1, output: 1, computed_usd: 0.25 } } },
-    }),
   ];
   const report = summarizeRun(state, journal);
 
@@ -388,14 +433,26 @@ describe("summarizeRun reads usage and a person's decision", () => {
     });
   });
 
-  test("usage records of an attempt add up over its models and its records", () => {
+  test("an attempt has the tokens the usage report gives it, and no price when its model has none", () => {
     expect(report.nodes.find((n) => n.node === "work")?.attempts[0]?.usage).toEqual({
-      input: 12,
-      output: 23,
-      cache_read: 3,
-      cache_write: 4,
-      calls: 5,
-      usd: 1,
+      input: 1_500,
+      output: 200,
+      cache_read: 60,
+      cache_write: 8,
+      calls: 2,
+      usd: null,
     });
+  });
+
+  test("it says the same as the report's own usage", () => {
+    const line = "attempts" in report.usage ? report.usage.attempts[0] : undefined;
+    expect(line).toMatchObject({ node: "work", attempt: 1 });
+    expect(line?.tokens.input).toBe(1_500);
+  });
+
+  test("a run that did not record usage leaves its attempts without it", () => {
+    const { usage: _usage, ...plain } = state;
+    const bare = summarizeRun(plain as RunState, journal);
+    expect(bare.nodes.every((n) => n.attempts.every((a) => a.usage === undefined))).toBe(true);
   });
 });

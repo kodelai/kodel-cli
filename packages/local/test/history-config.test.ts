@@ -4,7 +4,9 @@ import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  DEFAULT_AGENT_LOG,
   DEFAULT_HISTORY,
+  DEFAULT_USAGE,
   KodelError,
   PipelineService,
   parsePipeline,
@@ -38,7 +40,7 @@ beforeEach(async () => {
   await writeFile(join(dir, ".kodel", "pipelines", "plain.yaml"), PIPELINE);
 });
 afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
+  await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 const initGit = () => {
@@ -102,7 +104,11 @@ describe("starting a run needs git when history.changes is on", () => {
     await config();
     const host = newHost();
     const { run } = await start(host);
-    expect((await startedRecord(host, run.runId))?.history).toEqual(DEFAULT_HISTORY);
+    expect((await startedRecord(host, run.runId))?.history).toEqual({
+      ...DEFAULT_HISTORY,
+      agent_log: DEFAULT_AGENT_LOG,
+      usage: DEFAULT_USAGE,
+    });
   });
 
   test("history_start_in_a_subdirectory_of_a_repository_works", async () => {
@@ -211,6 +217,8 @@ describe("run_started.history", () => {
       prompts: { enabled: true },
       executor: { enabled: true },
       tool_log: { enabled: false },
+      agent_log: DEFAULT_AGENT_LOG,
+      usage: DEFAULT_USAGE,
     });
   });
 

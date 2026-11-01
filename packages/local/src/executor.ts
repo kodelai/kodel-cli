@@ -32,6 +32,8 @@ export const UNKNOWN_BUILD: BuildInfo = { version: "unknown", commit: "unknown" 
 /** How much of the end of a file is read: the newest lines of a log or of the hook index are there. */
 const TAIL_BYTES = 512 * 1024;
 const INDEX_TAIL_BYTES = 64 * 1024;
+/** How far back in the hook index a session of this project is looked for. */
+const INDEX_SCAN_MAX_BYTES = 1024 * 1024;
 /** The environment variable Claude Code sets in the processes it starts. */
 export const SESSION_ENV = "CLAUDE_CODE_SESSION_ID";
 /** What a session id looks like; anything else is never put into a path. */
@@ -56,8 +58,11 @@ export function engineRecord(build: BuildInfo, surface: ServedSurface | undefine
   };
 }
 
-/** The last lines of a file (the first of them may be cut), or nothing when it cannot be read. */
-async function tailLines(path: string, bytes: number): Promise<string[]> {
+/**
+ * The last lines of a file (the first of them may be cut), or nothing when it cannot be read; `whole`
+ * says the lines are all of the file.
+ */
+async function tailOf(path: string, bytes: number): Promise<{ lines: string[]; whole: boolean }> {
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     handle = await open(path, "r");
@@ -67,12 +72,16 @@ async function tailLines(path: string, bytes: number): Promise<string[]> {
     await handle.read(buffer, 0, buffer.length, start);
     const lines = buffer.toString("utf8").split("\n");
     if (start > 0) lines.shift();
-    return lines;
+    return { lines, whole: start === 0 };
   } catch {
-    return [];
+    return { lines: [], whole: true };
   } finally {
     await handle?.close().catch(() => undefined);
   }
+}
+
+async function tailLines(path: string, bytes: number): Promise<string[]> {
+  return (await tailOf(path, bytes)).lines;
 }
 
 /** What was read of a log is kept while the file stays as it was: the host asks at every call. */
@@ -115,31 +124,39 @@ interface IndexLine {
   cwd: string;
 }
 
-/** The newest session the hooks registered for a directory of the project, if any. */
+/**
+ * The newest session the hooks registered for a directory of the project, if any. The end of the
+ * index is read first and, when no line there fits, further back (up to `INDEX_SCAN_MAX_BYTES`):
+ * with clones sharing one index, the lines of another checkout can fill the end of it.
+ */
 async function registeredSession(
-  root: string,
+  indexPath: string,
   dirs: readonly string[],
 ): Promise<IndexLine | undefined> {
-  const lines = await tailLines(join(root, SESSIONS_INDEX), INDEX_TAIL_BYTES);
   const real = await Promise.all(dirs.map((dir) => realOrSelf(dir)));
-  // Newest first: the index only grows, so the first line that fits is the answer.
-  for (let i = lines.length - 1; i >= 0; i--) {
-    let record: Partial<IndexLine> | null;
-    try {
-      record = JSON.parse(lines[i] ?? "") as Partial<IndexLine> | null;
-    } catch {
-      continue;
+  for (let bytes = INDEX_TAIL_BYTES; ; bytes *= 4) {
+    const { lines, whole } = await tailOf(indexPath, bytes);
+    // Newest first: the index only grows, so the first line that fits is the answer.
+    for (let i = lines.length - 1; i >= 0; i--) {
+      let record: Partial<IndexLine> | null;
+      try {
+        record = JSON.parse(lines[i] ?? "") as Partial<IndexLine> | null;
+      } catch {
+        continue;
+      }
+      if (typeof record?.session_id !== "string" || typeof record.cwd !== "string") continue;
+      const cwd = await realOrSelf(record.cwd);
+      if (real.some((dir) => isInside(dir, cwd))) return record as IndexLine;
     }
-    if (typeof record?.session_id !== "string" || typeof record.cwd !== "string") continue;
-    const cwd = await realOrSelf(record.cwd);
-    if (real.some((dir) => isInside(dir, cwd))) return record as IndexLine;
+    if (whole || bytes >= INDEX_SCAN_MAX_BYTES) return undefined;
   }
-  return undefined;
 }
 
 export interface ExecutorContext {
-  /** The project root, where the hook index is. */
+  /** The project root, where the hook index is (unless `indexPath` says otherwise). */
   root: string;
+  /** The hook index, when it is not `<root>/.kodel/sessions.jsonl` (`storage: home`). */
+  indexPath?: string;
   /**
    * The directories the host itself chose for the run (its working directory, the project root); a
    * session of the agent is looked for there. A directory the agent named is not one of them.
@@ -158,7 +175,10 @@ async function observe(caller: Caller | undefined, context: ExecutorContext) {
   // session of the project, so with several open it can only say which one started last.
   let sessionId = cleanExecutorText(env[SESSION_ENV]);
   let transcript: string | undefined;
-  const hooked = await registeredSession(context.root, context.dirs);
+  const hooked = await registeredSession(
+    context.indexPath ?? join(context.root, SESSIONS_INDEX),
+    context.dirs,
+  );
   if (sessionId !== undefined) {
     record.session = sourced(sessionId, "observed-env");
     if (hooked?.session_id === sessionId) transcript = hooked.transcript_path;

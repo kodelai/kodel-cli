@@ -159,4 +159,319 @@ describe("the generated reference", () => {
     const odd = new Registry().registerCheck({ kind: "odd", shape: { x: z.date() } });
     expect(() => docTopics(odd)).toThrow("cannot describe");
   });
+
+  const topicText = (name: string) => topics.find((t) => t.topic === name)?.text ?? "";
+  const design = () => topicText("pipeline-design");
+  /** The text of one `##`/`###` section, up to the next heading of the same or a higher level. */
+  const section = (text: string, heading: string) => {
+    const start = text.indexOf(heading);
+    expect(start, heading).toBeGreaterThanOrEqual(0);
+    const level = /^#+/.exec(heading)?.[0].length ?? 2;
+    const rest = text.slice(start + heading.length);
+    const end = rest.search(new RegExp(`\\n#{1,${level}} `));
+    return end < 0 ? rest : rest.slice(0, end);
+  };
+  const exampleYaml = (name: string) => {
+    for (const [, body] of topicText("examples").matchAll(/```yaml\n([\s\S]*?)```/g)) {
+      const pipeline = parsePipeline(body ?? "");
+      if (pipeline.name === name) return pipeline;
+    }
+    throw new Error(`no example named ${name}`);
+  };
+
+  test("tr5j7_design_topic_asks_for_a_diagram_and_a_description_of_each_step", () => {
+    const handOver = section(design(), "## 5. Hand it over");
+    expect(handOver).toContain("(`kind: new`");
+    expect(handOver).toContain("->");
+    expect(handOver).toContain("One plain sentence for each step");
+  });
+
+  test("tr5j7_standard_and_strict_end_with_the_same_result_check", () => {
+    const ends = ["standard", "strict"].map((name) => {
+      const pipeline = exampleYaml(name);
+      const last = pipeline.nodes.find((n) => n.slug === "result-approval");
+      expect(last?.kind, name).toBe("human");
+      const edges = pipeline.edges.filter((e) => e.from === "result-approval");
+      expect(
+        edges.map((e) => [e.to, e.when]),
+        name,
+      ).toEqual([["impl", "rejected"]]);
+      // reached from the last automated step: `test` in standard, `review` in strict
+      const before = name === "standard" ? "test" : "review";
+      expect(
+        pipeline.edges.filter((e) => e.to === "result-approval").map((e) => [e.from, e.when]),
+        name,
+      ).toEqual([[before, "passed"]]);
+      return JSON.stringify(last);
+    });
+    expect(ends[0]).toBe(ends[1]);
+  });
+
+  test("tr5j7_profile_table_matches_the_examples", () => {
+    const text = design();
+    expect(text).toMatch(/\| `standard` \|[^\n]*result check by a person/);
+    expect(text).toMatch(/\| `strict` \|[^\n]*independent review/);
+    const strict = topicText("examples").split("## strict:")[1] ?? "";
+    const [heading = "", ...rest] = strict.split("\n");
+    expect(heading).toContain("independent review");
+    expect(heading).not.toContain("result gate");
+    const intro = rest.find((l) => l.startsWith("Like `standard`")) ?? "";
+    expect(intro).toContain("independent review");
+    expect(intro).toContain("is the same");
+    expect(intro).not.toContain("and a person's approval at the end.");
+  });
+
+  test("tr5j7_design_topic_offers_stricter_and_faster_cheaper_modes", () => {
+    const after = section(design(), "### After the proposal");
+    expect(after).toMatch(/\*\*Stricter\*\*/);
+    expect(after).toMatch(/\*\*Faster and cheaper\*\*/);
+    const flat = after.replace(/\s+/g, " ");
+    // stricter = more checks the project has, or more reviews by subagents; no limits of the file
+    for (const word of [
+      "(tests, linter, build)",
+      "reviews by subagents",
+      "independent review in a fresh context",
+      "security",
+      "business role",
+      "`lean`",
+      "`test` step",
+      "plan check",
+    ]) {
+      expect(flat, word).toContain(word);
+    }
+    expect(after).not.toContain("max_lines");
+    expect(after).not.toContain("max_attempts");
+    // the profiles named are real: they are in the table
+    for (const profile of ["lean", "strict"]) {
+      expect(design(), profile).toMatch(new RegExp(`\\| \`${profile}\` \\|`));
+    }
+  });
+
+  test("tr5j7_design_topic_invites_a_description_of_the_way_of_working", () => {
+    const after = section(design(), "### After the proposal");
+    expect(after).toContain("describe how they work in more detail");
+    expect(after).toContain("(docs:pipeline-quality)");
+    expect(after).toContain("propose again with");
+  });
+
+  test("tr5j7_hand_over_says_where_the_pipeline_is_and_where_to_accept_it", () => {
+    const handOver = section(design(), "## 5. Hand it over").replace(/\s+/g, " ");
+    expect(handOver).toContain("`kodel pipeline proposals show <name>`");
+    expect(handOver).toContain("`.kodel/pipelines/<name>.yaml` in the project root");
+    expect(handOver).toContain(
+      "on a line of its own, with the words that it is run in the project root",
+    );
+  });
+
+  test("tr5j7_modes_and_commands_belong_to_a_new_pipeline_and_come_after_the_proposal", () => {
+    const text = design();
+    const propose = text.indexOf("Call `pipeline_propose_change` without `run_id`");
+    expect(propose).toBeGreaterThanOrEqual(0);
+    for (const heading of ["### Once the person accepts it", "### After the proposal"]) {
+      expect(text.indexOf(heading), heading).toBeGreaterThan(propose);
+    }
+    expect(text.indexOf("### After the proposal")).toBeLessThan(
+      text.indexOf("## 6. Changing a pipeline that exists"),
+    );
+    expect(section(text, "## 5. Hand it over")).toContain("never a question before it");
+    expect(section(text, "## 1. Ask how much to ask")).toContain("ask nothing more");
+    // a change of an existing pipeline is not given the tutorial
+    expect(section(text, "## 6. Changing a pipeline that exists")).not.toContain(
+      "After the proposal",
+    );
+  });
+
+  /** What breaks the rule that the commands listed are the person's and are only the basic ones. */
+  const commandTextBreaks = (text: string) => {
+    const flat = text.replace(/\s+/g, " ");
+    return [
+      ...(flat.includes("The commands are the person's; the agent never runs them")
+        ? []
+        : ["the list is not introduced as the person's"]),
+      // decisions and watching are not listed: the agent gives the command when one is needed
+      ...text.split("\n").filter((l) => /`(gate|resume|ack|seal|wait|report)\b/.test(l)),
+      ...text.split("\n").filter((l) => /\byou\b/i.test(l)),
+    ];
+  };
+
+  test("tr5j7_design_topic_says_decisions_are_the_persons", () => {
+    const text = section(design(), "### Once the person accepts it");
+    expect(commandTextBreaks(text)).toEqual([]);
+    expect(text.replace(/\s+/g, " ")).toContain("the agent gives the command when one is needed");
+    // what a run does after it starts is said, so the person is not left guessing
+    const flat = text.replace(/\s+/g, " ");
+    // the flow is the proposed pipeline's own, and the engine, not the agent, runs the checks
+    expect(flat).toContain(
+      "for the steps of the pipeline that was proposed and not for another one",
+    );
+    expect(flat).toContain("the engine, not the agent, decides that a step is done");
+    expect(flat).toContain("`lean` has no planned stop");
+    expect(flat).toContain("Any run also pauses for the person when a step keeps failing");
+    expect(flat).toContain("`kodel status` lists the runs; `kodel status <run>` shows one run");
+    // refutation: a listed decision command, or a "you", fails the same check
+    for (const bad of [
+      "- `gate approve <run>` decides at a check",
+      "- run `resume <run>` yourself",
+      "- `wait <run>` stays until you decide",
+    ]) {
+      expect(commandTextBreaks(`${text}\n${bad}`), bad).not.toEqual([]);
+    }
+    expect(
+      commandTextBreaks(text.replace("The commands are the person's", "The commands are")),
+    ).not.toEqual([]);
+  });
+
+  test("tr5j7_quality_topic_has_the_reference_shape_the_report_and_the_checklist", () => {
+    const text = topicText("pipeline-quality");
+    const shape = section(text, "## The reference shape");
+    // seven steps, in order, with the person at two of them only
+    const steps = [...shape.matchAll(/^(\d)\. \*\*([^*]+)\*\*/gm)].map((m) => [m[1], m[2]]);
+    expect(steps.map(([n]) => n)).toEqual(["1", "2", "3", "4", "5", "6", "7"]);
+    expect(steps.map(([, name]) => name)).toEqual([
+      "Plan, read only.",
+      "Plan check by the person.",
+      "Implement.",
+      "Feedback loop.",
+      "Report.",
+      "Result check by the person.",
+      "Final steps.",
+    ]);
+    // the report goes from what matters to the details
+    const report = section(text, "## The report");
+    const order = ["First:", "Then:", "Last: details"].map((w) => report.indexOf(w));
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    // the person is not asked in the middle of a step
+    expect(section(text, "## Attention budget")).toContain("Never end a step by asking");
+    // the checklist is a list of questions
+    const checklist = section(text, "## A checklist for a pipeline that exists");
+    // an item may wrap onto a second line: count the items, and every one ends with a question mark
+    const items = checklist
+      .split(/^- /m)
+      .slice(1)
+      .map((i) => i.trim().replace(/\s+/g, " "));
+    expect(items.length).toBeGreaterThanOrEqual(8);
+    for (const item of items) expect(item.endsWith("?"), item).toBe(true);
+    // the claims fit the format: the fields it names exist in the reference, the model is not one of them
+    const reference = `${topicText("pipeline-spec")}\n${topicText("checks")}`;
+    for (const field of ["max_lines", "max_attempts", "max_consecutive_failures"]) {
+      expect(text, field).toContain(field);
+      expect(reference, field).toContain(field);
+    }
+    // the reference lists fields as table cells; the model is not one of them, and the check can fail
+    const hasField = (table: string, name: string) =>
+      new RegExp("\\|\\s*`" + name + "`\\s*\\|").test(table);
+    expect(hasField(reference, "max_attempts")).toBe(true);
+    expect(hasField(reference, "model")).toBe(false);
+    expect(hasField(`${reference}\n| \`model\` | string | no | x |`, "model")).toBe(true);
+    expect(text).toContain("not a field of the pipeline");
+    // it says what the engine has the agent write at a human node, and that the order is asked in `instructions`
+    expect(text.replace(/\s+/g, " ")).toContain(
+      "so the order of the report is asked for in `instructions`",
+    );
+    // the generated reference of the field carries the same
+    expect(topicText("pipeline-spec")).toContain("holds and in which order");
+    // a split of the work also takes the tests out of impl
+    expect(text.replace(/\s+/g, " ")).toContain("`mode: unchanged` on `test/**` in `impl`");
+    expect(text).not.toContain("this repository's own pipeline");
+    // the examples ask for the report the topic describes, in its order
+    for (const name of ["standard", "strict"]) {
+      const node = exampleYaml(name).nodes.find((n) => n.slug === "result-approval");
+      const instructions = String(node?.params.instructions);
+      expect(instructions, name).toContain("what was done");
+      expect(instructions, name).toContain("The message to the person is the report");
+      expect(instructions.indexOf("details last"), name).toBeGreaterThan(
+        instructions.indexOf("the checks that ran"),
+      );
+    }
+  });
+
+  test("tr5j7_quality_topic_offers_stronger_review_more_reviews_and_decomposition", () => {
+    const price = section(topicText("pipeline-quality"), "## Better quality, at a price");
+    for (const word of [
+      "stronger model",
+      "security review",
+      "business",
+      "Decompose",
+      "tests apart",
+    ]) {
+      expect(price, word).toContain(word);
+    }
+  });
+
+  test("tr5j7_the_design_topic_points_to_the_quality_topic", () => {
+    expect(design()).toContain("(docs:pipeline-quality)");
+    expect(topics.map((t) => t.topic)).toContain("pipeline-quality");
+  });
+
+  test("tr5j7_minimal_example_keeps_both_human_checks_and_has_no_command_steps", () => {
+    const minimal = exampleYaml("minimal");
+    expect(minimal.nodes.map((n) => [n.slug, n.kind])).toEqual([
+      ["plan", "agent"],
+      ["plan-approval", "human"],
+      ["impl", "agent"],
+      ["result-approval", "human"],
+    ]);
+    // the same result check as standard and strict
+    const result = (name: string) =>
+      JSON.stringify(exampleYaml(name).nodes.find((n) => n.slug === "result-approval")?.params);
+    expect(result("minimal")).toBe(result("standard"));
+    expect(
+      minimal.edges.filter((e) => e.from === "result-approval").map((e) => [e.to, e.when]),
+    ).toEqual([["impl", "rejected"]]);
+    // impl is reached only through the plan check (approved) or back from the result check (rejected)
+    expect(minimal.edges.filter((e) => e.to === "impl").map((e) => [e.from, e.when])).toEqual([
+      ["plan-approval", "approved"],
+      ["result-approval", "rejected"],
+    ]);
+    // every agent node has a check, as checks.md asks, and impl may not touch the plan
+    for (const node of minimal.nodes.filter((n) => n.kind === "agent")) {
+      expect(node.checks.length, node.slug).toBeGreaterThan(0);
+    }
+    // impl may not touch the plan: a diff check of mode unchanged on the plans
+    const impl = minimal.nodes.find((n) => n.slug === "impl");
+    expect(
+      impl?.checks.some(
+        (c) => JSON.stringify(c).includes("unchanged") && JSON.stringify(c).includes("docs/plans"),
+      ),
+    ).toBe(true);
+  });
+
+  test("tr5j7_an_empty_project_gets_the_minimal_form_and_the_two_modes_differ", () => {
+    const text = design().replace(/\s+/g, " ");
+    const rule = text.slice(text.indexOf("**A project that gives no commands**"));
+    expect(rule).toContain("do not choose `lean`");
+    expect(rule).toContain("the `minimal` example");
+    expect(rule).toContain("never invent one");
+    // the diff checks of the minimal form need a git work tree, and the example says so too
+    expect(rule).toContain("`git init` and a first commit of the project's files come first");
+    expect(topicText("examples").replace(/\s+/g, " ")).toContain(
+      "needs `git init` and a first commit of its files before the first run",
+    );
+    // on your own: no question, the assumption first; together: one question with a default
+    expect(rule).toMatch(/"on your own" mode ask nothing: say first in the message/);
+    expect(rule).toMatch(/"together" mode ask once what they are building/);
+    // the offers after the proposal fit the minimal form, and section 1 points to the rule
+    const after = section(design(), "### After the proposal").replace(/\s+/g, " ");
+    expect(after).toContain(
+      "Offer only what fits the pipeline you proposed. For the `minimal` form",
+    );
+    expect(after).toContain(
+      "nothing would be left to check, or the project has no commands to check with",
+    );
+    const first = section(design(), "## 1. Ask how much to ask").replace(/\s+/g, " ");
+    expect(first).toContain("which section 3 settles first");
+    expect(first).toContain("one question for a project that gives no commands");
+    // lean is kept for projects that have commands to verify with
+    expect(text).toMatch(/\| `lean` \|[^|]*\| [^|]*has commands to verify with/);
+  });
+
+  test("tr5j7_decomposition_names_the_way_back_to_the_tests_step", () => {
+    const quality = topicText("pipeline-quality").replace(/\s+/g, " ");
+    expect(quality).toContain("an `outcomes` label");
+    expect(quality).toContain(
+      "max_consecutive_failures` or `max_attempts`, whichever is reached first",
+    );
+    expect(quality).not.toContain("`max_consecutive_failures`, then `max_attempts`");
+  });
 });

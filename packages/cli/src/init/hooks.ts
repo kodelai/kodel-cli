@@ -50,7 +50,7 @@ function addHooks(
   }
 }
 
-/** Register `events` with `agent`; the command is the server command with `hook <agent>` in place of `mcp`. */
+/** Register `events` with `agent`; the command is `serverCommand` with `hook <agent>` after it. */
 export async function registerHooks(
   ctx: Context,
   agent: HookAgent,
