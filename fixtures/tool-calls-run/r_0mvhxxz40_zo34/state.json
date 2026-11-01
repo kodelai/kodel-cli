@@ -26,10 +26,7 @@
     }
   },
   "active": [],
-  "trail": [
-    "a",
-    "b"
-  ],
+  "trail": ["a", "b"],
   "pauses": [],
   "nextVisitId": 3,
   "seq": 10,
