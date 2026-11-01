@@ -579,29 +579,28 @@ describe("every stored format against the current engine", () => {
     expect(await storeFor().checkSeal(id)).toBe("unsealed");
   });
 
-  test("t41_v1_run_accepts_ack_seal_wait_cancel_changes", async () => {
+  test("t41_v1_run_accepts_ack_seal_wait_changes", async () => {
     await copyRuns("v1");
     const host = hostFor();
     const id = V1_RUNS[1] as string;
-    // none of these is the answer "format 1"
-    const outcomes = [
-      await refusal(host.seal(id)),
-      await refusal(host.open(id).then((run) => run?.acknowledge())),
-      await refusal(host.open(id).then((run) => run?.pendingChange())),
-      await refusal(host.open(id).then((run) => run?.history())),
-    ];
-    for (const outcome of outcomes) expect(outcome?.code).not.toBe("UNSUPPORTED_FORMAT");
+    // each one succeeds as it does for a run of the current format; none throws
+    expect(await host.seal(id)).toBeUndefined();
+    const run = await host.open(id);
+    if (!run) throw new Error("the fixture does not open");
+    await expect(run.acknowledge()).resolves.toBeDefined();
+    expect(await run.pendingChange()).toBeUndefined();
+    expect(await run.history()).toBeDefined();
   });
 
-  test("t41_cancel_of_v1_run_works_like_v2", async () => {
+  test("t41_cancel_of_a_finished_v1_run_says_it_is_over", async () => {
     // `run.cancel()` of the host API on a finished run of format 1 answers as for a finished run of
     // format 2: it is over; it is not "format 1", and nothing on disk changes
     await copyRuns("v1");
     const id = V1_RUNS[0] as string;
     const before = await hashTree(runsDir());
     const decision = await plainHost(root, tmp).open(id).cancel();
-    expect(decision.ok ? "ok" : decision.error.code).not.toBe("UNSUPPORTED_FORMAT");
-    expect(decision.ok ? "ok" : decision.error.code).not.toBe("UNSUPPORTED_FORMAT_FEATURE");
+    // a run that is over takes no cancel: it answers ok and writes nothing
+    expect(decision.ok).toBe(true);
     expect(await hashTree(runsDir())).toEqual(before);
   });
 

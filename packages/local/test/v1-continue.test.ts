@@ -422,4 +422,17 @@ describe("a run of format 1 goes on in format 1", () => {
     expect(spec?.firstDuplicateEdgeWins).toBe(true);
     expect((await reopened?.state())?.active.map((v) => v.node)).toEqual(["first"]);
   });
+
+  test("t41_snapshot_crash_before_the_naming_line_still_opens: the state names a version no line names yet", async () => {
+    // a crash between the write of the state and the append of `pipeline_accepted`
+    await copyFixture(PAUSED);
+    const path = join(runDir(PAUSED), "journal.jsonl");
+    const lines = (await readFile(path, "utf8")).trim().split("\n");
+    const state = await readJson(join(runDir(PAUSED), "state.json"));
+    const kept = lines.filter((l) => !l.includes(`"to":"${String(state.specHash)}"`));
+    expect(kept.length).toBe(lines.length - 1);
+    await writeFile(path, `${kept.join("\n")}\n`);
+    const run = await hostFor().open(PAUSED);
+    expect((await run?.currentSpec())?.nodes.length).toBeGreaterThan(0);
+  });
 });

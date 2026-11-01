@@ -559,6 +559,15 @@ export class FileStore {
     const format = await this.snapshotFormat(runId, hash);
     if (format === undefined) {
       if (options.introducing) return parseSnapshot(text);
+      // The state is protected and names the pipeline the run is on: a crash between the write of the
+      // state and the append of the line that names the version leaves exactly this. It is read by the
+      // rules of the state's own format, and the run opens.
+      const state = await this.readState(runId);
+      if (state && state.specHash === hash) {
+        return parseSnapshot(text, {
+          firstDuplicateEdgeWins: capabilitiesOf(state.v).firstDuplicateEdgeWins,
+        });
+      }
       throw new KodelError(
         "UNSUPPORTED_FORMAT",
         `the journal of run ${runId} does not say which format its pipeline ${hash} was written in, so it cannot be read`,

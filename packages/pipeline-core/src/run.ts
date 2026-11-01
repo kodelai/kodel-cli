@@ -18,7 +18,7 @@ import { canonicalNode, checkIdOf, type NodeForms, stableJson } from "./canonica
 import { type ChangesRef, changesField, isTreeId, MAX_CHANGES_ERROR } from "./changes";
 import { type ErrorCode, KodelError } from "./errors";
 import type { EngineRecord, ExecutorRecord } from "./executor";
-import { cannotHoldError } from "./formats/messages";
+import { cannotHoldError, withRunId } from "./formats/messages";
 import { capabilitiesOf, encodeJournalRecord, encodeRunState } from "./formats/registry";
 import type { FormatCapabilities } from "./formats/types";
 import type { HistoryConfig } from "./history-config";
@@ -2554,7 +2554,7 @@ export function decide(
       ),
     };
   } catch (error) {
-    if (error instanceof KodelError) return { ok: false, error };
+    if (error instanceof KodelError) return { ok: false, error: withRunId(error, draft.runId) };
     throw error;
   }
   return {

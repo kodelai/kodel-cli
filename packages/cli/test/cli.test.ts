@@ -1514,19 +1514,36 @@ describe("a store made from the golden runs of the stored formats", () => {
         expectNotFormatRefusal(result);
       }
       // the run is over: these say so, they do not say "format 1"
-      expectNotFormatRefusal(await cli("resume", id));
-      expectNotFormatRefusal(await cli("gate", "approve", id));
+      const resumed = await cli("resume", id);
+      expect(resumed.code).toBe(1);
+      expect(resumed.err).toContain("is not paused");
+      const gated = await cli("gate", "approve", id);
+      expect(gated.code).toBe(1);
+      expect(gated.err).toContain("is not waiting for a decision");
     }
   });
 
-  test("t41_v1_run_accepts_ack_seal_wait_cancel_changes", async () => {
+  test("t41_v1_run_accepts_ack_seal_wait_changes", async () => {
+    // there is no command that cancels a run (TASK-9JTV); each of these answers as it does for a run
+    // of the current format, with its own exit code and words
     const id = RUNS[0] as string;
-    expectNotFormatRefusal(await cli("ack", id));
-    expectNotFormatRefusal(await cli("seal", id));
-    expectNotFormatRefusal(await cliAs({ pollMs: 10 }, "wait", id, "--timeout", "1"));
-    expectNotFormatRefusal(await cli("pipeline", "changes", "show", id));
-    expectNotFormatRefusal(await cli("pipeline", "changes", "history", id));
-    expectNotFormatRefusal(await cli("pipeline", "changes", "apply", id));
+    const done = async (code: number, outPart: string, errPart: string, ...args: string[]) => {
+      const result = await cliAs({ pollMs: 10 }, ...args);
+      expect(result.code, args.join(" ")).toBe(code);
+      expect(result.out + result.err, args.join(" ")).toContain(outPart || errPart);
+      expectNotFormatRefusal(result);
+    };
+    await done(0, `${id}: accepted`, "", "ack", id);
+    await done(0, `${id}: sealed`, "", "seal", id);
+    await done(0, "no change of the pipeline waits", "", "pipeline", "changes", "show", id);
+    await done(0, "started with", "", "pipeline", "changes", "history", id);
+    await done(1, "", "its pipeline cannot change now", "pipeline", "changes", "apply", id);
+    await done(1, "", "is not paused", "resume", id);
+    await done(1, "", "is not waiting for a decision", "gate", "approve", id);
+    const waited = await cliAs({ pollMs: 10 }, "wait", id, "--timeout", "1");
+    expect(waited.code).toBe(0);
+    expect(waited.out + waited.err).not.toBe("");
+    expectNotFormatRefusal(waited);
   });
 
   test("t41_v2_fixtures_open_beside_v1_runs", async () => {

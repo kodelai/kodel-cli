@@ -50,7 +50,7 @@ run:
   `pipeline_start` for that same pair throws instead of starting a run.
 - An older `kodel wait` that watches a run that was upgraded is not told what happened.
 - An older process that writes back a state it kept in memory after the run was upgraded leaves a run
-  the new kodel refuses to read ("its state is older than its journal"); finish such a run with the
+  the new kodel refuses to read (it says the state is written in an older format than its journal records); finish such a run with the
   kodel that has it open, or upgrade first and close the older session.
 - The beta may not read a run after a newer kodel has written it: its shape has grown since.
 
