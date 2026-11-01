@@ -27,6 +27,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",
+    "@speed-highlight/core": "2.1.0",
     "commander": "^14.0.0"
   },
   "devDependencies": {

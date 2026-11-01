@@ -57,6 +57,7 @@ import {
   parsePipeline,
   parseSnapshot,
   type RedactRule,
+  type ResultReport,
   type RunEvent,
   type RunFacts,
   type RunReport,
@@ -99,6 +100,12 @@ import {
   readRunCommits,
   repoPrefix,
 } from "./git";
+import {
+  type AgentLogEntry,
+  type AgentReport,
+  agentLog,
+  lastAgentReport,
+} from "./history/claude-code/report";
 import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integrity";
 import { patchBetween } from "./patch";
 import { MAX_PATCH_KB, PATCH_READ_MARGIN } from "./patch-text";
@@ -1218,6 +1225,24 @@ export class LocalRun {
   }
 
   /**
+   * Every version of the pipeline the run has had, as it was kept, oldest name first. A version that
+   * cannot be read is left out: this is for looking at what was, not for running anything.
+   */
+  async keptVersions(): Promise<PipelineSpec[]> {
+    const specs: PipelineSpec[] = [];
+    for (const hash of await this.host.store.listSpecs(this.runId)) {
+      const text = await this.host.store.readSpec(this.runId, hash);
+      if (text === undefined) continue;
+      try {
+        specs.push(parseSnapshot(text));
+      } catch (error) {
+        if (!(error instanceof KodelError)) throw error;
+      }
+    }
+    return specs;
+  }
+
+  /**
    * The agent proposes another version of the pipeline. Nothing about the run changes: the proposal
    * is checked, kept apart, and journaled, and a person accepts it or not. What would be refused at
    * the person's command is refused here, so the agent hears it at once.
@@ -1838,6 +1863,47 @@ export class LocalRun {
         reason: scrubHome(describeError(error), this.host.options.storage),
       };
     }
+  }
+
+  /**
+   * The unified diff of one changed file, from where the run began to the files as they are now.
+   * Read-only; the secrets the rules know are taken out. The path must be one the change list named.
+   */
+  async diffOf(path: string): Promise<{ text: string; truncated: boolean } | undefined> {
+    const tree = (await this.host.store.readSnapshots(this.runId)).run;
+    if (tree === undefined) return undefined;
+    // Redacted before it is cut, so that no part of a secret is shown at the cut.
+    return (await this.snapshotter()).patchSince(tree, path, (text) =>
+      redactText(text, this.host.rules),
+    );
+  }
+
+  /**
+   * Where the agent's logs of this run are read: the sessions the engine copied the log of, when it did,
+   * else the sessions that began in the run's directory. What is read has the project's secrets taken out.
+   */
+  private async logOptions(state: RunState) {
+    return {
+      root: this.host.options.root,
+      workdir: await this.cwd(),
+      sessionIds: Object.keys(state.agentLog?.sessions ?? {}),
+      rules: this.host.rules,
+    };
+  }
+
+  /** What the agent last wrote in the run's sessions at or after `since`: the report it gives at a gate. */
+  async agentReport(since: number): Promise<AgentReport | undefined> {
+    return lastAgentReport({ ...(await this.logOptions(await this.state())), since });
+  }
+
+  /** What the agent said and which tools it called while the run went on, when its logs can be read. */
+  async agentLog(): Promise<AgentLogEntry[] | undefined> {
+    const state = await this.state();
+    return agentLog({
+      ...(await this.logOptions(state)),
+      from: state.startedAt,
+      to: state.finishedAt ?? this.host.clock(),
+    });
   }
 
   /**
@@ -2572,7 +2638,7 @@ export class LocalRun {
   /** Where the time went and what was redone, from the run's own state and journal. */
   async report(): Promise<RunReport> {
     const journal = await this.host.store.readJournal(this.runId);
-    const report = summarizeRun(await this.state(), journal);
+    const report = await this.withFindings(summarizeRun(await this.state(), journal));
     // A run that did not record changes has no patch to measure, whatever file may be lying there.
     const started = journal.find((r) => r.event === "run_started");
     const changesOff =
@@ -2585,6 +2651,31 @@ export class LocalRun {
     };
     const where = await this.locationForDisplay();
     return where ? { ...sized, workdir: where.path } : sized;
+  }
+
+  /** The findings of each attempt's reports counted by severity; the journal only knows how many rows. */
+  private async withFindings(report: RunReport): Promise<RunReport> {
+    const nodes = await Promise.all(
+      report.nodes.map(async (node) => ({
+        ...node,
+        attempts: await Promise.all(
+          node.attempts.map(async (attempt) => {
+            if (!attempt.reports?.length) return attempt;
+            const stored = await this.host.store
+              .readReport(this.runId, node.node, attempt.attempt)
+              .catch(() => undefined);
+            if (!stored) return attempt;
+            const findings: Record<string, number> = {};
+            for (const row of stored.rows) {
+              const severity = typeof row.severity === "string" ? row.severity : "other";
+              findings[severity] = (findings[severity] ?? 0) + 1;
+            }
+            return { ...attempt, findings };
+          }),
+        ),
+      })),
+    );
+    return { ...report, nodes };
   }
 
   /** Files changed since the run started, with the lines changed, or why that cannot be told. */
@@ -2811,6 +2902,11 @@ export class LocalRun {
     } catch {
       // nothing more to do about it
     }
+  }
+
+  /** What an attempt reported as results (a review's findings, a person's comments); read-only. */
+  resultsOf(node: string, attempt: number): Promise<ResultReport | undefined> {
+    return this.host.store.readReport(this.runId, node, attempt);
   }
 
   /**

@@ -5,7 +5,7 @@
 import type { JournalRecord, RunState } from "./run";
 import { runSlug } from "./slug";
 import type { TaskSize } from "./task-size";
-import { type UsageReport, usageReport } from "./usage-report";
+import { type UsageLine, type UsageReport, usageReport } from "./usage-report";
 
 export interface AttemptReport {
   attempt: number;
@@ -27,6 +27,37 @@ export interface AttemptReport {
   definition?: { work: string; checks: string; routing: string };
   /** Which parts of the node's definition differ from the attempt before this one. */
   definition_changed?: ("work" | "checks" | "routing")[];
+  /** What the agent used in this attempt, when the run recorded it (from `RunReport.usage`). */
+  usage?: AttemptUsage;
+  /** At a gate: what the person decided, and the words they gave with it. */
+  decision?: { outcome: string; reason?: string };
+  /**
+   * The findings of the attempt's reports, counted by severity. Added by a host that can read the
+   * reports; the journal only knows how many rows there were.
+   */
+  findings?: Record<string, number>;
+}
+
+/** The tokens and the estimated money of one attempt, summed over the models that did the work. */
+export interface AttemptUsage {
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_write: number;
+  calls: number;
+  /** Dollars over the calls that have a price; `null` when none has one. */
+  usd: number | null;
+}
+
+function attemptUsage(line: UsageLine): AttemptUsage {
+  return {
+    input: line.tokens.input,
+    output: line.tokens.output,
+    cache_read: line.tokens.cache_read,
+    cache_write: line.tokens.cache_write,
+    calls: line.tokens.api_calls,
+    usd: line.cost.usd,
+  };
 }
 
 /** A version of the pipeline a person accepted for the run. */
@@ -403,6 +434,17 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
         if (name) gates.add(name);
         break;
       case "gate_decided":
+        if (name) {
+          const found = nodes.get(name)?.attempts.at(-1);
+          if (found) {
+            found.decision = {
+              outcome: String(record.decision),
+              ...(typeof record.reason === "string" && record.reason.trim() !== ""
+                ? { reason: record.reason }
+                : {}),
+            };
+          }
+        }
         if (record.decided_by === "agent") {
           agentDecisions.push({
             at: record.ts,
@@ -545,6 +587,15 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
     report.seconds = Math.round(report.attempts.reduce((sum, a) => sum + a.seconds, 0) * 10) / 10;
   }
 
+  // What each attempt used comes from the usage report, so that the two never say different things.
+  const usage = usageReport(state, journal);
+  if ("attempts" in usage) {
+    for (const line of usage.attempts) {
+      const found = nodes.get(line.node)?.attempts.find((a) => a.attempt === line.attempt);
+      if (found) found.usage = attemptUsage(line);
+    }
+  }
+
   const all = [...nodes.values()];
   // An attempt still going runs until the last thing the journal knows of, as above.
   const withEnd = (span: Span): EndedSpan => ({ ...span, to: span.to ?? last });
@@ -601,7 +652,7 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
     // The state key is there from the start of a run that keeps prompts, so a run of zero serves says so.
     prompts: state.served === undefined ? { not_collected: true } : { served },
     agent_log: agentLogReport(state, lastAgentStep),
-    usage: usageReport(state, journal),
+    usage,
   };
 }
 

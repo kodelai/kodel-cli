@@ -946,6 +946,22 @@ describe("what the journal keeps, on the real adapters", () => {
     ]);
   });
 
+  test("the report of a run counts the findings of an attempt by severity", async () => {
+    const run = await start();
+    await run.completeStep("plan", 1);
+    await run.settle();
+    await run.reportResult("audit", 1, {
+      completeness: "complete",
+      rows: [
+        { severity: "minor", location: "a.ts:1", description: "nit" },
+        { severity: "minor", location: "a.ts:2", description: "another nit" },
+        { severity: "major", location: "b.ts:3", description: "worse" },
+      ],
+    });
+    const attempt = (await run.report()).nodes.find((n) => n.node === "audit")?.attempts[0];
+    expect(attempt?.findings).toEqual({ minor: 2, major: 1 });
+  });
+
   test("calls that were refused are journaled with what was tried and the code", async () => {
     const run = await start();
     await run.completeStep("plan", 9); // a attempt that is not the one it is on

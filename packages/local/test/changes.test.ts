@@ -480,6 +480,16 @@ describe("the agent's proposal to change the pipeline", () => {
     expect(pinned.hash).toBe(hashSource(V1));
   });
 
+  test("kept_versions_are_every_version_the_run_has_had", async () => {
+    const run = await startRun();
+    expect((await run.keptVersions()).map((s) => s.name)).toHaveLength(1);
+    await run.proposeChange({ yaml: proposal(), summary: "s" });
+    await run.acceptChange({ source: "proposal", text: proposal() });
+    const kept = await run.keptVersions();
+    expect(kept).toHaveLength(2);
+    expect(new Set(kept.map((s) => JSON.stringify(s))).size).toBe(2);
+  });
+
   test("a_note_says_which_version_and_step_it_was_about", async () => {
     const run = await startRun();
     await run.feedback({ category: "wrong_check", message: "the limit counts tests" });
