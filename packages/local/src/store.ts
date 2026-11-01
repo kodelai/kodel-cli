@@ -516,7 +516,6 @@ export class FileStore {
     await this.writeAtomic(join(dir, specFileName(hash)), source);
   }
 
-  /** A kept version of the pipeline. It is parsed and checked again by whoever uses it. */
   /**
    * The format a kept pipeline was written in: the `v` of the first journal line that names its hash
    * (`run_started` for the version the run began with, `pipeline_accepted` for one it moved to).
@@ -534,10 +533,14 @@ export class FileStore {
     // claims an older format than the state is believed only beside the mark of a real upgrade;
     // otherwise an edited `v` would switch an old reading rule on for a run that never had it.
     const state = await this.readState(runId);
-    if (state && found < state.v && !records.some((r) => r.event === "run_migrated")) {
+    if (
+      state &&
+      found < state.v &&
+      !records.some((r) => r.event === "run_migrated" && (r as { from?: unknown }).from === found)
+    ) {
       throw new KodelError(
         "UNSUPPORTED_FORMAT",
-        `the journal of run ${runId} says its pipeline ${hash} was written in run-state format ${found}, but the run is in format ${state.v} and was never upgraded, so the journal cannot be trusted and the pipeline cannot be read`,
+        `the journal of run ${runId} says its pipeline ${hash} was written in run-state format ${found}, but the run is in format ${state.v} and was never upgraded (or the upgrade stopped before its mark was written: 'kodel migrate ${runId}' in a terminal writes it), so the journal cannot be trusted and the pipeline cannot be read`,
       );
     }
     return found;
@@ -568,6 +571,7 @@ export class FileStore {
     });
   }
 
+  /** A kept version of the pipeline. It is parsed and checked again by whoever uses it. */
   async readSpec(runId: string, hash: string): Promise<string | undefined> {
     try {
       return await readFile(join(this.specsDir(runId), specFileName(hash)), "utf8");

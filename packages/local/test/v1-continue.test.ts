@@ -11,6 +11,7 @@ import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { dirname, join, join as pathJoin, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parsePipeline, parseSnapshot } from "@kodel-ai/pipeline-core";
 import { LocalPipelineHost } from "../src";
 import { FileStore } from "../src/store";
 
@@ -352,5 +353,54 @@ describe("a run of format 1 goes on in format 1", () => {
     expect(error?.code).toBe("UNSUPPORTED_FORMAT");
     expect(error?.message).toContain("journal records a newer format");
     expect(error?.message).not.toContain("modified");
+  });
+
+  test("t41_reading_changes_no_byte: open, state and report leave every file as it was", async () => {
+    await copyFixture(PAUSED);
+    const before = await snapshot(runDir(PAUSED));
+    const run = await hostFor().open(PAUSED);
+    await run?.state();
+    await run?.report();
+    await (await hostFor().open(PAUSED))?.report();
+    expect(await snapshot(runDir(PAUSED))).toEqual(before);
+  });
+
+  test("t41_v1_encode_redacts_journal: a secret handed in at a gate does not reach the v1 journal", async () => {
+    const token = `ghp_${"A1b2C3d4E5".repeat(4)}`;
+    await copyFixture(GATE);
+    const run = await hostFor().open(GATE);
+    await run?.decideHuman("approve", "rejected", `use ${token} to push`);
+    const journal = await readFile(join(runDir(GATE), "journal.jsonl"), "utf8");
+    expect(journal).not.toContain(token);
+    expect((await journalLines(GATE)).every((line) => line.v === 1)).toBe(true);
+  });
+
+  test("t41_d3_missing_spec_is_still_modified: a lost kept pipeline is not called unreadable", async () => {
+    await copyFixture(DUP_EDGE);
+    const dir = join(runDir(DUP_EDGE), "specs");
+    for (const name of await readdir(dir)) await rm(join(dir, name));
+    await expect(hostFor().open(DUP_EDGE)).rejects.toMatchObject({
+      code: "STATE_MODIFIED_EXTERNALLY",
+    });
+  });
+
+  test("t41_d1_new_text_duplicate_edge_is_an_error: only a snapshot of an old run is read the old way", async () => {
+    await copyFixture(DUP_EDGE);
+    const state = await readJson(join(runDir(DUP_EDGE), "state.json"));
+    const kept = await readFile(
+      join(runDir(DUP_EDGE), "specs", `${String(state.specHash)}.yaml`),
+      "utf8",
+    );
+    expect(() => parsePipeline(kept)).toThrow();
+    expect(parseSnapshot(kept, { firstDuplicateEdgeWins: true }).firstDuplicateEdgeWins).toBe(true);
+  });
+
+  test("t41_d1_migrate_keeps_snapshot_semantics: after the upgrade the kept pipeline still reads first-wins", async () => {
+    const run = await trustedGateRun();
+    const before = await run.currentSpec();
+    await run.migrate();
+    const after = await (await hostFor().open(GATE))?.currentSpec();
+    expect(after?.firstDuplicateEdgeWins).toBe(before.firstDuplicateEdgeWins);
+    expect(after?.nodes.map((n) => n.slug)).toEqual(before.nodes.map((n) => n.slug));
   });
 });

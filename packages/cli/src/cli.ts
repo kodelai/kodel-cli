@@ -1254,7 +1254,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           `no run this kodel can read: ${summaries.length === 1 ? "the one run is" : `all ${summaries.length} runs are`} ${
             formats.length > 0
               ? `in run-state format ${formats.join(", ")} (this kodel reads ${RECORD_VERSION}); report on them with the kodel that started them`
-              : "unreadable (see kodel status)"
+              : "unreadable or kept before pipelines were versioned (see kodel status)"
           }`,
         );
       }
