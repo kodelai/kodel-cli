@@ -416,6 +416,40 @@ describe("zkrh the account of tool calls in the run machine", () => {
     expect(apply(crowded, recorded({ session: "another" }))).toMatchObject({ noop: true });
   });
 
+  test("zkrh_journal_budget_approximate_and_bounded", () => {
+    // records of rows go on until the budget is passed; then rows never come back, however small a record is
+    let state: RunState = started();
+    const big = (n: number) =>
+      payload({
+        rows: Array.from({ length: 100 }, (_, i) =>
+          call({ id: `id-${String(n * 100 + i).padStart(12, "0")}`, in_bytes: 1 }),
+        ),
+        counts: { "write:1": { Bash: 100 } },
+      });
+    let cutAt = -1;
+    for (let n = 0; n < 200 && cutAt < 0; n++) {
+      const decision = apply(
+        state,
+        recorded({ calls: big(n), cursor: { last_seq: n + 1, last_key: HEX } }),
+      );
+      state = decision.state;
+      const out = decision.journal[0]?.["calls"] as ToolCallsPayload | undefined;
+      if (out?.rows_cut === true) cutAt = n;
+    }
+    expect(cutAt).toBeGreaterThan(0);
+    expect(state.toolCalls?.rowBytes).toBeLessThanOrEqual(TOOL_CALL_ROW_BYTES_BUDGET);
+    const later = apply(
+      state,
+      recorded({
+        calls: payload({ rows: [call({ id: "id-ffffffffffff" })] }),
+        cursor: { last_seq: 9_999, last_key: HEX },
+      }),
+    );
+    const out = later.journal[0]?.["calls"] as ToolCallsPayload;
+    expect(out.rows).toEqual([]);
+    expect(out.rows_cut).toBe(true);
+  });
+
   test("zkrh_state_holds_no_text_names_or_attempts", () => {
     const state = apply(started(), recorded()).state;
     const keys = Object.keys(state.toolCalls ?? {}).sort();

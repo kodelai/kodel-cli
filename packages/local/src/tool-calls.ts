@@ -30,6 +30,7 @@ import {
   MAX_COUNT_TOOLS,
   MAX_ROWS_PER_RECORD,
   MAX_TOOL_CALL_EVENTS,
+  MAX_TOOL_CALL_SESSIONS,
   MAX_TOOL_PREVIEW_CHARS,
   newReadStats,
   OTHER_TOOL,
@@ -71,7 +72,6 @@ import { outsideSpans, usageEventKey } from "./usage";
 /** A pass stops reading after this long and keeps what it has: a big log catches up over several passes. */
 export const TOOL_CALLS_BUDGET_MS = 5_000;
 
-/** Bounded like the memos of the usage count, so one busy run cannot make another forget. */
 /**
  * A call that began after the pass did, but not by much, is not recorded yet: the pass reads the logs to their end while a
  * worker goes on writing its own, and a row is never rewritten, so such a call is left for the next pass, which places it.
@@ -79,6 +79,7 @@ export const TOOL_CALLS_BUDGET_MS = 5_000;
  */
 const NEAR_FUTURE_MS = 60_000;
 
+/** Bounded like the memos of the usage count, so one busy run cannot make another forget. */
 const MAIN_MEMO_CAP = 32;
 const CHILD_MEMO_CAP = 48;
 const RUN_CAP = 8;
@@ -494,6 +495,15 @@ export class ToolCallsWriter {
       ? state.toolCalls.sessions[session]
       : undefined;
     const recorded = stored?.last_seq ?? 0;
+    // The run keeps a cursor for so many sessions (each subagent is one). A stream past that is skipped, said once as `cap`,
+    // and the pass goes on with the others: the machine would refuse its record, and a refusal ends a pass.
+    if (
+      stored === undefined &&
+      Object.keys(state.toolCalls.sessions).length >= MAX_TOOL_CALL_SESSIONS
+    ) {
+      await this.fail(run, ctx.result, "cap", session);
+      return "done";
+    }
 
     // A checkpoint is good only for the stream the state says we left: after another process wrote, or after the log itself
     // changed under us, the pass starts again from the run's beginning and skips what is recorded.
@@ -675,7 +685,8 @@ export class ToolCallsWriter {
               v: 1,
               rows: part.map((item) => item.row),
               counts,
-              ...(n === 0 && skipped > 0 ? { skipped } : {}),
+              // A held pass is read again from the start by the next one, which counts the same lines: they are said then.
+              ...(n === 0 && skipped > 0 && !held ? { skipped } : {}),
             },
             cursor,
           });

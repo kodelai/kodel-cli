@@ -80,9 +80,11 @@ The record of the agent's tool calls adds an optional `toolCalls` key to `state.
 format 2 alike (the codec of format 1 keeps them as it keeps `usage`). A run that was going when kodel was
 updated has no `tool_calls` in its frozen history, so it reads `not_captured` and goes on as before; a run
 started after the update records tool calls. A kodel from before the update refuses a project config that has
-`history.tool_calls` (the `history` section is strict) and a run that holds `toolCalls` or its events ("cannot
-read"); a run of format 1 never holds them in practice, since new runs start in format 2 and a run that was going has no
-`history.tool_calls`. Nothing here needs `kodel migrate`.
+`history.tool_calls` (the `history` section is strict). It reads and goes on with a run of format 2 that holds `toolCalls`
+and its events (the codec of format 2 keeps what it does not know): it ignores them and leaves the state key as it was, so
+the cursor lags and a newer kodel catches up later. A run of format 1 never holds them in practice, since new runs start in
+format 2 and a run that was going has no `history.tool_calls`; an older codec of format 1 would refuse them as "cannot
+read". Nothing here needs `kodel migrate`.
 
 ## When the formats change again
 

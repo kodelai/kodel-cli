@@ -276,7 +276,9 @@ export function toolCallsLines(
     );
   }
   if (report.skipped > 0)
-    lines.push(`  ${report.skipped} line(s) of the log were over the limit and not read`);
+    lines.push(
+      `  ${report.skipped} line(s) of the log could not be read (over the limit, or not JSON)`,
+    );
   if (report.unjoined > 0) lines.push(`  ${report.unjoined} result(s) have no call in the record`);
   if (!report.complete) lines.push("  the log was not read to its end yet");
   if (report.failed.length > 0) {

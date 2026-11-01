@@ -256,6 +256,27 @@ describe("the history section", () => {
     expect((await loadConfig(dir)).history.output).toEqual({ enabled: false, max_kb: 64 });
   });
 
+  test("zkrh_config_parses_and_defaults", async () => {
+    await write("history:\n  tool_calls: { preview_chars: 0 }\n");
+    expect((await loadConfig(dir)).history.tool_calls).toEqual({ enabled: true, preview_chars: 0 });
+    await write("history:\n  tool_calls: { enabled: false }\n");
+    expect((await loadConfig(dir)).history.tool_calls).toEqual({
+      enabled: false,
+      preview_chars: 200,
+    });
+  });
+
+  test("zkrh_preview_chars_validation", async () => {
+    for (const bad of ["-1", "2001", "1.5", "'many'"]) {
+      expect(
+        (await failure(`history:\n  tool_calls: { preview_chars: ${bad} }\n`)).message,
+      ).toContain("preview_chars");
+    }
+    expect((await failure("history:\n  tool_calls: { previews: 3 }\n")).message).toContain(
+      "previews",
+    );
+  });
+
   test("history_an_unknown_key_is_refused_by_name", async () => {
     expect((await failure("history:\n  change: { enabled: false }\n")).message).toContain("change");
     const nested = await failure("history:\n  changes: { enable: false }\n");

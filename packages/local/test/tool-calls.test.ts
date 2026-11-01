@@ -836,6 +836,352 @@ describe("zkrh the pass, what the review asked for", () => {
   });
 });
 
+describe("zkrh the pass, what the second review asked for", () => {
+  test("zkrh_many_subagent_logs_do_not_make_the_pass_forget_the_main_log", async () => {
+    const r = await rig();
+    const log = sessionLog(r.runId);
+    const path = await install(log);
+    const dirOf = join(dirname(path), SESSION, "subagents");
+    await mkdir(dirOf, { recursive: true });
+    for (let i = 0; i < 70; i++) {
+      const id = `agent-m${String(i).padStart(3, "0")}`;
+      const child = new ClaudeLogBuilder({
+        sessionId: id,
+        cwd: dir,
+        start: new Date(T0 + 150 + i).toISOString(),
+      });
+      child
+        .user("x")
+        .call(`c${i}_0`, { id: `toolu_c${i}`, name: "Glob", input: { i } })
+        .result(`toolu_c${i}`, "ok")
+        .call(`c${i}_1`, { id: `toolu_ce${i}`, name: "Read", input: { i } });
+      await writeFile(join(dirOf, `${id}.jsonl`), child.text());
+    }
+    nowMs = after(log);
+    await r.run.completeStep("a", 1);
+    const sessions = Object.keys((await stateOf(r)).toolCalls?.sessions ?? {});
+    // the run keeps a cursor for 64 sessions; the rest is said once, and the pass did not end at the first refusal
+    expect(sessions.length).toBeLessThanOrEqual(64);
+    expect(sessions).toContain(SESSION);
+    expect((await callsOf(r)).some((c) => c.tool === "Bash" && c.subagent === undefined)).toBe(
+      true,
+    );
+    expect(await failuresOf(r)).toContain("cap");
+    expect(await failuresOf(r)).not.toContain("record_refused");
+  });
+
+  test.each([1, 2, 3])("zkrh_rows_plus_unattributed_equal_all_calls: seed %i", async (seed) => {
+    let state = seed * 7919;
+    const rand = () => {
+      state = (state * 1103515245 + 12345) % 2147483648;
+      return state / 2147483648;
+    };
+    const r = await rig();
+    const log = new ClaudeLogBuilder({
+      sessionId: SESSION,
+      cwd: dir,
+      start: new Date(T0).toISOString(),
+    });
+    log
+      .user("go")
+      .call("m_start", {
+        id: "toolu_start",
+        name: "mcp__kodel__pipeline_start",
+        input: { task: "t" },
+      })
+      .result("toolu_start", [
+        { type: "text", text: JSON.stringify({ ok: true, run_id: r.runId }) },
+      ]);
+    const owner = new Map<string, "a" | "b">([["toolu_start", "a"]]);
+    const add = (id: string, step: "a" | "b") => {
+      log
+        .wait(Math.floor(rand() * 300))
+        .call(`m_${id}`, { id, name: rand() < 0.5 ? "Bash" : "Read", input: { id } })
+        .wait(Math.floor(rand() * 300))
+        .result(id, "ok");
+      owner.set(id, step);
+    };
+    const first = 3 + Math.floor(rand() * 8);
+    for (let i = 0; i < first; i++) add(`toolu_a${i}`, "a");
+    log.call("m_ha", {
+      id: "toolu_ha",
+      name: "mcp__kodel__pipeline_complete_step",
+      input: { node_slug: "a", attempt: 1 },
+    });
+    owner.set("toolu_ha", "a");
+    const path = await install(log);
+    nowMs = after(log, 10);
+    await r.run.completeStep("a", 1);
+    log.wait(2000).result("toolu_ha", "{}");
+    const second = 3 + Math.floor(rand() * 8);
+    for (let i = 0; i < second; i++) add(`toolu_b${i}`, "b");
+    log.call("m_hb", {
+      id: "toolu_hb",
+      name: "mcp__kodel__pipeline_complete_step",
+      input: { node_slug: "b", attempt: 1 },
+    });
+    await writeFile(path, log.text());
+    nowMs = after(log, 2000);
+    await r.run.completeStep("b", 1);
+    const calls = await callsOf(r);
+    const ids = calls.map((c) => c.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    // every call but the one of the last hand-in (its response is never released) is recorded, once, with its step
+    const expected = [...owner.keys()];
+    expect(ids.sort()).toEqual(expected.map((id) => rowId(SESSION, id)).sort());
+    for (const call of calls) {
+      const raw = expected.find((id) => rowId(SESSION, id) === call.id) as string;
+      expect(call.node, raw).toBe(owner.get(raw));
+      expect(call.attempt, raw).toBe(1);
+    }
+    // and the counts say the same as the rows
+    let counted = 0;
+    for (const rec of await recordsOf(r)) {
+      for (const tools of Object.values((rec["calls"] as ToolCallsPayload).counts)) {
+        for (const n of Object.values(tools)) counted += n;
+      }
+    }
+    expect(counted).toBe(calls.length);
+  });
+
+  test("zkrh_loop_100_identical_calls_100_rows", async () => {
+    const r = await rig();
+    const log = sessionLog(r.runId);
+    for (let i = 0; i < 100; i++) {
+      log
+        .call(`m_l${i}`, { id: `toolu_l${i}`, name: "Bash", input: { command: "make" } })
+        .result(`toolu_l${i}`, "ok");
+    }
+    log.call("m_end", { id: "toolu_end", name: "Read", input: {} });
+    await install(log);
+    nowMs = after(log);
+    await r.run.completeStep("a", 1);
+    const loop = (await callsOf(r)).filter(
+      (c) => c.in_bytes === Buffer.byteLength('{"command":"make"}'),
+    );
+    expect(loop).toHaveLength(100);
+    expect(new Set(loop.map((c) => c.id)).size).toBe(100);
+    const report = await reportOf(r);
+    if (!("attempts" in report)) throw new Error(JSON.stringify(report));
+    expect(report.attempts[0]?.by_tool["Bash"]).toBeGreaterThanOrEqual(101);
+  });
+
+  test("zkrh_parallel_calls_one_message", async () => {
+    const r = await rig();
+    const log = sessionLog(r.runId);
+    log
+      .assistant("m_par", {
+        type: "tool_use",
+        id: "toolu_p1",
+        name: "Read",
+        input: { file_path: "/1" },
+      })
+      .assistant("m_par", {
+        type: "tool_use",
+        id: "toolu_p2",
+        name: "Grep",
+        input: { pattern: "x" },
+      })
+      .result("toolu_p1", "one")
+      .result("toolu_p2", "two")
+      .call("m_end", { id: "toolu_end", name: "Glob", input: {} });
+    await install(log);
+    nowMs = after(log);
+    await r.run.completeStep("a", 1);
+    const report = await reportOf(r);
+    if (!("attempts" in report)) throw new Error(JSON.stringify(report));
+    const lines = report.attempts[0]?.lines ?? [];
+    expect(lines.find((l) => l.tool === "Read")).toMatchObject({ ok: true });
+    expect(lines.find((l) => l.tool === "Grep")).toMatchObject({ ok: true });
+  });
+
+  test("zkrh_log_ending_after_a_result_line_still_joins_next_pass", async () => {
+    const r = await rig();
+    const log = new ClaudeLogBuilder({
+      sessionId: SESSION,
+      cwd: dir,
+      start: new Date(T0).toISOString(),
+    });
+    log
+      .user("go")
+      .call("m_start", {
+        id: "toolu_start",
+        name: "mcp__kodel__pipeline_start",
+        input: { task: "t" },
+      })
+      .result("toolu_start", [
+        { type: "text", text: JSON.stringify({ ok: true, run_id: r.runId }) },
+      ])
+      .call("m_q", { id: "toolu_q", name: "Bash", input: { command: "ls" } })
+      .result("toolu_q", "fine");
+    const path = await install(log);
+    nowMs = after(log);
+    await r.run.completeStep("a", 1);
+    // the log may end between a result line and the next response: whatever the first pass saw, the second joins them
+    log.wait(2000).call("m_next", { id: "toolu_next", name: "Edit", input: {} });
+    log
+      .wait(300)
+      .result("toolu_next", "ok")
+      .call("m_last", { id: "toolu_last", name: "Read", input: {} });
+    await writeFile(path, log.text());
+    nowMs = after(log, 2000);
+    await r.run.completeStep("b", 1);
+    const report = await reportOf(r);
+    if (!("attempts" in report)) throw new Error(JSON.stringify(report));
+    const all = report.attempts.flatMap((a) => a.lines);
+    expect(all.find((l) => l.tool === "Bash")).toMatchObject({ ok: true });
+    expect(report.unjoined).toBe(0);
+  });
+
+  test("zkrh_entries_without_timestamp_and_invalid_lines", async () => {
+    const r = await rig();
+    const log = sessionLog(r.runId);
+    const path = await install(log);
+    await appendFile(path, "this is not json\n");
+    await appendFile(
+      path,
+      `${JSON.stringify({ type: "user", sessionId: SESSION, message: { role: "user", content: "no time" } })}\n`,
+    );
+    nowMs = after(log);
+    await r.run.completeStep("a", 1);
+    const report = await reportOf(r);
+    if (!("attempts" in report)) throw new Error(JSON.stringify(report));
+    expect(report.skipped).toBeGreaterThanOrEqual(1);
+    expect((await callsOf(r)).some((c) => c.tool === "Bash")).toBe(true);
+  });
+
+  test("zkrh_windows_paths_in_input", async () => {
+    const r = await rig();
+    const log = sessionLog(r.runId);
+    log
+      .call("m_w", {
+        id: "toolu_w",
+        name: "Read",
+        input: { file_path: "C:\\Users\\dev\\notes.txt" },
+      })
+      .result("toolu_w", "ok")
+      .call("m_end", { id: "toolu_end", name: "Glob", input: {} });
+    await install(log);
+    nowMs = after(log);
+    await r.run.completeStep("a", 1);
+    const read = (await callsOf(r)).find((c) => c.tool === "Read");
+    expect(read?.preview ?? "").toContain("Users");
+    expect(read?.preview ?? "").toContain("notes.txt");
+  });
+
+  test("zkrh_session_id_over_length_cap", async () => {
+    const r = await rig({ session: "a".repeat(200) });
+    await install(sessionLog(r.runId));
+    nowMs = T0 + 2000;
+    await r.run.completeStep("a", 1);
+    expect(await recordsOf(r)).toHaveLength(0);
+    expect(await failuresOf(r)).toEqual(["session_unknown"]);
+  });
+
+  test("zkrh_agent_running_at_run_end", async () => {
+    const r = await rig();
+    const log = sessionLog(r.runId);
+    const path = await install(log);
+    nowMs = after(log);
+    await r.run.completeStep("a", 1);
+    log
+      .wait(3000)
+      .result("toolu_done_a", "{}")
+      .call("m_hb", {
+        id: "toolu_hb",
+        name: "mcp__kodel__pipeline_complete_step",
+        input: { node_slug: "b", attempt: 1 },
+      });
+    await writeFile(path, log.text());
+    nowMs = after(log, 2000);
+    await r.run.completeStep("b", 1);
+    expect((await stateOf(r)).status).toBe("completed");
+    const before = (await journalOf(r)).length;
+    const result = await r.writer.capture(runOf(r), { node: "b", attempt: 1 }, held);
+    // nothing is written to a run that has ended
+    expect(result.skipped).toBe("not_running");
+    expect((await journalOf(r)).length).toBe(before);
+  });
+
+  test("zkrh_a_skipped_pass_loses_nothing_the_next_pass_places_by_started", async () => {
+    // the first pass of the run reads nothing (its reader breaks once); the next one reads all and places each call by its own start
+    let broken = true;
+    const r = await rig({
+      collector: (configDir) => {
+        const real = claudeCodeCollector({ configDir, cacheScope: true });
+        return {
+          agent: real.agent,
+          profiles: real.profiles,
+          locate: (root, options) => real.locate(root, options),
+          async *read(ref, window, options) {
+            if (broken) {
+              broken = false;
+              throw new Error("a reader that breaks once");
+            }
+            yield* real.read(ref, window, options);
+          },
+        };
+      },
+    });
+    const log = sessionLog(r.runId);
+    const path = await install(log);
+    nowMs = after(log);
+    await r.run.completeStep("a", 1);
+    expect(await recordsOf(r)).toHaveLength(0);
+    log
+      .wait(3000)
+      .result("toolu_done_a", "{}")
+      .call("m_e", { id: "toolu_e", name: "Edit", input: {} });
+    log
+      .wait(300)
+      .result("toolu_e", "ok")
+      .call("m_hb", {
+        id: "toolu_hb",
+        name: "mcp__kodel__pipeline_complete_step",
+        input: { node_slug: "b", attempt: 1 },
+      });
+    await writeFile(path, log.text());
+    nowMs = after(log, 2000);
+    await r.run.completeStep("b", 1);
+    const calls = await callsOf(r);
+    expect(calls.find((c) => c.tool === "Bash")).toMatchObject({ node: "a", attempt: 1 });
+    expect(calls.find((c) => c.tool === "pipeline_complete_step")).toMatchObject({ node: "a" });
+    expect(calls.find((c) => c.tool === "Edit")).toMatchObject({ node: "b", attempt: 1 });
+  });
+
+  test("zkrh_first_attempt_starts_at_the_runs_first_call", async () => {
+    const r = await rig();
+    const log = new ClaudeLogBuilder({
+      sessionId: SESSION,
+      cwd: dir,
+      start: new Date(T0).toISOString(),
+    });
+    log
+      .user("something else first")
+      .call("m_pre", { id: "toolu_pre", name: "Glob", input: { pattern: "*" } })
+      .result("toolu_pre", "x")
+      .call("m_start", {
+        id: "toolu_start",
+        name: "mcp__kodel__pipeline_start",
+        input: { task: "t" },
+      })
+      .result("toolu_start", [
+        { type: "text", text: JSON.stringify({ ok: true, run_id: r.runId }) },
+      ])
+      .call("m_bash", { id: "toolu_bash", name: "Bash", input: { command: "ls" } })
+      .result("toolu_bash", "ok")
+      .call("m_end", { id: "toolu_end", name: "Read", input: {} });
+    await install(log);
+    nowMs = after(log);
+    await r.run.completeStep("a", 1);
+    const tools = (await callsOf(r)).map((c) => c.tool);
+    expect(tools).toContain("pipeline_start");
+    expect(tools).toContain("Bash");
+    // what came before the run's first call is not the run's
+    expect(tools).not.toContain("Glob");
+  });
+});
+
 describe("zkrh what is found about where a run begins is shared", () => {
   test("zkrh_run_start_memo_shared_no_double_scan", async () => {
     const r = await rig();

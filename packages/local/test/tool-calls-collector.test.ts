@@ -226,4 +226,29 @@ describe("tool call detail of the Claude Code reader (TASK-ZKRH)", () => {
     expect([...seenCalls].sort()).toEqual([...uses].sort());
     expect([...seenResults].sort()).toEqual([...results].sort());
   });
+
+  test("zkrh_preview_cut_mark_and_surrogates", async () => {
+    // a cut never leaves half of a surrogate pair, and says it cut
+    const emoji = "😀".repeat(40);
+    for (const cap of [5, 6, 7, 8, 9]) {
+      const events = await readAll(
+        (log) => {
+          log
+            .user("go")
+            .call("m1", { id: "toolu_e", name: "Write", input: { content: emoji } })
+            .result("toolu_e", "ok")
+            .say("m2", "done");
+        },
+        { toolDetail: true, capture: { caps: { tool_input: cap } } },
+      );
+      const call = calls(events)[0];
+      const preview = call && call.kind === "tool_call" ? (call.input_preview ?? "") : "";
+      expect(preview.endsWith("…"), `cap ${cap}`).toBe(true);
+      // every surrogate in it has its pair
+      expect(
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(preview),
+      ).toBe(false);
+      expect(preview.length).toBeLessThanOrEqual(cap);
+    }
+  });
 });

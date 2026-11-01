@@ -575,7 +575,7 @@ hand-in call of a step, which the reader releases only when the next response st
 still put with the step it ended. A call made while the run waits at a gate or a pause and no agent step is open, before the
 run's first call, or in the future, is `unattributed`. In a fork several agent steps are open at once in one session and the log
 cannot tell the branches apart: a call that started while more than one was open is credited to the step handed in first and
-marked `shared`. A step that was never handed in (superseded, canceled) takes no calls: they go to the next hand-in. While a
+marked `shared`: also in a fork whose steps the agent works one by one, where every branch is open from the start of the fork and the place is in fact exact. A step that was never handed in (superseded, canceled) takes no calls: they go to the next hand-in. While a
 pipeline change waits for a person the agent may keep working in the step's phase; those calls are charged to the step, as the
 tokens of usage are. A pass that gets `busy` (in a fork a second hand-in waits for the lock only a few seconds) loses nothing:
 the next pass reads everything since its cursor and places each call by its own start. Tokens and calls can differ in one
@@ -585,13 +585,13 @@ attempt after a retry or in a fork, because usage credits what a pass reads to t
 has ended. So these are not in the record: the final response of the last agent step (with its hand-in call), of a session that
 ended between steps (a new chat after a gate, `/clear`, a restart), of each subagent's log, and of a step whose last pass was
 skipped. A line of the log over 8 MB is dropped by the line reader, and a call or result on it is not recorded (the record counts
-`skipped` lines, not the calls); between 1 MB and 8 MB only the size of the value is kept, and an input over 256 KB of JSON has no
+`skipped` lines, not the calls; a line that is not JSON is counted too, and a read again from the start after a restart counts the same lines again); between 1 MB and 8 MB only the size of the value is kept, and an input over 256 KB of JSON has no
 preview. The report says what is missing. A call that was still running when its step ended (a background tool), or that was
 interrupted, stays `open`; the result that comes later is recorded and joins it. A Claude Code session forked with
 `--fork-session` copies the history with the same ids and is recorded again, as in usage. The result of an own call says nothing
 of whether its step passed: the engine answers a failed check as a normal result. Another MCP server that has a tool of the same
 name as one of the engine's is marked `own` too (the row shows the server). Durations are wall time from the log: calls made in
-one message start and end together, so each reads as long as the slowest. `result_bytes` counts text blocks only.
+one message start and end together, so each reads as long as the slowest. `out_bytes` (the size of a result) counts text blocks only.
 
 **Bounded.** At most 200 rows in a record and 1 000 records in a run; the rows of a run are budgeted at about 768 KB (counted
 before the store redacts, so approximately), and past it a record carries counts only (32 tool names, the rest under `other`), so
@@ -606,7 +606,7 @@ pass reads on. So does a pass that meets a call that began after the pass did (b
 own log while another worker's step is handed in): rows are never rewritten, so such a call is left for the next pass, which
 places it by its own start; a call further in the future than that (a clock that is wrong, or a log that is not true) is recorded
 as `unattributed`. Once the rows of a run pass their budget no rows come back, however small a later record is. A call that the
-main log and a subagent's own file both hold is recorded once in a pass (not across passes). An attempt past the 64 a record can
+main log and a subagent's own file both hold is recorded once in a pass (not across passes: read in two passes it is two rows under two sessions). A subagent's log whose first entry has no time yet (a file just created) is said `unreadable`, once for the run, as in usage. An attempt past the 64 a record can
 count is counted with the unattributed calls, and its rows say so.
 
 **Format.** The records exist in run-state format 2 and format 1 alike (the codec of format 1 keeps `toolCalls` and the events
@@ -615,9 +615,11 @@ as it keeps `usage`): `tool_calls_recorded` and `tool_calls_failed` in the journ
 a `tool_result` event (never written into the stored copy of the agent's log, so the events the other readers get and the
 golden fixtures are unchanged). The payload carries its own `v` (`calls.v`); a record of a format this engine does not know, or a
 reason it does not know, reads as "cannot read (written in format X)", never as "modified" and never as "no calls". A field added
-to a record later bumps `calls.v`. An engine from before this change, even one that has the codecs, does not know `toolCalls`
-or the two events and refuses a state or a record that has them as "cannot read"; in practice a run of format 1 never gets them
-(new runs start in format 2, and a run that was going has no `history.tool_calls`), so the format-1 entries are for completeness.
+to a record later bumps `calls.v`. An engine from before this change that goes on with a run of format 2 reads it, since the
+current codec keeps what it does not know: the old `summarizeRun` ignores the two events and the state key stays as it was, so
+the cursor then lags and a later pass of this engine catches up from the start of the run's log. A run of format 1 never holds the
+key in practice (new runs start in format 2, and a run that was going has no `history.tool_calls`); the format-1 entries are for
+completeness, and an engine from before this change refuses a format-1 state that holds `toolCalls` as "cannot read".
 The golden run with tool calls is `fixtures/tool-calls-run/`
 (its README says when it moves under the frozen formats).
 

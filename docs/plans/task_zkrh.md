@@ -246,15 +246,41 @@ format and every format has a codec), so:
   that the main log and a subagent's own file both hold is recorded once per pass; a record that is not the last of a pass carries `behind`; the
   dead `unreadableAt` branch is removed; the CLI block shows how many calls are the engine's own and which MCP servers were called; the docs no
   longer say an older kodel keeps the state key.
-- **Not built, left for a follow-up** (named in the plan; the list is complete as far as the plan's test names go): real fork runs at pass level
-  (`zkrh_fork_*` on a hand-written fork fixture, `zkrh_real_fork_run_marks_shared`; the placement of a fork is tested in the pure code only),
-  the e2e through the real `PipelineService`, the tests of the lock in a fork (`busy`, three workers), `zkrh_two_sessions_in_one_run`,
-  `zkrh_one_session_over_two_runs`, `zkrh_many_subagent_logs_do_not_make_the_pass_forget_the_main_log`, `zkrh_stale_cursor_after_older_engine_is_caught_up`,
-  `zkrh_held_cap_flush` and `zkrh_synthetic_entry_releases_at_once` (collector level), `zkrh_does_not_wait_for_the_step_call`,
-  `zkrh_report_running_run_shows_only_ended_attempts` (the report does not filter: the block of the latest step is complete after the next pass,
-  said in the docs), the bounded-time tests with a slow reader and with a journal at its cap, the config validation tests of `preview_chars`
-  beyond the schema bound, and the CLI test of the report on Windows line endings. `zkrh_unreadable_log_not_reread_until_it_grows` went with the
-  dead branch (a log found changed stops that stream, `zkrh_truncated_or_rotated_log`). `zkrh_golden_events_and_hashes_untouched` is the existing
-  format tests (`hashes.json` and the golden event files are not changed). A pass that runs out of time before it has read one event and has no
-  stored cursor yet writes nothing, so nothing marks that log as behind. The env-gated real-agent scenarios were written and **not run**
-  (`tests/agents/claude-code-tool-calls.test.ts`).
+- **Changed after the second review of the build:** a stream refused for the cap of 64 sessions is skipped and said as `cap` (it used to end the whole pass
+  as `record_refused`); a held pass does not count `skipped` lines (the next pass reads them again); the label of `skipped` says "could not be read (over
+  the limit, or not JSON)"; the docs say what is true of an older kodel (format 2 reads and keeps the key, only format 1 and the config refuse), that every
+  call in a fork whose steps are worked one by one is also `shared`, and that a call held by the main log and a subagent file is two rows when read in two passes.
+- **The tests, counted** (a script compared the 147 `zkrh_` names of the acceptance section with the test files): 71 are there under the same name. These
+  are there under another name: `zkrh_agent_log_off_or_metadata_stores_no_preview_but_sizes` and `zkrh_works_with_usage_off` (in
+  `zkrh_works_with_agent_log_off_and_usage_off_and_stores_no_preview`), `zkrh_preview_chars_zero_stores_no_preview` (in `zkrh_previews_only_when_agent_log_full`),
+  `zkrh_config_edit_mid_run_keeps_frozen_value`, `zkrh_cursor_skips_credited_after_restart` and `zkrh_hand_in_call_recorded_after_server_restart` (in
+  `zkrh_cursor_skips_recorded_after_restart_and_the_hand_in_call_comes_with_the_next_pass`), `zkrh_failing_copy_or_usage_does_not_stop_the_pass` (the usage half only:
+  `zkrh_failing_usage_does_not_stop_the_pass`), `zkrh_first_attempt_starts_at_runs_first_call`, `zkrh_interrupted_result_is_error_type_interrupted` and
+  `zkrh_refused_own_call_is_not_ok_from_is_error` (in `zkrh_interrupted_and_refused_own_call_end_to_end`), `zkrh_error_type_never_in_agent_log_copy` (in
+  `zkrh_preview_is_redacted_in_journal_and_error_type_never_in_the_agent_log_copy`), `zkrh_skipped_busy_pass_loses_nothing_next_pass_places_by_started`,
+  `zkrh_subagent_rows_marked_with_log_id`, `zkrh_subagent_log_without_time_is_said` (in `zkrh_subagent_that_began_before_the_run_takes_no_slot_and_one_without_a_time_is_said`),
+  `zkrh_id_reused_across_sessions_stays_apart` (in `zkrh_same_id_twice_first_wins_and_sessions_stay_apart`), `zkrh_id_format_checked` (in `zkrh_session_and_id_formats_are_checked`),
+  `zkrh_task_tools_not_flagged` and `zkrh_other_server_same_name_is_flagged_and_shown` (in `zkrh_flags_own_calls_by_name_list_and_shows_server`, and the CLI test of the servers),
+  `zkrh_the_step_handed_in_now_takes_the_calls_since_the_last_hand_in` and `zkrh_next_step_fetch_call_is_in_its_step` (in `zkrh_call_goes_to_the_next_hand_in_after_started` and the
+  seeded `zkrh_rows_plus_unattributed_equal_all_calls`), the report's `zkrh_report_marks_unverified`, `zkrh_report_says_rows_cut_and_skipped` and `zkrh_report_longest_3`
+  (in `zkrh_report_block_text` and `zkrh_report_marks_shared_cut_skipped_unjoined_and_incomplete`), `zkrh_end_of_run_loses_what_follows_the_last_pass` (in `zkrh_agent_running_at_run_end`),
+  `zkrh_golden_events_and_hashes_untouched` (the existing format tests: `hashes.json` and the golden event files are not changed), `zkrh_duration_from_timestamps` (the `ms` asserted in the join test).
+- **Not built, left for a follow-up** (the names of the plan with no test at all): at pass level a real fork (`zkrh_fork_placement_on_a_hand_written_fork_fixture`,
+  `zkrh_fork_in_gate_wait_while_other_branch_open_is_not_unattributed`, `zkrh_mixed_run_sequential_fork_sequential`, `zkrh_fork_second_pass_busy_is_caught_up_later`,
+  `zkrh_fork_three_workers_race_for_the_lock`, `zkrh_real_fork_run_marks_shared`; the placement of a fork is tested in the pure code only) and the e2e
+  `zkrh_fork_run_through_the_real_pipeline_service_with_a_scripted_log`; the lock and the passes together (`zkrh_step_end_takes_the_lock_once_for_all_passes`,
+  `zkrh_lost_lock_with_the_copy_off_is_said_as_busy`, `zkrh_ticker_does_not_run_the_pass`, `zkrh_does_not_wait_for_the_step_call`, `zkrh_tool_calls_timeout_leaves_usage_record_intact`,
+  `zkrh_bounded_time_with_slow_reader`, `zkrh_report_and_status_with_journal_at_cap`); the sessions (`zkrh_two_sessions_in_one_run`, `zkrh_one_session_over_two_runs`,
+  `zkrh_stale_cursor_after_older_engine_is_caught_up`, `zkrh_worktree_removed_before_collection`, `zkrh_unreadable_log_not_reread_until_it_grows` (the branch it tested was dead and is
+  removed), `zkrh_renamed_tool_fields_are_unreadable_not_no_calls` (the pass says `no_calls` for such a log; usage's guess that a log is of a format it does not read is not built here));
+  the reader (`zkrh_held_cap_flush`, `zkrh_synthetic_entry_releases_at_once`, `zkrh_synthetic_model_log_with_calls_and_no_usage_is_read`, `zkrh_input_bytes_utf8`,
+  `zkrh_result_bytes_text_blocks_only`, `zkrh_negative_or_missing_duration_dropped`, `zkrh_invalid_lines_truncated_tail_unknown_fields` for a torn tail, `zkrh_big_log_is_streamed`); the report
+  (`zkrh_report_running_run_shows_only_ended_attempts`, `zkrh_report_marks_the_latest_step_incomplete_until_next_pass`, `zkrh_report_writes_nothing`, `zkrh_status_unchanged`) and the machine
+  (`zkrh_refused_record_said_once`, `zkrh_unknown_event_types_ignored_by_the_current_summarize`); the history (`zkrh_storage_home_run`), the retries (`zkrh_retry_attempt_own_rows`,
+  `zkrh_refused_hand_in_then_retry_adds_rows_once`, `zkrh_pipeline_change_wait_charged_to_the_attempt`, `zkrh_attribution_agrees_with_outside_spans_on_the_usage_fixtures`),
+  the ends of a run (`zkrh_last_step_final_response_absent_and_said`, `zkrh_session_ended_between_steps_final_response_absent_and_said`, `zkrh_subagent_final_response_absent`: said in the docs and the
+  report, not asserted per case), `zkrh_counts_split_main_and_subagent`, `zkrh_subagents_counted_when_tool_log_false`, `zkrh_parallel_mode_task_calls_read_open`; the documented limits that have no test
+  (`zkrh_forked_session_copies_rows_documented`, `zkrh_removed_and_readded_node_collision_documented`, `zkrh_hash_collision_by_a_hex_rule_documented`); and the two real-agent names
+  `zkrh_real_run_every_non_last_agent_node_has_a_tool_block` and `zkrh_real_fork_run_marks_shared` (the file has `zkrh_real_run_lists_edit_and_bash`, `zkrh_real_run_matches_raw_log` and
+  `zkrh_real_run_block_says_what_is_not_recorded`). A pass that runs out of time before it has read one event and has no stored cursor yet writes nothing, so nothing marks that log as behind. The
+  env-gated real-agent scenarios were written and **not run** (`tests/agents/claude-code-tool-calls.test.ts`).

@@ -59,7 +59,7 @@ describe("zkrh the block of tool calls in the report", () => {
     ).join("\n");
     expect(text).toContain("3 shared with another open step");
     expect(text).toContain("rows were left out for want of room");
-    expect(text).toContain("2 line(s) of the log were over the limit");
+    expect(text).toContain("2 line(s) of the log could not be read");
     expect(text).toContain("4 result(s) have no call");
     expect(text).toContain("not read to its end yet");
     expect(text).toContain("not recorded: busy");
