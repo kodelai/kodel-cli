@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PipelineService, toolsFingerprint } from "@kodel-ai/pipeline-core";
@@ -13,7 +13,7 @@ import {
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { engineRecord, LocalPipelineHost, modelFromLog } from "../src";
+import { engineRecord, LocalPipelineHost, logFacts, modelFromLog } from "../src";
 import { projectFolderName } from "../src/history/claude-code/locate";
 
 const PIPELINE = [
@@ -107,6 +107,7 @@ interface Rec {
     client?: Sourced<{ name: string; version: string }>;
     session?: Sourced<string>;
     model?: Sourced<string>;
+    session_name?: Sourced<string>;
   };
 }
 
@@ -394,6 +395,230 @@ describe("what the host will not trust or cannot read", () => {
     await call("pipeline_complete_step", { run_id: runId, node_slug: "a", attempt: 1 });
     const report = await (await host.open(runId))?.report();
     expect(report?.runId).toBe(runId);
+    await close();
+  });
+});
+
+// The shapes below are the ones Claude Code writes in a session log (checked on real logs, 2026-11):
+// a rename adds a `custom-title` record followed by an `agent-name` record with the same text, and an
+// automatic session has an `agent-name` that equals its `ai-title`.
+const SID = "s-name";
+const custom = (title: string, session = SID) => ({
+  type: "custom-title",
+  customTitle: title,
+  sessionId: session,
+});
+const shown = (name: string, session = SID) => ({
+  type: "agent-name",
+  agentName: name,
+  sessionId: session,
+});
+const aiTitle = (title: string, session = SID) => ({
+  type: "ai-title",
+  aiTitle: title,
+  sessionId: session,
+});
+const logPath = (session: string) =>
+  join(claude, "projects", projectFolderName(dir), `${session}.jsonl`);
+const namedHost = (session = SID) =>
+  newHost({ environment: { CLAUDE_CONFIG_DIR: claude, CLAUDE_CODE_SESSION_ID: session } });
+
+describe("the name of the session", () => {
+  test("session_label_recorded_on_the_records", async () => {
+    await transcript(SID, [custom("fix the list"), shown("fix the list")]);
+    const host = namedHost();
+    const { call, close } = await connect(host);
+    const runId = await startRun(call);
+    await call("pipeline_next_step", { run_id: runId });
+    await call("pipeline_complete_step", { run_id: runId, node_slug: "a", attempt: 1 });
+    const journal = ((await (await host.open(runId))?.journal()) ?? []) as unknown as Rec[];
+    const named = (event: string) =>
+      journal.filter((r) => r.event === event).map((r) => r.executor?.session_name);
+    const expected = { value: "fix the list", source: "derived" };
+    expect(named("run_started")).toEqual([expected]);
+    expect(named("step_served")[0]).toEqual(expected);
+    expect(named("agent_completed")[0]).toEqual(expected);
+    await close();
+  });
+
+  test("session_label_name_rule_prefers_the_last_custom_title", async () => {
+    await transcript(SID, [custom("first"), shown("first"), custom("second"), shown("auto name")]);
+    expect((await logFacts(logPath(SID), SID)).name).toBe("second");
+  });
+
+  test("session_label_name_rule_skips_a_cleared_custom_title", async () => {
+    await transcript(SID, [custom("kept"), custom("  "), shown("auto name")]);
+    expect((await logFacts(logPath(SID), SID)).name).toBe("kept");
+  });
+
+  test("session_label_name_rule_uses_agent_name_without_a_custom_title", async () => {
+    await transcript(SID, [shown("older"), aiTitle("older"), shown("newer")]);
+    expect((await logFacts(logPath(SID), SID)).name).toBe("newer");
+  });
+
+  test("session_label_name_rule_ignores_ai_title_alone", async () => {
+    await transcript(SID, [aiTitle("a summary of the first prompt")]);
+    expect((await logFacts(logPath(SID), SID)).name).toBeUndefined();
+  });
+
+  test("session_label_name_rule_ignores_other_session_ids", async () => {
+    await transcript(SID, [custom("theirs", "other"), shown("theirs", "other"), shown("mine")]);
+    expect((await logFacts(logPath(SID), SID)).name).toBe("mine");
+    expect((await logFacts(logPath(SID), "other")).name).toBe("theirs");
+  });
+
+  test("session_label_a_name_before_the_tail_is_not_found_and_is_no_error", async () => {
+    const filler = { type: "user", message: { content: "x".repeat(700 * 1024) } };
+    await transcript(SID, [custom("too far back"), filler]);
+    expect(await logFacts(logPath(SID), SID)).toEqual({ model: undefined, name: undefined });
+  });
+
+  test("session_label_the_model_scan_is_unchanged", async () => {
+    await mkdir(join(claude, "projects", projectFolderName(dir)), { recursive: true });
+    await writeFile(
+      logPath(SID),
+      `{"type": "assistant", "message": {"model": "claude-spaced"}}\n${JSON.stringify(shown("n"))}\n`,
+    );
+    expect(await logFacts(logPath(SID), SID)).toEqual({ model: "claude-spaced", name: "n" });
+    expect(await modelFromLog(logPath(SID))).toBe("claude-spaced");
+  });
+
+  test("session_label_failures_leave_no_name", async () => {
+    expect(await logFacts(logPath("missing"), "missing")).toEqual({
+      model: undefined,
+      name: undefined,
+    });
+    await mkdir(logPath("a-directory"), { recursive: true });
+    expect((await logFacts(logPath("a-directory"), "a-directory")).name).toBeUndefined();
+    await transcript(SID, [{ type: "user" }]);
+    expect((await logFacts(logPath(SID), SID)).name).toBeUndefined();
+    await mkdir(join(claude, "projects", projectFolderName(dir)), { recursive: true });
+    await writeFile(
+      logPath("torn"),
+      `${JSON.stringify(shown("kept", "torn"))}\n{"type":"agent-name","ag`,
+    );
+    expect((await logFacts(logPath("torn"), "torn")).name).toBe("kept");
+  });
+
+  test("session_label_cache_key_has_the_session_id", async () => {
+    await transcript(SID, [shown("mine"), shown("theirs", "other")]);
+    expect((await logFacts(logPath(SID), SID)).name).toBe("mine");
+    expect((await logFacts(logPath(SID), "other")).name).toBe("theirs");
+  });
+
+  test("session_label_cache_hit_returns_the_name", async () => {
+    await transcript(SID, [shown("old name")]);
+    const path = logPath(SID);
+    expect((await logFacts(path, SID)).name).toBe("old name");
+    const { mtime } = await stat(path);
+    // The same size and the same mtime: the file is taken to be as it was.
+    await writeFile(path, `${JSON.stringify(shown("new name"))}\n`);
+    await utimes(path, mtime, mtime);
+    expect((await logFacts(path, SID)).name).toBe("old name");
+  });
+
+  test("session_label_cache_follows_a_change_of_size", async () => {
+    await transcript(SID, [shown("old name")]);
+    expect((await logFacts(logPath(SID), SID)).name).toBe("old name");
+    await transcript(SID, [shown("old name"), shown("a longer new name")]);
+    expect((await logFacts(logPath(SID), SID)).name).toBe("a longer new name");
+  });
+
+  test("session_label_cache_follows_a_change_of_mtime", async () => {
+    await transcript(SID, [shown("old name")]);
+    const path = logPath(SID);
+    expect((await logFacts(path, SID)).name).toBe("old name");
+    await writeFile(path, `${JSON.stringify(shown("new name"))}\n`);
+    await utimes(path, new Date(2030, 0, 1), new Date(2030, 0, 1));
+    expect((await logFacts(path, SID)).name).toBe("new name");
+  });
+
+  test("session_label_follows_a_rename_at_the_next_record", async () => {
+    await transcript(SID, [shown("before")]);
+    const host = namedHost();
+    const { call, close } = await connect(host);
+    const runId = await startRun(call);
+    await transcript(SID, [shown("before"), custom("after the rename"), shown("after the rename")]);
+    await call("pipeline_complete_step", { run_id: runId, node_slug: "a", attempt: 1 });
+    const { started, completed } = await records(host, runId);
+    expect(started?.executor.session_name?.value).toBe("before");
+    expect(completed[0]?.executor.session_name?.value).toBe("after the rename");
+    await close();
+  });
+
+  test("session_label_model_and_name_are_searched_independently", async () => {
+    // The hook names one file for the session; the store holds another: each value comes from the first
+    // file that has it.
+    await transcript("elsewhere", [{ type: "assistant", message: { model: "claude-test-1" } }]);
+    await transcript(SID, [shown("from the store")]);
+    await writeFile(
+      join(dir, ".kodel", "sessions.jsonl"),
+      `${JSON.stringify({ session_id: SID, agent: "claude-code", cwd: dir, transcript_path: logPath("elsewhere"), ts: "2026-01-01T00:00:00.000Z" })}\n`,
+    );
+    const host = namedHost();
+    const { call, close } = await connect(host);
+    const { started } = await records(host, await startRun(call));
+    expect(started?.executor.model).toEqual({ value: "claude-test-1", source: "derived" });
+    expect(started?.executor.session_name).toEqual({ value: "from the store", source: "derived" });
+    await close();
+  });
+
+  test("session_label_name_is_cleaned_then_redacted", async () => {
+    const secret = "sk-ant-abcdefghijklmnopqrstuvwxyz0123456789";
+    const hostile = `\u202etitle\u200b\u0000 ${secret} ${"y".repeat(300)}`;
+    await transcript(SID, [custom(hostile)]);
+    const host = namedHost();
+    const { call, close } = await connect(host);
+    const { started, text } = await records(host, await startRun(call));
+    expect(text).not.toContain(secret);
+    const name = started?.executor.session_name?.value ?? "";
+    expect(name.startsWith("title")).toBe(true);
+    expect(name.length).toBeLessThanOrEqual(120);
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: the test is about them
+    expect(/[\u0000-\u001f\u200b\u202e]/.test(name)).toBe(false);
+    await close();
+  });
+
+  test("session_label_unsafe_session_id_reads_no_file", async () => {
+    // `../x` would land on this decoy if the id were put into a path.
+    await mkdir(join(claude, "projects"), { recursive: true });
+    await writeFile(
+      join(claude, "projects", "x.jsonl"),
+      `${JSON.stringify(shown("decoy", "../x"))}\n`,
+    );
+    const host = namedHost("../x");
+    const { call, close } = await connect(host);
+    const { started } = await records(host, await startRun(call));
+    expect(started?.executor).not.toHaveProperty("session_name");
+    await close();
+  });
+
+  test("session_label_records_what_it_recorded_for_an_id_too_long_for_the_name", async () => {
+    const long = "s".repeat(129);
+    await transcript(long, [
+      { type: "assistant", message: { model: "claude-test-1" } },
+      shown("never read", long),
+    ]);
+    const host = namedHost(long);
+    const { call, close } = await connect(host);
+    const { started } = await records(host, await startRun(call));
+    expect(started?.executor.session?.value).toBe(long);
+    expect(started?.executor.model?.value).toBe("claude-test-1");
+    expect(started?.executor).not.toHaveProperty("session_name");
+    await close();
+  });
+
+  test("session_label_absent_when_executor_history_is_off", async () => {
+    await setConfig("history:\n  executor:\n    enabled: false\n");
+    await transcript(SID, [shown("must not appear")]);
+    const host = namedHost();
+    const { call, close } = await connect(host);
+    const runId = await startRun(call);
+    await call("pipeline_next_step", { run_id: runId });
+    await call("pipeline_complete_step", { run_id: runId, node_slug: "a", attempt: 1 });
+    const { text } = await records(host, runId);
+    expect(text).not.toContain("must not appear");
+    expect(text).not.toContain("session_name");
     await close();
   });
 });

@@ -27,6 +27,7 @@ import {
   type RunEvent,
   type RunState,
   readRunState,
+  summarizeRun,
   V1_EVENTS,
   V1_STATE_KEYS,
   V2_ONLY_EVENTS,
@@ -563,6 +564,31 @@ describe("t41 what format 1 cannot hold is refused by the encoder, nothing is dr
     expect(names.size).toBeGreaterThan(20);
     for (const name of names) {
       expect(V1_EVENTS.includes(name) || V2_ONLY_EVENTS.includes(name), name).toBe(true);
+    }
+  });
+});
+
+describe("t41 an event the engine does not know", () => {
+  test("t41_unknown_event_is_ignored_by_the_current_engine", () => {
+    // A later engine may journal an event this one has no name for. The journal is only appended to
+    // and the state decides every step, so the record must read, write back and report as if absent.
+    for (const run of fixtureRuns("v2")) {
+      const state = readRunState(run.state, run.id);
+      const journal = run.journal.map((line) => decodeJournalRecord(JSON.parse(line)));
+      const before = journal.at(-1);
+      if (before === undefined) continue;
+      const foreign = {
+        v: state.v,
+        seq: before.seq,
+        ts: before.ts,
+        event: "event_of_a_later_engine",
+        session: "s-1",
+        name: "a name",
+      } as JournalRecord;
+      const decoded = decodeJournalRecord(JSON.parse(JSON.stringify(foreign)));
+      expect(canonical(encodeJournalRecord(decoded))).toBe(canonical(foreign));
+      const withIt = [...journal.slice(0, -1), foreign, before];
+      expect(canonical(summarizeRun(state, withIt))).toBe(canonical(summarizeRun(state, journal)));
     }
   });
 });

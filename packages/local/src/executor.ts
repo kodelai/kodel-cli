@@ -9,6 +9,7 @@ import { join } from "node:path";
 import {
   type Caller,
   cleanExecutorText,
+  cleanSessionName,
   clientOf,
   type EngineRecord,
   type ExecutorRecord,
@@ -38,6 +39,11 @@ const INDEX_SCAN_MAX_BYTES = 1024 * 1024;
 export const SESSION_ENV = "CLAUDE_CODE_SESSION_ID";
 /** What a session id looks like; anything else is never put into a path. */
 const SAFE_SESSION = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+/**
+ * What a session id looks like when the log of the session is read for its name: the strict form
+ * (at most 128 characters) every reader of the agent's logs uses; `session-finder.ts` exports it.
+ */
+export const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
@@ -85,23 +91,16 @@ async function tailLines(path: string, bytes: number): Promise<string[]> {
 }
 
 /** What was read of a log is kept while the file stays as it was: the host asks at every call. */
-const models = new Map<string, { size: number; mtimeMs: number; model: string | undefined }>();
+interface LogFacts {
+  model: string | undefined;
+  name: string | undefined;
+}
+const facts = new Map<string, { size: number; mtimeMs: number; facts: LogFacts }>();
 const MAX_CACHED_LOGS = 64;
 
-/** The model of the last answer in the end of a Claude Code session log, if there is one. */
-export async function modelFromLog(path: string): Promise<string | undefined> {
-  let seen: { size: number; mtimeMs: number };
-  try {
-    const { size, mtimeMs } = await stat(path);
-    seen = { size, mtimeMs };
-  } catch {
-    return undefined;
-  }
-  const cached = models.get(path);
-  if (cached && cached.size === seen.size && cached.mtimeMs === seen.mtimeMs) return cached.model;
-  let model: string | undefined;
-  const lines = await tailLines(path, TAIL_BYTES);
-  for (let i = lines.length - 1; i >= 0 && model === undefined; i--) {
+/** The model of the last answer in the lines, if there is one. */
+function modelOfLines(lines: readonly string[]): string | undefined {
+  for (let i = lines.length - 1; i >= 0; i--) {
     let entry: { type?: unknown; message?: { model?: unknown } } | null;
     try {
       entry = JSON.parse(lines[i] ?? "") as typeof entry;
@@ -110,11 +109,67 @@ export async function modelFromLog(path: string): Promise<string | undefined> {
     }
     if (entry?.type !== "assistant") continue;
     const found = cleanExecutorText(entry.message?.model);
-    if (found !== undefined && found !== "<synthetic>") model = found;
+    if (found !== undefined && found !== "<synthetic>") return found;
   }
-  if (models.size >= MAX_CACHED_LOGS) models.clear();
-  models.set(path, { ...seen, model });
-  return model;
+  return undefined;
+}
+
+/**
+ * The name the session has in its own log: the last `custom-title` (the person's `/rename`), else the
+ * last `agent-name` (what the agent shows); never the `ai-title`. Only the records of this session
+ * count, a log of a resumed or forked session holds the records of others. A line is parsed only if
+ * it holds one of the two words, so the cost of a long tail is a string search.
+ */
+function nameOfLines(lines: readonly string[], sessionId: string): string | undefined {
+  let custom: string | undefined;
+  let shown: string | undefined;
+  for (let i = lines.length - 1; i >= 0 && custom === undefined; i--) {
+    const line = lines[i] ?? "";
+    const isCustom = line.includes('"custom-title"');
+    if (!isCustom && !line.includes('"agent-name"')) continue;
+    if (!isCustom && shown !== undefined) continue;
+    let entry: { type?: unknown; sessionId?: unknown; customTitle?: unknown; agentName?: unknown };
+    try {
+      entry = JSON.parse(line) as typeof entry;
+    } catch {
+      continue;
+    }
+    if (entry === null || typeof entry !== "object" || entry.sessionId !== sessionId) continue;
+    if (entry.type === "custom-title") custom = cleanSessionName(entry.customTitle);
+    else if (entry.type === "agent-name") shown ??= cleanSessionName(entry.agentName);
+  }
+  return custom ?? shown;
+}
+
+/**
+ * The model of the last answer and, when the session is named, its name, read once from the end of a
+ * Claude Code session log. The result is kept per file and session while the file stays as it was.
+ */
+export async function logFacts(path: string, sessionId?: string): Promise<LogFacts> {
+  const none: LogFacts = { model: undefined, name: undefined };
+  let seen: { size: number; mtimeMs: number };
+  try {
+    const { size, mtimeMs } = await stat(path);
+    seen = { size, mtimeMs };
+  } catch {
+    return none;
+  }
+  const key = `${path}\0${sessionId ?? ""}`;
+  const cached = facts.get(key);
+  if (cached && cached.size === seen.size && cached.mtimeMs === seen.mtimeMs) return cached.facts;
+  const lines = await tailLines(path, TAIL_BYTES);
+  const found: LogFacts = {
+    model: modelOfLines(lines),
+    name: sessionId === undefined ? undefined : nameOfLines(lines, sessionId),
+  };
+  if (facts.size >= MAX_CACHED_LOGS) facts.clear();
+  facts.set(key, { ...seen, facts: found });
+  return found;
+}
+
+/** The model of the last answer in the end of a Claude Code session log, if there is one. */
+export async function modelFromLog(path: string): Promise<string | undefined> {
+  return (await logFacts(path)).model;
 }
 
 interface IndexLine {
@@ -195,12 +250,19 @@ async function observe(caller: Caller | undefined, context: ExecutorContext) {
     ...(transcript === undefined ? [] : [transcript]),
     ...context.dirs.map((dir) => join(store, projectFolderName(dir), `${sessionId}.jsonl`)),
   ];
+  // The name is read only for an id of the strict form: it is the one every reader of the logs trusts.
+  const nameOf = SAFE_SESSION_ID.test(sessionId) ? sessionId : undefined;
   for (const path of candidates) {
     // A path from a hook is not trusted to point anywhere but at the agent's own store.
     if (!isInside(realStore, await realOrSelf(path))) continue;
-    const model = await modelFromLog(path);
-    if (model !== undefined) {
-      record.model = sourced(model, "derived");
+    const read = await logFacts(path, nameOf);
+    if (record.model === undefined && read.model !== undefined) {
+      record.model = sourced(read.model, "derived");
+    }
+    if (record.session_name === undefined && read.name !== undefined) {
+      record.session_name = sourced(read.name, "derived");
+    }
+    if (record.model !== undefined && (nameOf === undefined || record.session_name !== undefined)) {
       break;
     }
   }

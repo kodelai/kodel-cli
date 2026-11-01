@@ -36,6 +36,12 @@ export interface ExecutorRecord {
   client?: Sourced<Caller>;
   session?: Sourced<string>;
   model?: Sourced<string>;
+  /**
+   * The name the session has in the agent's own log (the person's `/rename`, else the title the agent
+   * shows), as it was when the record was written. Display text only: it comes from a file the agent's
+   * session can write, so it decides nothing.
+   */
+  session_name?: Sourced<string>;
 }
 
 /** The engine that wrote a run's records. Written once, at the start of a run. */
@@ -67,6 +73,29 @@ const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
 export function cleanExecutorText(raw: unknown): string | undefined {
   if (typeof raw !== "string") return undefined;
   const text = raw.replace(CONTROL, "").trim().slice(0, MAX_EXECUTOR_TEXT);
+  return text === "" ? undefined : text;
+}
+
+/** Longest session name kept: it is shown in a row of the list, so a long one is only noise. */
+export const MAX_SESSION_NAME = 120;
+
+// Bidirectional controls and zero-width characters: they do not move the cursor but change what a
+// line reads as, so they have no place in a name that stands for a run.
+const INVISIBLE = /[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+
+/**
+ * A session name made safe to keep and to show: control, bidirectional and zero-width characters
+ * removed, cut at `MAX_SESSION_NAME`. Empty after cleaning means there is no name. Not
+ * `cleanExecutorText`: that one also builds the key of a served step, so its rules do not move.
+ */
+export function cleanSessionName(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const text = raw
+    .replace(CONTROL, "")
+    .replace(INVISIBLE, "")
+    .trim()
+    .slice(0, MAX_SESSION_NAME)
+    .trim();
   return text === "" ? undefined : text;
 }
 
