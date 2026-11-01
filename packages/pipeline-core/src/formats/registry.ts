@@ -84,9 +84,15 @@ export function encodeRunState(state: RunState): unknown {
   return codec.encodeState(state);
 }
 
-/** A journal record from the parsed line; each line is read by its own `v`. */
+/**
+ * A journal record from the parsed line; each line is read by its own `v`. A line that names no
+ * format is read as it is (the journal is history: what is there is shown, and the seal and the
+ * hashes are what say it was changed); one that names a format this kodel does not know is refused.
+ */
 export function decodeJournalRecord(raw: unknown): JournalRecord {
-  const version = typeof raw === "object" && raw !== null ? (raw as { v?: unknown }).v : undefined;
+  const isObject = typeof raw === "object" && raw !== null && !Array.isArray(raw);
+  const version = isObject ? (raw as { v?: unknown }).v : undefined;
+  if (isObject && version === undefined) return raw as JournalRecord;
   const codec = codecFor(version);
   if (!codec) throw refuseUnknown(version, "a journal record");
   return codec.decodeRecord(raw);

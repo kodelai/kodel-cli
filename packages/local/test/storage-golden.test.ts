@@ -76,14 +76,12 @@ describe("the golden runs in a home tree", () => {
     });
     const summaries = await host.runSummaries();
     expect(summaries.map((s) => s.meta.runId).sort()).toEqual([...ids, ...old].sort());
+    // runs of format 1 are read and written in that format: they open like the others
     for (const summary of summaries.filter((s) => old.includes(s.meta.runId))) {
-      expect(summary.state).toBeUndefined();
-      expect(summary.unreadable).toMatchObject({ code: "UNSUPPORTED_FORMAT", format: 1 });
+      expect(summary.state?.v).toBe(1);
+      expect(summary.unreadable).toBeUndefined();
     }
-    for (const id of old) {
-      await expect(host.open(id)).rejects.toMatchObject({ code: "UNSUPPORTED_FORMAT" });
-    }
-    for (const id of ids) {
+    for (const id of [...old, ...ids]) {
       const run = await host.open(id);
       expect(run).toBeDefined();
       expect((await run?.state())?.status).toBe("completed");
