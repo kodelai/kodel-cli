@@ -77,6 +77,7 @@ const TWO_STEPS: Fixture = {
     "edges:",
     "  - { from: write, to: polish }",
     "  - { from: polish, to: approve }",
+    "  - { from: approve, to: write, when: rejected }",
     "",
   ].join("\n"),
 };
@@ -131,14 +132,22 @@ describe("Claude Code, the tool calls of a run", () => {
         ),
       );
       const mine = turn.calls.filter((c) => c.parent === undefined && c.id !== undefined);
-      const missing = mine.filter((c) => !recorded.has(rowId(turn.sessionId, c.id as string)));
-      // what the record lacks is what no pass reads: the final response of the last step, here the calls after the last
-      // hand-in and the hand-in itself
-      const lastTools = turn.responses[turn.responses.length - 1]?.tools.length ?? 0;
+      // a call before pipeline_start belongs to no run, so it is in no step; the hand-in of the last step and what follows
+      // it are what no pass reads: only those may be missing from the record
+      const started = mine.findIndex((c) => c.name.endsWith("pipeline_start"));
+      const lastHandIn = mine
+        .map((c) => c.name.endsWith("pipeline_complete_step"))
+        .lastIndexOf(true);
+      expect(started, `the agent never started a run${why}`).toBeGreaterThanOrEqual(0);
+      expect(lastHandIn, `the agent never handed a step in${why}`).toBeGreaterThan(started);
+      const missing = mine
+        .slice(started)
+        .filter((c) => !recorded.has(rowId(turn.sessionId, c.id as string)));
+      const unexpected = missing.filter((c) => mine.indexOf(c) < lastHandIn);
       expect(
-        missing.length,
-        `the record lacks calls the agent made:\n${missing.map((c) => c.name).join("\n")}${why}`,
-      ).toBeLessThanOrEqual(lastTools + 1);
+        unexpected.map((c) => c.name),
+        `the record lacks calls the agent made inside the run:${why}`,
+      ).toEqual([]);
       // and everything the record holds the agent's own stream has too
       const raw = new Set(mine.map((c) => rowId(turn.sessionId, c.id as string)));
       const extra = [...recorded].filter((id) => !raw.has(id));
