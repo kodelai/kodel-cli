@@ -172,6 +172,9 @@ it does not keep a declared outcome after a failed check, it reads two equal edg
 other fix since applies to every run. The limits that a new engine cannot lift in an older one are in
 `docs/run-formats.md`.
 
+Decision T-41 (a run keeps its format; `kodel migrate` is the person's way up) is refuted if a user
+outside this repository reports a run of a supported format refused, orphaned or changed by an update.
+
 ## Decisions and tests
 
 Every decision recorded in the decision log (local notes, referred to by id) has a test plan and a refutation criterion.

@@ -9,8 +9,11 @@ import { MAX_WAIT_S } from "../next-step";
 import { RUN_ID_PATTERN } from "../run-id";
 import type { PipelineService, ToolResult } from "../service";
 
-/** Bump when a tool is renamed or its arguments change; a snapshot test pins the surface. */
-export const CONTRACT_VERSION = 3;
+/**
+ * Bump when a tool is renamed, its arguments change or an answer gains a code a client must handle;
+ * a snapshot test pins the surface. 4: `UNSUPPORTED_FORMAT_FEATURE` and `details.how_to_upgrade`.
+ */
+export const CONTRACT_VERSION = 4;
 
 /**
  * What the agent is told about this server when it connects (the MCP `instructions` field), so the

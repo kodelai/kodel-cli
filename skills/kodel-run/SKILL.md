@@ -23,3 +23,6 @@ The person wants a task done through a Kodel pipeline. Do these steps in order a
 4. From here on follow the instructions the server sent when it connected: they cover the loop, a
    `waiting` answer, a `workdir`, a `choice` and a run that is already finished. Pass `restart: true`
    only if the person asks to run the task again.
+   If an answer says `UNSUPPORTED_FORMAT_FEATURE`, the run is written in an older stored format that cannot hold what
+   was asked. Tell the person what you wanted and offer them `kodel migrate <run>` (one way) or to go on within the
+   run's limits. Only a person runs that command, in a terminal: never run it yourself.

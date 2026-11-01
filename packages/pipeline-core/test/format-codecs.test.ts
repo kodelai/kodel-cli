@@ -9,6 +9,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   CURRENT_RECORD_VERSION,
+  cannotHoldError,
   cannotHoldMessage,
   capabilitiesOf,
   codecFor,
@@ -341,6 +342,53 @@ describe("t41 a run of format 1 takes its next step", () => {
     expect(result.error.message).toBe(
       cannotHoldMessage(1, "a pipeline with a fork and a join", "r1"),
     );
+  });
+
+  test("t41_decide_returns_encoded_or_refusal: a format-1 decision carries what is to be written, never both", () => {
+    const state = v1Start(AGENT_THEN_COMMAND);
+    const ok = decide(
+      AGENT_THEN_COMMAND,
+      state,
+      { type: "agent_completed", node: "a", attempt: 1 },
+      1,
+    );
+    expect(ok.ok && ok.encoded !== undefined).toBe(true);
+    const refused = decide(
+      AGENT_THEN_COMMAND,
+      { ...state, forks: {} } as RunState,
+      { type: "agent_completed", node: "a", attempt: 1 },
+      1,
+    );
+    expect(refused.ok).toBe(false);
+    expect("encoded" in refused).toBe(false);
+  });
+
+  test("t41_v1_run_continues_in_format_1_on_each_write_path: tick and heartbeat keep format 1", () => {
+    const started = decide(
+      AGENT_THEN_COMMAND,
+      v1Start(AGENT_THEN_COMMAND),
+      { type: "agent_completed", node: "a", attempt: 1 },
+      1,
+    );
+    if (!started.ok) throw started.error;
+    for (const event of [
+      { type: "heartbeat", node: "c", attempt: 1 },
+      { type: "tick" },
+    ] as RunEvent[]) {
+      const done = decide(AGENT_THEN_COMMAND, started.state, event, 2);
+      expect(done.ok).toBe(true);
+      if (!done.ok) return;
+      expect(done.encoded).toBeDefined();
+      expect((done.encoded as { state: { v: number } }).state.v).toBe(1);
+      for (const record of done.encoded?.journal ?? []) expect(record.v).toBe(1);
+    }
+  });
+
+  test("t41_refusal_carries_how_to_upgrade: the way up is in the details, not only in the text", () => {
+    const error = cannotHoldError(1, "a second pause", "r_0abcdefgh_ijkl");
+    expect(error.code).toBe("UNSUPPORTED_FORMAT_FEATURE");
+    expect(JSON.stringify(error.details)).toContain("kodel migrate r_0abcdefgh_ijkl");
+    expect(error.message).toContain("only a person can run it");
   });
 
   test("t41_v1_take_step_answers_nothing_to_take", () => {
