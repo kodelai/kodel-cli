@@ -37,6 +37,28 @@ export interface HistoryConfig {
    * (read as "not captured"); the project config always fills it (`defaultUsage`).
    */
   usage?: UsageConfig;
+  /**
+   * What the run records of the agent's tool calls (name, time, outcome, sizes), from the agent's own log. Absent in a run
+   * started before it existed (read as "not captured"); the project config always fills it (`defaultToolCalls`).
+   */
+  tool_calls?: ToolCallsConfig;
+}
+
+/**
+ * `enabled: false` writes nothing and does not read the agent's log. `preview_chars` cuts the preview of a call's input; a
+ * preview is stored only when the agent's own conversation log is kept as `full` text (`agent_log`), and `0` stores none.
+ * It is frozen with the rest of the section when the run starts.
+ */
+export interface ToolCallsConfig {
+  enabled: boolean;
+  preview_chars: number;
+}
+
+export const DEFAULT_TOOL_CALLS: ToolCallsConfig = { enabled: true, preview_chars: 200 };
+
+/** A copy of the defaults, so no caller shares or changes the constant. */
+export function defaultToolCalls(): ToolCallsConfig {
+  return { ...DEFAULT_TOOL_CALLS };
 }
 
 /**

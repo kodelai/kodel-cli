@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   DEFAULT_AGENT_LOG,
   DEFAULT_HISTORY,
+  DEFAULT_TOOL_CALLS,
   DEFAULT_USAGE,
   defaultAgentLog,
   HISTORY_CATEGORIES,
@@ -54,7 +55,12 @@ describe("the project config", () => {
         on_run: { mode: "auto" },
         adapters: {},
       },
-      history: { ...DEFAULT_HISTORY, agent_log: DEFAULT_AGENT_LOG, usage: DEFAULT_USAGE },
+      history: {
+        ...DEFAULT_HISTORY,
+        agent_log: DEFAULT_AGENT_LOG,
+        usage: DEFAULT_USAGE,
+        tool_calls: DEFAULT_TOOL_CALLS,
+      },
       agents: { subagents: "auto", max_parallel: 8, claim_ttl_s: 900 },
       storage: "project",
     });
@@ -205,7 +211,12 @@ describe("the project config", () => {
 
 describe("the history section", () => {
   test("history_defaults_when_there_is_no_file_or_no_section", async () => {
-    const defaults = { ...DEFAULT_HISTORY, agent_log: DEFAULT_AGENT_LOG, usage: DEFAULT_USAGE };
+    const defaults = {
+      ...DEFAULT_HISTORY,
+      agent_log: DEFAULT_AGENT_LOG,
+      usage: DEFAULT_USAGE,
+      tool_calls: DEFAULT_TOOL_CALLS,
+    };
     expect((await loadConfig(dir)).history).toEqual(defaults);
     await write("version: 1\n");
     expect((await loadConfig(dir)).history).toEqual(defaults);
@@ -233,6 +244,7 @@ describe("the history section", () => {
       tool_log: { enabled: false },
       agent_log: DEFAULT_AGENT_LOG,
       usage: DEFAULT_USAGE,
+      tool_calls: DEFAULT_TOOL_CALLS,
     });
     await write("history:\n  changes: { exclude: ['a/**'] }\n");
     expect((await loadConfig(dir)).history.changes).toEqual({
@@ -291,7 +303,7 @@ describe("the history section", () => {
     // same ones, and each must have an `enabled` key.
     // `agent_log` and `usage` are the sections with more than a switch (mode, caps, interval; the price override) and are listed apart
     expect([...HISTORY_SECTION_KEYS].sort()).toEqual(
-      [...HISTORY_CATEGORIES, "agent_log", "usage"].sort(),
+      [...HISTORY_CATEGORIES, "agent_log", "usage", "tool_calls"].sort(),
     );
     expect(Object.keys(DEFAULT_HISTORY).sort()).toEqual([...HISTORY_CATEGORIES].sort());
     for (const category of HISTORY_CATEGORIES) {

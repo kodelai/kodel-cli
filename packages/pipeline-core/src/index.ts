@@ -32,6 +32,8 @@ export * from "./slug";
 export * from "./task-service";
 export * from "./task-size";
 export * from "./tasks";
+export * from "./tool-calls";
+export * from "./tool-calls-record";
 export * from "./usage";
 export * from "./usage-record";
 export * from "./usage-report";
