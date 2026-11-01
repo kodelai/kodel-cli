@@ -76,6 +76,8 @@ afterEach(async () => {
 });
 
 interface RigOptions {
+  /** Another pipeline than the two sequential steps: its name and its text. */
+  pipeline?: { name: string; text: string };
   /** A task of its own, so that a second run in one test is not the first one picked up again. */
   task?: string;
   toolCalls?: Partial<ToolCallsConfig> | null;
@@ -108,6 +110,12 @@ const historyOf = (options: RigOptions): HistoryConfig => ({
 async function rig(options: RigOptions = {}): Promise<Rig> {
   const env: NodeJS.ProcessEnv = { CLAUDE_CONFIG_DIR: claude };
   if (options.session !== null) env["CLAUDE_CODE_SESSION_ID"] = options.session ?? SESSION;
+  if (options.pipeline !== undefined) {
+    await writeFile(
+      join(dir, ".kodel", "pipelines", `${options.pipeline.name}.yaml`),
+      options.pipeline.text,
+    );
+  }
   const writer = new ToolCallsWriter({
     root: dir,
     rules: [],
@@ -125,7 +133,11 @@ async function rig(options: RigOptions = {}): Promise<Rig> {
     history: historyOf(options),
     toolCalls: writer,
   });
-  const started = await host.start({ pipeline: "two", task: options.task ?? "t", restart: false });
+  const started = await host.start({
+    pipeline: options.pipeline?.name ?? "two",
+    task: options.task ?? "t",
+    restart: false,
+  });
   const run = started.run as LocalRun;
   return { host, run, runId: run.runId, writer, store, env };
 }
@@ -1239,6 +1251,100 @@ describe("zkrh the pass, what the second review asked for", () => {
     expect(tools).toContain("Bash");
     // what came before the run's first call is not the run's
     expect(tools).not.toContain("Glob");
+  });
+});
+
+describe("zkrh the pass in a fork", () => {
+  const FORKED = [
+    "name: forked",
+    "nodes:",
+    "  - { slug: plan, kind: agent, prompt: plan }",
+    "  - { slug: a, kind: agent, prompt: do a }",
+    "  - { slug: b, kind: agent, prompt: do b }",
+    "  - { slug: merge, kind: agent, prompt: merge, join: all }",
+    "edges:",
+    "  - { from: plan, to: a }",
+    "  - { from: plan, to: b }",
+    "  - { from: a, to: merge }",
+    "  - { from: b, to: merge }",
+    "",
+  ].join("\n");
+
+  test("zkrh_fork_placement_on_a_hand_written_fork_fixture", async () => {
+    // plan is handed in; a and b are open together in one session; a is handed in first, b later
+    const r = await rig({ pipeline: { name: "forked", text: FORKED } });
+    const log = new ClaudeLogBuilder({
+      sessionId: SESSION,
+      cwd: dir,
+      start: new Date(T0).toISOString(),
+    });
+    log
+      .user("go")
+      .call("m_start", {
+        id: "toolu_start",
+        name: "mcp__kodel__pipeline_start",
+        input: { task: "t" },
+      })
+      .result("toolu_start", [
+        { type: "text", text: JSON.stringify({ ok: true, run_id: r.runId }) },
+      ])
+      .call("m_plan", { id: "toolu_plan", name: "Bash", input: { command: "plan" } })
+      .result("toolu_plan", "ok")
+      .call("m_hplan", {
+        id: "toolu_hplan",
+        name: "mcp__kodel__pipeline_complete_step",
+        input: { node_slug: "plan", attempt: 1 },
+      });
+    const path = await install(log);
+    nowMs = after(log, 10);
+    await r.run.completeStep("plan", 1);
+    expect((await stateOf(r)).active.map((v) => v.node).sort()).toEqual(["a", "b"]);
+    // both branches are worked in the same session, calls interleaved
+    log.wait(500).result("toolu_hplan", "{}");
+    log
+      .call("m_ra", { id: "toolu_ra", name: "Read", input: { file_path: "/a" } })
+      .result("toolu_ra", "ok");
+    log
+      .call("m_eb", { id: "toolu_eb", name: "Edit", input: { file_path: "/b" } })
+      .result("toolu_eb", "ok");
+    log.call("m_ha", {
+      id: "toolu_ha",
+      name: "mcp__kodel__pipeline_complete_step",
+      input: { node_slug: "a", attempt: 1 },
+    });
+    await writeFile(path, log.text());
+    nowMs = after(log, 10);
+    await r.run.completeStep("a", 1);
+    log.wait(500).result("toolu_ha", "{}");
+    log
+      .call("m_gb", { id: "toolu_gb", name: "Grep", input: { pattern: "x" } })
+      .result("toolu_gb", "ok");
+    log.call("m_hb", {
+      id: "toolu_hb",
+      name: "mcp__kodel__pipeline_complete_step",
+      input: { node_slug: "b", attempt: 1 },
+    });
+    await writeFile(path, log.text());
+    nowMs = after(log, 10);
+    await r.run.completeStep("b", 1);
+    const byTool = (tool: string) => callsRows.find((c) => c.tool === tool);
+    const callsRows = await callsOf(r);
+    // what the plan step did belongs to it, and was made while it alone was open
+    expect(byTool("Bash")).toMatchObject({ node: "plan", attempt: 1 });
+    expect(byTool("Bash")?.shared).toBeUndefined();
+    // the two branches were open together: the first hand-in takes what came before it, and the row says it is shared
+    expect(byTool("Read")).toMatchObject({ node: "a", attempt: 1, shared: true });
+    expect(byTool("Edit")).toMatchObject({ node: "a", attempt: 1, shared: true });
+    // the hand-in call of a belongs to a
+    expect(
+      callsRows.filter((c) => c.tool === "pipeline_complete_step" && c.node === "a"),
+    ).toHaveLength(1);
+    // after a was handed in only b was open: what came then is b's, and not shared
+    expect(byTool("Grep")).toMatchObject({ node: "b", attempt: 1 });
+    expect(byTool("Grep")?.shared).toBeUndefined();
+    // every call once
+    const ids = callsRows.map((c) => c.id);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });
 

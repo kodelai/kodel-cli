@@ -250,7 +250,7 @@ format and every format has a codec), so:
   as `record_refused`); a held pass does not count `skipped` lines (the next pass reads them again); the label of `skipped` says "could not be read (over
   the limit, or not JSON)"; the docs say what is true of an older kodel (format 2 reads and keeps the key, only format 1 and the config refuse), that every
   call in a fork whose steps are worked one by one is also `shared`, and that a call held by the main log and a subagent file is two rows when read in two passes.
-- **The tests, counted** (a script compared the 147 `zkrh_` names of the acceptance section with the test files): 72 are there under the same name. These
+- **The tests, counted** (a script compared the 147 `zkrh_` names of the acceptance section with the test files): 73 are there under the same name. These
   are there under another name: `zkrh_agent_log_off_or_metadata_stores_no_preview_but_sizes` and `zkrh_works_with_usage_off` (in
   `zkrh_works_with_agent_log_off_and_usage_off_and_stores_no_preview`), `zkrh_preview_chars_zero_stores_no_preview` (in `zkrh_previews_only_when_agent_log_full`),
   `zkrh_config_edit_mid_run_keeps_frozen_value`, `zkrh_cursor_skips_credited_after_restart` and `zkrh_hand_in_call_recorded_after_server_restart` (in
@@ -271,8 +271,13 @@ format and every format has a codec), so:
   the slow tests of the pass have a default timeout of 60 s; the budget test compares the whole id set; the memo of subagent logs holds as many as a run has cursors; the preview is not cut a
   second time; the docs and the CLI say the true things about the 64 sessions, the 256 KB preview limit (there is no 1 MB limit), the size of the journal, the lines counted again after a held pass,
   a stream found changed, and calls that finished after the rows were cut.
-- **Not built, left for a follow-up** (the names of the plan with no test at all): at pass level a real fork (`zkrh_fork_placement_on_a_hand_written_fork_fixture`,
-  `zkrh_fork_in_gate_wait_while_other_branch_open_is_not_unattributed`, `zkrh_mixed_run_sequential_fork_sequential`, `zkrh_fork_second_pass_busy_is_caught_up_later`,
+- **Changed after the fourth review of the build:** a hand-written fork at pass level (`zkrh_fork_placement_on_a_hand_written_fork_fixture`: plan, then branches a and b open together
+  in one session; the calls before a's hand-in are a's and `shared`, those after it are b's and not; the plan step's own calls are not shared); a record is no longer written for skipped lines
+  alone; the dead guard on the cursor key is a failure; the CLI says 'of the rows kept' also when an attempt has more than 200 rows; the docs say what happens to an interrupted call, the
+  32-name fold in every record, that a changed stream is read again after a restart, and that a bare `pipeline_*` tool name is flagged too.
+- **What only a person can close:** the task's Done-when ('a real run lists the tool calls of every agent node') is verified on a real Claude Code only by running
+  `KODEL_AGENT_TESTS=1 bun test tests/agents/claude-code-tool-calls.test.ts` (four scenarios, the Claude Code CLI, a budget). This was not done here.
+- **Not built, left for a follow-up** (the names of the plan with no test at all): at pass level a real fork in a gate wait (`zkrh_fork_in_gate_wait_while_other_branch_open_is_not_unattributed`, `zkrh_mixed_run_sequential_fork_sequential`, `zkrh_fork_second_pass_busy_is_caught_up_later`,
   `zkrh_fork_three_workers_race_for_the_lock`, `zkrh_real_fork_run_marks_shared`; the placement of a fork is tested in the pure code only) and the e2e
   `zkrh_fork_run_through_the_real_pipeline_service_with_a_scripted_log`; the lock and the passes together (`zkrh_step_end_takes_the_lock_once_for_all_passes`,
   `zkrh_lost_lock_with_the_copy_off_is_said_as_busy`, `zkrh_ticker_does_not_run_the_pass`, `zkrh_does_not_wait_for_the_step_call`, `zkrh_tool_calls_timeout_leaves_usage_record_intact`,

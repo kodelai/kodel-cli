@@ -231,6 +231,8 @@ function toolCallsAttemptLine(
   /** Rows were cut: a call with no result may have finished, and what is counted from the rows kept is a part. */
   cut: boolean,
 ): string {
+  // Rows are kept up to 200 per attempt and none past the budget: what is counted from them is a part when either held.
+  const partial = cut || attempt.omitted > 0;
   const parts = [`${attempt.calls} call(s) (${toolList(attempt.by_tool, plain)})`];
   if (attempt.failed > 0) parts.push(`${attempt.failed} failed`);
   if (attempt.open > 0) {
@@ -238,7 +240,7 @@ function toolCallsAttemptLine(
   }
   if (attempt.shared > 0) parts.push(`${attempt.shared} shared with another open step`);
   const own = attempt.lines.filter((l) => l.own === true).length;
-  if (own > 0) parts.push(`${own} of the engine's own${cut ? " (of the rows kept)" : ""}`);
+  if (own > 0) parts.push(`${own} of the engine's own${partial ? " (of the rows kept)" : ""}`);
   const servers = [
     ...new Set(attempt.lines.flatMap((l) => (l.server === undefined ? [] : [l.server]))),
   ];

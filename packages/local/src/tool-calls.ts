@@ -643,7 +643,8 @@ export class ToolCallsWriter {
     const needsMark = behind ? stored?.behind !== true : stored?.behind === true;
     let written = recorded;
     if (
-      (fresh.length > 0 || skipped > 0 || needsMark) &&
+      // Lines that could not be read are said with rows, not by a record of their own: a read from the start counts them again.
+      (fresh.length > 0 || needsMark) &&
       (lastSeen !== undefined || stored !== undefined)
     ) {
       // The last record of the pass carries the cursor of the whole read; one that holds only part carries the cursor of
@@ -653,53 +654,57 @@ export class ToolCallsWriter {
         last_key: lastSeen === undefined ? (stored?.last_key ?? "") : usageEventKey(lastSeen),
         ...(behind ? { behind: true as const } : {}),
       };
-      if (/^[0-9a-f]{64}$/.test(finalCursor.last_key)) {
-        const chunks: Positioned[][] = [];
-        for (let i = 0; i < fresh.length; i += MAX_ROWS_PER_RECORD) {
-          chunks.push(fresh.slice(i, i + MAX_ROWS_PER_RECORD));
+      if (!/^[0-9a-f]{64}$/.test(finalCursor.last_key)) {
+        // Not possible (the key is a sha256), but a cursor that cannot be written must not let the read go on past its rows.
+        memo.checkpoint = undefined;
+        await this.fail(run, ctx.result, "unreadable", session);
+        return "done";
+      }
+      const chunks: Positioned[][] = [];
+      for (let i = 0; i < fresh.length; i += MAX_ROWS_PER_RECORD) {
+        chunks.push(fresh.slice(i, i + MAX_ROWS_PER_RECORD));
+      }
+      if (chunks.length === 0) chunks.push([]);
+      for (let n = 0; n < chunks.length; n++) {
+        const part = chunks[n] ?? [];
+        const lastPart = n === chunks.length - 1;
+        const tail = part[part.length - 1];
+        const cursor: ToolCallsCursor =
+          lastPart || tail === undefined
+            ? finalCursor
+            : // More of this pass follows: say so, so a record the run refuses does not leave a cursor that looks complete.
+              { last_seq: tail.seq, last_key: tail.key, behind: true as const };
+        const counts: Record<string, Record<string, number>> = {};
+        for (const item of part) {
+          if (item.row.k !== "c" || item.owner === undefined || item.tool === undefined) continue;
+          const into = counts[item.owner] ?? {};
+          into[item.tool] = (into[item.tool] ?? 0) + 1;
+          counts[item.owner] = into;
         }
-        if (chunks.length === 0) chunks.push([]);
-        for (let n = 0; n < chunks.length; n++) {
-          const part = chunks[n] ?? [];
-          const lastPart = n === chunks.length - 1;
-          const tail = part[part.length - 1];
-          const cursor: ToolCallsCursor =
-            lastPart || tail === undefined
-              ? finalCursor
-              : // More of this pass follows: say so, so a record the run refuses does not leave a cursor that looks complete.
-                { last_seq: tail.seq, last_key: tail.key, behind: true as const };
-          const counts: Record<string, Record<string, number>> = {};
-          for (const item of part) {
-            if (item.row.k !== "c" || item.owner === undefined || item.tool === undefined) continue;
-            const into = counts[item.owner] ?? {};
-            into[item.tool] = (into[item.tool] ?? 0) + 1;
-            counts[item.owner] = into;
-          }
-          if (!(await lock.stillHeld())) return "abort";
-          if (await this.capReached(ctx)) return "abort";
-          const decision = await run.apply({
-            type: "tool_calls_recorded",
-            session,
-            node: ctx.node.node,
-            attempt: ctx.node.attempt,
-            calls: {
-              v: 1,
-              rows: part.map((item) => item.row),
-              counts,
-              // A held pass is read again from the start by the next one, which counts the same lines: they are said then.
-              ...(n === 0 && skipped > 0 && !held ? { skipped } : {}),
-            },
-            cursor,
-          });
-          if (!decision.ok || decision.noop === true) {
-            // Said once, not left as a pass that ends for no visible reason.
-            await this.fail(run, ctx.result, "record_refused", session);
-            return "abort";
-          }
-          ctx.result.recorded += 1;
-          if (!ctx.result.sessions.includes(session)) ctx.result.sessions.push(session);
-          written = cursor.last_seq;
+        if (!(await lock.stillHeld())) return "abort";
+        if (await this.capReached(ctx)) return "abort";
+        const decision = await run.apply({
+          type: "tool_calls_recorded",
+          session,
+          node: ctx.node.node,
+          attempt: ctx.node.attempt,
+          calls: {
+            v: 1,
+            rows: part.map((item) => item.row),
+            counts,
+            // A held pass is read again from the start by the next one, which counts the same lines: they are said then.
+            ...(n === 0 && skipped > 0 && !held ? { skipped } : {}),
+          },
+          cursor,
+        });
+        if (!decision.ok || decision.noop === true) {
+          // Said once, not left as a pass that ends for no visible reason.
+          await this.fail(run, ctx.result, "record_refused", session);
+          return "abort";
         }
+        ctx.result.recorded += 1;
+        if (!ctx.result.sessions.includes(session)) ctx.result.sessions.push(session);
+        written = cursor.last_seq;
       }
     }
     // Everything the read gave was recorded (a failed record returns above), so the read can go on from where it stopped.
