@@ -1584,6 +1584,29 @@ describe("a store made from the golden runs of the stored formats", () => {
     expect((await cli("pipeline", "changes", "history", file)).out).not.toContain("then:");
   });
 
+  test("t41_d2_migrate_is_for_a_person_at_a_terminal_and_asks_first", async () => {
+    const id = RUNS[0] as string;
+    const statePath = join(dir, ".kodel", "runs", id, "state.json");
+    const before = await readFile(statePath, "utf8");
+    const script = await cliAs({ interactive: false }, "migrate", id);
+    expect(script.code).not.toBe(0);
+    expect(script.err).toContain("for a person at a terminal");
+    const engine = await cliAs({ environment: { KODEL_ENGINE: "1" } }, "migrate", id);
+    expect(engine.code).not.toBe(0);
+    expect(engine.err).toContain("will not run from a command the engine runs");
+    // asked first, and the question says what it costs; a "no" changes nothing
+    const declined = await cliAs({ answer: false }, "migrate", id);
+    expect(declined.code).not.toBe(0);
+    expect(declined.err).toContain("not confirmed, nothing was changed");
+    expect(declined.asked[0]).toContain("one way");
+    expect(declined.asked[0]).toContain("Close every older session");
+    // a finished run is read as it is
+    const finished = await cli("migrate", id);
+    expect(finished.code).not.toBe(0);
+    expect(finished.err).toContain("NODE_NOT_RUNNING");
+    expect(await readFile(statePath, "utf8")).toBe(before);
+  });
+
   test("t41_report_without_run_picks_the_latest", async () => {
     // with only runs of format 1 `report` reads the latest of them
     const first = await cli("report");

@@ -18,7 +18,7 @@ import { canonicalNode, checkIdOf, type NodeForms, stableJson } from "./canonica
 import { type ChangesRef, changesField, isTreeId, MAX_CHANGES_ERROR } from "./changes";
 import { type ErrorCode, KodelError } from "./errors";
 import type { EngineRecord, ExecutorRecord } from "./executor";
-import { cannotHoldMessage } from "./formats/messages";
+import { cannotHoldError } from "./formats/messages";
 import { capabilitiesOf, encodeJournalRecord, encodeRunState } from "./formats/registry";
 import type { FormatCapabilities } from "./formats/types";
 import type { HistoryConfig } from "./history-config";
@@ -690,6 +690,13 @@ export type RunEvent =
     }
   /** Carry a paused branch on; `node` picks the pause when more than one branch is paused. */
   | { type: "resume"; node?: string }
+  /**
+   * A person upgraded the run to the newest stored format (`kodel migrate`). The only event that
+   * changes the format a run lives in, and only that command builds it: no tool of the agent does.
+   * `from` is given only to write the mark of an upgrade that was made without it (the state was
+   * written and the journal line was not).
+   */
+  | { type: "run_migrated"; from?: RecordVersion }
   | { type: "cancel" }
   /**
    * The patch of the whole run, or why there is none. Applied once the run has finished, like
@@ -1661,6 +1668,7 @@ class Machine {
       return;
     }
     if (event.type === "resume") return this.resume(event.node);
+    if (event.type === "run_migrated") return this.migrated(event);
     if (event.type === "pipeline_accepted") return this.acceptPipeline(event);
     if (event.type === "tick" || event.type === "heartbeat") {
       if (this.s.status !== "running") throw new Repeat();
@@ -2237,6 +2245,39 @@ class Machine {
     this.takePause((p) => p.node === node || p.blocked?.from === node);
   }
 
+  /**
+   * The run moves to the newest format: from here its state and its journal lines are of that
+   * format (the earlier lines keep theirs), and what the older format could not hold is open to it.
+   * Refused while an engine answers for a step (the older process that has it would write its old
+   * state back); a run already in the newest format changes nothing, unless the mark of the upgrade
+   * is missing, which is then written.
+   */
+  private migrated(event: Extract<RunEvent, { type: "run_migrated" }>) {
+    if (this.ended) {
+      throw fail(
+        "NODE_NOT_RUNNING",
+        `the run is ${this.s.status}; only a run that is going is upgraded`,
+      );
+    }
+    const busy = this.s.active.find(
+      (v) => v.heartbeatAt !== undefined && this.now - v.heartbeatAt < this.staleMs,
+    );
+    if (busy?.heartbeatAt !== undefined) {
+      throw fail(
+        "INVALID_ARGUMENTS",
+        `an engine is working on "${busy.node}" (it answered ${Math.round((this.now - busy.heartbeatAt) / 1000)} s ago); close it, or wait until it has stopped, then upgrade the run`,
+      );
+    }
+    if (this.s.v === RECORD_VERSION) {
+      if (event.from === undefined) throw new Repeat();
+      this.log("run_migrated", { from: event.from, to: RECORD_VERSION });
+      return;
+    }
+    const from = this.s.v;
+    this.s.v = RECORD_VERSION;
+    this.log("run_migrated", { from, to: RECORD_VERSION });
+  }
+
   private acceptPipeline(event: Extract<RunEvent, { type: "pipeline_accepted" }>) {
     if (this.s.specHash === event.to) throw new Repeat();
     if (this.s.specHash !== event.from) {
@@ -2251,10 +2292,7 @@ class Machine {
       this.spec.nodes.some((n) => n.join !== undefined) &&
       !this.caps.pipelineFeatures.includes("join")
     ) {
-      throw fail(
-        "UNSUPPORTED_FORMAT_FEATURE",
-        cannotHoldMessage(this.s.v, "a pipeline with a fork and a join"),
-      );
+      throw cannotHoldError(this.s.v, "a pipeline with a fork and a join", this.s.runId);
     }
     // Before the change itself is judged: a change worked out for another standing may well be
     // acceptable still, but it is not the one the person looked at.

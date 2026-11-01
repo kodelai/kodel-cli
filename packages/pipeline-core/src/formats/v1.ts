@@ -16,7 +16,7 @@
  */
 import { KodelError } from "../errors";
 import type { BlockedRoute, JournalRecord, NodeRun, Pause, RunState, Visit } from "../run";
-import { cannotHoldMessage } from "./messages";
+import { cannotHoldError, withRunId } from "./messages";
 import type { FormatCapabilities, FormatCodec } from "./types";
 
 export const V1_CAPABILITIES: FormatCapabilities = {
@@ -186,6 +186,7 @@ export const V1_EVENTS = [
 ];
 /** Events that exist only since forks and claims. */
 export const V2_ONLY_EVENTS = [
+  "run_migrated",
   "fork_started",
   "branch_settled",
   "join_reached",
@@ -210,7 +211,7 @@ function cannotRead(runId: unknown, why: string): KodelError {
 }
 
 function cannotHold(what: string): KodelError {
-  return new KodelError("UNSUPPORTED_FORMAT_FEATURE", cannotHoldMessage(1, what));
+  return cannotHoldError(1, what);
 }
 
 /** Every key of `obj` must be in `allowed`; a key of a later format is named as such. */
@@ -336,85 +337,101 @@ export const v1Codec: FormatCodec = {
   },
 
   encodeState(state) {
-    if (state.v !== 1) {
-      throw new KodelError(
-        "UNSUPPORTED_FORMAT_FEATURE",
-        `a state of format ${state.v} was given to the encoder of format 1`,
-      );
+    try {
+      return encodeV1State(state);
+    } catch (error) {
+      throw error instanceof KodelError ? withRunId(error, state.runId) : error;
     }
-    if (state.forks !== undefined) throw cannotHold("a fork");
-    if (state.claimEvents !== undefined) throw cannotHold("a worker's claim on a step");
-    if (state.pauses.length > 1) throw cannotHold("more than one pause");
-    if (state.active.length > 1) throw cannotHold("more than one step at a time");
-    // `paused` and the pause go together in this format; the engine of a fork derives the status.
-    const open = state.status === "running" || state.status === "paused";
-    if (open && (state.pauses.length === 1) !== (state.status === "paused")) {
-      throw cannotHold("a pause and a status that do not agree");
-    }
-    const out: Plain = {};
-    for (const [key, value] of Object.entries(state)) {
-      if (value === undefined) continue;
-      if (key === "pauses") {
-        const [pause] = state.pauses;
-        if (pause !== undefined) out.pause = encodePause(pause as unknown as Plain);
-      } else if (key === "nodes") {
-        const nodes: Plain = {};
-        for (const [slug, node] of Object.entries(state.nodes)) {
-          nodes[slug] = encodeChecked(
-            node as unknown as Plain,
-            V1_NODE_KEYS,
-            LATER_NODE_KEYS,
-            `the node "${slug}"`,
-          );
-        }
-        out.nodes = nodes;
-      } else if (key === "active") {
-        out.active = state.active.map((visit) =>
-          encodeChecked(
-            visit as unknown as Plain,
-            V1_VISIT_KEYS,
-            LATER_VISIT_KEYS,
-            "an active visit",
-          ),
-        );
-      } else if (V1_STATE_KEYS.includes(key)) {
-        out[key] = value;
-      } else {
-        throw cannotHold(`the field "${key}"`);
-      }
-    }
-    return out;
   },
 
   decodeRecord(raw) {
-    if (!isObject(raw)) throw cannotRead(undefined, "a journal record is not an object");
-    if (raw.event !== "pipeline_accepted" || raw.effects !== undefined) return raw as JournalRecord;
-    const { effect, ...rest } = raw;
-    const effects = isObject(effect) && effect.kind !== "none" ? [effect] : [];
-    return { ...rest, effects } as unknown as JournalRecord;
+    return decodeV1Record(raw);
   },
 
   encodeRecord(record) {
-    if (record.v !== 1) {
-      throw new KodelError(
-        "UNSUPPORTED_FORMAT_FEATURE",
-        `a journal record of format ${record.v} was given to the encoder of format 1`,
-      );
-    }
-    if (!V1_EVENTS.includes(record.event)) throw cannotHold(`the event "${record.event}"`);
-    for (const field of FORK_RECORD_FIELDS) {
-      if (record[field] !== undefined) throw cannotHold(`a fork attribution ("${field}")`);
-    }
-    if (record.event !== "pipeline_accepted") return record;
-    const { effects, ...rest } = record;
-    if (effects === undefined) return record;
-    if (!Array.isArray(effects)) throw cannotHold("a malformed list of effects");
-    if (effects.length > 1) throw cannotHold("more than one effect of one change");
-    const [effect] = effects;
-    if (effect === undefined) return { ...rest, effect: { kind: "none" } };
-    if (!isObject(effect) || !ACCEPT_EFFECT_KINDS.includes(String(effect.kind))) {
-      throw cannotHold(`the effect ${JSON.stringify(effect)}`);
-    }
-    return { ...rest, effect };
+    return encodeV1Record(record);
   },
 };
+
+function encodeV1State(state: RunState): unknown {
+  if (state.v !== 1) {
+    throw new KodelError(
+      "UNSUPPORTED_FORMAT_FEATURE",
+      `a state of format ${state.v} was given to the encoder of format 1`,
+    );
+  }
+  if (state.forks !== undefined) throw cannotHold("a fork");
+  if (state.claimEvents !== undefined) throw cannotHold("a worker's claim on a step");
+  if (state.pauses.length > 1) throw cannotHold("more than one pause");
+  if (state.active.length > 1) throw cannotHold("more than one step at a time");
+  // `paused` and the pause go together in this format; the engine of a fork derives the status.
+  const open = state.status === "running" || state.status === "paused";
+  if (open && (state.pauses.length === 1) !== (state.status === "paused")) {
+    throw cannotHold("a pause and a status that do not agree");
+  }
+  const out: Plain = {};
+  for (const [key, value] of Object.entries(state)) {
+    if (value === undefined) continue;
+    if (key === "pauses") {
+      const [pause] = state.pauses;
+      if (pause !== undefined) out.pause = encodePause(pause as unknown as Plain);
+    } else if (key === "nodes") {
+      const nodes: Plain = {};
+      for (const [slug, node] of Object.entries(state.nodes)) {
+        nodes[slug] = encodeChecked(
+          node as unknown as Plain,
+          V1_NODE_KEYS,
+          LATER_NODE_KEYS,
+          `the node "${slug}"`,
+        );
+      }
+      out.nodes = nodes;
+    } else if (key === "active") {
+      out.active = state.active.map((visit) =>
+        encodeChecked(
+          visit as unknown as Plain,
+          V1_VISIT_KEYS,
+          LATER_VISIT_KEYS,
+          "an active visit",
+        ),
+      );
+    } else if (V1_STATE_KEYS.includes(key)) {
+      out[key] = value;
+    } else {
+      throw cannotHold(`the field "${key}"`);
+    }
+  }
+  return out;
+}
+
+function decodeV1Record(raw: unknown): JournalRecord {
+  if (!isObject(raw)) throw cannotRead(undefined, "a journal record is not an object");
+  if (raw.event !== "pipeline_accepted" || raw.effects !== undefined) return raw as JournalRecord;
+  const { effect, ...rest } = raw;
+  const effects = isObject(effect) && effect.kind !== "none" ? [effect] : [];
+  return { ...rest, effects } as unknown as JournalRecord;
+}
+
+function encodeV1Record(record: JournalRecord): unknown {
+  if (record.v !== 1) {
+    throw new KodelError(
+      "UNSUPPORTED_FORMAT_FEATURE",
+      `a journal record of format ${record.v} was given to the encoder of format 1`,
+    );
+  }
+  if (!V1_EVENTS.includes(record.event)) throw cannotHold(`the event "${record.event}"`);
+  for (const field of FORK_RECORD_FIELDS) {
+    if (record[field] !== undefined) throw cannotHold(`a fork attribution ("${field}")`);
+  }
+  if (record.event !== "pipeline_accepted") return record;
+  const { effects, ...rest } = record;
+  if (effects === undefined) return record;
+  if (!Array.isArray(effects)) throw cannotHold("a malformed list of effects");
+  if (effects.length > 1) throw cannotHold("more than one effect of one change");
+  const [effect] = effects;
+  if (effect === undefined) return { ...rest, effect: { kind: "none" } };
+  if (!isObject(effect) || !ACCEPT_EFFECT_KINDS.includes(String(effect.kind))) {
+    throw cannotHold(`the effect ${JSON.stringify(effect)}`);
+  }
+  return { ...rest, effect };
+}

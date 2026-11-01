@@ -19,6 +19,8 @@ import {
   type ChangeSet,
   type ChangesRef,
   type CheckVerdict,
+  CURRENT_RECORD_VERSION,
+  cannotHoldError,
   cannotHoldMessage,
   canonicalPipeline,
   capabilitiesOf,
@@ -57,6 +59,7 @@ import {
   type PipelineSpec,
   type ProposeOutcome,
   parsePipeline,
+  type RecordVersion,
   type RedactRule,
   type RunEvent,
   type RunFacts,
@@ -1273,7 +1276,7 @@ export class LocalRun {
       return {
         ok: false,
         code: "UNSUPPORTED_FORMAT_FEATURE",
-        message: cannotHoldMessage(state.v, "a pipeline with a fork and a join"),
+        message: cannotHoldMessage(state.v, "a pipeline with a fork and a join", this.runId),
       };
     }
     const current = await this.currentSpec(state);
@@ -1336,10 +1339,7 @@ export class LocalRun {
     ) {
       return {
         ok: false,
-        error: new KodelError(
-          "UNSUPPORTED_FORMAT_FEATURE",
-          cannotHoldMessage(state.v, "a pipeline with a fork and a join"),
-        ),
+        error: cannotHoldError(state.v, "a pipeline with a fork and a join", this.runId),
       };
     }
     await this.host.store.writeSpec(this.runId, to, input.text);
@@ -2889,6 +2889,72 @@ export class LocalRun {
       ...(full === undefined ? {} : { reason: full }),
       ...(byAgent === undefined ? {} : { byAgent }),
     });
+  }
+
+  /**
+   * Take the run to the newest stored format (`kodel migrate`, a person's command). One way: the
+   * older kodel will not read the run afterwards. Refused for a run that is over, a run whose state
+   * this machine does not vouch for (modified, or never recorded here), a run with no kept
+   * pipeline, and a run with a change of its pipeline waiting; the engine refuses it while an engine
+   * answers for a step. A run already in the newest format changes nothing, except that the mark of
+   * an upgrade whose journal line was lost is written.
+   */
+  async migrate(): Promise<
+    | { status: "migrated"; from: RecordVersion; to: RecordVersion }
+    | { status: "marked"; to: RecordVersion }
+    | { status: "already_current"; to: RecordVersion }
+  > {
+    await this.assertOurs();
+    const to = CURRENT_RECORD_VERSION;
+    const state = await this.state();
+    if (state.status !== "running" && state.status !== "paused") {
+      throw new KodelError(
+        "NODE_NOT_RUNNING",
+        `run ${this.runId} is ${state.status}; only a run that is going is upgraded, and a finished one is read as it is`,
+      );
+    }
+    const meta = await this.host.store.readMeta(this.runId);
+    const kept =
+      meta?.v === META_VERSION
+        ? await this.host.store.readSpec(this.runId, state.specHash)
+        : undefined;
+    if (kept === undefined || hashSource(kept) !== state.specHash) {
+      throw new KodelError(
+        "UNSUPPORTED_FORMAT",
+        `run ${this.runId} has no kept pipeline (it was written before pipelines were kept in versions, or its copy is missing): no kodel can continue it, so there is nothing to upgrade`,
+      );
+    }
+    const integrity = await this.integrityStatus();
+    if (integrity === "modified") {
+      throw new KodelError(
+        "STATE_MODIFIED_EXTERNALLY",
+        `the state of run ${this.runId} is not what kodel last wrote; it was changed outside kodel, and an upgrade would make that state the run's (look at it, and accept it with kodel ack first)`,
+      );
+    }
+    if (integrity === "unknown") {
+      throw new KodelError(
+        "INVALID_ARGUMENTS",
+        `this machine has never recorded the state of run ${this.runId}, so it cannot tell whether it was changed; continue the run once here (a decision at its gate, or a step), then upgrade it`,
+      );
+    }
+    if (await this.pendingChange()) {
+      throw new KodelError(
+        "PIPELINE_CHANGE_REFUSED",
+        `a change of the pipeline of run ${this.runId} waits for you; accept it or drop it first (kodel pipeline changes show ${this.runId})`,
+      );
+    }
+    if (state.v >= to) {
+      const journal = await this.journal();
+      const oldest = journal.reduce<RecordVersion>((v, r) => (r.v < v ? r.v : v), state.v);
+      const marked = journal.some((r) => r.event === "run_migrated");
+      if (oldest >= to || marked) return { status: "already_current", to };
+      const decision = await this.apply({ type: "run_migrated", from: oldest });
+      if (!decision.ok) throw decision.error;
+      return { status: "marked", to };
+    }
+    const decision = await this.apply({ type: "run_migrated" });
+    if (!decision.ok) throw decision.error;
+    return { status: "migrated", from: state.v, to };
   }
 
   /** `node`: which paused branch to carry on, when more than one is paused. */

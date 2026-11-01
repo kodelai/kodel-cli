@@ -12,6 +12,7 @@ import {
   cannotHoldMessage,
   capabilitiesOf,
   codecFor,
+  DEFAULT_STALE_MS,
   decide,
   decodeJournalRecord,
   encodeJournalRecord,
@@ -300,7 +301,9 @@ describe("t41 a run of format 1 takes its next step", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.code).toBe("UNSUPPORTED_FORMAT_FEATURE");
-    expect(result.error.message).toBe(cannotHoldMessage(1, "a pipeline with a fork and a join"));
+    expect(result.error.message).toBe(
+      cannotHoldMessage(1, "a pipeline with a fork and a join", "r1"),
+    );
   });
 
   test("t41_v1_take_step_answers_nothing_to_take", () => {
@@ -440,6 +443,84 @@ describe("t41 what format 1 cannot hold is refused by the encoder, nothing is dr
     for (const name of names) {
       expect(V1_EVENTS.includes(name) || V2_ONLY_EVENTS.includes(name), name).toBe(true);
     }
+  });
+});
+
+describe("t41 upgrading a run", () => {
+  const NOW = 1_000_000;
+
+  /** A run of format 1 with a command in flight whose last sign of life was at `heartbeatAt`. */
+  function running(heartbeatAt: number | undefined): RunState {
+    const state = v1Start(AGENT_THEN_COMMAND);
+    const done = decide(
+      AGENT_THEN_COMMAND,
+      state,
+      { type: "agent_completed", node: "a", attempt: 1 },
+      1,
+    );
+    if (!done.ok) throw done.error;
+    const visit = done.state.active[0];
+    if (!visit) throw new Error("a command is running");
+    const { heartbeatAt: _, ...rest } = visit;
+    return {
+      ...done.state,
+      active: [heartbeatAt === undefined ? rest : { ...rest, heartbeatAt }],
+    } as RunState;
+  }
+
+  test("t41_migrate_heartbeat_boundaries", () => {
+    const upgrade = (state: RunState) =>
+      decide(AGENT_THEN_COMMAND, state, { type: "run_migrated" }, NOW);
+    // an engine answered a second ago: refused, and nothing is written
+    const fresh = upgrade(running(NOW - 1_000));
+    expect(fresh.ok).toBe(false);
+    if (!fresh.ok) expect(fresh.error.message).toContain("an engine is working");
+    // just inside the staleness window: still refused; just outside, and never answered: allowed
+    expect(upgrade(running(NOW - (DEFAULT_STALE_MS - 1))).ok).toBe(false);
+    for (const heartbeatAt of [NOW - DEFAULT_STALE_MS, NOW - DEFAULT_STALE_MS - 1, undefined]) {
+      const done = upgrade(running(heartbeatAt));
+      expect(done.ok).toBe(true);
+      if (!done.ok) continue;
+      const stored = done.encoded?.state as { v: number; pauses: unknown[] };
+      expect(stored.v).toBe(2);
+      expect(stored.pauses).toEqual([]);
+      expect(done.encoded?.journal).toHaveLength(1);
+      expect(done.encoded?.journal[0]).toMatchObject({
+        v: 2,
+        event: "run_migrated",
+        from: 1,
+        to: 2,
+      });
+    }
+  });
+
+  test("t41_migrate_is_the_only_event_that_changes_the_format", () => {
+    const state = v1Start(AGENT_THEN_COMMAND);
+    // every other event leaves the format of the run as it is
+    const done = decide(
+      AGENT_THEN_COMMAND,
+      state,
+      { type: "agent_completed", node: "a", attempt: 1 },
+      1,
+    );
+    expect(done.ok && done.state.v).toBe(1);
+    // a finished run is not upgraded; a run already in the newest format changes nothing
+    const ended = decide(AGENT_THEN_COMMAND, state, { type: "cancel" }, 1);
+    if (!ended.ok) throw ended.error;
+    const refused = decide(AGENT_THEN_COMMAND, ended.state, { type: "run_migrated" }, NOW);
+    expect(refused.ok).toBe(false);
+    const current = decide(AGENT_THEN_COMMAND, undefined, start(), 0);
+    if (!current.ok) throw current.error;
+    const noop = decide(AGENT_THEN_COMMAND, current.state, { type: "run_migrated" }, NOW);
+    expect(noop.ok && noop.noop).toBe(true);
+    // the mark of an upgrade whose journal line was lost is written without changing the state
+    const marked = decide(
+      AGENT_THEN_COMMAND,
+      current.state,
+      { type: "run_migrated", from: 1 },
+      NOW,
+    );
+    expect(marked.ok && marked.journal.map((r) => r.event)).toEqual(["run_migrated"]);
   });
 });
 

@@ -1,4 +1,4 @@
-export { cannotHoldMessage } from "./messages";
+export { cannotHoldError, cannotHoldMessage, withRunId } from "./messages";
 export * from "./registry";
 export {
   V1_BLOCKED_KEYS,

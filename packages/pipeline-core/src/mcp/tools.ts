@@ -72,6 +72,7 @@ export function serverInstructions(
     "8. If you are asked to write or change a pipeline, read pipeline_docs first: it is the reference for this engine version. To add a pipeline, or to change one outside a run (start from the `yaml` of pipeline_resolve), call pipeline_propose_change without run_id: a person accepts it with a command. Never put a file in .kodel/pipelines yourself and never run that command. When the change is about a check, the summary names its check_id and what should get better.",
     "9. If an answer tells you that the pipeline of the run was changed and a person has to accept it (a `waiting` answer about the change, or a note about it on a `node` answer), do what `tell_the_person` says. If the change was made by editing the pipeline file and not through pipeline_propose_change, put the file back as it was and propose it instead.",
     stepsRule(options.waitHint !== false),
+    FORMAT_RULE,
     ...(options.dialog === true ? [DIALOG_RULE] : []),
     ...agentDecisionsRule(options.decisions, decidesRule),
   ].join("\n");
@@ -85,6 +86,13 @@ const stepsRule = (waitHint: boolean) =>
   "9a. A `node` answer may list several open steps (`steps`): `execution.mode` says how this project works them, and `execution.instruction` says exactly what to do. In `parallel` mode you start one worker per free step; each worker takes its step with pipeline_take_step (node_slug), keeps the `claim_token`, does the step, completes it with pipeline_complete_step and that token, and reports the answer back to you; a worker never writes to the person" +
   (waitHint ? " and never starts `kodel wait`" : "") +
   ". In `sequential` mode you do them one by one, unless its instruction says the project lets you work them in parallel: then, if you can start subagents, call pipeline_next_step again with subagents: {can: true} to have the open steps worked in parallel; if you cannot, carry on one step at a time. A `running` answer with `open_steps` means every open step is in a worker's hands: wait for them (wait_s) or for their reports. `also_waiting` on an answer names decisions a person has to make meanwhile: tell them. pipeline_next_step only reads; it never takes a step.";
+
+/**
+ * A run keeps the stored format it started with; an older format cannot hold everything (forks,
+ * claims, a second pause). Numbered after 9a for the same reason: the other rules keep their numbers.
+ */
+const FORMAT_RULE =
+  "9b. A call can be refused with `UNSUPPORTED_FORMAT_FEATURE`: the run is written in an older stored format that cannot hold what you asked for (a pipeline with a fork, a second pause), and nothing was written. Tell the person what you wanted and that they can leave the run as it is, and you go on within its limits, or upgrade it with the command in the answer (`kodel migrate <run>`: one way, the older kodel will not read the run afterwards). Only a person can run that command; it refuses to run for an agent, and you must not try.";
 
 export const SERVER_INSTRUCTIONS = serverInstructions();
 
