@@ -1234,8 +1234,8 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .option("--json", "print the report as JSON")
     .action(async (runId: string | undefined, opts: { json?: boolean }) => {
       const h = await host();
-      // The latest run whose state this kodel reads: one of an older format is skipped, not reported,
-      // and so is one kept before pipelines were versioned (meta format 1), which is listed only.
+      // The latest run this kodel can report on: one whose state it cannot read (a newer format) is
+      // skipped, and so is one kept before pipelines were versioned (meta format 1), which is listed only.
       const summaries = runId === undefined ? await h.runSummaries() : [];
       const id =
         runId ??
@@ -1253,7 +1253,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         throw new UserError(
           `no run this kodel can read: ${summaries.length === 1 ? "the one run is" : `all ${summaries.length} runs are`} ${
             formats.length > 0
-              ? `in run-state format ${formats.join(", ")} (this kodel reads ${RECORD_VERSION}); report on them with the kodel that started them`
+              ? `in run-state format ${formats.join(", ")} (this kodel reads ${RECORD_VERSION}); upgrade kodel to report on them`
               : "unreadable or kept before pipelines were versioned (see kodel status)"
           }`,
         );

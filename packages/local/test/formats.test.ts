@@ -600,7 +600,8 @@ describe("every stored format against the current engine", () => {
     const id = V1_RUNS[0] as string;
     const before = await hashTree(runsDir());
     const decision = await plainHost(root, tmp).open(id).cancel();
-    if (!decision.ok) expect(decision.error.code).not.toBe("UNSUPPORTED_FORMAT");
+    expect(decision.ok ? "ok" : decision.error.code).not.toBe("UNSUPPORTED_FORMAT");
+    expect(decision.ok ? "ok" : decision.error.code).not.toBe("UNSUPPORTED_FORMAT_FEATURE");
     expect(await hashTree(runsDir())).toEqual(before);
   });
 
