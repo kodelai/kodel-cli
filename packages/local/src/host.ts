@@ -114,8 +114,10 @@ import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integ
 import { patchBetween } from "./patch";
 import { MAX_PATCH_KB, PATCH_READ_MARGIN } from "./patch-text";
 import { fitServed, promptHashOf, type ServedNode, servedKeyOf } from "./served";
+import { RunStartCache } from "./session-finder";
 import { type StoragePlace, scrubHome } from "./storage-paths";
 import { artifactFileName, FileStore, META_VERSION, type RunMeta } from "./store";
+import { ToolCallsWriter } from "./tool-calls";
 import { UsageWriter } from "./usage";
 import { GitWorktreeProvider, type Workdir, type WorkdirProvider } from "./worktree";
 
@@ -219,6 +221,8 @@ export interface HostOptions {
   agentLog?: AgentLogWriter;
   /** What counts the agent's token use at the end of each step. One per process, like `agentLog`. */
   usage?: UsageWriter;
+  /** What records the agent's tool calls at the end of each step. One per process, like `usage`. */
+  toolCalls?: ToolCallsWriter;
   /**
    * The timers that copy the agent's log while runs go: present only in the process that serves the MCP tools, so
    * that a command a person runs (`status`, `report`, `wait`, `gate`) never starts one.
@@ -488,6 +492,9 @@ export class LocalHost {
    */
   readonly declaredSubagents = new Map<string, SubagentsDeclaration>();
   readonly usage: UsageWriter;
+  readonly toolCalls: ToolCallsWriter;
+  /** What the writers of this host found about where a run begins in a log: searched once, not once per writer. */
+  readonly runStarts = new RunStartCache();
 
   constructor(
     readonly spec: PipelineSpec,
@@ -516,6 +523,16 @@ export class LocalHost {
         rules: this.rules,
         env: () => options.environment ?? process.env,
         now: options.clock ?? Date.now,
+        runStarts: this.runStarts,
+      });
+    this.toolCalls =
+      options.toolCalls ??
+      new ToolCallsWriter({
+        root: options.root,
+        rules: this.rules,
+        env: () => options.environment ?? process.env,
+        now: options.clock ?? Date.now,
+        runStarts: this.runStarts,
       });
     this.integrity =
       options.integrity ??
@@ -1746,6 +1763,8 @@ export class LocalRun {
           this.host.options.agentLogTickers?.stop(this.runId);
           this.host.agentLog.forget(this.runId);
           this.host.usage.forget(this.runId);
+          this.host.toolCalls.forget(this.runId);
+          this.host.runStarts.forget(this.runId);
         }
         if (finished) {
           const sealHash = await store.writeSeal(this.runId, clock());
@@ -2799,6 +2818,13 @@ export class LocalRun {
           await this.host.usage.capture(run, { node, attempt }, lock).catch(async () => {
             await this.apply({ type: "usage_failed", reason: "unreadable" }).catch(() => undefined);
           });
+          // The record of tool calls follows, under the same lock, with a switch and a budget of its own; a failure of
+          // the count before it does not stop it, and a failure of it is not a failure of either.
+          await this.host.toolCalls.capture(run, { node, attempt }, lock).catch(async () => {
+            await this.apply({ type: "tool_calls_failed", reason: "unreadable" }).catch(
+              () => undefined,
+            );
+          });
         },
       })
       .catch(() => undefined);
@@ -2812,6 +2838,7 @@ export class LocalRun {
         copied?.skipped === "not_running" || copied?.skipped === "no_step" ? undefined : "busy";
       if (reason !== undefined) {
         await this.apply({ type: "usage_failed", reason }).catch(() => undefined);
+        await this.apply({ type: "tool_calls_failed", reason }).catch(() => undefined);
       }
     }
     const executor = await this.executorNow(caller);
