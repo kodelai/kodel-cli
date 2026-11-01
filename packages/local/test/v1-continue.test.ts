@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, join as pathJoin, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LocalPipelineHost } from "../src";
+import { FileStore } from "../src/store";
 
 const FORMATS = resolve(
   fileURLToPath(import.meta.url),
@@ -166,6 +167,52 @@ describe("a run of format 1 goes on in format 1", () => {
     expect(spec?.firstDuplicateEdgeWins).toBe(true);
     const state = await run?.state();
     expect(state?.active.map((v) => v.node)).toEqual(["first"]);
+    // and it is what the old engine recorded for the same run
+    const recording = JSON.parse(
+      await readFile(join(FORMATS, "v1-open", "routing-result.json"), "utf8"),
+    ) as { target_entered: string; target_attempt: number };
+    const entered = state?.active.find((v) => v.node === recording.target_entered);
+    expect(entered?.attempt).toBe(recording.target_attempt);
+  });
+
+  test("t41_snapshot_unchecked_journal_cannot_read", async () => {
+    // an upgraded run whose upgrade mark is gone, beside journal lines that claim format 1: the
+    // lines are not believed, so an edited `v` cannot switch the old reading rule on
+    const run = await trustedGateRun();
+    await run.migrate();
+    const path = join(runDir(GATE), "journal.jsonl");
+    const lines = (await readFile(path, "utf8")).trim().split("\n");
+    await writeFile(path, `${lines.filter((l) => !l.includes('"run_migrated"')).join("\n")}\n`);
+    const error = await hostFor()
+      .open(GATE)
+      .then(
+        (r) =>
+          r?.currentSpec().then(
+            () => undefined,
+            (e: unknown) => e as { code?: string },
+          ),
+        (e: unknown) => e as { code?: string },
+      );
+    expect(error?.code).toBe("UNSUPPORTED_FORMAT");
+  });
+
+  test("t41_d3_meta_format_1_run_is_read_not_continued", async () => {
+    await copyFixture(DUP_EDGE);
+    const metaPath = join(runDir(DUP_EDGE), "meta.json");
+    const meta = await readFile(metaPath, "utf8");
+    await writeFile(metaPath, meta.replace('"v": 2', '"v": 1'));
+    const store = new FileStore({ root: join(root, ".kodel") });
+    // a lookup of the latest run passes it over; it never reaches a start or a report
+    expect(await store.findLatest("dup-edge", "add a small helper")).toBeUndefined();
+    // when it is still open it blocks a new run, and says why
+    const peek = await store.peekState(DUP_EDGE);
+    if (peek?.status === "running" || peek?.status === "paused") {
+      await expect(store.findActive("dup-edge", "add a small helper")).rejects.toMatchObject({
+        code: "UNSUPPORTED_FORMAT",
+      });
+    } else {
+      expect(await store.findActive("dup-edge", "add a small helper")).toBeUndefined();
+    }
   });
 
   /** The files of a run other than its state and its journal: the ones an upgrade must not touch. */

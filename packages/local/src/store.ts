@@ -469,6 +469,9 @@ export class FileStore {
       (m) => m.pipeline === pipeline && m.task === redactedTask && !this.isForeign(m),
     );
     for (const meta of candidates.reverse()) {
+      // A run kept before pipelines were versioned is read for lists and reports only: it cannot be
+      // reported on or carried on here, so a lookup for "the latest" passes it over.
+      if ((meta.v as number) !== META_VERSION) continue;
       let state: RunState | undefined;
       try {
         state = await this.readState(meta.runId);
@@ -521,11 +524,23 @@ export class FileStore {
    */
   async snapshotFormat(runId: string, hash: string): Promise<RecordVersion | undefined> {
     const records = await this.readJournal(runId);
-    return records.find(
+    const found = records.find(
       (r) =>
         (r.event === "run_started" && r.spec === hash) ||
         (r.event === "pipeline_accepted" && r.to === hash),
     )?.v;
+    if (found === undefined) return undefined;
+    // The journal can be written by the agent while the run is open, the state cannot. A line that
+    // claims an older format than the state is believed only beside the mark of a real upgrade;
+    // otherwise an edited `v` would switch an old reading rule on for a run that never had it.
+    const state = await this.readState(runId);
+    if (state && found < state.v && !records.some((r) => r.event === "run_migrated")) {
+      throw new KodelError(
+        "UNSUPPORTED_FORMAT",
+        `the journal of run ${runId} says its pipeline ${hash} was written in run-state format ${found}, but the run is in format ${state.v} and was never upgraded, so the journal cannot be trusted and the pipeline cannot be read`,
+      );
+    }
+    return found;
   }
 
   /**
@@ -748,6 +763,16 @@ export class FileStore {
       (m) => m.pipeline === pipeline && m.task === redactedTask && !this.isForeign(m),
     );
     for (const meta of candidates.reverse()) {
+      if ((meta.v as number) !== META_VERSION) {
+        const peek = await this.peekState(meta.runId);
+        if (peek?.status === "running" || peek?.status === "paused") {
+          throw new KodelError(
+            "UNSUPPORTED_FORMAT",
+            `run ${meta.runId} was written before pipelines were kept in versions (meta format ${meta.v}); left as it is, it still blocks a new run of this pipeline for this task: run ${meta.runId} must be finished before a new run starts for this task`,
+          );
+        }
+        continue;
+      }
       let state: RunState | undefined;
       try {
         state = await this.readState(meta.runId);

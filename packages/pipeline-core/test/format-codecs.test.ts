@@ -254,6 +254,43 @@ describe("t41 a run of format 1 takes its next step", () => {
     expect(stale.ok && stale.noop).toBe(true);
   });
 
+  test("t41_v1_stale_result_matches_the_recording_of_the_old_engine", () => {
+    // `stale-result.json` was recorded from the engine of 12f8578: a result carrying another version's
+    // hash was a noop repeat and wrote nothing
+    const recording = JSON.parse(
+      readFileSync(join(FORMATS, "v1-open", "stale-result.json"), "utf8"),
+    ) as {
+      event: { node: string; specHash: string };
+      decision: { ok: boolean; noop: boolean; journal_records: number };
+    };
+    const state = v1Start(AGENT_THEN_COMMAND);
+    const running = decide(
+      AGENT_THEN_COMMAND,
+      state,
+      { type: "agent_completed", node: "a", attempt: 1 },
+      1,
+    );
+    if (!running.ok) throw running.error;
+    const result = decide(
+      AGENT_THEN_COMMAND,
+      running.state,
+      {
+        type: "work_finished",
+        node: "c",
+        attempt: 1,
+        passed: true,
+        reason: "",
+        specHash: `${recording.event.specHash}-older`,
+      },
+      2,
+    );
+    expect(result.ok).toBe(recording.decision.ok);
+    expect(result.ok && result.noop).toBe(recording.decision.noop);
+    expect(result.ok ? (result.encoded?.journal.length ?? 0) : -1).toBe(
+      recording.decision.journal_records,
+    );
+  });
+
   test("t41_v1_declared_outcome_is_not_kept_on_the_node", () => {
     const state = v1Start(AGENT_THEN_COMMAND);
     const done = decide(

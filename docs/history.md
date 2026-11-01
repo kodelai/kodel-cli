@@ -516,7 +516,7 @@ another machine than the agent's (a devcontainer) may be windowed wrongly.
 **Format.** The usage records exist only in run-state format 2 (forks, T-40): the optional `cache_write_1h` on the `usage`
 event (only a read made for usage carries it, so the events the other readers get and the golden fixtures are unchanged), the
 events `usage_recorded` and `usage_failed`, `state.usage` and `run_started.history.usage`. A run that has them is a format-2
-run, which `@kodel-ai/kodel@0.1.0-beta.0` (format 1) refuses as a format it does not know, so no older engine reads them; a
+run (a format-1 run does not get them, it keeps its format: `docs/run-formats.md`), and the beta (format 1) may not read it; a
 usage delta also carries its own `v` (`USAGE_RECORD_FORMAT`). Every shipped price row carries `checkedAt: 2026-10-28`: that day all fourteen rows
 were compared with the live price page (the page of `https://docs.claude.com/en/docs/about-claude/pricing`, which redirects to
 `platform.claude.com`) and they match. How they were compared differs by row: the eleven rows that had first been taken from the
