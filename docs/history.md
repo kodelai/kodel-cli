@@ -602,7 +602,12 @@ the copy (30 s), the wait for the step's call (2 s) and the count of usage (10 s
 with a budget of 5 s of its own (52 s together). It does not wait for the step's call in the log, never fails a step, and has no
 timer: nothing is recorded between step ends. Where a run begins in a log is searched once for the usage count and this pass
 together. A pass that stops for time records what it read and marks the log as not read to its end (`complete: false`); the next
-pass reads on.
+pass reads on. So does a pass that meets a call that began after the pass did (by at most a minute: a worker goes on writing its
+own log while another worker's step is handed in): rows are never rewritten, so such a call is left for the next pass, which
+places it by its own start; a call further in the future than that (a clock that is wrong, or a log that is not true) is recorded
+as `unattributed`. Once the rows of a run pass their budget no rows come back, however small a later record is. A call that the
+main log and a subagent's own file both hold is recorded once in a pass (not across passes). An attempt past the 64 a record can
+count is counted with the unattributed calls, and its rows say so.
 
 **Format.** The records exist in run-state format 2 and format 1 alike (the codec of format 1 keeps `toolCalls` and the events
 as it keeps `usage`): `tool_calls_recorded` and `tool_calls_failed` in the journal, `toolCalls` in the state,
@@ -610,8 +615,10 @@ as it keeps `usage`): `tool_calls_recorded` and `tool_calls_failed` in the journ
 a `tool_result` event (never written into the stored copy of the agent's log, so the events the other readers get and the
 golden fixtures are unchanged). The payload carries its own `v` (`calls.v`); a record of a format this engine does not know, or a
 reason it does not know, reads as "cannot read (written in format X)", never as "modified" and never as "no calls". A field added
-to a record later bumps `calls.v`. An older engine that goes on with a run keeps the state key untouched; the cursor then lags
-and a later pass catches up from the start of the run's log. The golden run with tool calls is `fixtures/tool-calls-run/`
+to a record later bumps `calls.v`. An engine from before this change, even one that has the codecs, does not know `toolCalls`
+or the two events and refuses a state or a record that has them as "cannot read"; in practice a run of format 1 never gets them
+(new runs start in format 2, and a run that was going has no `history.tool_calls`), so the format-1 entries are for completeness.
+The golden run with tool calls is `fixtures/tool-calls-run/`
 (its README says when it moves under the frozen formats).
 
 Reasons nothing is shown: `not_captured`, `disabled`, `session_unknown`, `log_missing`, `refused`, `unreadable`, `busy`,

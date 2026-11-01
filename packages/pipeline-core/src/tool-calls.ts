@@ -111,7 +111,8 @@ export function placeCall(startedMs: number, context: PlacementContext): Placeme
 
 /**
  * The hand-ins and the agent steps of a run, from its journal. A visit is an agent step when the journal has its
- * hand-in or it is the step handed in now (the same rule `outsideSpans` of the usage count follows).
+ * hand-in, or it is open now as an agent step (the step handed in now and, in a fork, its siblings): the rule `outsideSpans`
+ * of the usage count follows.
  */
 export function placementFromJournal(
   journal: readonly JournalRecord[],
@@ -119,9 +120,14 @@ export function placementFromJournal(
   now: number,
   waits: readonly { from: number; to: number }[],
   runStart?: number,
+  /** The agent steps open now (the run's active visits in phase agent): siblings in a fork have no hand-in yet. */
+  openSteps: readonly { node: string; attempt: number }[] = [],
 ): PlacementContext {
   const key = (node: string, attempt: number) => `${node}\u0000${attempt}`;
-  const agent = new Set<string>([key(current.node, current.attempt)]);
+  const agent = new Set<string>([
+    key(current.node, current.attempt),
+    ...openSteps.map((v) => key(v.node, v.attempt)),
+  ]);
   const handIns: HandIn[] = [];
   for (const record of journal) {
     if (
@@ -277,13 +283,15 @@ export function toolCallsReport(
 ): ToolCallsReport {
   const bad = unreadable(journal);
   if (bad !== undefined) return { cannot_read: true, format: bad };
-  const tc = state.toolCalls;
-  if (tc === undefined) {
+  // A state that lost the key (an older engine wrote it back) does not hide what the journal holds.
+  const recorded = journal.some((r) => r.event === "tool_calls_recorded");
+  if (state.toolCalls === undefined && !recorded) {
     return {
       not_collected: true,
       reason: state.history?.tool_calls?.enabled === false ? "disabled" : "not_captured",
     };
   }
+  const tc = state.toolCalls ?? { sessions: {}, events: 0, rowBytes: 0, failed: [] };
 
   const calls = new Map<string, CallRow & { session: string }>();
   const results = new Map<string, ResultRow>();

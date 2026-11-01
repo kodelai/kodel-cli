@@ -118,4 +118,29 @@ describe("zkrh the block of tool calls in the report", () => {
     for (const char of ["\u001b", "\u0007", "\r", "\u202e"])
       expect(text.includes(char)).toBe(false);
   });
+
+  test("zkrh_report_marks_own_calls_and_shows_servers", () => {
+    const line = (tool: string, over: Record<string, unknown> = {}) => ({
+      id: `id-${tool}`,
+      tool,
+      started: "2026-10-21T10:00:00.000Z",
+      ...over,
+    });
+    const text = toolCallsLines(
+      full({
+        attempts: [
+          attempt({
+            lines: [
+              line("pipeline_start", { own: true, server: "kodel" }),
+              line("pipeline_start", { own: true, server: "claude_ai_Kodel" }),
+              line("Bash"),
+            ] as ToolCallsAttempt["lines"],
+          }),
+        ],
+      }),
+      plain,
+    ).join("\n");
+    expect(text).toContain("2 of the engine's own");
+    expect(text).toContain("MCP: kodel, claude_ai_Kodel");
+  });
 });

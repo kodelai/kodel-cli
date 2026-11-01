@@ -233,6 +233,12 @@ function toolCallsAttemptLine(
   if (attempt.failed > 0) parts.push(`${attempt.failed} failed`);
   if (attempt.open > 0) parts.push(`${attempt.open} open`);
   if (attempt.shared > 0) parts.push(`${attempt.shared} shared with another open step`);
+  const own = attempt.lines.filter((l) => l.own === true).length;
+  if (own > 0) parts.push(`${own} of the engine's own`);
+  const servers = [
+    ...new Set(attempt.lines.flatMap((l) => (l.server === undefined ? [] : [l.server]))),
+  ];
+  if (servers.length > 0) parts.push(`MCP: ${servers.map(plain).join(", ")}`);
   const longest = attempt.longest.map((l) => `${plain(l.tool)} ${formatDuration(l.ms / 1000)}`);
   return `  ${label}: ${parts.join(", ")}${longest.length > 0 ? `; longest: ${longest.join(", ")}` : ""}`;
 }

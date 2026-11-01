@@ -157,6 +157,51 @@ describe("zkrh where a call belongs", () => {
     expect(first).toEqual(again);
   });
 
+  test("zkrh_shared_is_set_on_the_pass_of_the_first_branch_of_a_fork", () => {
+    // the sibling is still open (it has no hand-in): the pass for the first hand-in must know it from the open steps
+    const fork = [entry("a", 1, 0), entry("b", 1, 0)];
+    const blind = placementFromJournal(fork, { node: "a", attempt: 1 }, T0 + 2000, [], T0);
+    expect(placeCall(T0 + 400, blind)).toMatchObject({ node: "a", shared: false });
+    const aware = placementFromJournal(fork, { node: "a", attempt: 1 }, T0 + 2000, [], T0, [
+      { node: "a", attempt: 1 },
+      { node: "b", attempt: 1 },
+    ]);
+    expect(placeCall(T0 + 400, aware)).toEqual({
+      kind: "step",
+      node: "a",
+      attempt: 1,
+      shared: true,
+    });
+  });
+
+  test("zkrh_a_call_is_placed_in_a_step_the_journal_knows_or_nowhere", () => {
+    // a property over many journals and start times: the owner is a hand-in, the step being handed in, or none
+    let seed = 7;
+    const next = () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed / 2147483648;
+    };
+    for (let round = 0; round < 200; round++) {
+      const steps = Array.from({ length: 1 + Math.floor(next() * 4) }, (_, i) => `n${i}`);
+      const journal: JournalRecord[] = [];
+      let at = 0;
+      for (const node of steps) {
+        journal.push(entry(node, 1, at));
+        at += 100 + Math.floor(next() * 900);
+        journal.push(done(node, 1, at));
+      }
+      const current = { node: "cur", attempt: 1 };
+      const now = T0 + at + 500;
+      const ctx = placementFromJournal(journal, current, now, [], T0);
+      const known = new Set([...steps.map((n) => `${n}:1`), "cur:1"]);
+      for (let i = 0; i < 20; i++) {
+        const placed = placeCall(T0 + Math.floor(next() * (at + 700)) - 100, ctx);
+        if (placed.kind === "step")
+          expect(known.has(`${placed.node}:${placed.attempt}`)).toBe(true);
+      }
+    }
+  });
+
   test("zkrh_superseded_attempt_calls_go_to_the_next_hand_in", () => {
     const superseded = [
       entry("impl", 1, 0),
@@ -344,7 +389,8 @@ describe("zkrh the account of tool calls in the run machine", () => {
     expect(out.rows).toEqual([]);
     expect(out.rows_cut).toBe(true);
     expect(out.counts).toEqual({ "write:1": { Bash: 1 } });
-    expect(decision.state.toolCalls?.rowBytes).toBe(TOOL_CALL_ROW_BYTES_BUDGET - 10);
+    // latched: a later, smaller record must not bring rows back after rows were cut
+    expect(decision.state.toolCalls?.rowBytes).toBe(TOOL_CALL_ROW_BYTES_BUDGET);
   });
 
   test("zkrh_session_and_id_formats_are_checked", () => {
@@ -522,6 +568,44 @@ describe("zkrh the report of tool calls", () => {
       not_collected: true,
       reason: "log_missing",
     });
+  });
+
+  test("zkrh_report_json_rows", () => {
+    const report = toolCallsReport(state(), journalOf(payload()));
+    const parsed = JSON.parse(JSON.stringify(report)) as {
+      attempts: { lines: { tool: string }[] }[];
+    };
+    expect(parsed.attempts[0]?.lines[0]?.tool).toBe("Bash");
+  });
+
+  test.each([
+    "session_unknown",
+    "log_missing",
+    "refused",
+    "unreadable",
+    "busy",
+    "agent_unsupported",
+  ] as const)("zkrh_reason_table: %s", (reason) => {
+    const failed = apply(started(), { type: "tool_calls_failed", reason });
+    expect(toolCallsReport(failed.state, failed.journal)).toEqual({
+      not_collected: true,
+      reason,
+    });
+  });
+
+  test("zkrh_a_state_that_lost_the_key_does_not_hide_the_journal", () => {
+    const lost = { ...state() } as RunState;
+    delete (lost as { toolCalls?: unknown }).toolCalls;
+    const report = toolCallsReport(lost, journalOf(payload()));
+    expect("attempts" in report).toBe(true);
+  });
+
+  test("zkrh_a_session_named_proto_or_inherited_is_not_a_cursor", () => {
+    const base = started();
+    expect(apply(base, recorded({ session: "__proto__" }))).toMatchObject({ noop: true });
+    // an inherited name is no stored cursor: it is a new session with its own
+    const decision = apply(base, recorded({ session: "constructor" }));
+    expect(Object.hasOwn(decision.state.toolCalls?.sessions ?? {}, "constructor")).toBe(true);
   });
 
   test("zkrh_unknown_payload_v_is_cannot_read_not_modified", () => {

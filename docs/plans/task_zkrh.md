@@ -238,8 +238,23 @@ format and every format has a codec), so:
 - **The offline twin** (`zkrh_saved_real_session_matches_raw_tool_use_ids`) runs at the collector: it compares every `tool_use` and
   `tool_result` id of the saved session and its subagent with what the reader gives, with no collector code on the reference side. The
   pass-level comparison with a raw log is the env-gated `zkrh_real_run_matches_raw_log`.
-- **Not built, left for a follow-up** (named in the plan, not needed for the behaviour): real fork runs (`zkrh_fork_*` on a hand-written fork
-  fixture, `zkrh_real_fork_run_marks_shared`, the e2e through the real `PipelineService`), the tests of the lock in a fork (`busy`, three
-  workers), the bounded-time tests with a slow reader and with a journal at its cap, the config validation tests of `preview_chars` beyond
-  the schema bound, a test that `attempt` collisions after a node is removed and added again are documented only, and the CLI test of the
-  report on Windows line endings. The env-gated real-agent scenarios were written and **not run** (`tests/agents/claude-code-tool-calls.test.ts`).
+- **Changed after the review of the build** (findings of the first review, all fixed): the placement context now knows the agent steps that
+  are open (`state.active`), so the pass of the first branch of a fork marks `shared`; a call that began after the pass did (by at most a minute)
+  is left for the next pass instead of being recorded `unattributed` for good (the cursor stays before it, `behind` is set, the checkpoint is
+  dropped); the counts and a row agree past 64 attempts; the row budget latches after a cut; the report reads the journal when the state lost
+  `toolCalls`; the run start of one log is never taken for another's; `Object.hasOwn` and a refusal of `__proto__` for the session key; a call
+  that the main log and a subagent's own file both hold is recorded once per pass; a record that is not the last of a pass carries `behind`; the
+  dead `unreadableAt` branch is removed; the CLI block shows how many calls are the engine's own and which MCP servers were called; the docs no
+  longer say an older kodel keeps the state key.
+- **Not built, left for a follow-up** (named in the plan; the list is complete as far as the plan's test names go): real fork runs at pass level
+  (`zkrh_fork_*` on a hand-written fork fixture, `zkrh_real_fork_run_marks_shared`; the placement of a fork is tested in the pure code only),
+  the e2e through the real `PipelineService`, the tests of the lock in a fork (`busy`, three workers), `zkrh_two_sessions_in_one_run`,
+  `zkrh_one_session_over_two_runs`, `zkrh_many_subagent_logs_do_not_make_the_pass_forget_the_main_log`, `zkrh_stale_cursor_after_older_engine_is_caught_up`,
+  `zkrh_held_cap_flush` and `zkrh_synthetic_entry_releases_at_once` (collector level), `zkrh_does_not_wait_for_the_step_call`,
+  `zkrh_report_running_run_shows_only_ended_attempts` (the report does not filter: the block of the latest step is complete after the next pass,
+  said in the docs), the bounded-time tests with a slow reader and with a journal at its cap, the config validation tests of `preview_chars`
+  beyond the schema bound, and the CLI test of the report on Windows line endings. `zkrh_unreadable_log_not_reread_until_it_grows` went with the
+  dead branch (a log found changed stops that stream, `zkrh_truncated_or_rotated_log`). `zkrh_golden_events_and_hashes_untouched` is the existing
+  format tests (`hashes.json` and the golden event files are not changed). A pass that runs out of time before it has read one event and has no
+  stored cursor yet writes nothing, so nothing marks that log as behind. The env-gated real-agent scenarios were written and **not run**
+  (`tests/agents/claude-code-tool-calls.test.ts`).

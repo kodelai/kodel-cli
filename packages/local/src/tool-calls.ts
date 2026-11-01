@@ -16,7 +16,6 @@
  *  - A pass never fails the step: whatever goes wrong is a reason, journaled once.
  */
 import { createHash } from "node:crypto";
-import { stat } from "node:fs/promises";
 import { basename } from "node:path";
 import {
   type AgentHistoryCollector,
@@ -73,6 +72,13 @@ import { outsideSpans, usageEventKey } from "./usage";
 export const TOOL_CALLS_BUDGET_MS = 5_000;
 
 /** Bounded like the memos of the usage count, so one busy run cannot make another forget. */
+/**
+ * A call that began after the pass did, but not by much, is not recorded yet: the pass reads the logs to their end while a
+ * worker goes on writing its own, and a row is never rewritten, so such a call is left for the next pass, which places it.
+ * A call further in the future than this is a clock that is wrong (or a log that is forged): it is recorded, `unattributed`.
+ */
+const NEAR_FUTURE_MS = 60_000;
+
 const MAIN_MEMO_CAP = 32;
 const CHILD_MEMO_CAP = 48;
 const RUN_CAP = 8;
@@ -84,8 +90,6 @@ interface StreamMemo extends RunStartMemo {
   /** The `last_seq` the state had for this stream when this process last wrote it. */
   recordedSeq: number;
   stopped?: ToolCallsFailure;
-  /** The size of the log when it was last found unreadable; it is not read again until it grows. */
-  unreadableAt?: number;
 }
 
 interface RunMemos {
@@ -152,6 +156,12 @@ interface PassContext {
   previewChars: number;
   /** `tool_calls_recorded` events the journal held when the pass began. */
   events: number;
+  /**
+   * The ids (as the log has them) of the calls and the results given in this pass, whatever the stream: a call that the main
+   * log and a subagent's own file both hold is recorded once.
+   */
+  seenCalls: Set<string>;
+  seenResults: Set<string>;
   result: ToolCallsResult;
 }
 
@@ -300,11 +310,20 @@ export class ToolCallsWriter {
       collector: this.collector(configDir),
       node: step,
       // The start of the run is set below, from the log that proves it.
-      placement: placementFromJournal(journal, step, started, spans),
+      placement: placementFromJournal(
+        journal,
+        step,
+        started,
+        spans,
+        undefined,
+        state.active.filter((v) => v.phase === "agent"),
+      ),
       started,
       workdir,
       previewChars: this.previewCharsOf(state),
       events: state.toolCalls?.events ?? 0,
+      seenCalls: new Set(),
+      seenResults: new Set(),
       result,
     };
 
@@ -328,8 +347,10 @@ export class ToolCallsWriter {
       }
       if (!(await proveRunStart(run.runId, memo, this.options.runStarts))) continue;
       proven += 1;
+      // The start of the run is this log's own: one that has none leaves the placement without it, never with another log's.
+      const { runStart: _previous, ...base } = ctx.placement;
       const runStart = memo.start?.ts === undefined ? undefined : Date.parse(memo.start.ts);
-      ctx.placement = { ...ctx.placement, ...(runStart === undefined ? {} : { runStart }) };
+      ctx.placement = runStart === undefined ? base : { ...base, runStart };
       if ((await this.record(ctx, candidate.session, undefined, memo)) === "abort") return result;
       // Subagents are read whatever the switch of the tool log says: their calls are calls.
       for (const log of await subagentLogs(candidate.path, candidate.session)) {
@@ -469,17 +490,10 @@ export class ToolCallsWriter {
     const { run, collector, lock } = ctx;
     const state = await run.state();
     if (state.status !== "running" || state.toolCalls === undefined) return "abort";
-    const stored: ToolCallsCursor | undefined = state.toolCalls.sessions[session];
+    const stored: ToolCallsCursor | undefined = Object.hasOwn(state.toolCalls.sessions, session)
+      ? state.toolCalls.sessions[session]
+      : undefined;
     const recorded = stored?.last_seq ?? 0;
-
-    if (memo.unreadableAt !== undefined) {
-      const size = await stat(memo.path).then(
-        (info) => info.size,
-        () => undefined,
-      );
-      if (size === memo.unreadableAt) return "done";
-      memo.unreadableAt = undefined;
-    }
 
     // A checkpoint is good only for the stream the state says we left: after another process wrote, or after the log itself
     // changed under us, the pass starts again from the run's beginning and skips what is recorded.
@@ -530,6 +544,7 @@ export class ToolCallsWriter {
     };
     const fresh: Positioned[] = [];
     let lastSeen: HistoryEvent | undefined;
+    let held = false;
     let sawRecorded = recorded === 0 || resume !== undefined;
     let changed = false;
     // The names of the tools seen in this pass, so the counts stay within their bound.
@@ -557,9 +572,19 @@ export class ToolCallsWriter {
           }
           continue;
         }
+        if (event.kind === "tool_call") {
+          const began = Date.parse(event.started);
+          if (began > ctx.started && began <= ctx.started + NEAR_FUTURE_MS) {
+            // From here on nothing is recorded: the cursor stays before this call and the next pass reads it again.
+            held = true;
+            break;
+          }
+        }
         lastSeen = event;
         const key = usageEventKey(event);
         if (event.kind === "tool_call") {
+          if (ctx.seenCalls.has(event.id)) continue;
+          ctx.seenCalls.add(event.id);
           const made = this.callRow(ctx, session, parent, event);
           const tool =
             tools.has(made.tool) || tools.size < MAX_COUNT_TOOLS ? made.tool : OTHER_TOOL;
@@ -569,8 +594,16 @@ export class ToolCallsWriter {
               ? made.owner
               : UNATTRIBUTED_KEY;
           owners.add(owner);
-          fresh.push({ row: made.row, seq: event.seq, key, owner, tool });
+          // The counts and the row say the same: a call counted under the unattributed key has no attempt on its row.
+          let row: CallRow = made.row;
+          if (owner !== made.owner) {
+            const { node: _node, attempt: _attempt, shared: _shared, ...rest } = made.row;
+            row = rest;
+          }
+          fresh.push({ row, seq: event.seq, key, owner, tool });
         } else if (event.kind === "tool_result") {
+          if (ctx.seenResults.has(event.id)) continue;
+          ctx.seenResults.add(event.id);
           fresh.push({ row: this.resultRow(session, event), seq: event.seq, key });
         }
       }
@@ -585,7 +618,8 @@ export class ToolCallsWriter {
       return "done";
     }
 
-    const endSeq = holder.value?.seq ?? recorded;
+    // A held pass ends where it stopped, not where the reader's state went on to.
+    const endSeq = held ? (lastSeen?.seq ?? recorded) : (holder.value?.seq ?? recorded);
     if (changed || (!sawRecorded && !stoppedEarly && endSeq < recorded)) {
       memo.checkpoint = undefined;
       memo.stopped = "unreadable";
@@ -594,7 +628,8 @@ export class ToolCallsWriter {
     }
 
     const skipped = stats.invalid_lines;
-    const needsMark = stoppedEarly ? stored?.behind !== true : stored?.behind === true;
+    const behind = stoppedEarly || held;
+    const needsMark = behind ? stored?.behind !== true : stored?.behind === true;
     let written = recorded;
     if (
       (fresh.length > 0 || skipped > 0 || needsMark) &&
@@ -605,7 +640,7 @@ export class ToolCallsWriter {
       const finalCursor: ToolCallsCursor = {
         last_seq: Math.max(endSeq, recorded),
         last_key: lastSeen === undefined ? (stored?.last_key ?? "") : usageEventKey(lastSeen),
-        ...(stoppedEarly ? { behind: true as const } : {}),
+        ...(behind ? { behind: true as const } : {}),
       };
       if (/^[0-9a-f]{64}$/.test(finalCursor.last_key)) {
         const chunks: Positioned[][] = [];
@@ -620,7 +655,8 @@ export class ToolCallsWriter {
           const cursor: ToolCallsCursor =
             lastPart || tail === undefined
               ? finalCursor
-              : { last_seq: tail.seq, last_key: tail.key };
+              : // More of this pass follows: say so, so a record the run refuses does not leave a cursor that looks complete.
+                { last_seq: tail.seq, last_key: tail.key, behind: true as const };
           const counts: Record<string, Record<string, number>> = {};
           for (const item of part) {
             if (item.row.k !== "c" || item.owner === undefined || item.tool === undefined) continue;
@@ -655,7 +691,9 @@ export class ToolCallsWriter {
       }
     }
     // Everything the read gave was recorded (a failed record returns above), so the read can go on from where it stopped.
-    if (holder.value !== undefined) {
+    if (held) {
+      memo.checkpoint = undefined;
+    } else if (holder.value !== undefined) {
       memo.checkpoint = holder.value;
       memo.sourceTail = await sourceTailHash(memo.path, holder.value.offset);
       memo.recordedSeq = written;

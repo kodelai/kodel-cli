@@ -2248,14 +2248,12 @@ class Machine {
     const payload = toolCallsPayloadSchema.safeParse(event.calls);
     const cursor = toolCallsCursorSchema.safeParse(event.cursor);
     if (!SAFE_ID.test(event.session) || !payload.success || !cursor.success) throw new Repeat();
+    // A session id is a key of a plain object: `__proto__` would set the prototype, not a cursor.
+    if (event.session === "__proto__") throw new Repeat();
     if (tc.events >= MAX_TOOL_CALL_EVENTS) throw new Repeat();
-    if (
-      !(event.session in tc.sessions) &&
-      Object.keys(tc.sessions).length >= MAX_TOOL_CALL_SESSIONS
-    ) {
-      throw new Repeat();
-    }
-    const stored = tc.sessions[event.session];
+    const hasCursor = Object.hasOwn(tc.sessions, event.session);
+    if (!hasCursor && Object.keys(tc.sessions).length >= MAX_TOOL_CALL_SESSIONS) throw new Repeat();
+    const stored = hasCursor ? tc.sessions[event.session] : undefined;
     if (cursor.data.last_seq < (stored?.last_seq ?? 0)) throw new Repeat();
     const visit = this.s.active.find(
       (v) => v.node === event.node && v.attempt === event.attempt && v.phase === "agent",
@@ -2288,6 +2286,8 @@ class Machine {
     if (rows.length > 0 && tc.rowBytes + size > TOOL_CALL_ROW_BYTES_BUDGET) {
       kept = [];
       cut = true;
+      // Latched: a later, smaller record must not bring rows back after rows were cut (their results would join no call).
+      tc.rowBytes = TOOL_CALL_ROW_BYTES_BUDGET;
     } else {
       tc.rowBytes += size;
     }
