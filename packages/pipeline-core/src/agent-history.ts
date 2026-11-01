@@ -94,6 +94,8 @@ const toolCallEvent = z.object({
   name: z.string().min(1),
   mcp_server: z.string().optional(),
   input_preview: z.string().optional(),
+  /** Bytes of the whole input before any cut; only a read made with `toolDetail` carries it. */
+  input_bytes: count.optional(),
   started: ts,
 });
 
@@ -106,6 +108,12 @@ const toolResultEvent = z.object({
   duration_ms: count.optional(),
   size: count.optional(),
   output_preview: z.string().optional(),
+  /**
+   * Why a result is an error, as the reader of the log tells it (a plain string here: a later reader may add
+   * values, and a stored copy that carries one must stay readable by an older engine). Only a read made with
+   * `toolDetail` carries it, and it is never written into the stored copy of the agent's log.
+   */
+  error_type: z.string().max(32).optional(),
 });
 
 const subagentEvent = z.object({
@@ -474,6 +482,12 @@ export interface ReadOptions {
    * not rely on the second part; it is a guard for a consumer that reads without `holdBack`.
    */
   usageDetail?: boolean;
+  /**
+   * For a consumer that records tool calls: a `tool_call` carries `input_bytes` and has no `input_preview` when its input is
+   * over 256 KB of JSON (only the size is kept); a `tool_result` that is an error carries `error_type`. The events the other
+   * readers get, and the golden fixtures, are unchanged.
+   */
+  toolDetail?: boolean;
   /** Start at this byte offset of the log with a fresh state (the start of a window). `seq` counts from there. */
   fromOffset?: number;
   /** Continue a read that stopped; `fromOffset` is ignored. The checkpoint belongs to the same log. */
