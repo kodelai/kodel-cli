@@ -1,6 +1,5 @@
 /** Reads the runs of a project into sessions. Read-only: nothing here writes, decides or restarts work. */
 
-import { SAFE_SESSION_ID } from "@kodel-ai/local";
 import {
   cleanSessionName,
   EXECUTOR_SOURCES,
@@ -10,6 +9,7 @@ import {
   type NextStep,
   type RunState,
   runSlug,
+  SAFE_SESSION_ID,
 } from "@kodel-ai/pipeline-core";
 import type { PipeEntry } from "./pipelines";
 import { canReadPipelines, loadPipelines } from "./pipes-load";

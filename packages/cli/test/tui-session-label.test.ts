@@ -8,7 +8,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { JournalRecord, NextStep, RunState } from "@kodel-ai/pipeline-core";
-import { stripAnsi, visibleLength } from "../src/tui/ansi";
+import { fit, stripAnsi, visibleLength } from "../src/tui/ansi";
 import { demoGateDetail, demoSessions } from "../src/tui/demo";
 import { isGuess, labelText, renderLabel, rowLabels, sessionLine } from "../src/tui/label";
 import {
@@ -257,6 +257,55 @@ describe("session_label loading", () => {
     ]);
     expect(session.activity).toBe("quiet");
     expect(session.step).toBe("quiet 12m");
+  });
+});
+
+describe("session_label an event the TUI does not know", () => {
+  test("t41_unknown_event_is_ignored_by_the_tui_load", async () => {
+    const journal = [
+      by("run_started", S1, "observed-env", "a name", 29),
+      rec("node_entered", { node: "a" }, 1),
+    ];
+    const plainRun = await loadOne(journal);
+    const withForeign = await loadOne([
+      journal[0] as JournalRecord,
+      rec("event_of_a_later_engine", { n: 1 }, 20),
+      journal[1] as JournalRecord,
+    ]);
+    // the card's log tail shows the raw name of the event, as it does for every record; nothing else moves
+    expect({ ...withForeign, log: [] }).toEqual({ ...plainRun, log: [] });
+    expect(withForeign.log).toHaveLength(plainRun.log.length + 1);
+  });
+});
+
+describe("session_label columns", () => {
+  test("session_label_wide_emoji_and_flags_are_two_columns", () => {
+    const columns: [string, number][] = [
+      ["✅", 2],
+      ["⭐", 2],
+      ["☔", 2],
+      ["⌚", 2],
+      ["日", 2],
+      ["🙂", 2],
+      // a flag is two regional indicators and takes two columns together
+      ["🇩🇪", 2],
+      // the glyphs the screens draw themselves stay one column
+      ["◐●▌⏱⛁✓✗⚠±⟳▮▯", 12],
+      // a combining mark takes none
+      ["e\u0301", 1],
+    ];
+    for (const [text, expected] of columns) expect(visibleLength(text), text).toBe(expected);
+  });
+
+  test("session_label_fit_is_exact_when_a_wide_character_ends_the_line", () => {
+    for (const width of [3, 4, 5, 6, 7]) {
+      const out = fit("ab日本語cd", width);
+      expect(visibleLength(out), `width ${width}`).toBe(width);
+    }
+    // a colour code between the parts does not let narrow text slip in after the cut
+    const styled = fit("\u001b[2mab日\u001b[0m本cdef", 4);
+    expect(stripAnsi(styled)).toBe("ab …");
+    expect(visibleLength(styled)).toBe(4);
   });
 });
 

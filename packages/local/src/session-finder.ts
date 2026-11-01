@@ -9,9 +9,9 @@
 import { createHash } from "node:crypto";
 import { open, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { cleanExecutorText } from "@kodel-ai/pipeline-core";
+import { cleanExecutorText, SAFE_SESSION_ID } from "@kodel-ai/pipeline-core";
 import { z } from "zod";
-import { SAFE_SESSION_ID, SESSION_ENV } from "./executor";
+import { SESSION_ENV } from "./executor";
 import { claudeConfigDir, findSessionLog } from "./history/claude-code/locate";
 import { AGENT_ID } from "./history/claude-code/normalize";
 import { findRunStart } from "./history/claude-code/window";

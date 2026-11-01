@@ -313,7 +313,7 @@ default).
   hooks registered), so its name is a guess too, and it is written all the same.
 - **It is display text, not the agent's word.** It comes from a file the agent's session can write, so it decides
   nothing, and kodel never names a run by it alone. It is stripped of control, bidirectional and zero-width
-  characters and cut at 120 characters.
+  characters, redacted, and only then cut at 120 characters (so that a secret is whole when the rules meet it).
 - **A rename shows without a call of the agent.** The copy of the agent's log (`history.agent_log`, every
   `interval_s` seconds while the run goes, and at the end of each step) looks at the name of every session that is
   proven to belong to the run (its log calls the run's tools) and journals `agent_session_named` (`session`,

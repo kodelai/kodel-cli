@@ -1782,3 +1782,92 @@ describe("session_label the name of a session proven to belong to the run", () =
     expect((await named(r)).map((rec) => rec.name)).toEqual(["renamed"]);
   });
 });
+
+describe("session_label the pass: what stops the name", () => {
+  const withTitle = async (r: Rig, title: string) => {
+    const path = await installed(sessionLog(r.runId));
+    await appendFile(path, `${titleLine(title)}\n`);
+    return path;
+  };
+  const events = async (r: Rig) =>
+    (await journalOf(r)).filter((rec) => rec.event === "agent_session_named");
+
+  test("session_label_pass_apply_requires_the_lock", async () => {
+    const r = await rig();
+    await withTitle(r, "never journaled");
+    const run = r.run.agentLogRun();
+    let reads = 0;
+    const lost: AgentLogRun = {
+      ...run,
+      // after the pass has read the state once, another process takes the lock on copying over
+      state: async () => {
+        reads += 1;
+        if (reads > 1) {
+          await writeFile(
+            join(r.store.runDir(r.runId), "agent_log.lock"),
+            JSON.stringify({ token: "someone else" }),
+          );
+        }
+        return run.state();
+      },
+    };
+    await r.writer.capture(lost, { why: "tick", waitMs: 0 });
+    expect(await events(r)).toEqual([]);
+    // the name is journaled by the next pass that holds the lock
+    await rm(join(r.store.runDir(r.runId), "agent_log.lock"), { force: true });
+    await capture(r);
+    expect((await events(r)).map((rec) => rec.name)).toEqual(["never journaled"]);
+  });
+
+  test("session_label_pass_a_failure_of_the_name_never_fails_the_pass", async () => {
+    const r = await rig();
+    await withTitle(r, "a name");
+    const run = r.run.agentLogRun();
+    const failing: AgentLogRun = {
+      ...run,
+      apply: async (event) => {
+        if (event.type === "agent_session_named") throw new Error("the journal broke");
+        return run.apply(event);
+      },
+    };
+    const result = await r.writer.capture(failing, { why: "tick", waitMs: 0 });
+    expect(result.errored).toBeUndefined();
+    expect(result.saved).toBe(1);
+    expect(await events(r)).toEqual([]);
+  });
+
+  test("session_label_pass_skips_a_paused_run", async () => {
+    const r = await rig();
+    await withTitle(r, "a name");
+    const run = r.run.agentLogRun();
+    const paused: AgentLogRun = {
+      ...run,
+      state: async () => ({ ...(await run.state()), status: "paused" }),
+    };
+    expect(await r.writer.capture(paused, { why: "tick", waitMs: 0 })).toMatchObject({
+      skipped: "not_running",
+    });
+    expect(await events(r)).toEqual([]);
+  });
+
+  test("session_label_pass_leaves_the_state_alone_when_there_is_no_name", async () => {
+    // a run from before the event: no hashes in its state, and a log that holds no name
+    const r = await rig();
+    await installed(sessionLog(r.runId));
+    await capture(r);
+    const before = JSON.stringify(await stateOf(r));
+    expect((await stateOf(r)).agentLog?.nameHashes).toBeUndefined();
+    await capture(r);
+    expect(JSON.stringify(await stateOf(r))).toBe(before);
+    expect(await events(r)).toEqual([]);
+  });
+
+  test("session_label_pass_names_a_run_that_began_before_the_event_once_per_session", async () => {
+    const r = await rig();
+    await withTitle(r, "named");
+    await capture(r);
+    await capture(r);
+    await capture(r);
+    expect(await events(r)).toHaveLength(1);
+  });
+});

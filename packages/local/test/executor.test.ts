@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PipelineService, toolsFingerprint } from "@kodel-ai/pipeline-core";
@@ -13,7 +13,7 @@ import {
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { engineRecord, LocalPipelineHost, logFacts, modelFromLog } from "../src";
+import { engineRecord, FileStore, LocalPipelineHost, logFacts, modelFromLog } from "../src";
 import { projectFolderName } from "../src/history/claude-code/locate";
 
 const PIPELINE = [
@@ -619,6 +619,85 @@ describe("the name of the session", () => {
     const { text } = await records(host, runId);
     expect(text).not.toContain("must not appear");
     expect(text).not.toContain("session_name");
+    await close();
+  });
+});
+
+describe("the name of the session: what the log really looks like", () => {
+  test("session_label_reads_the_records_of_a_real_log", async () => {
+    // fixtures/claude-code-names.jsonl keeps the shape of the records Claude Code 2.1.316 wrote on
+    // 2026-11-01 (a session named automatically, then renamed); the ids and the titles are made up. A change in the
+    // shape shows here first.
+    const id = "11111111-1111-4111-8111-111111111111";
+    await mkdir(join(claude, "projects", projectFolderName(dir)), { recursive: true });
+    await copyFile(
+      new URL("./fixtures/claude-code-names.jsonl", import.meta.url).pathname,
+      logPath(id),
+    );
+    expect((await logFacts(logPath(id), id)).name).toBe("wait timeout");
+  });
+
+  test("session_label_a_secret_across_the_cut_is_redacted_whole", async () => {
+    // The name is cut at 120 characters; the secret starts before the cut and ends after it, and must be
+    // redacted before the cut, or half of it stays.
+    const secret = "sk-ant-abcdefghijklmnopqrstuvwxyz0123456789";
+    await transcript(SID, [custom(`${"a".repeat(100)} ${secret} tail`)]);
+    const host = namedHost();
+    const { call, close } = await connect(host);
+    const { started, text } = await records(host, await startRun(call));
+    expect(text).not.toContain("sk-ant");
+    expect(text).not.toContain("abcdefghij");
+    expect(started?.executor.session_name?.value.startsWith("aaaa")).toBe(true);
+    await close();
+  });
+
+  test("session_label_a_cut_never_splits_a_character", async () => {
+    await transcript(SID, [custom(`${"a".repeat(119)}\u{1F600}\u{1F600}`)]);
+    const host = namedHost();
+    const { call, close } = await connect(host);
+    const { started } = await records(host, await startRun(call));
+    const name = started?.executor.session_name?.value ?? "";
+    expect([...name].length).toBe(120);
+    expect(
+      /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(name),
+    ).toBe(false);
+    await close();
+  });
+});
+
+describe("an event the running engine does not know", () => {
+  test("t41_unknown_event_is_ignored_by_the_running_engine", async () => {
+    // A later engine may journal an event this one has no name for. The state decides every step and the
+    // journal is only appended to, so the run must report, answer and go on as if it were not there.
+    const host = newHost();
+    const { call, close } = await connect(host);
+    const runId = await startRun(call);
+    const run = await host.open(runId);
+    const journal = (await run?.journal()) ?? [];
+    const last = journal.at(-1);
+    const before = {
+      report: JSON.stringify(await run?.report()),
+      inspect: JSON.stringify(await run?.inspect()),
+      next: JSON.stringify(await call("pipeline_next_step", { run_id: runId })),
+    };
+    await new FileStore({ root: join(dir, ".kodel") }).appendJournal(runId, [
+      { v: 2, seq: last?.seq ?? 1, ts: last?.ts ?? 0, event: "event_of_a_later_engine", n: 1 },
+    ]);
+    // read back, listed, reported, asked for the next step, completed: nothing notices it
+    expect(((await run?.journal()) ?? []).some((r) => r.event === "event_of_a_later_engine")).toBe(
+      true,
+    );
+    expect(JSON.stringify(await run?.report())).toBe(before.report);
+    expect(JSON.stringify(await run?.inspect())).toBe(before.inspect);
+    expect(JSON.stringify(await call("pipeline_next_step", { run_id: runId }))).toBe(before.next);
+    expect((await host.runSummaries()).map((r) => r.meta.runId)).toContain(runId);
+    const done = await call("pipeline_complete_step", {
+      run_id: runId,
+      node_slug: "a",
+      attempt: 1,
+    });
+    expect(done.ok).toBe(true);
+    expect(done.next?.node?.slug).toBe("b");
     await close();
   });
 });

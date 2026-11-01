@@ -14,8 +14,12 @@ import {
   type EngineRecord,
   type ExecutorRecord,
   RECORD_VERSION,
+  type RedactRule,
+  redactText,
+  SAFE_SESSION_ID,
   type ServedSurface,
   sourced,
+  stripSessionName,
 } from "@kodel-ai/pipeline-core";
 import { claudeConfigDir, projectFolderName } from "./history/claude-code/locate";
 import { isInside, realOrSelf } from "./history/scope";
@@ -39,12 +43,6 @@ const INDEX_SCAN_MAX_BYTES = 1024 * 1024;
 export const SESSION_ENV = "CLAUDE_CODE_SESSION_ID";
 /** What a session id looks like; anything else is never put into a path. */
 const SAFE_SESSION = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-/**
- * What a session id looks like when the log of the session is read for its name: the strict form
- * (at most 128 characters) every reader of the agent's logs uses; `session-finder.ts` exports it.
- */
-export const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
 export function engineRecord(build: BuildInfo, surface: ServedSurface | undefined): EngineRecord {
@@ -135,8 +133,8 @@ function nameOfLines(lines: readonly string[], sessionId: string): string | unde
       continue;
     }
     if (entry === null || typeof entry !== "object" || entry.sessionId !== sessionId) continue;
-    if (entry.type === "custom-title") custom = cleanSessionName(entry.customTitle);
-    else if (entry.type === "agent-name") shown ??= cleanSessionName(entry.agentName);
+    if (entry.type === "custom-title") custom = stripSessionName(entry.customTitle);
+    else if (entry.type === "agent-name") shown ??= stripSessionName(entry.agentName);
   }
   return custom ?? shown;
 }
@@ -218,6 +216,8 @@ export interface ExecutorContext {
    */
   dirs: readonly string[];
   env?: NodeJS.ProcessEnv;
+  /** The redaction rules of the project: the name of the session is redacted before it is cut. */
+  rules?: readonly RedactRule[];
 }
 
 async function observe(caller: Caller | undefined, context: ExecutorContext) {
@@ -260,11 +260,11 @@ async function observe(caller: Caller | undefined, context: ExecutorContext) {
       record.model = sourced(read.model, "derived");
     }
     if (record.session_name === undefined && read.name !== undefined) {
-      record.session_name = sourced(read.name, "derived");
+      // Redacted before it is cut, so that a secret is whole when the rules meet it.
+      const name = cleanSessionName(redactText(read.name, [...(context.rules ?? [])]));
+      if (name !== undefined) record.session_name = sourced(name, "derived");
     }
-    if (record.model !== undefined && (nameOf === undefined || record.session_name !== undefined)) {
-      break;
-    }
+    if (record.model !== undefined && (nameOf === undefined || read.name !== undefined)) break;
   }
   return record;
 }

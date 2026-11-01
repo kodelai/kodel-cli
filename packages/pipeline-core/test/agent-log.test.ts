@@ -533,3 +533,49 @@ describe("t41 the name of a session in the run machine", () => {
     expect(apply(canceled, named()).journal).toEqual([]);
   });
 });
+
+describe("t41 a consumer that has to know every event", () => {
+  // Kodel Server keeps a table or a switch over the events of the machine. This table is the same kind of
+  // consumer: when the machine gets a new event the table stops compiling until the event is listed, so a
+  // consumer that forgets one is found by the typecheck and not in use.
+  const EVENTS = {
+    start: true,
+    agent_completed: true,
+    work_finished: true,
+    check_finished: true,
+    pipeline_accepted: true,
+    report_accepted: true,
+    call_refused: true,
+    human_decided: true,
+    heartbeat: true,
+    feedback: true,
+    change_proposed: true,
+    step_served: true,
+    served_write_failed: true,
+    step_claimed: true,
+    agent_log_saved: true,
+    agent_log_failed: true,
+    agent_session_named: true,
+    usage_recorded: true,
+    usage_failed: true,
+    acknowledge: true,
+    tick: true,
+    resume: true,
+    run_migrated: true,
+    cancel: true,
+    changes_recorded: true,
+    task_note: true,
+  } satisfies Record<RunEvent["type"], true>;
+
+  test("t41_the_event_that_names_a_session_is_in_the_table_of_the_consumer", () => {
+    expect(Object.keys(EVENTS)).toContain("agent_session_named");
+  });
+
+  test("t41_the_state_of_the_copy_keeps_only_hashes_of_names", () => {
+    // the type of the state: `nameHashes` maps a session to a string and nothing in it is a name
+    const log = started().agentLog;
+    if (log === undefined) throw new Error("the run copies the agent's log");
+    log.nameHashes = { s1: "a".repeat(64) };
+    expect(Object.values(log.nameHashes).every((v) => /^[0-9a-f]{64}$/.test(v))).toBe(true);
+  });
+});

@@ -53,14 +53,50 @@ export function stripAnsi(text: string): string {
 function charWidth(code: number): number {
   if (
     (code >= 0x300 && code <= 0x36f) ||
+    (code >= 0x1ab0 && code <= 0x1aff) ||
+    (code >= 0x1dc0 && code <= 0x1dff) ||
+    (code >= 0x20d0 && code <= 0x20ff) ||
     (code >= 0xfe00 && code <= 0xfe0f) ||
-    code === 0x200d ||
-    code === 0x20e3
+    (code >= 0xfe20 && code <= 0xfe2f) ||
+    code === 0x200d
   ) {
     return 0;
   }
   if (
     (code >= 0x1100 && code <= 0x115f) ||
+    (code >= 0x231a && code <= 0x231b) ||
+    (code >= 0x23e9 && code <= 0x23ec) ||
+    code === 0x23f0 ||
+    code === 0x23f3 ||
+    (code >= 0x25fd && code <= 0x25fe) ||
+    (code >= 0x2614 && code <= 0x2615) ||
+    (code >= 0x2648 && code <= 0x2653) ||
+    code === 0x267f ||
+    code === 0x2693 ||
+    code === 0x26a1 ||
+    (code >= 0x26aa && code <= 0x26ab) ||
+    (code >= 0x26bd && code <= 0x26be) ||
+    (code >= 0x26c4 && code <= 0x26c5) ||
+    code === 0x26ce ||
+    code === 0x26d4 ||
+    code === 0x26ea ||
+    (code >= 0x26f2 && code <= 0x26f3) ||
+    code === 0x26f5 ||
+    code === 0x26fa ||
+    code === 0x26fd ||
+    code === 0x2705 ||
+    (code >= 0x270a && code <= 0x270b) ||
+    code === 0x2728 ||
+    code === 0x274c ||
+    code === 0x274e ||
+    (code >= 0x2753 && code <= 0x2755) ||
+    code === 0x2757 ||
+    (code >= 0x2795 && code <= 0x2797) ||
+    code === 0x27b0 ||
+    code === 0x27bf ||
+    (code >= 0x2b1b && code <= 0x2b1c) ||
+    code === 0x2b50 ||
+    code === 0x2b55 ||
     (code >= 0x2e80 && code <= 0x303e) ||
     (code >= 0x3041 && code <= 0x33ff) ||
     (code >= 0x3400 && code <= 0x4dbf) ||
@@ -110,19 +146,25 @@ export function fit(raw: string, width: number): string {
   if (length <= width) return text + " ".repeat(width - length);
   let out = "";
   let count = 0;
+  let full = false;
   for (const [i, part] of text.split(SEQUENCE).entries()) {
     if (i % 2 === 1) {
       out += part;
       continue;
     }
     for (const ch of part) {
+      if (full) break;
       const w = charWidth(ch.codePointAt(0) ?? 0);
-      if (count + w > width - 1) break;
-      out += ch;
-      count += w;
+      // A wide character that does not fit ends the text: nothing narrower is taken after it.
+      if (count + w > width - 1) full = true;
+      else {
+        out += ch;
+        count += w;
+      }
     }
   }
-  return `${out}${RESET}…`;
+  // The room a wide character left is kept, so that the line is as wide as it was asked to be.
+  return `${out}${" ".repeat(width - 1 - count)}${RESET}…`;
 }
 
 /** Break plain text into lines no longer than `width`, at spaces where it can. */

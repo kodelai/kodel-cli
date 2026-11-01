@@ -637,9 +637,10 @@ describe("t41 the event that names a session", () => {
   });
 
   test("t41_session_name_additions_change_no_decision", () => {
-    // The field of the executor and the event, on a golden run of format 2: stripped, the run reports
-    // and reads the same; written back, it is as it was read.
-    for (const run of fixtureRuns("v2")) {
+    // The field of the executor on a golden run of either format and the event on one of format 2:
+    // stripped, the run reports the same; written back, it is as it was read. (A run of format 1 holds the
+    // field, which is what a format-1 run continued by this engine writes, and never the event.)
+    for (const run of [...fixtureRuns("v2"), ...fixtureRuns("v1"), ...fixtureRuns("v1-open")]) {
       const state = readRunState(run.state, run.id);
       const journal = run.journal.map((line) => decodeJournalRecord(JSON.parse(line)));
       const first = journal[0];
@@ -660,12 +661,13 @@ describe("t41 the event that names a session", () => {
         session: "s-1",
         name: "a name",
       } as JournalRecord;
-      const extended = [withName[0] as JournalRecord, event, ...withName.slice(1)];
+      const extended =
+        state.v === 2 ? [withName[0] as JournalRecord, event, ...withName.slice(1)] : withName;
       expect(canonical(summarizeRun(state, extended))).toBe(
         canonical(summarizeRun(state, journal)),
       );
       for (const record of extended) {
-        const wire = JSON.parse(JSON.stringify(record)) as JournalRecord;
+        const wire = JSON.parse(JSON.stringify(encodeJournalRecord(record))) as JournalRecord;
         expect(canonical(encodeJournalRecord(decodeJournalRecord(wire)))).toBe(canonical(wire));
       }
     }
