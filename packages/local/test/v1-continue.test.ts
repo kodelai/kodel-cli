@@ -435,4 +435,21 @@ describe("a run of format 1 goes on in format 1", () => {
     const run = await hostFor().open(PAUSED);
     expect((await run?.currentSpec())?.nodes.length).toBeGreaterThan(0);
   });
+
+  test("t41_migrate_repairs_a_lost_mark_for_a_duplicate_edge_snapshot", async () => {
+    // the pipeline the old format accepted and today's rules reject, and an upgrade that stopped
+    // after the state was written: the run opens, and `kodel migrate` can still write the mark
+    await copyFixture(DUP_EDGE);
+    const run = await hostFor().open(DUP_EDGE);
+    if (!run) throw new Error("the fixture does not open");
+    expect((await run.apply({ type: "acknowledge", note: "t" })).ok).toBe(true);
+    expect((await run.migrate()).status).toBe("migrated");
+    const path = join(runDir(DUP_EDGE), "journal.jsonl");
+    const lines = (await readFile(path, "utf8")).trim().split("\n");
+    await writeFile(path, `${lines.slice(0, -1).join("\n")}\n`);
+    const fresh = await hostFor().open(DUP_EDGE);
+    expect((await fresh?.currentSpec())?.firstDuplicateEdgeWins).toBe(true);
+    expect((await fresh?.migrate())?.status).toBe("marked");
+    expect((await journalLines(DUP_EDGE)).at(-1)).toMatchObject({ v: 2, event: "run_migrated" });
+  });
 });

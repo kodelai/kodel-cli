@@ -522,6 +522,17 @@ export class FileStore {
    * Nothing found means the journal does not say, and the pipeline is not read.
    */
   async snapshotFormat(runId: string, hash: string): Promise<RecordVersion | undefined> {
+    return (await this.snapshotFormats(runId, hash))?.format;
+  }
+
+  /**
+   * `format` is the one to read by; `claimed` is set when the journal claims an older one that is
+   * not vouched for: it is used only as a second try, after the state's own (strict) format fails.
+   */
+  private async snapshotFormats(
+    runId: string,
+    hash: string,
+  ): Promise<{ format: RecordVersion; claimed?: RecordVersion } | undefined> {
     const records = await this.readJournal(runId);
     const found = records.find(
       (r) =>
@@ -532,16 +543,15 @@ export class FileStore {
     // The journal can be written by the agent while the run is open, the state cannot. A line that
     // claims an older format than the state is believed only beside the mark of a real upgrade.
     // Without the mark the pipeline is read by the rules of the state's own format, which are the
-    // strict ones: an edited `v` cannot switch the old reading on and drop a branch, and a run whose
-    // upgrade stopped before its mark was written still opens, so `kodel migrate` can write the mark.
+    // strict ones: an edited `v` cannot switch the old reading on and drop a branch.
     const state = await this.readState(runId);
     if (state && found < state.v) {
       const vouched = records.some(
         (r) => r.event === "run_migrated" && (r as { from?: unknown }).from === found,
       );
-      return vouched ? found : state.v;
+      return vouched ? { format: found } : { format: state.v, claimed: found };
     }
-    return found;
+    return { format: found };
   }
 
   /**
@@ -556,8 +566,8 @@ export class FileStore {
     text: string,
     options: { introducing?: boolean } = {},
   ): Promise<PipelineSpec> {
-    const format = await this.snapshotFormat(runId, hash);
-    if (format === undefined) {
+    const formats = await this.snapshotFormats(runId, hash);
+    if (formats === undefined) {
       if (options.introducing) return parseSnapshot(text);
       // The state is protected and names the pipeline the run is on: a crash between the write of the
       // state and the append of the line that names the version leaves exactly this. It is read by the
@@ -573,9 +583,20 @@ export class FileStore {
         `the journal of run ${runId} does not say which format its pipeline ${hash} was written in, so it cannot be read`,
       );
     }
-    return parseSnapshot(text, {
-      firstDuplicateEdgeWins: capabilitiesOf(format).firstDuplicateEdgeWins,
-    });
+    try {
+      return parseSnapshot(text, {
+        firstDuplicateEdgeWins: capabilitiesOf(formats.format).firstDuplicateEdgeWins,
+      });
+    } catch (error) {
+      // An upgrade that stopped before its mark was written, for a pipeline the older format accepted
+      // and today's rules reject (a duplicate edge): the journal's claim is tried once the strict
+      // reading has failed. A pipeline that passes the strict rules never gets here, so a forged
+      // `v` cannot change how a valid pipeline of the current format is read.
+      if (formats.claimed === undefined || !(error instanceof KodelError)) throw error;
+      return parseSnapshot(text, {
+        firstDuplicateEdgeWins: capabilitiesOf(formats.claimed).firstDuplicateEdgeWins,
+      });
+    }
   }
 
   /** A kept version of the pipeline. It is parsed and checked again by whoever uses it. */

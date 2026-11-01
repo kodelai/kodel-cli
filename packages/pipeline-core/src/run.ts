@@ -2339,8 +2339,9 @@ class Machine {
       this.applyEffect(effect);
     }
     // What is still running was not touched by the change (a touched running step is refused, a
-    // suspended one restarted or rechecked above): its work keeps the version it was issued under
-    // (`Visit.spec`), so its result is not dropped for naming that version.
+    // suspended one restarted or rechecked above). Where the format keeps `Visit.spec`, its work keeps
+    // the version it was issued under, so its result is not dropped for naming that version; in
+    // format 1 it has none, and a result naming the old version is dropped as stale, as it was.
   }
 
   private applyEffect(effect: AcceptEffect) {

@@ -93,6 +93,12 @@ export function decodeJournalRecord(raw: unknown): JournalRecord {
   const isObject = typeof raw === "object" && raw !== null && !Array.isArray(raw);
   const version = isObject ? (raw as { v?: unknown }).v : undefined;
   if (isObject && version === undefined) return raw as JournalRecord;
+  if (!isObject) {
+    throw new KodelError(
+      "STATE_MODIFIED_EXTERNALLY",
+      "a journal line is not a JSON object; it was changed outside kodel",
+    );
+  }
   const codec = codecFor(version);
   if (!codec) throw refuseUnknown(version, "a journal record");
   return codec.decodeRecord(raw);

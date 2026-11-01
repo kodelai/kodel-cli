@@ -1547,7 +1547,7 @@ describe("a store made from the golden runs of the stored formats", () => {
   });
 
   test("t41_v2_fixtures_open_beside_v1_runs", async () => {
-    // the real runs of this engine beside the refused ones: `status`, `report` and the history of
+    // the real runs of this engine beside the runs of format 1: `status`, `report` and the history of
     // the pipeline read them, and the accepted change is shown with what it redid
     const V2 = join(V1, "..", "v2");
     const ids = ["r_0mvu1vxry_4ggv", "r_0mvu1w1ng_dk6c"];
