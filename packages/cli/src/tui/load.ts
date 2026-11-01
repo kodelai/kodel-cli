@@ -70,16 +70,34 @@ const STEP_STATE: Record<string, StepState> = {
   skipped: "pending",
 };
 
+/**
+ * How long the pipelines are kept before they are read again. Reading them parses every pipeline file and
+ * diffs every proposal, and the list of runs is read every two seconds, whichever screen is open.
+ */
+const PIPELINES_EVERY_MS = 10_000;
+
+const pipelinesKept = new WeakMap<object, { at: number; key: string; entries: PipeEntry[] }>();
+
 export async function loadSessions(source: SessionSource, now: number): Promise<Loaded> {
   const [summaries, proposals] = await Promise.all([
     source.runSummaries(),
     source.pipelineProposals().catch(() => []),
   ]);
   const sessions = await Promise.all(summaries.map((s) => buildSession(source, s, now)));
-  const pipelines = canReadPipelines(source)
-    ? await loadPipelines(source, sessions).catch(() => [])
-    : [];
-  return { sessions, proposals: proposals.length, pipelines };
+  if (!canReadPipelines(source)) return { sessions, proposals: proposals.length, pipelines: [] };
+  // What is read again at once is what a person is waiting to see: a proposal, or a change of a run's
+  // pipeline, that appeared or went. The rest can be a few seconds old.
+  const key = [
+    proposals.length,
+    ...sessions.filter((s) => s.need === "pipeline_edit").map((s) => `${s.id}:${s.since}`),
+  ].join("|");
+  const kept = pipelinesKept.get(source);
+  if (kept && kept.key === key && now - kept.at < PIPELINES_EVERY_MS) {
+    return { sessions, proposals: proposals.length, pipelines: kept.entries };
+  }
+  const entries = await loadPipelines(source, sessions).catch(() => kept?.entries ?? []);
+  pipelinesKept.set(source, { at: now, key, entries });
+  return { sessions, proposals: proposals.length, pipelines: entries };
 }
 
 type Summary = Awaited<ReturnType<SessionSource["runSummaries"]>>[number];

@@ -377,4 +377,37 @@ describe("loadPipelines", () => {
     };
     expect((await loadSessions(plain, Date.now())).pipelines).toEqual([]);
   });
+
+  describe("how often the pipelines are read", () => {
+    const counted = (over: Partial<PipelineSource> = {}) => {
+      const calls = { lists: 0 };
+      const base = source(over);
+      const list = base.list.bind(base);
+      base.list = async () => {
+        calls.lists++;
+        return list();
+      };
+      return { calls, base };
+    };
+
+    test("not again within a few seconds: the list of runs is read every two", async () => {
+      const { calls, base } = counted();
+      const first = await loadSessions(base, 1_000_000);
+      const second = await loadSessions(base, 1_005_000);
+      expect(calls.lists).toBe(1);
+      expect(second.pipelines).toBe(first.pipelines);
+      await loadSessions(base, 1_011_000);
+      expect(calls.lists).toBe(2);
+    });
+
+    test("at once when a proposal appears or goes", async () => {
+      let waiting = [{ name: "dev" }];
+      const { calls, base } = counted({ pipelineProposals: async () => waiting });
+      await loadSessions(base, 1_000_000);
+      waiting = [{ name: "dev" }, { name: "ship" }];
+      const after = await loadSessions(base, 1_001_000);
+      expect(calls.lists).toBe(2);
+      expect(after.pipelines?.some((p) => p.name === "ship")).toBe(true);
+    });
+  });
 });
