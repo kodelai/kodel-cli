@@ -1238,7 +1238,9 @@ export class LocalRun {
       const text = await this.host.store.readSpec(this.runId, hash);
       if (text === undefined) continue;
       try {
-        specs.push(parseSnapshot(text));
+        // By the rules of the format the version was written in: a snapshot of an older run may hold
+        // what today's rules reject (two equal edges), and it is still a version the run had.
+        specs.push(await this.host.store.parseKept(this.runId, hash, text));
       } catch (error) {
         if (!(error instanceof KodelError)) throw error;
       }

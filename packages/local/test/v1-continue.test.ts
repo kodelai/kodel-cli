@@ -452,4 +452,17 @@ describe("a run of format 1 goes on in format 1", () => {
     expect((await fresh?.migrate())?.status).toBe("marked");
     expect((await journalLines(DUP_EDGE)).at(-1)).toMatchObject({ v: 2, event: "run_migrated" });
   });
+
+  test("t41_kept_versions_lists_a_duplicate_edge_snapshot_of_a_v1_run", async () => {
+    // the versions of a step that the report of the terminal UI shows are read by the rules of the
+    // format they were written in: a snapshot that today's rules reject is still a version the run had
+    await copyFixture(DUP_EDGE);
+    const run = await hostFor().open(DUP_EDGE);
+    const versions = await run?.keptVersions();
+    expect(versions?.map((v) => v.name)).toEqual(["dup-edge"]);
+    expect(versions?.[0]?.firstDuplicateEdgeWins).toBe(true);
+    // and the two-version run (an accepted change) lists both
+    await copyFixture(PAUSED);
+    expect((await (await hostFor().open(PAUSED))?.keptVersions())?.length).toBe(2);
+  });
 });
