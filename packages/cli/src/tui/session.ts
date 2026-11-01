@@ -1,4 +1,5 @@
 /** What the screens know about a run: the engine's state boiled down to what a person looks at. */
+import type { ExecutorSource } from "@kodel-ai/pipeline-core";
 
 /** `unreadable`: nothing can be decided about it, so it does not wait for anyone. */
 export type Status = "waiting" | "running" | "failed" | "done" | "canceled" | "unreadable";
@@ -17,9 +18,22 @@ export interface StepLine {
   note?: string;
 }
 
+/** The agent session the run was last worked in, as the journal records it (`load.ts`). */
+export interface AgentSession {
+  id: string;
+  /** Where the engine got the id from: only `observed-env` is exact. */
+  source: ExecutorSource;
+  /** What the session is called in the agent's own log, when the journal has it. */
+  name?: string;
+  /** The copy of the agent's log found the session to call this run's tools. */
+  proven: boolean;
+}
+
 export interface Session {
   id: string;
   title: string;
+  /** The session the run was last worked in; absent when the journal names none. */
+  agentSession?: AgentSession;
   pipeline: string;
   status: Status;
   need?: Need;

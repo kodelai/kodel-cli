@@ -46,9 +46,59 @@ export function stripAnsi(text: string): string {
     .join("");
 }
 
-/** Width on screen. Every glyph the screens use takes one column. */
+/**
+ * How many terminal columns a character takes: none for a combining mark, a joiner or a variation selector,
+ * two for the wide scripts and emoji, one for everything else (every glyph the screens use themselves).
+ */
+function charWidth(code: number): number {
+  if (
+    (code >= 0x300 && code <= 0x36f) ||
+    (code >= 0xfe00 && code <= 0xfe0f) ||
+    code === 0x200d ||
+    code === 0x20e3
+  ) {
+    return 0;
+  }
+  if (
+    (code >= 0x1100 && code <= 0x115f) ||
+    (code >= 0x2e80 && code <= 0x303e) ||
+    (code >= 0x3041 && code <= 0x33ff) ||
+    (code >= 0x3400 && code <= 0x4dbf) ||
+    (code >= 0x4e00 && code <= 0x9fff) ||
+    (code >= 0xa000 && code <= 0xa4cf) ||
+    (code >= 0xac00 && code <= 0xd7a3) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe30 && code <= 0xfe6f) ||
+    (code >= 0xff00 && code <= 0xff60) ||
+    (code >= 0xffe0 && code <= 0xffe6) ||
+    (code >= 0x1f300 && code <= 0x1faff) ||
+    (code >= 0x20000 && code <= 0x3fffd)
+  ) {
+    return 2;
+  }
+  return 1;
+}
+
+/** Width on screen, in terminal columns. */
 export function visibleLength(text: string): number {
-  return [...stripAnsi(text)].length;
+  let columns = 0;
+  for (const ch of stripAnsi(text)) columns += charWidth(ch.codePointAt(0) ?? 0);
+  return columns;
+}
+
+/** Plain text cut to `columns` columns, ending in an ellipsis when something was left out. */
+export function clip(text: string, columns: number): string {
+  if (columns <= 0) return "";
+  if (visibleLength(text) <= columns) return text;
+  let out = "";
+  let used = 0;
+  for (const ch of text) {
+    const w = charWidth(ch.codePointAt(0) ?? 0);
+    if (used + w > columns - 1) break;
+    out += ch;
+    used += w;
+  }
+  return `${out}…`;
 }
 
 /** Cut to `width` columns (ending in an ellipsis) or pad with spaces, keeping the color codes. */
@@ -66,9 +116,10 @@ export function fit(raw: string, width: number): string {
       continue;
     }
     for (const ch of part) {
-      if (count >= width - 1) break;
+      const w = charWidth(ch.codePointAt(0) ?? 0);
+      if (count + w > width - 1) break;
       out += ch;
-      count++;
+      count += w;
     }
   }
   return `${out}${RESET}…`;
