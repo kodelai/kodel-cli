@@ -28,7 +28,7 @@ First hand run of Q4 (the person, Claude Code) found two defects in the spike, b
    resize frame on connect and on every window change, and the holder sets `TIOCSWINSZ` (checked: the child saw `30 100`).
 5. `Ctrl+\\` did not detach: Claude Code turns on the kitty keyboard protocol, so the terminal sends the chord as
    `ESC [ 92 ; 5 u`, not the byte `0x1c`. The detach chord must be matched in three encodings (raw, kitty, xterm
-   modifyOtherKeys), which is what the plan already says.
+   modifyOtherKeys), plus Ctrl+] (0x1d and kitty) which is what the plan already says.
 6. The child's `cwd` has to be in the spec; the holder's own `chdir("/")` must not leak into the child (it did first).
 
 Not answered (unknown): whether `claude "/kodel-run ..."` expands the skill as a positional prompt, and whether a `--bg`

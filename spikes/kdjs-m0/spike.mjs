@@ -205,6 +205,10 @@ _,st=os.waitpid(pid,0);sys.exit(os.waitstatus_to_exitcode(st))`;
   } else if (cmd === "tail") {
     process.stdout.write(fs.readFileSync(path.join(dirOf(name), "out.log")));
   } else if (cmd === "attach") {
+    const exitRaw = (code) => {
+      if (process.stdin.isTTY) process.stdin.setRawMode(false);
+      process.exit(code);
+    };
     const s = net.connect(status(name).sock);
     const send = (t, payload) => {
       const h = Buffer.alloc(3);
@@ -221,14 +225,25 @@ _,st=os.waitpid(pid,0);sys.exit(os.waitstatus_to_exitcode(st))`;
     s.on("connect", size);
     process.stdout.on("resize", size);
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
-    s.on("close", () => process.exit(0));
+    s.on("close", () => exitRaw(0));
     s.on("data", (d) => process.stdout.write(d));
     // Ctrl+\ in three encodings: raw byte, kitty CSI-u, xterm modifyOtherKeys
     const chords = [Buffer.from([0x1c]), Buffer.from("\x1b[92;5u"), Buffer.from("\x1b[27;5;92~")];
+    chords.push(Buffer.from([0x1d]), Buffer.from("\x1b[93;5u")); // Ctrl+] as a second way out
+    // the session may end while an orphan still holds the PTY: leave when the holder says so
+    setInterval(() => {
+      if (status(name).state !== "running") exitRaw(0);
+    }, 500);
     process.stdin.on("data", (d) => {
+      if (process.env.KODEL_SPIKE_KEYLOG) {
+        fs.appendFileSync(
+          process.env.KODEL_SPIKE_KEYLOG,
+          `${JSON.stringify(d.toString("latin1"))}\n`,
+        );
+      }
       if (chords.some((c) => d.includes(c))) {
         s.destroy(); // detach
-        process.exit(0);
+        exitRaw(0);
       }
       for (let i = 0; i < d.length; i += 4000) send(0, d.subarray(i, i + 4000));
     });
