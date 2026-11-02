@@ -37,6 +37,17 @@ First hand run of Q4 (the person, Claude Code) found two defects in the spike, b
    the plan's mode tracker in its smallest form: a fixed reset string is enough for leaving, tracking is needed only for
    replay on re-attach.
 
+8. Background use (checked with `send` and `text`, the person's question): `send` works without a UI: the text goes in as a
+   bracketed paste in one frame and Enter in a second frame 400 ms later; two prompts in a row reached an interactive
+   child; a second client does not kick an attached UI (the holder keeps a list of clients). Reading is the weak side:
+   `tail` is raw terminal bytes; `text` strips escape sequences, but a TUI draws spaces as cursor moves and redraws
+   lines, so the result is only good enough to see that something happened, not to take an answer from. For an answer
+   use the engine's own record (Claude Code transcript JSONL) or run it non-interactively.
+9. A fresh Claude Code in a new directory stops at a first-run dialog ("New MCP server found in this project"). Such a
+   dialog needs a key from a person; `send` cannot decide it for them, and a background start of an engine in a new
+   worktree will wait there. `agent start` must say so (the plan's "unattended-prompt hint") and D-C should show a
+   session whose last screen is a question as "waits for input" (deferred in the plan).
+
 Not answered (unknown): whether `claude "/kodel-run ..."` expands the skill as a positional prompt, and whether a `--bg`
 session goes on when a background `kodel wait` reports. These need a real Claude Code and the person.
 

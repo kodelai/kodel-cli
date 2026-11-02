@@ -118,32 +118,32 @@ if pid==0:
   os.chdir(${JSON.stringify(input.cwd)});os.execvp(sys.argv[1],sys.argv[1:])
 def sz(c,r): fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack('HHHH',r,c,0,0))
 sz(80,24)
-o=open(${JSON.stringify(path.join(dir, "out.log"))},'ab',buffering=0);c=None;ring=b'';buf=b''
+o=open(${JSON.stringify(path.join(dir, "out.log"))},'ab',buffering=0);cs={};ring=b''
 while True:
-  r=[fd,s]+([c] if c else [])
-  x,_,_=select.select(r,[],[])
+  x,_,_=select.select([fd,s]+list(cs),[],[])
   if fd in x:
     try: d=os.read(fd,4096)
     except OSError: break
     if not d: break
     o.write(d);ring=(ring+d)[-1048576:]
-    if c:
-      try:c.sendall(d)
-      except OSError:c=None
+    for k in list(cs):
+      try:k.sendall(d)
+      except OSError:del cs[k]
   if s in x:
-    c,_=s.accept();buf=b'';c.sendall(ring)
-  if c and c in x:
-    d=c.recv(4096)
-    if not d:c=None
-    else:
-      buf+=d
-      while len(buf)>=3:
-        t=buf[0];n=struct.unpack('>H',buf[1:3])[0]
-        if len(buf)<3+n:break
-        q=buf[3:3+n];buf=buf[3+n:]
-        if t==0:os.write(fd,q)
-        else:
-          cc,rr=struct.unpack('>HH',q);sz(cc,rr)
+    k,_=s.accept();cs[k]=b'';k.sendall(ring)
+  for k in [k for k in x if k in cs]:
+    d=k.recv(4096)
+    if not d:
+      del cs[k];continue
+    buf=cs[k]+d
+    while len(buf)>=3:
+      t=buf[0];n=struct.unpack('>H',buf[1:3])[0]
+      if len(buf)<3+n:break
+      q=buf[3:3+n];buf=buf[3+n:]
+      if t==0:os.write(fd,q)
+      else:
+        cc,rr=struct.unpack('>HH',q);sz(cc,rr)
+    cs[k]=buf
 _,st=os.waitpid(pid,0);sys.exit(os.waitstatus_to_exitcode(st))`;
     child = spawn("python3", ["-c", py, ...input.argv], {
       cwd: input.cwd,
@@ -259,6 +259,41 @@ _,st=os.waitpid(pid,0);sys.exit(os.waitstatus_to_exitcode(st))`;
       }
       for (let i = 0; i < d.length; i += 4000) send(0, d.subarray(i, i + 4000));
     });
+  } else if (cmd === "send") {
+    // no UI: one data frame with the text as a bracketed paste, then Enter as its own frame
+    const text = process.argv.slice(4).join(" ");
+    const s = net.connect(status(name).sock);
+    const send = (t, payload) => {
+      const h = Buffer.alloc(3);
+      h[0] = t;
+      h.writeUInt16BE(payload.length, 1);
+      s.write(Buffer.concat([h, payload]));
+    };
+    s.on("data", () => {}); // replay of the ring, ignored
+    s.on("connect", () => {
+      send(0, Buffer.from(`\x1b[200~${text}\x1b[201~`));
+      setTimeout(() => send(0, Buffer.from("\r")), 400);
+      setTimeout(() => process.exit(0), 800);
+    });
+  } else if (cmd === "text") {
+    // a crude reader: drop escape sequences and carriage returns; good enough to see the last lines
+    const raw = fs.readFileSync(path.join(dirOf(name), "out.log"), "utf8");
+    const ESC = String.fromCharCode(27);
+    const BEL = String.fromCharCode(7);
+    const csi = new RegExp(`${ESC}\\[[0-9;?<>]*[ -/]*[@-~]`, "g");
+    const osc = new RegExp(`${ESC}\\][^${BEL}]*(${BEL}|${ESC}\\\\)`, "g");
+    const fwd = new RegExp(`${ESC}\\[([0-9]*)C`, "g"); // cursor forward is how a TUI draws spaces
+    const clean = raw
+      .replace(fwd, (_, n) => " ".repeat(Number(n || 1)))
+      .replace(csi, "")
+      .replace(osc, "")
+      .replace(/\r/g, "");
+    process.stdout.write(
+      `${clean
+        .split("\n")
+        .slice(-Number(process.argv[4] || 30))
+        .join("\n")}\n`,
+    );
   } else if (cmd === "ls") {
     for (const n of fs.readdirSync(path.join(BASE, "run"))) console.log(n, status(n).state);
   }
