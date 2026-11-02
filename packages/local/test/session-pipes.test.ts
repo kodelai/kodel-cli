@@ -352,6 +352,8 @@ describe("pipes adapter, real processes", () => {
     await expect(adapter.wait(id, { timeoutMs: 100 })).rejects.toMatchObject({
       code: "IDENTITY_UNKNOWN",
     });
+    await expect(adapter.status(id)).rejects.toMatchObject({ code: "IDENTITY_UNKNOWN" });
+    expect((await adapter.list()).map((e) => e.problem)).toEqual(["FOREIGN"]);
     expect(existsSync(join(adapter.place.dir, id))).toBe(true);
     expect(existsSync(join(adapter.place.dir, id, "status.json"))).toBe(false); // no tombstone either
   });
@@ -377,6 +379,106 @@ describe("pipes adapter, real processes", () => {
     writeFileSync(join(adapter.place.dir, bad, "session.json"), "{ not json");
     await adapter.remove(bad);
     expect(existsSync(join(adapter.place.dir, bad))).toBe(false);
+  });
+
+  tableTest(
+    "tA_stop_on_a_starting_session_waits_for_the_child_and_signals_it",
+    async () => {
+      // like the real child of a holder, it leads its own process group
+      const stranger = spawn("sleep", ["30"], { stdio: "ignore", detached: true });
+      try {
+        const id = "a_000000000_000a";
+        ensurePrivateDir(adapter.place.runDir);
+        ensurePrivateDir(adapter.place.dir);
+        publishSession(join(adapter.place.dir, id), {
+          v: 1,
+          id,
+          mode: "pipes",
+          spec: { cwd: root, envNames: [] },
+          started: Date.now(),
+          root,
+        });
+        const statusFile = join(adapter.place.dir, id, "status.json");
+        const holder = { pid: process.pid, identity: processIdentity(process.pid) };
+        const starting = {
+          v: 1,
+          state: "starting",
+          by: "holder",
+          holder,
+          since: Date.now(),
+        } as const;
+        replaceRecord(statusFile, encodeRecord("status", starting));
+        // the holder records its child a moment after `stop` began to wait
+        setTimeout(() => {
+          replaceRecord(
+            statusFile,
+            encodeRecord("status", {
+              ...starting,
+              state: "running",
+              child: {
+                pid: stranger.pid as number,
+                identity: processIdentity(stranger.pid as number),
+              },
+            }),
+          );
+        }, 300);
+        await adapter.stop(id);
+        await eventually(() => !liveProcess(stranger.pid as number), 8_000);
+        expect(existsSync(join(adapter.place.dir, id, "stop.json"))).toBe(true);
+      } finally {
+        stranger.kill("SIGKILL");
+      }
+    },
+    30_000,
+  );
+
+  test("tA_stop_on_a_session_that_never_records_a_child_says_try_again", async () => {
+    const id = "a_000000000_000b";
+    ensurePrivateDir(adapter.place.runDir);
+    ensurePrivateDir(adapter.place.dir);
+    publishSession(join(adapter.place.dir, id), {
+      v: 1,
+      id,
+      mode: "pipes",
+      spec: { cwd: root, envNames: [] },
+      started: Date.now(),
+      root,
+    });
+    await expect(adapter.stop(id)).rejects.toMatchObject({ code: "NOT_RUNNING" });
+  }, 15_000);
+
+  test("tA_remove_of_an_unreadable_folder_refuses_a_newer_status_and_a_live_child", async () => {
+    ensurePrivateDir(adapter.place.runDir);
+    ensurePrivateDir(adapter.place.dir);
+    const newer = "a_000000000_000c";
+    mkdirSync(join(adapter.place.dir, newer), { recursive: true });
+    writeFileSync(join(adapter.place.dir, newer, "session.json"), "{ not json");
+    writeFileSync(
+      join(adapter.place.dir, newer, "status.json"),
+      JSON.stringify({ v: 99, state: "running" }),
+    );
+    await expect(adapter.remove(newer)).rejects.toMatchObject({ code: "NEWER_FORMAT" });
+    expect(existsSync(join(adapter.place.dir, newer))).toBe(true);
+    const orphan = spawn("sleep", ["30"], { stdio: "ignore" });
+    try {
+      const alive = "a_000000000_000d";
+      mkdirSync(join(adapter.place.dir, alive), { recursive: true });
+      writeFileSync(join(adapter.place.dir, alive, "session.json"), "{ not json");
+      replaceRecord(
+        join(adapter.place.dir, alive, "status.json"),
+        encodeRecord("status", {
+          v: 1,
+          state: "running",
+          by: "holder",
+          holder: { pid: 2 ** 22 + 99 },
+          child: { pid: orphan.pid as number },
+          since: Date.now(),
+        }),
+      );
+      await expect(adapter.remove(alive)).rejects.toMatchObject({ code: "STILL_RUNNING" });
+    } finally {
+      orphan.kill("SIGKILL");
+    }
   });
 
   test("tA_unsupported_lifetime_and_parent_are_refused", async () => {

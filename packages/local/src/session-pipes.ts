@@ -245,16 +245,21 @@ export class PipesSessionAdapter implements SessionAdapter {
         // No answer in time. The tombstone, created exclusively, makes the session final: a holder that is late
         // then finds it and never starts the child. If the holder was first, it may be starting the child, so the
         // session and its name stay and the person is told.
-        const tombstone = createExclusive(
-          join(dir, STATUS_FILE),
-          encodeRecord("status", {
-            v: SESSION_FORMAT_VERSION,
-            state: "lost",
-            by: "reader",
-            reason: "no_status",
-            since: this.now(),
-          }),
-        );
+        let tombstone = false;
+        try {
+          tombstone = createExclusive(
+            join(dir, STATUS_FILE),
+            encodeRecord("status", {
+              v: SESSION_FORMAT_VERSION,
+              state: "lost",
+              by: "reader",
+              reason: "no_status",
+              since: this.now(),
+            }),
+          );
+        } catch {
+          tombstone = true; // the folder is gone: nothing can run in it
+        }
         if (!tombstone) {
           throw new SessionError(
             "HOLDER_BOOT_FAILED",
@@ -338,6 +343,9 @@ export class PipesSessionAdapter implements SessionAdapter {
   }
 
   async status(id: string): Promise<SessionStatus> {
+    if (this.isForeign(sessionDirOf(this.place, id))) {
+      throw new SessionError("IDENTITY_UNKNOWN", `session ${id} belongs to another machine`);
+    }
     return this.settle(id);
   }
 
@@ -372,21 +380,21 @@ export class PipesSessionAdapter implements SessionAdapter {
 
   async stop(id: string): Promise<SessionStatus> {
     const dir = sessionDirOf(this.place, id);
-    const before = this.settle(id);
+    let before = this.settle(id);
     if (this.isForeign(dir)) {
       throw new SessionError("IDENTITY_UNKNOWN", `session ${id} belongs to another machine`);
     }
-    let recorded = readStatus(dir);
-    // A session that is still starting has no child to signal yet: give the holder a moment to record it.
+    // A session that is still starting has no child to signal yet: give the holder a moment to record it, then
+    // decide on the status read after the wait, not on the one read before it.
     for (let i = 0; before.state === "starting" && i < 60; i++) {
-      if (typeof recorded !== "string" && recorded.child) break;
       await sleep(50);
-      recorded = readStatus(dir);
+      before = this.settle(id);
     }
-    if (typeof recorded === "string") return before;
-    if (before.state === "starting" && !recorded.child) {
+    if (before.state === "starting") {
       throw new SessionError("NOT_RUNNING", `session ${id} is still starting; try again`);
     }
+    const recorded = readStatus(dir);
+    if (typeof recorded === "string") return before;
     const child = recorded.child;
     if (before.state !== "running" && !(before.childAlive && child)) return before;
     if (!child) return before;
@@ -525,14 +533,26 @@ export class PipesSessionAdapter implements SessionAdapter {
       );
     }
     if (record === "unreadable") {
-      // The folder cannot be judged; it goes only when no holder of it is alive.
+      // The folder cannot be judged; it goes only when nothing of it is alive and nothing in it is a newer kodel's.
       const written = readStatus(dir);
-      if (
-        typeof written !== "string" &&
-        written.holder &&
-        sameProcess(written.holder.pid, written.holder.identity)
-      ) {
-        throw new SessionError("STILL_RUNNING", `session ${id} still runs; stop it first`);
+      if (written === "newer") {
+        throw new SessionError(
+          "NEWER_FORMAT",
+          `session ${id} was written by a newer kodel; upgrade kodel`,
+        );
+      }
+      if (typeof written !== "string") {
+        const holderAlive =
+          written.holder && sameProcess(written.holder.pid, written.holder.identity);
+        const childAlive = written.child && sameProcess(written.child.pid, written.child.identity);
+        if (holderAlive || childAlive) {
+          throw new SessionError("STILL_RUNNING", `session ${id} still runs; stop it first`);
+        }
+      } else if (written === "unreadable") {
+        throw new SessionError(
+          "CANNOT_READ",
+          `session ${id} cannot be read; remove its folder by hand`,
+        );
       }
       removeDir(dir);
       return;
@@ -568,6 +588,16 @@ export class PipesSessionAdapter implements SessionAdapter {
         continue;
       }
       if (wanted !== undefined && record.name !== wanted) continue;
+      if (this.isForeign(join(this.place.dir, entry))) {
+        // listed, never judged: the holder pid of another machine means nothing here
+        entries.push({
+          id: entry,
+          ...(record.name !== undefined ? { name: record.name } : {}),
+          status: { state: "lost" },
+          problem: "FOREIGN",
+        });
+        continue;
+      }
       try {
         entries.push({
           id: entry,

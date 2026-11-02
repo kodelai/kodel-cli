@@ -267,8 +267,8 @@ export interface SessionListEntry {
   id: string;
   name?: string;
   status: SessionStatus;
-  /** The entry could not be read (`CANNOT_READ`) or was written by a newer kodel (`NEWER_FORMAT`); its status is not real. */
-  problem?: "CANNOT_READ" | "NEWER_FORMAT";
+  /** The entry could not be read (`CANNOT_READ`), was written by a newer kodel (`NEWER_FORMAT`) or by another machine (`FOREIGN`); its status is not real. */
+  problem?: "CANNOT_READ" | "NEWER_FORMAT" | "FOREIGN";
 }
 
 export interface SessionAdapter {

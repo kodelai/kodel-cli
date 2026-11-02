@@ -279,7 +279,7 @@ export async function runHolder(deps: HolderDeps): Promise<number> {
   };
   const current = readStatus(input.dir);
   if (typeof current === "string" || current.by !== "holder") {
-    killTree(child.pid);
+    killNow(child);
     boot("HOLDER_BOOT_FAILED:tombstone");
     return 1;
   }
@@ -287,7 +287,7 @@ export async function runHolder(deps: HolderDeps): Promise<number> {
     replaceRecord(statusPath, encodeRecord("status", running));
   } catch {
     // The folder was removed under us (the starter gave up): the child must not run on with no record.
-    killTree(child.pid);
+    killNow(child);
     return 1;
   }
   boot("ready");
@@ -340,6 +340,17 @@ export async function runHolder(deps: HolderDeps): Promise<number> {
   }
   return 0;
 }
+
+/** For the paths where the holder returns at once: a timer for a later SIGKILL would die with the process. */
+const killNow = (child: ChildProcess): void => {
+  for (const target of [-(child.pid as number), child.pid as number]) {
+    try {
+      process.kill(target, "SIGKILL");
+    } catch {
+      // already gone
+    }
+  }
+};
 
 export const BOOT_FILE = "boot.txt";
 

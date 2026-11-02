@@ -41,6 +41,7 @@ export interface AgentContext {
 }
 
 const detailOf = (entry: SessionListEntry): string => {
+  if (entry.problem === "FOREIGN") return "another machine's agent";
   if (entry.problem)
     return entry.problem === "NEWER_FORMAT" ? "written by a newer kodel" : "cannot be read";
   const s = entry.status;
