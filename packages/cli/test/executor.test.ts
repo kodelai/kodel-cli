@@ -6,7 +6,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalPipelineHost } from "@kodel-ai/local";
 import { toolsFingerprint } from "@kodel-ai/pipeline-core";
-import { CONTRACT_VERSION, serverInstructions, toolsFor } from "@kodel-ai/pipeline-core/mcp";
+import {
+  CONTRACT_VERSION,
+  HISTORY_TOOLS,
+  serverInstructions,
+  toolsFor,
+} from "@kodel-ai/pipeline-core/mcp";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../src/mcp-server";
@@ -64,7 +69,7 @@ describe("the real server stamps who calls it", () => {
       meta_version: 2,
       contract_version: CONTRACT_VERSION,
       instructions_hash: sha256(serverInstructions()),
-      tools_hash: sha256(toolsFingerprint(toolsFor())),
+      tools_hash: sha256(toolsFingerprint([...toolsFor(), ...HISTORY_TOOLS])),
     });
     await Promise.all([client.close(), server.close()]);
   });

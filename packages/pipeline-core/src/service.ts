@@ -9,6 +9,18 @@ import { docTopics } from "./docs";
 import { type ErrorCode, KodelError } from "./errors";
 import type { Caller } from "./executor";
 import {
+  type AgentLogInput,
+  agentLogAnswer,
+  type DetailsInput,
+  detailsAnswer,
+  type HistoryHost,
+  historyGuard,
+  type RunsInput,
+  runsAnswer,
+  type StatsInput,
+  statsAnswer,
+} from "./history-view";
+import {
   type AgentStep,
   MAX_WAIT_S,
   type NextStep,
@@ -209,7 +221,7 @@ export interface StartOutcome {
   task?: { key: string; restarted?: true; warning?: string };
 }
 
-export interface PipelineHost {
+export interface PipelineHost extends HistoryHost {
   list(): Promise<{ pipelines: PipelineInfo[]; problems: PipelineProblem[] }>;
   resolve(name: string): Promise<PipelineSpec | undefined>;
   /** The pipeline as its file has it: the text a change starts from, and the hash of that text. */
@@ -369,6 +381,38 @@ export class PipelineService {
       }
       return { ok: true, topic: found.topic, text: found.text };
     });
+  }
+
+  /** The runs of this project, newest first; read-only. See `history-view.ts`. */
+  historyRuns(input: RunsInput): Promise<ToolResult> {
+    return guarded(async () => ({
+      ...(await historyGuard(this.host, () => runsAnswer(this.host, input))),
+      ok: true as const,
+    }));
+  }
+
+  /** One run on three levels (run, node, attempt); read-only. */
+  historyRunDetails(input: DetailsInput): Promise<ToolResult> {
+    return guarded(async () => ({
+      ...(await historyGuard(this.host, () => detailsAnswer(this.host, input))),
+      ok: true as const,
+    }));
+  }
+
+  /** The stored agent log of one attempt; read-only, `unverified`. */
+  historyAgentLog(input: AgentLogInput): Promise<ToolResult> {
+    return guarded(async () => ({
+      ...(await historyGuard(this.host, () => agentLogAnswer(this.host, input))),
+      ok: true as const,
+    }));
+  }
+
+  /** How a pipeline fared over its newest runs, counted on the server; read-only. */
+  historyStats(input: StatsInput): Promise<ToolResult> {
+    return guarded(async () => ({
+      ...(await historyGuard(this.host, () => statsAnswer(this.host, input))),
+      ok: true as const,
+    }));
   }
 
   list(): Promise<ToolResult> {

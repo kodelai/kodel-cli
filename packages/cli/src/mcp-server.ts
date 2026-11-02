@@ -10,6 +10,8 @@ import {
 import {
   CONTRACT_VERSION,
   decisionTools,
+  HISTORY_TOOLS,
+  registerHistoryTools,
   registerPipelineTools,
   registerTaskTools,
   serverInstructions,
@@ -105,7 +107,7 @@ export function createServer(
     },
     surface: {
       instructions,
-      tools: toolsFingerprint([...toolsFor({ taskLink }), ...decisions]),
+      tools: toolsFingerprint([...toolsFor({ taskLink }), ...decisions, ...HISTORY_TOOLS]),
       contract_version: CONTRACT_VERSION,
     },
   });
@@ -123,6 +125,7 @@ export function createServer(
       : {}),
     extraTools: decisions,
   });
+  registerHistoryTools(server, service);
   if (tasks) registerTaskTools(server, tasks);
   return server;
 }

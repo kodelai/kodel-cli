@@ -11,6 +11,7 @@ export * from "./errors";
 export * from "./executor";
 export * from "./formats";
 export * from "./history-config";
+export * from "./history-view";
 export * from "./hook-normalizers";
 export * from "./hooks";
 export * from "./new-pipeline";
