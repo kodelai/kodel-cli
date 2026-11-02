@@ -40,28 +40,56 @@ export interface AgentContext {
   launcher?: { exec: string; args: string[] };
 }
 
+/** How a reason the adapter records reads to a person; a reason this build does not know is shown as it is, spaced. */
+const REASON_WORDS: Record<string, string> = {
+  timeout: "timeout",
+  start_late: "started too late",
+  rules_unknown: "a redaction rule cannot be used",
+  holder_error: "could not start",
+  holder_gone: "holder gone",
+  no_status: "no answer",
+};
+const reasonWords = (reason: string): string => REASON_WORDS[reason] ?? reason.replace(/_/g, " ");
+
 /**
  * What a person reads as the state, with the detail in brackets: how it ended, or why it is not known. A session
- * that `stop` ended is "stopped", not "killed".
+ * that `stop` ended is "stopped", not "killed". A process that is still alive after the session is over is said so
+ * in whatever state it is, because the person (or a step) must not take that session for finished.
  */
 export const stateLabel = (entry: SessionListEntry): string => {
   if (entry.problem === "FOREIGN") return "unknown (another machine)";
   if (entry.problem === "NEWER_FORMAT") return "unknown (newer kodel)";
   if (entry.problem) return "unknown (cannot be read)";
   const s = entry.status;
+  const detail: string[] = [];
+  let word: string = s.state;
   switch (s.state) {
     case "exited":
-      return `exited (${s.exitCode ?? 0})`;
+      if (s.exitCode !== undefined) detail.push(String(s.exitCode));
+      break;
     case "killed":
-      if (s.reason === "stopped") return "stopped";
-      return `killed (${s.reason ?? s.signal ?? "unknown"})`;
-    case "lost": {
-      const why = s.reason === "no_status" ? "no answer" : "holder gone";
-      return `lost (${why}${s.childAlive ? ", child still runs" : ""})`;
-    }
+      if (s.reason === "stopped") {
+        word = "stopped";
+      } else if (
+        s.reason === "holder_error" ||
+        s.reason === "rules_unknown" ||
+        s.reason === "start_late"
+      ) {
+        word = "failed";
+        detail.push(reasonWords(s.reason));
+      } else if (s.reason !== undefined || s.signal !== undefined) {
+        detail.push(reasonWords(s.reason ?? (s.signal as string)));
+      }
+      break;
+    case "lost":
+      if (s.reason !== undefined) detail.push(reasonWords(s.reason));
+      break;
     default:
-      return s.state;
+      break;
   }
+  if (s.childAlive && s.state !== "running" && s.state !== "starting")
+    detail.push("child still runs");
+  return detail.length > 0 ? `${word} (${detail.join(", ")})` : word;
 };
 
 /** A command cut to a width for the table; the full text is in `--json`. */

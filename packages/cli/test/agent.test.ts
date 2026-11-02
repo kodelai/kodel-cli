@@ -226,14 +226,38 @@ describe("kodel agent", () => {
     expect(stateLabel(row({ state: "starting" }))).toBe("starting");
     expect(stateLabel(row({ state: "exited", exitCode: 0 }))).toBe("exited (0)");
     expect(stateLabel(row({ state: "exited", exitCode: 3 }))).toBe("exited (3)");
+    expect(stateLabel(row({ state: "exited" }))).toBe("exited"); // no code is not success
     expect(stateLabel(row({ state: "killed", reason: "stopped" }))).toBe("stopped");
     expect(stateLabel(row({ state: "killed", reason: "timeout" }))).toBe("killed (timeout)");
     expect(stateLabel(row({ state: "killed", signal: "SIGKILL" }))).toBe("killed (SIGKILL)");
+    expect(stateLabel(row({ state: "killed" }))).toBe("killed");
+    expect(stateLabel(row({ state: "killed", reason: "holder_error" }))).toBe(
+      "failed (could not start)",
+    );
+    expect(stateLabel(row({ state: "killed", reason: "rules_unknown" }))).toBe(
+      "failed (a redaction rule cannot be used)",
+    );
+    expect(stateLabel(row({ state: "killed", reason: "start_late" }))).toBe(
+      "failed (started too late)",
+    );
     expect(stateLabel(row({ state: "lost", reason: "holder_gone" }))).toBe("lost (holder gone)");
     expect(stateLabel(row({ state: "lost", reason: "no_status" }))).toBe("lost (no answer)");
+    expect(stateLabel(row({ state: "lost" }))).toBe("lost");
+    expect(stateLabel(row({ state: "lost", reason: "timeout" }))).toBe("lost (timeout)");
     expect(stateLabel(row({ state: "lost", reason: "holder_gone", childAlive: true }))).toBe(
       "lost (holder gone, child still runs)",
     );
+    // a process that is still alive is said so in every state that claims to be over
+    expect(stateLabel(row({ state: "killed", reason: "stopped", childAlive: true }))).toBe(
+      "stopped (child still runs)",
+    );
+    expect(stateLabel(row({ state: "killed", reason: "timeout", childAlive: true }))).toBe(
+      "killed (timeout, child still runs)",
+    );
+    expect(stateLabel(row({ state: "exited", exitCode: 0, childAlive: true }))).toBe(
+      "exited (0, child still runs)",
+    );
+    expect(stateLabel(row({ state: "lost", childAlive: true }))).toBe("lost (child still runs)");
     expect(stateLabel(row({ state: "lost" }, "FOREIGN"))).toBe("unknown (another machine)");
     expect(stateLabel(row({ state: "lost" }, "NEWER_FORMAT"))).toBe("unknown (newer kodel)");
     expect(stateLabel(row({ state: "lost" }, "CANNOT_READ"))).toBe("unknown (cannot be read)");
