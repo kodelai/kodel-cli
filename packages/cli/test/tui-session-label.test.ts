@@ -649,6 +649,30 @@ describe("session_label the confirmation", () => {
     expect(bottom).toContain("row «usage and cost capture»");
   });
 
+  test("session_label_a_long_label_cannot_push_the_keys_off_a_narrow_screen", () => {
+    const hostile = "z".repeat(120);
+    const sessions = demoSessions(NOW).sessions.map((s) =>
+      s.id === "r_0mvo6g4mi"
+        ? { ...s, agentSession: { ...(s.agentSession as AgentSession), name: hostile } }
+        : s,
+    );
+    const m = update(
+      { ...initialModel({ ...demoSessions(NOW), sessions }, "demo", NOW), selected: "r_0mvo6g4mi" },
+      "a",
+    );
+    for (const cols of [60, 80, 120]) {
+      const bottom = plain(render(m, { cols, rows: 30 })).at(-1) ?? "";
+      expect(bottom, `${cols} columns`).toContain("y yes");
+      expect(bottom, `${cols} columns`).toContain("n no");
+    }
+    const wide = plain(render(m, SIZE)).at(-1) ?? "";
+    expect(wide).toContain(`row «${"z".repeat(29)}…»`);
+    // a clash shows the end of the id once
+    const clash = update({ ...demo(), selected: "r_0vb88k4fn" }, "a");
+    const text = plain(render(clash, SIZE)).at(-1) ?? "";
+    expect(text.split("vb88k4fn").length - 1).toBe(1);
+  });
+
   test("session_label_a_run_without_a_name_gets_the_slug_and_the_id_end_only", () => {
     const sessions = demoSessions(NOW).sessions.map((s) =>
       s.id === "r_0mvo6g4mi" ? { ...s, agentSession: undefined } : s,

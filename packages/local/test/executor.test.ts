@@ -456,8 +456,23 @@ describe("the name of the session", () => {
     expect((await logFacts(logPath(SID), SID)).name).toBe("newer");
   });
 
-  test("session_label_name_rule_ignores_ai_title_alone", async () => {
+  test("session_label_name_rule_falls_back_to_ai_title_alone", async () => {
+    // an automatic session of Claude Code may have only this record (seen on a real log, 2026-11-02)
     await transcript(SID, [aiTitle("a summary of the first prompt")]);
+    expect((await logFacts(logPath(SID), SID)).name).toBe("a summary of the first prompt");
+  });
+
+  test("session_label_name_rule_ranks_the_three_kinds", async () => {
+    // the newest of a kind counts; an older custom-title beats a newer agent-name, which beats an ai-title
+    await transcript(SID, [aiTitle("old summary"), shown("shown"), aiTitle("new summary")]);
+    expect((await logFacts(logPath(SID), SID)).name).toBe("shown");
+    await transcript(SID, [custom("chosen"), shown("shown"), aiTitle("new summary")]);
+    expect((await logFacts(logPath(SID), SID)).name).toBe("chosen");
+    await transcript(SID, [aiTitle("old summary"), aiTitle("new summary")]);
+    expect((await logFacts(logPath(SID), SID)).name).toBe("new summary");
+    await transcript(SID, [aiTitle("   ")]);
+    expect((await logFacts(logPath(SID), SID)).name).toBeUndefined();
+    await transcript(SID, [aiTitle("theirs", "other")]);
     expect((await logFacts(logPath(SID), SID)).name).toBeUndefined();
   });
 

@@ -1,6 +1,7 @@
 /** The screens as pure functions: a model and a size in, lines out; a key and a model in, a model out. */
 import {
   bold,
+  clip,
   cyan,
   dim,
   fit,
@@ -14,7 +15,7 @@ import {
 } from "./ansi";
 import { firstCode, moveCode, moveHunk, type Prepared, placeOf, prepare } from "./diffview";
 import type { InputEvent } from "./input";
-import { labelText, renderLabel, rowLabels, sessionLine } from "./label";
+import { renderLabel, rowLabels, sessionLine } from "./label";
 import type { Loaded } from "./load";
 import {
   emptyPipes,
@@ -1091,10 +1092,16 @@ function menuLine(m: Model, cols: number): string {
  * What a gate prompt adds to the slug so that the row the person picked can be told from a look-alike: the
  * end of the id of the run, which only the engine writes, and the label of the row when it is not the slug.
  */
+/** How much of the label of a row a gate prompt repeats: it is only there to be compared with the row. */
+const ROW_IN_PROMPT = 30;
+
 function rowOf(m: Model, s: Session | undefined): string {
   if (!s) return "";
   const label = rowLabels(m.sessions).get(s.id);
-  const shown = label === undefined || label.name === s.title ? "" : ` · row «${labelText(label)}»`;
+  const shown =
+    label === undefined || label.name === s.title
+      ? ""
+      : ` · row «${clip(label.name, ROW_IN_PROMPT)}»`;
   return dim(` · ${s.id.slice(-8)}${shown}`);
 }
 
@@ -1107,7 +1114,8 @@ function hints(m: Model): string {
     return `${bold("Delete this comment?")}  ${bold("y")} yes   ${bold("n")} no`;
   if (m.confirm !== null) {
     const label = current?.need ? (NEED_KEYS[current.need][m.confirm] ?? "") : "";
-    return `${bold(label)} «${current?.title ?? ""}»${rowOf(m, current)}?  ${bold("y")} yes   ${bold("n")} no`;
+    // The keys come first: text that the agent's session wrote must not push them off a narrow screen.
+    return `${bold("y")} yes   ${bold("n")} no   ${bold(label)} «${current?.title ?? ""}»${rowOf(m, current)}?`;
   }
   const keys = current?.need ? NEED_KEYS[current.need] : {};
   const decide = `${keys.a ? `   ${bold("a")} ${keys.a}` : ""}${keys.r ? `   ${bold("r")} ${keys.r}` : ""}`;

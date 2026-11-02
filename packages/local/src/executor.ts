@@ -114,19 +114,31 @@ function modelOfLines(lines: readonly string[]): string | undefined {
 
 /**
  * The name the session has in its own log: the last `custom-title` (the person's `/rename`), else the
- * last `agent-name` (what the agent shows); never the `ai-title`. Only the records of this session
+ * last `agent-name` (what the agent shows), else the last `ai-title` (the summary the agent makes of the
+ * session; an automatic session of Claude Code may have only that one). Only the records of this session
  * count, a log of a resumed or forked session holds the records of others. A line is parsed only if
  * it holds one of the two words, so the cost of a long tail is a string search.
  */
 function nameOfLines(lines: readonly string[], sessionId: string): string | undefined {
   let custom: string | undefined;
   let shown: string | undefined;
+  let summary: string | undefined;
   for (let i = lines.length - 1; i >= 0 && custom === undefined; i--) {
     const line = lines[i] ?? "";
     const isCustom = line.includes('"custom-title"');
-    if (!isCustom && !line.includes('"agent-name"')) continue;
-    if (!isCustom && shown !== undefined) continue;
-    let entry: { type?: unknown; sessionId?: unknown; customTitle?: unknown; agentName?: unknown };
+    const isShown = !isCustom && line.includes('"agent-name"');
+    const isSummary = !isCustom && !isShown && line.includes('"ai-title"');
+    if (!isCustom && !isShown && !isSummary) continue;
+    // Only the newest of the two weaker kinds counts, but an older `custom-title` still beats them.
+    if (isShown && shown !== undefined) continue;
+    if (isSummary && summary !== undefined) continue;
+    let entry: {
+      type?: unknown;
+      sessionId?: unknown;
+      customTitle?: unknown;
+      agentName?: unknown;
+      aiTitle?: unknown;
+    };
     try {
       entry = JSON.parse(line) as typeof entry;
     } catch {
@@ -135,8 +147,9 @@ function nameOfLines(lines: readonly string[], sessionId: string): string | unde
     if (entry === null || typeof entry !== "object" || entry.sessionId !== sessionId) continue;
     if (entry.type === "custom-title") custom = stripSessionName(entry.customTitle);
     else if (entry.type === "agent-name") shown ??= stripSessionName(entry.agentName);
+    else if (entry.type === "ai-title") summary ??= stripSessionName(entry.aiTitle);
   }
-  return custom ?? shown;
+  return custom ?? shown ?? summary;
 }
 
 /**

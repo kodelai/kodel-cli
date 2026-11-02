@@ -299,7 +299,8 @@ description or arguments) change. With `history.executor: false` none of these f
 ### The name of the session (`session_name`)
 
 `session_name` is what the session is called in the agent's own log: the title the person gave it with `/rename`
-(Claude Code's `custom-title` record), else the name the agent shows for it (`agent-name`); never the `ai-title`. It is
+(Claude Code's `custom-title` record), else the name the agent shows for it (`agent-name`), else the summary the agent made of the session
+(`ai-title`; an automatic session may have only that record). It is
 read from the last 512 KB of the log each time a record is written, so a rename shows in the next record, and it is
 kept in the record, so it is still there after the agent has deleted its log (Claude Code does so after 30 days by
 default).

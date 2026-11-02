@@ -134,3 +134,8 @@ Fixed: the label as a steering risk (folding, the clash rule, Decision 2, the id
 - A trimmed excerpt of real records (`fixtures/claude-code-names.jsonl`, Claude Code 2.1.316, 2026-11-01, made-up ids and titles) is test input.
 - The reads of the names in a pass are bounded by the number of candidates (at most 21) and the cache, but are not metered against the pass's time budget one by one.
 - A format-1 run keeps `executor.session_name` (pinned on the golden runs of format 1 in `t41_session_name_additions_change_no_decision`).
+
+### After the trial on a real Claude Code session
+
+- The person tried the change on a real session. The run had been started by one session, whose log held only an `ai-title` (no `agent-name` and no `custom-title`), and the person went on in a continuation of it (Claude Code copied the history into a new session, which the person renamed). The journal named the first session, as it should (only it had called the run), and it had no name, so the list showed the slug. Two changes follow. (1) The name rule gets a last fallback: `custom-title`, then `agent-name`, then `ai-title` (the plan said never the `ai-title`; that was based on logs where `agent-name` equals it). Decision 1 (write every name) already covers it. (2) A continuation of a session that has not yet called the run is shown under the session that last did: the person chose to leave it to TASK-8FEG (choosing the current session from the proven sessions).
+- The confirmation of a gate puts `y yes   n no` first and shows the row's label cut at 30 columns and without the end of the id (the id end is already in the prompt), so text written by the agent's session cannot push the keys off a narrow screen.
