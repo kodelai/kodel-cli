@@ -199,6 +199,26 @@ describe("kodel agent", () => {
     expect(r.err).toContain("UNSUPPORTED");
   });
 
+  test("tA_agent_logs_is_a_read_an_engine_may_run_and_validates_bytes", async () => {
+    const started = await cli({ interactive: true }, "agent", "exec", "--", "echo", "hi");
+    const id = /started (a_\S+)/.exec(started.out)?.[1] as string;
+    for (
+      let i = 0;
+      i < 80 && !(await cli({ interactive: false }, "agent", "ls")).out.includes("exit 0");
+      i++
+    ) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const asEngine = await cli({ interactive: false, engine: true }, "agent", "logs", id);
+    expect(asEngine).toMatchObject({ code: 0 });
+    expect(asEngine.out).toContain("hi");
+    for (const bad of ["0", "-3", "abc"]) {
+      const r = await cli({ interactive: false }, "agent", "logs", id, "--bytes", bad);
+      expect(r.code, bad).toBe(1);
+      expect(r.err).toContain("positive whole number");
+    }
+  }, 30_000);
+
   test("tA_agents_alias_works", async () => {
     expect((await cli({ interactive: false }, "agents", "ls")).out).toBe("no agents\n");
   });

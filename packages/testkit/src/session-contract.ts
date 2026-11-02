@@ -150,10 +150,14 @@ export function sessionContract(
     }),
     withSubject("cli_session_frees_its_name_on_remove", true, async (s) => {
       // a session a person started from the command line does not hold its name once it is removed
-      const first = await s.adapter.start(spec(s, s.programs.exit(0), { name: "mine" }));
+      const first = await s.adapter.start(
+        spec(s, s.programs.exit(0), { name: "mine", origin: "cli" }),
+      );
       await s.adapter.wait(first.id, { timeoutMs: 15_000 });
       await s.adapter.remove(first.id);
-      const again = await s.adapter.start(spec(s, s.programs.exit(0), { name: "mine" }));
+      const again = await s.adapter.start(
+        spec(s, s.programs.exit(0), { name: "mine", origin: "cli" }),
+      );
       assert(again.id !== first.id, "the name starts again");
     }),
     withSubject("list_by_name_finds_a_live_session_again", true, async (s) => {

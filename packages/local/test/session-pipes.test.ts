@@ -169,7 +169,7 @@ describe("pipes adapter, real processes", () => {
     expect(existsSync(join(adapter.place.dir, id))).toBe(true);
   });
 
-  test("tA_rm_and_prune_never_touch_name_markers", async () => {
+  test("tA_rm_keeps_the_name_marker_of_a_host_session", async () => {
     const { id } = await adapter.start(sh("exit 0", { name: "keep", origin: "host" }));
     await adapter.wait(id, { timeoutMs: 15_000 });
     await adapter.remove(id);
@@ -177,12 +177,30 @@ describe("pipes adapter, real processes", () => {
   });
 
   test("tA_cli_session_frees_its_name_on_remove_a_host_session_keeps_it", async () => {
-    const mine = await adapter.start(sh("exit 0", { name: "mine" }));
+    const mine = await adapter.start(sh("exit 0", { name: "mine", origin: "cli" }));
     await adapter.wait(mine.id, { timeoutMs: 15_000 });
     await adapter.remove(mine.id);
     expect(readdirSync(adapter.place.namesDir)).toEqual([]);
-    const again = await adapter.start(sh("exit 0", { name: "mine" }));
+    const again = await adapter.start(sh("exit 0", { name: "mine", origin: "cli" }));
     expect(again.id).not.toBe(mine.id);
+  });
+
+  test("tA_a_starter_that_does_not_say_where_it_came_from_keeps_the_name_used", async () => {
+    const unnamed = await adapter.start(sh("exit 0", { name: "silent" }));
+    await adapter.wait(unnamed.id, { timeoutMs: 15_000 });
+    await adapter.remove(unnamed.id);
+    expect(readdirSync(adapter.place.namesDir)).toEqual(["silent.json"]);
+    await expect(adapter.start(sh("exit 0", { name: "silent" }))).rejects.toMatchObject({
+      code: "NAME_USED",
+    });
+  });
+
+  test("tA_tail_refuses_a_bad_byte_count", async () => {
+    const { id } = await adapter.start(sh("echo hi"));
+    await adapter.wait(id, { timeoutMs: 15_000 });
+    for (const bad of [0, -5, Number.NaN, 1.5]) {
+      await expect(adapter.tail(id, bad)).rejects.toMatchObject({ code: "SPEC_INVALID" });
+    }
   });
 
   test("tA_pipes_tail_gives_stdout_and_stderr_apart", async () => {

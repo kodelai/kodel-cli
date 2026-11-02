@@ -15,8 +15,8 @@ The state base is `KODEL_STATE_DIR` or `~/.kodel`. A session folder holds:
 
 A **name marker** (`<checkout key>.names/<name>.json`) is written once by `start`. For a session a host started
 (`origin: host`) it stays after `rm`: a name that was used and is gone answers `NAME_USED`, so a retried step never runs
-its command a second time; only a person frees it (`kodel agent forget-name`). A session started from the command line
-frees its name with its folder.
+its command a second time; only a person frees it (`kodel agent forget-name`). Only a session that says `origin: "cli"` (what `kodel agent exec` does)
+frees its name with its folder; a starter that does not say keeps the name used.
 
 Every record carries `v`. Version 1 is **not frozen yet**: until a person says so, no beta is cut from `main` and a
 field may still change. A reader that meets a newer `v` answers `NEWER_FORMAT` ("upgrade kodel"). This family is not
@@ -39,3 +39,7 @@ pid recycled within the same second compares as the same process; `stop` signals
 matches, and refuses (`IDENTITY_UNKNOWN`) when none was recorded. The redacted tail is cut after redaction with a
 margin of 1 KiB (as `runCommand` does), which is a heuristic: a secret split at the cut can leave a fragment no rule
 matches. A session of another machine (a shared state folder) is listed but never judged, removed or signalled.
+
+**A limit of the combined view.** `tail.txt` holds both streams in the order they came and is redacted as one text; a secret
+that reaches one stream in pieces with the other stream writing in between can escape it there. `stdout.txt` and
+`stderr.txt` hold each stream whole and are redacted whole.

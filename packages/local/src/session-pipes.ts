@@ -375,6 +375,9 @@ export class PipesSessionAdapter implements SessionAdapter {
   async tail(id: string, bytes = 64 * 1024, stream: TailStream = "both"): Promise<TailResult> {
     const dir = sessionDirOf(this.place, id);
     if (!existsSync(dir)) throw new SessionError("NOT_FOUND", `no session ${id}`);
+    if (!Number.isInteger(bytes) || bytes <= 0) {
+      throw new SessionError("SPEC_INVALID", "bytes must be a positive whole number");
+    }
     const text = readTail(dir, stream);
     const cut = Buffer.from(text).length > bytes;
     return {
@@ -572,14 +575,15 @@ export class PipesSessionAdapter implements SessionAdapter {
     if (status.state === "starting" || status.state === "running" || status.childAlive) {
       throw new SessionError("STILL_RUNNING", `session ${id} still runs; stop it first`);
     }
-    removeDir(dir);
-    // The name marker stays for a session a host started: its retry rule needs 'used' to outlive the folder. A
-    // session a person started from the command line frees its name with its folder.
-    if (record.name !== undefined && record.spec.origin !== "host") {
+    // The name marker stays unless the session says it came from a person at the command line (`origin: "cli"`):
+    // a host's retry rule, and any starter that did not say, need "used" to outlive the folder. The marker goes
+    // first, so a start with the same name never sees a marker without a folder for a name about to be freed.
+    if (record.name !== undefined && record.spec.origin === "cli") {
       const markerFile = this.markerPath(record.name);
       const held = readMarker(markerFile);
       if (typeof held !== "string" && held.id === id) removeDir(markerFile);
     }
+    removeDir(dir);
   }
 
   async list(filter?: { name?: string }): Promise<SessionListEntry[]> {

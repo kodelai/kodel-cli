@@ -25,7 +25,7 @@ export const AGENT_HUMAN_COMMANDS = [
   "agent forget-name",
 ] as const;
 /** Commands an agent may run: they only read. */
-export const AGENT_READ_COMMANDS = ["agent ls"] as const;
+export const AGENT_READ_COMMANDS = ["agent ls", "agent logs"] as const;
 
 export interface AgentContext {
   cwd: string;
@@ -155,6 +155,9 @@ export function registerAgentCommands(
     .action(async (id: string, opts: { stdout?: boolean; stderr?: boolean; bytes?: number }) => {
       platform();
       if (opts.stdout && opts.stderr) ctx.fail("give --stdout or --stderr, not both");
+      if (opts.bytes !== undefined && !(Number.isInteger(opts.bytes) && opts.bytes > 0)) {
+        ctx.fail("--bytes is a positive whole number");
+      }
       const stream = opts.stdout ? "stdout" : opts.stderr ? "stderr" : "both";
       const tail = await guard(async () => (await adapter()).tail(id, opts.bytes, stream));
       // line by line: what an agent printed must not move the cursor or fake a line in the person's terminal
@@ -170,7 +173,9 @@ export function registerAgentCommands(
     .action(async (id: string) => {
       platform();
       ctx.requireHuman();
-      await ctx.mustConfirm(`Remove agent ${plain(id)}? Its name stays used.`);
+      await ctx.mustConfirm(
+        `Remove agent ${plain(id)}? (A name a program started under stays used until you free it.)`,
+      );
       await guard(async () => (await adapter()).remove(id));
       ctx.out(`${plain(id)}: removed\n`);
     });
@@ -190,6 +195,7 @@ export function registerAgentCommands(
         (await adapter()).start({
           argv: command,
           cwd: ctx.cwd,
+          origin: "cli" as const,
           ...(opts.name !== undefined ? { name: opts.name } : {}),
         }),
       );

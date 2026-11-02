@@ -52,8 +52,8 @@ export class FakeSessionAdapter implements SessionAdapter {
         throw new SessionError(live ? "NAME_TAKEN" : "NAME_USED", `name ${name}`);
       }
     }
-    // a name outlives its session only when a host started it (the consumer's retry rule)
-    if (name !== undefined && spec.origin === "host") this.usedNames.add(name);
+    // a name outlives its session unless a person at the command line started it (the consumer's retry rule)
+    if (name !== undefined && spec.origin !== "cli") this.usedNames.add(name);
     this.counter += 1;
     const id = `a_${this.counter.toString(36).padStart(9, "0")}_0000`;
     const entry: Entry = {
