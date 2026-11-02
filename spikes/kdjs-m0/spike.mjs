@@ -42,7 +42,7 @@ async function start(name, mode, argv) {
     detached: true,
     stdio: ["pipe", "ignore", "ignore", "pipe"],
   });
-  mid.stdin.write(frame({ name, mode, argv, graceMs: 500 }));
+  mid.stdin.write(frame({ name, mode, argv, cwd: process.cwd(), graceMs: 500 }));
   mid.stdin.end(); // spike: explicit end after the input (not with-starter)
   const boot = await new Promise((resolve) => {
     let buf = "";
@@ -114,7 +114,8 @@ if (process.argv[2] === "holder") {
 s=socket.socket(socket.AF_UNIX);p=${JSON.stringify(path.join(dir, "s.sock"))}
 s.bind(p);s.listen(1)
 pid,fd=pty.fork()
-if pid==0: os.execvp(sys.argv[1],sys.argv[1:])
+if pid==0:
+  os.chdir(${JSON.stringify(input.cwd)});os.execvp(sys.argv[1],sys.argv[1:])
 o=open(${JSON.stringify(path.join(dir, "out.log"))},'ab',buffering=0);c=None;ring=b''
 while True:
   r=[fd,s]+([c] if c else [])
@@ -134,10 +135,16 @@ while True:
     if not d:c=None
     else: os.write(fd,d)
 _,st=os.waitpid(pid,0);sys.exit(os.waitstatus_to_exitcode(st))`;
-    child = spawn("python3", ["-c", py, ...input.argv], { stdio: ["ignore", log, log] });
+    child = spawn("python3", ["-c", py, ...input.argv], {
+      cwd: input.cwd,
+      stdio: ["ignore", log, log],
+    });
     sock = path.join(dir, "s.sock");
   } else {
-    child = spawn(input.argv[0], input.argv.slice(1), { stdio: ["ignore", log, log] });
+    child = spawn(input.argv[0], input.argv.slice(1), {
+      cwd: input.cwd,
+      stdio: ["ignore", log, log],
+    });
   }
   write({ v: 1, state: "running", holder: process.pid, child: child.pid, sock });
   boot("ready");
