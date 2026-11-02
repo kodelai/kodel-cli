@@ -35,9 +35,9 @@ This repository adds these rules:
 - To add a pipeline, or to change one outside a run, use `pipeline_propose_change` without `run_id`; never
   write into `.kodel/pipelines/` yourself. The proposal waits in `.kodel/proposals/` (with `storage: home`, in the
   project's folder under `~/.kodel`; do not edit it) until the person accepts it.
-- Do not run `gate`, `ack`, `seal`, `resume`, `migrate`, `pipeline changes apply|discard|restore` or
-  `pipeline proposals apply|discard`: they refuse to run without a terminal and ask for a confirmation, so
-  trying them only fails.
+- Do not run `gate`, `ack`, `seal`, `resume`, `migrate`, `pipeline changes apply|discard|restore`,
+  `pipeline proposals apply|discard` or `agent stop|rm|exec|forget-name`: they refuse to run without a terminal and
+  ask for a confirmation, so trying them only fails. `agent ls` and `agent logs` only read and are yours.
 - `kodel wait <run>` is yours: it only watches and prints one line when the person has decided, so start it
   in the background (Claude Code: the Bash tool with `run_in_background`) when an answer offers it (a
   `waiting` answer, or a `node` or `running` answer whose text names it because a decision waits besides),
@@ -99,7 +99,7 @@ Bun workspace (TypeScript, ESM). Runtime target: Node >= 22.19; Bun is the devel
 
 - `packages/pipeline-core` (`@kodel-ai/pipeline-core`): pure engine (pipeline spec, result checks, run state machine, routing, redaction, error codes, format versions), the `PipelineService` and the adapter interfaces. It also holds the task adapter contract (`tasks.ts`) and the `TaskService`; the `task_*` tools (`mcp/task-tools.ts`) exist only when the config turns tasks on. No file system, process, network or clock access. The subpath `@kodel-ai/pipeline-core/mcp` holds the MCP tool definitions bound to the service (it depends on the MCP SDK; the main entry does not import it). Transport-free: the CLI adds stdio, the server adds HTTP and auth.
 - `packages/local` (`@kodel-ai/local`): local adapters (file state store, process executor, git snapshots, system clock, the `local` task adapter that keeps one YAML file per task in `.kodel/tasks/`).
-- `packages/cli` (`kodel`): the CLI, built to a single JS file (`dist/kodel.js`), including human-only commands (`gate`, `resume`, `ack`, `seal`, `migrate`, `pipeline changes apply|discard|restore`, `pipeline proposals apply|discard`).
+- `packages/cli` (`kodel`): the CLI, built to a single JS file (`dist/kodel.js`), including human-only commands (`gate`, `resume`, `ack`, `seal`, `migrate`, `pipeline changes apply|discard|restore`, `pipeline proposals apply|discard`, `agent stop|rm|exec|forget-name`).
 - `packages/testkit` (`@kodel-ai/testkit`, private): scripted and adversarial fake agents, fixture helpers.
 - `adapters/`: per-agent pieces (MCP config writers, deny rules, driver prompts). `skills/`: agent-facing skills.
 - `tests/e2e`, `tests/agents`: end-to-end and real-agent scenarios. `fixtures/formats/`: golden fixtures per format version.
@@ -171,6 +171,17 @@ A run of format 1 keeps the behaviour its engine had where the codec says so (it
 it does not keep a declared outcome after a failed check, it reads two equal edges as one); every
 other fix since applies to every run. The limits that a new engine cannot lift in an older one are in
 `docs/run-formats.md`.
+
+**Session records** (`<state base>/run/`, the processes `kodel agent` runs) are machine-local state, not history. Their
+format follows rules 1-5: a `v` on every record, one codec each (`decode`, `encode`) in
+`pipeline-core/src/sessions/`, a golden fixture taken from a real holder in `fixtures/session-formats/`, a newer `v`
+refused with "upgrade kodel"; a `decode` is never removed once a published version has written the format. They
+differ from history in one way: records may be removed (`kodel agent rm`), but the name marker a session leaves
+stays until a person frees it (a session a person started at the command line frees its name with its folder). Unlike the run codecs (an allow-list that refuses an unknown field), the `decode` of
+this family ignores unknown optional fields of a known `v`, because builds of different age write one directory;
+after the format is declared frozen every new field bumps `v`. Session errors are `SessionError` with
+`SESSION_ERROR_CODES`, outside the MCP error contract. The `t41_*` tests do not cover this family; its own tests do
+(`docs/session-formats.md`).
 
 Decision T-41 (a run keeps its format; `kodel migrate` is the person's way up) is refuted if a user
 outside this repository reports a run of a supported format refused, orphaned or changed by an update.

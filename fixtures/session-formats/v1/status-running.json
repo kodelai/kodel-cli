@@ -1,0 +1,20 @@
+{
+  "v": 1,
+  "state": "running",
+  "by": "holder",
+  "holder": {
+    "pid": 4242,
+    "identity": {
+      "method": "ps-lstart",
+      "value": "MASKED"
+    }
+  },
+  "child": {
+    "pid": 4242,
+    "identity": {
+      "method": "ps-lstart",
+      "value": "MASKED"
+    }
+  },
+  "since": 1700000000000
+}

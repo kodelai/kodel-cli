@@ -39,6 +39,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { Command, CommanderError } from "commander";
 import pkg from "../package.json" with { type: "json" };
+import { registerAgentCommands } from "./agent-commands";
 import { BUILD } from "./build-info";
 import { describePendingChange, gateChangesText, gateCommentsText } from "./decide-text";
 import {
@@ -83,6 +84,8 @@ export interface CliEnv {
   betweenLooks?(): Promise<void>;
   /** For `wait`: called once, when it is watching a run that waits (so a test knows when to decide). */
   onWatching?(): void;
+  /** For `agent`: how to start the holder processes (a test points it at the source entry). */
+  sessionLauncher?: { exec: string; args: string[] };
 }
 
 /** A problem to report to the user without a stack trace. */
@@ -1442,6 +1445,19 @@ Examples:
     }
     return fields;
   }
+
+  registerAgentCommands(program, withPlural, {
+    cwd: env.cwd,
+    out: env.out,
+    environment: env.environment ?? {},
+    root: async () => (await project()).root,
+    fail: (message: string): never => {
+      throw new UserError(message);
+    },
+    requireHuman,
+    mustConfirm,
+    ...(env.sessionLauncher ? { launcher: env.sessionLauncher } : {}),
+  });
 
   const task = withPlural(program.command("task")).description(
     "The tasks of this repository (they are off until tasks.enabled is set in the config)",

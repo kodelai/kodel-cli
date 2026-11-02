@@ -1,0 +1,14 @@
+{
+  "v": 1,
+  "id": "a_000000000_0000",
+  "name": "fixture-done",
+  "mode": "pipes",
+  "spec": {
+    "argv": ["sh", "-c", "echo hi; exit 0"],
+    "cwd": "/masked/project",
+    "name": "fixture-done",
+    "envNames": []
+  },
+  "started": 1700000000000,
+  "root": "/masked/project"
+}

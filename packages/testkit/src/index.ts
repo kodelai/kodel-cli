@@ -7,6 +7,7 @@
 export * from "./agent-history-contract";
 export * from "./claude-log-builder";
 export * from "./dsl";
+export * from "./engine-step-sketch";
 export * from "./fake-agent-history";
 export * from "./history-fixtures";
 export * from "./latch-runner";
@@ -18,6 +19,8 @@ export * from "./memory-task-adapter";
 export * from "./run";
 export * from "./scenarios/feature";
 export * from "./scripted-engine";
+export * from "./session-contract";
+export * from "./session-fake";
 export * from "./task-adapter-contract";
 export * from "./types";
 export * from "./validate";
