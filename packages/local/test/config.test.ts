@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   DEFAULT_AGENT_LOG,
   DEFAULT_HISTORY,
+  DEFAULT_TOOL_CALLS,
   DEFAULT_USAGE,
   defaultAgentLog,
   HISTORY_CATEGORIES,
@@ -54,7 +55,12 @@ describe("the project config", () => {
         on_run: { mode: "auto" },
         adapters: {},
       },
-      history: { ...DEFAULT_HISTORY, agent_log: DEFAULT_AGENT_LOG, usage: DEFAULT_USAGE },
+      history: {
+        ...DEFAULT_HISTORY,
+        agent_log: DEFAULT_AGENT_LOG,
+        usage: DEFAULT_USAGE,
+        tool_calls: DEFAULT_TOOL_CALLS,
+      },
       agents: { subagents: "auto", max_parallel: 8, claim_ttl_s: 900 },
       storage: "project",
     });
@@ -205,7 +211,12 @@ describe("the project config", () => {
 
 describe("the history section", () => {
   test("history_defaults_when_there_is_no_file_or_no_section", async () => {
-    const defaults = { ...DEFAULT_HISTORY, agent_log: DEFAULT_AGENT_LOG, usage: DEFAULT_USAGE };
+    const defaults = {
+      ...DEFAULT_HISTORY,
+      agent_log: DEFAULT_AGENT_LOG,
+      usage: DEFAULT_USAGE,
+      tool_calls: DEFAULT_TOOL_CALLS,
+    };
     expect((await loadConfig(dir)).history).toEqual(defaults);
     await write("version: 1\n");
     expect((await loadConfig(dir)).history).toEqual(defaults);
@@ -233,6 +244,7 @@ describe("the history section", () => {
       tool_log: { enabled: false },
       agent_log: DEFAULT_AGENT_LOG,
       usage: DEFAULT_USAGE,
+      tool_calls: DEFAULT_TOOL_CALLS,
     });
     await write("history:\n  changes: { exclude: ['a/**'] }\n");
     expect((await loadConfig(dir)).history.changes).toEqual({
@@ -242,6 +254,27 @@ describe("the history section", () => {
     });
     await write("history:\n  output: { enabled: false }\n");
     expect((await loadConfig(dir)).history.output).toEqual({ enabled: false, max_kb: 64 });
+  });
+
+  test("zkrh_config_parses_and_defaults", async () => {
+    await write("history:\n  tool_calls: { preview_chars: 0 }\n");
+    expect((await loadConfig(dir)).history.tool_calls).toEqual({ enabled: true, preview_chars: 0 });
+    await write("history:\n  tool_calls: { enabled: false }\n");
+    expect((await loadConfig(dir)).history.tool_calls).toEqual({
+      enabled: false,
+      preview_chars: 200,
+    });
+  });
+
+  test("zkrh_preview_chars_validation", async () => {
+    for (const bad of ["-1", "2001", "1.5", "'many'"]) {
+      expect(
+        (await failure(`history:\n  tool_calls: { preview_chars: ${bad} }\n`)).message,
+      ).toContain("preview_chars");
+    }
+    expect((await failure("history:\n  tool_calls: { previews: 3 }\n")).message).toContain(
+      "previews",
+    );
   });
 
   test("history_an_unknown_key_is_refused_by_name", async () => {
@@ -291,7 +324,7 @@ describe("the history section", () => {
     // same ones, and each must have an `enabled` key.
     // `agent_log` and `usage` are the sections with more than a switch (mode, caps, interval; the price override) and are listed apart
     expect([...HISTORY_SECTION_KEYS].sort()).toEqual(
-      [...HISTORY_CATEGORIES, "agent_log", "usage"].sort(),
+      [...HISTORY_CATEGORIES, "agent_log", "usage", "tool_calls"].sort(),
     );
     expect(Object.keys(DEFAULT_HISTORY).sort()).toEqual([...HISTORY_CATEGORIES].sort());
     for (const category of HISTORY_CATEGORIES) {

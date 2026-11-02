@@ -28,6 +28,21 @@ import { defaultRegistry, labelsOf, RESTART_FAILED, type Registry } from "./regi
 import { renderContextOf, renderDeep, renderTemplate } from "./render";
 import { runSlug } from "./slug";
 import {
+  MAX_TOOL_CALL_EVENTS,
+  MAX_TOOL_CALL_SESSIONS,
+  newToolCallsState,
+  parseAttemptKey,
+  TOOL_CALL_ROW_BYTES_BUDGET,
+  TOOL_CALLS_FAILURES,
+  type ToolCallsCursor,
+  type ToolCallsFailure,
+  type ToolCallsPayload,
+  type ToolCallsState,
+  toolCallsCursorSchema,
+  toolCallsPayloadSchema,
+  UNATTRIBUTED_KEY,
+} from "./tool-calls-record";
+import {
   addDelta,
   MAX_USAGE_ATTEMPTS,
   MAX_USAGE_EVENTS,
@@ -363,6 +378,13 @@ export interface RunState {
    * feeds a check, a route or a gate.
    */
   usage?: UsageState;
+  /**
+   * What the agent called, as the cursors of the records a pass of the host appended (`tool_calls_recorded`) and the size
+   * of the rows so far. Present only for a run started with `history.tool_calls` on, so its absence says "not captured".
+   * Holds numbers, safe ids and hex hashes, never text or names: the state is not redacted. Information only: nothing here
+   * feeds a check, a route or a gate.
+   */
+  toolCalls?: ToolCallsState;
 }
 
 /** Where the stored stream of one session ends, and what the journal vouches for. */
@@ -686,6 +708,21 @@ export type RunEvent =
     }
   /** Usage could not be recorded, for this reason; journaled once per reason. */
   | { type: "usage_failed"; reason: UsageFailure; session?: string }
+  /**
+   * The tool calls and results a pass read from the agent's log since the last record of this session. `node` and
+   * `attempt` are the agent step the pass runs for, which must be the one the run is at; the rows carry the attempt each
+   * call belongs to. `cursor` is where the recorded part of the session's log now ends.
+   */
+  | {
+      type: "tool_calls_recorded";
+      session: string;
+      node: string;
+      attempt: number;
+      calls: ToolCallsPayload;
+      cursor: ToolCallsCursor;
+    }
+  /** Tool calls could not be recorded, for this reason; journaled once per reason. */
+  | { type: "tool_calls_failed"; reason: ToolCallsFailure; session?: string }
   /** A human accepted a change made to the run's files outside kodel. Journaled; changes nothing else. */
   | { type: "acknowledge"; note?: string }
   /**
@@ -1676,6 +1713,8 @@ class Machine {
     if (event.type === "agent_session_named") return this.agentSessionNamed(event);
     if (event.type === "usage_recorded") return this.usageRecorded(event);
     if (event.type === "usage_failed") return this.usageFailed(event);
+    if (event.type === "tool_calls_recorded") return this.toolCallsRecorded(event);
+    if (event.type === "tool_calls_failed") return this.toolCallsFailed(event);
     if (event.type === "cancel") {
       if (this.s.status === "running" || this.s.status === "paused") this.end("canceled");
       else throw new Repeat();
@@ -1930,6 +1969,7 @@ class Machine {
       };
     }
     if (event.history?.usage?.enabled === true) this.s.usage = newUsageState();
+    if (event.history?.tool_calls?.enabled === true) this.s.toolCalls = newToolCallsState();
     this.log("run_started", {
       run: event.runId,
       task: event.task,
@@ -2226,6 +2266,94 @@ class Machine {
     }
     usage.failed.push(event.reason);
     this.log("usage_failed", {
+      reason: event.reason,
+      ...(event.session !== undefined && SAFE_ID.test(event.session)
+        ? { session: event.session }
+        : {}),
+    });
+  }
+
+  /**
+   * Keep the account of tool calls. The record is accepted only for the agent step the run is at; the rows name the attempt
+   * each call belongs to, which may be an earlier one (a call is placed by the time it started). A row that names a node the
+   * run does not have, or an attempt below 1 or above the node's highest, loses its attempt and is the run's: the check is
+   * cheap and weak (the times come from a log the agent can edit), and the report says `unverified`. Like usage, anything
+   * that does not hold is a quiet no-op: this is display data and must never refuse or fail a step. Once the rows of a run
+   * pass a budget a record keeps its counts only, so the journal that every reader reads whole stays small.
+   */
+  private toolCallsRecorded(event: Extract<RunEvent, { type: "tool_calls_recorded" }>) {
+    const tc = this.s.toolCalls;
+    if (tc === undefined || this.s.status !== "running") throw new Repeat();
+    const payload = toolCallsPayloadSchema.safeParse(event.calls);
+    const cursor = toolCallsCursorSchema.safeParse(event.cursor);
+    if (!SAFE_ID.test(event.session) || !payload.success || !cursor.success) throw new Repeat();
+    // A session id is a key of a plain object: `__proto__` would set the prototype, not a cursor.
+    if (event.session === "__proto__") throw new Repeat();
+    if (tc.events >= MAX_TOOL_CALL_EVENTS) throw new Repeat();
+    const hasCursor = Object.hasOwn(tc.sessions, event.session);
+    if (!hasCursor && Object.keys(tc.sessions).length >= MAX_TOOL_CALL_SESSIONS) throw new Repeat();
+    const stored = hasCursor ? tc.sessions[event.session] : undefined;
+    if (cursor.data.last_seq < (stored?.last_seq ?? 0)) throw new Repeat();
+    const visit = this.s.active.find(
+      (v) => v.node === event.node && v.attempt === event.attempt && v.phase === "agent",
+    );
+    if (visit === undefined) throw new Repeat();
+
+    const known = (node: string | undefined, attempt: number | undefined): boolean => {
+      if (node === undefined || attempt === undefined) return false;
+      const run = this.s.nodes[node];
+      return run !== undefined && attempt >= 1 && attempt <= run.attempt;
+    };
+    const rows = payload.data.rows.map((row) => {
+      if (row.k !== "c" || (row.node === undefined && row.attempt === undefined)) return row;
+      if (known(row.node, row.attempt)) return row;
+      const { node: _node, attempt: _attempt, shared: _shared, ...rest } = row;
+      return rest;
+    });
+    const counts: Record<string, Record<string, number>> = {};
+    for (const [key, tools] of Object.entries(payload.data.counts)) {
+      const where = parseAttemptKey(key);
+      const into = where !== undefined && known(where.node, where.attempt) ? key : UNATTRIBUTED_KEY;
+      const sum = counts[into] ?? {};
+      for (const [tool, n] of Object.entries(tools)) sum[tool] = (sum[tool] ?? 0) + n;
+      counts[into] = sum;
+    }
+
+    const size = JSON.stringify(rows).length;
+    let kept = rows;
+    let cut = payload.data.rows_cut === true;
+    if (rows.length > 0 && tc.rowBytes + size > TOOL_CALL_ROW_BYTES_BUDGET) {
+      kept = [];
+      cut = true;
+      // Latched: a later, smaller record must not bring rows back after rows were cut (their results would join no call).
+      tc.rowBytes = TOOL_CALL_ROW_BYTES_BUDGET;
+    } else {
+      tc.rowBytes += size;
+    }
+    tc.sessions[event.session] = cursor.data;
+    tc.events += 1;
+    this.log("tool_calls_recorded", {
+      session: event.session,
+      node: event.node,
+      attempt: event.attempt,
+      calls: {
+        ...payload.data,
+        rows: kept,
+        counts,
+        ...(cut ? { rows_cut: true as const } : {}),
+      },
+      cursor: cursor.data,
+    });
+  }
+
+  private toolCallsFailed(event: Extract<RunEvent, { type: "tool_calls_failed" }>) {
+    const tc = this.s.toolCalls;
+    if (tc === undefined || this.s.status !== "running") throw new Repeat();
+    if (!TOOL_CALLS_FAILURES.includes(event.reason) || tc.failed.includes(event.reason)) {
+      throw new Repeat();
+    }
+    tc.failed.push(event.reason);
+    this.log("tool_calls_failed", {
       reason: event.reason,
       ...(event.session !== undefined && SAFE_ID.test(event.session)
         ? { session: event.session }

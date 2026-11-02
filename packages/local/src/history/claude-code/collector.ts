@@ -152,6 +152,7 @@ export function claudeCodeCollector(
     };
     const state = reader.claude;
     if (readOptions.usageDetail === true) state.usageDetail = true;
+    if (readOptions.toolDetail === true) state.toolDetail = true;
     const chosen = new Map<
       string,
       ReturnType<typeof selectProfile<(typeof CLAUDE_PROFILES)[number]>>

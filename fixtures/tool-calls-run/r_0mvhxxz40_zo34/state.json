@@ -1,0 +1,89 @@
+{
+  "v": 2,
+  "runId": "r_0mvhxxz40_zo34",
+  "task": "t",
+  "specHash": "ecb79800c8fdeaea",
+  "status": "completed",
+  "startedAt": 1792576800000,
+  "nodes": {
+    "a": {
+      "slug": "a",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 1
+    },
+    "b": {
+      "slug": "b",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 2
+    }
+  },
+  "active": [],
+  "trail": ["a", "b"],
+  "pauses": [],
+  "nextVisitId": 3,
+  "seq": 10,
+  "slug": "t",
+  "pipelineFile": ".kodel/pipelines/two.yaml",
+  "history": {
+    "changes": {
+      "enabled": true,
+      "exclude": [],
+      "max_kb": 512
+    },
+    "output": {
+      "enabled": true,
+      "max_kb": 64
+    },
+    "prompts": {
+      "enabled": true
+    },
+    "executor": {
+      "enabled": true
+    },
+    "tool_log": {
+      "enabled": true
+    },
+    "agent_log": {
+      "enabled": false,
+      "mode": "full",
+      "preview_chars": {
+        "user": 4000,
+        "agent": 4000,
+        "tool_input": 4000,
+        "tool_result": 8000
+      },
+      "max_kb": 20480,
+      "interval_s": 10
+    },
+    "usage": {
+      "enabled": false,
+      "prices": {}
+    },
+    "tool_calls": {
+      "enabled": true,
+      "preview_chars": 200
+    }
+  },
+  "engineVersion": "unknown",
+  "served": {},
+  "toolCalls": {
+    "sessions": {
+      "77777777-7777-4777-8777-777777777777": {
+        "last_seq": 16,
+        "last_key": "63e28003a86fd9c9cb95ae5bcca4864cd68e758bc6dc42504136a77b62687ca9"
+      }
+    },
+    "events": 2,
+    "rowBytes": 1222,
+    "failed": []
+  },
+  "finishedAt": 1792576806850
+}

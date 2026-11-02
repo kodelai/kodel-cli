@@ -13,11 +13,13 @@ import {
   DEFAULT_TASK_ON_RUN,
   defaultAgentLog,
   defaultHistory,
+  defaultToolCalls,
   defaultUsage,
   type HistoryConfig,
   isValidGlob,
   KodelError,
   MAX_SUPPORTED_MAJOR,
+  MAX_TOOL_PREVIEW_CHARS,
   parseVersion,
   pricesOverrideSchema,
   TASK_ON_RUN_MODES,
@@ -171,6 +173,15 @@ const usageSchema = z
   })
   .strict();
 
+// `preview_chars` is the cut of the preview of a call's input; a preview exists only when the agent's own log is kept as
+// `full` text, and `0` stores none. The bound keeps what the journal holds small.
+const toolCallsSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    preview_chars: z.number().int().min(0).max(MAX_TOOL_PREVIEW_CHARS).optional(),
+  })
+  .strict();
+
 // Strict at every level like the rest: a misspelled category must not leave a switch on without the
 // person noticing, and a switch is the point of this section.
 const historySchema = z
@@ -196,6 +207,7 @@ const historySchema = z
     tool_log: z.object({ enabled: z.boolean().optional() }).strict().optional(),
     agent_log: agentLogSchema.optional(),
     usage: usageSchema.optional(),
+    tool_calls: toolCallsSchema.optional(),
   })
   .strict();
 
@@ -302,7 +314,12 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
         agent_hints: { ...DEFAULT_AGENT_HINTS },
         decisions: { dialog: false, agent: { ...DEFAULT_DECISIONS.agent } },
         tasks: { ...DEFAULT_TASKS, on_run: { ...DEFAULT_TASKS.on_run }, adapters: {} },
-        history: { ...defaultHistory(), agent_log: defaultAgentLog(), usage: defaultUsage() },
+        history: {
+          ...defaultHistory(),
+          agent_log: defaultAgentLog(),
+          usage: defaultUsage(),
+          tool_calls: defaultToolCalls(),
+        },
         agents: { ...DEFAULT_AGENTS },
         storage: "project",
       };
@@ -429,6 +446,10 @@ function mergeHistory(given: z.infer<typeof historySchema> | undefined): History
     usage: {
       enabled: given?.usage?.enabled ?? defaultUsage().enabled,
       prices: given?.usage?.prices ?? {},
+    },
+    tool_calls: {
+      enabled: given?.tool_calls?.enabled ?? defaultToolCalls().enabled,
+      preview_chars: given?.tool_calls?.preview_chars ?? defaultToolCalls().preview_chars,
     },
   };
 }

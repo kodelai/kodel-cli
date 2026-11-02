@@ -10,7 +10,7 @@
  * dropped. A format that cannot hold a state says so before anything is written
  * (`UNSUPPORTED_FORMAT_FEATURE`), so the run stays as it was.
  *
- * `history`, `served`, `agentLog` and `usage` are bookkeeping the source marks as information only
+ * `history`, `served`, `agentLog`, `usage` and `toolCalls` are bookkeeping the source marks as information only
  * ("nothing here feeds a check, a route or a gate"): they are checked to be objects and passed
  * through as they are.
  */
@@ -78,6 +78,7 @@ const STATE_TABLE = {
   servedEvents: "kept",
   agentLog: "kept",
   usage: "kept",
+  toolCalls: "kept",
 } satisfies Record<keyof RunState, Disposition>;
 
 const NODE_TABLE = {
@@ -145,7 +146,7 @@ export const V1_BLOCKED_KEYS = keysOf(BLOCKED_TABLE, "kept");
 export const V1_PAUSE_KEYS = keysOf(PAUSE_TABLE, "kept");
 const FEEDBACK_KEYS = ["source", "reason", "from", "check_id"];
 /** The bookkeeping blobs that pass through unchecked beyond being objects. */
-const OPAQUE_KEYS = ["history", "served", "agentLog", "usage"];
+const OPAQUE_KEYS = ["history", "served", "agentLog", "usage", "toolCalls"];
 
 /** Keys that belong to a later format; named in the message so the cause is plain. */
 const LATER_STATE_KEYS = [...keysOf(STATE_TABLE, "refused"), "pauses"];
@@ -182,6 +183,8 @@ export const V1_EVENTS = [
   "served_write_failed",
   "step_served",
   "task_link",
+  "tool_calls_failed",
+  "tool_calls_recorded",
   "usage_failed",
   "usage_recorded",
 ];

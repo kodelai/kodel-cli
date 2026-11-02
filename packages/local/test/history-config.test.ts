@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   DEFAULT_AGENT_LOG,
   DEFAULT_HISTORY,
+  DEFAULT_TOOL_CALLS,
   DEFAULT_USAGE,
   KodelError,
   PipelineService,
@@ -108,6 +109,7 @@ describe("starting a run needs git when history.changes is on", () => {
       ...DEFAULT_HISTORY,
       agent_log: DEFAULT_AGENT_LOG,
       usage: DEFAULT_USAGE,
+      tool_calls: DEFAULT_TOOL_CALLS,
     });
   });
 
@@ -219,6 +221,7 @@ describe("run_started.history", () => {
       tool_log: { enabled: false },
       agent_log: DEFAULT_AGENT_LOG,
       usage: DEFAULT_USAGE,
+      tool_calls: DEFAULT_TOOL_CALLS,
     });
   });
 
