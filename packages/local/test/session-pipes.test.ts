@@ -163,6 +163,40 @@ describe("pipes adapter, real processes", () => {
     expect(readdirSync(adapter.place.namesDir)).toEqual(["keep.json"]);
   });
 
+  test("tA_pipes_send_reaches_a_child_that_reads_stdin_twice", async () => {
+    const { id } = await adapter.start(sh("while read l; do echo got:$l; done", { input: true }));
+    const first = await adapter.send?.(id, "one");
+    expect(first?.bytes).toBe(4);
+    await adapter.send?.(id, "two words");
+    await eventually(() => {
+      const dir = join(adapter.place.dir, id);
+      return (
+        existsSync(join(dir, "tail.txt")) &&
+        readFileSync(join(dir, "tail.txt"), "utf8").includes("got:two words")
+      );
+    }, 10_000);
+    const { text } = await adapter.tail(id);
+    expect(text).toContain("got:one");
+  });
+
+  test("tA_pipes_send_refuses_without_input_and_when_not_running", async () => {
+    const quiet = await adapter.start(sh("sleep 30"));
+    await expect(adapter.send?.(quiet.id, "x")).rejects.toMatchObject({ code: "UNSUPPORTED" });
+    const done = await adapter.start(sh("exit 0", { input: true }));
+    await adapter.wait(done.id, { timeoutMs: 15_000 });
+    await expect(adapter.send?.(done.id, "x")).rejects.toMatchObject({ code: "NOT_RUNNING" });
+    await expect(adapter.send?.("a_000000000_0000", "x")).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+  });
+
+  test("tA_pipes_without_input_a_reader_of_stdin_sees_end_of_file", async () => {
+    const { id } = await adapter.start(sh("cat; echo end"));
+    const done = await adapter.wait(id, { timeoutMs: 15_000 });
+    expect(done.state).toBe("exited");
+    expect((await adapter.tail(id)).text).toContain("end");
+  });
+
   test("tA_unknown_id_and_invalid_spec", async () => {
     await expect(adapter.status("a_000000000_0000")).rejects.toMatchObject({ code: "NOT_FOUND" });
     await expect(adapter.start({ argv: [], cwd: root })).rejects.toMatchObject({

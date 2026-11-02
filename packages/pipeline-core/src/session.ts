@@ -61,6 +61,8 @@ export interface SessionSpec {
   cwd: string;
   env?: Record<string, string>;
   inheritEnv?: boolean;
+  /** Keep the child's stdin open for `send` (off by default: a program that reads stdin would wait for it). */
+  input?: boolean;
   timeoutMs?: number;
   name?: string;
   mode?: SessionMode;
@@ -97,6 +99,7 @@ export const validateSpec = (spec: SessionSpec): string | undefined => {
       if (key.startsWith("KODEL_")) return `env ${key} is reserved`;
     }
   }
+  if (spec.input !== undefined && typeof spec.input !== "boolean") return "input must be a boolean";
   if (spec.name !== undefined && !isSessionName(spec.name)) return "name is not valid";
   if (spec.parent !== undefined && !isSessionId(spec.parent)) return "parent is not a session id";
   if (spec.mode !== undefined && spec.mode !== "pipes" && spec.mode !== "pty")

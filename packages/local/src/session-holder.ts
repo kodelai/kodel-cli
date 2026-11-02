@@ -1,5 +1,13 @@
-import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync, writeSync } from "node:fs";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import {
+  constants,
+  createReadStream,
+  existsSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { redactText, SESSION_FORMAT_VERSION } from "@kodel-ai/pipeline-core";
 import { killTree } from "./command";
@@ -23,12 +31,15 @@ export interface HolderInput {
   cwd: string;
   env: Record<string, string>;
   timeoutMs?: number;
+  /** Open the child's stdin and feed it from the `in.fifo` of the session folder. */
+  input?: boolean;
   graceMs: number;
   started: number;
   build?: string;
   tailBytes?: number;
 }
 
+export const INPUT_FIFO = "in.fifo";
 export const HOLDER_MARKER = "--kodel-session-holder";
 const END = Buffer.from("KEND");
 const DEFAULT_TAIL_BYTES = 256 * 1024;
@@ -106,7 +117,11 @@ export async function runHolder(deps: HolderDeps): Promise<number> {
       cwd: input.cwd,
       env: input.env,
       detached: true,
-      stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"],
+      stdio: [input.input ? "pipe" : "ignore", "pipe", "pipe"] as [
+        "pipe" | "ignore",
+        "pipe",
+        "pipe",
+      ],
     };
     child =
       input.command !== undefined
@@ -117,6 +132,14 @@ export async function runHolder(deps: HolderDeps): Promise<number> {
     boot(`HOLDER_BOOT_FAILED:${redactText((error as Error).message)}`);
     return 1;
   }
+
+  // Listen for the exit at once: a child that ends before the holder has recorded it as running would be missed.
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    // `exit`, not `close`: a descendant in another session may keep the pipes open long after the child is gone.
+    child.once("exit", (c, sig) => {
+      setTimeout(() => resolve({ code: c, signal: sig }), PIPE_DRAIN_MS);
+    });
+  });
 
   const tailBytes = input.tailBytes ?? DEFAULT_TAIL_BYTES;
   let tail = Buffer.alloc(0);
@@ -139,6 +162,16 @@ export async function runHolder(deps: HolderDeps): Promise<number> {
       // the directory may be gone; the watcher below handles that
     }
   };
+
+  if (input.input && child.stdin) {
+    // A FIFO opened for reading and writing by the holder never reports end of file; `send` writes into it.
+    const fifo = join(input.dir, INPUT_FIFO);
+    if (spawnSync("mkfifo", [fifo]).status === 0) {
+      const fd = openSync(fifo, constants.O_RDWR);
+      createReadStream("", { fd, autoClose: false }).pipe(child.stdin);
+      child.stdin.on("error", () => {});
+    }
+  }
 
   const spawnFailure = await new Promise<Error | undefined>((resolve) => {
     child.once("spawn", () => resolve(undefined));
@@ -179,14 +212,7 @@ export async function runHolder(deps: HolderDeps): Promise<number> {
     if (!existsSync(input.dir)) killTree(child.pid); // the directory was removed under a live child
   }, 1_000);
 
-  const code = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-    (resolve) => {
-      // `exit`, not `close`: a descendant in another session may keep the pipes open long after the child is gone.
-      child.once("exit", (c, s) => {
-        setTimeout(() => resolve({ code: c, signal: s }), PIPE_DRAIN_MS);
-      });
-    },
-  );
+  const code = await exited;
   if (timer) clearTimeout(timer);
   clearInterval(watcher);
   flush();
@@ -212,29 +238,32 @@ export async function runHolder(deps: HolderDeps): Promise<number> {
   return 0;
 }
 
-/** Process entry of the holder: boot pipe is fd 3, the framed input is stdin. */
+export const BOOT_FILE = "boot.txt";
+
+/** The boot report is a file (written whole, then renamed), not a pipe: an extra stdio pipe is not reliable under Bun and has no equivalent on Windows. */
+export const writeBoot = (dir: string, line: string): void => {
+  try {
+    const tmp = join(dir, `${BOOT_FILE}.tmp`);
+    writeFileSync(tmp, `${line}\n`, { mode: 0o600 });
+    renameSync(tmp, join(dir, BOOT_FILE));
+  } catch {
+    // the starter is gone or the folder was removed
+  }
+};
+
+/** Process entry of the holder: the framed input is stdin; the boot report goes to the session folder. */
 export async function holderMain(): Promise<number> {
   process.chdir("/");
   const input = await readInput(process.stdin);
-  const boot = (line: string) => {
-    try {
-      writeSync(3, `${line}\n`);
-    } catch {
-      // the starter is gone
-    }
-  };
-  if (!input) {
-    boot("HOLDER_BOOT_FAILED:input");
-    return 1;
-  }
-  return runHolder({ input, boot });
+  if (!input) return 1; // the starter died mid-write: nobody waits for an answer
+  return runHolder({ input, boot: (line) => writeBoot(input.dir, line) });
 }
 
 /** The intermediate process: starts the holder with the same pipe ends and exits at once. */
 export function intermediateMain(launch: { exec: string; args: string[] }): void {
   const child = spawn(launch.exec, [...launch.args, HOLDER_MARKER], {
     detached: true,
-    stdio: [0, "ignore", "ignore", 3],
+    stdio: [0, "ignore", "ignore"],
   });
   child.unref();
 }

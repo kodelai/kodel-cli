@@ -1,11 +1,20 @@
 import { spawn } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  writeSync,
+} from "node:fs";
 import { join } from "node:path";
 import {
   DEFAULT_START_GRACE_MS,
   deriveStatus,
   foldSessionName,
   isLocalSessionId,
+  planSend,
   redactText,
   SESSION_FORMAT_VERSION,
   type SessionAdapter,
@@ -21,7 +30,7 @@ import {
 import { KILL_GRACE_MS, killTree } from "./command";
 import { descendantsOf, liveProcess, processIdentity, sameIdentity } from "./process-table";
 import { sessionEnv } from "./session-env";
-import { frameInput, type HolderInput, readTail } from "./session-holder";
+import { BOOT_FILE, frameInput, type HolderInput, INPUT_FIFO, readTail } from "./session-holder";
 import {
   ensurePrivateDir,
   newSessionId,
@@ -80,7 +89,7 @@ export class PipesSessionAdapter implements SessionAdapter {
   }
 
   capabilities(): SessionCapabilities {
-    return { pty: false, send: false, attach: false, lastOutputAt: true };
+    return { pty: false, send: true, attach: false, lastOutputAt: true };
   }
 
   private markerPath(name: string): string {
@@ -157,6 +166,7 @@ export class PipesSessionAdapter implements SessionAdapter {
       cwd: spec.cwd,
       env: sessionEnv(spec.env, spec.inheritEnv ?? true, this.opts.baseEnv),
       ...(spec.timeoutMs !== undefined ? { timeoutMs: spec.timeoutMs } : {}),
+      ...(spec.input ? { input: true } : {}),
       graceMs: this.graceMs,
       started,
       ...(this.opts.build ? { build: this.opts.build } : {}),
@@ -165,33 +175,12 @@ export class PipesSessionAdapter implements SessionAdapter {
     const middle = spawn(
       this.opts.intermediate.exec,
       [...this.opts.intermediate.args, "intermediate", JSON.stringify(this.opts.holder)],
-      { detached: true, stdio: ["pipe", "ignore", "ignore", "pipe"] },
+      { detached: true, stdio: ["pipe", "ignore", "ignore"] },
     );
     middle.on("error", () => {});
     middle.stdin?.on("error", () => {});
     middle.stdin?.end(frameInput(input));
-    const bootStream = middle.stdio[3];
-    const bootLine = await new Promise<string>((resolve) => {
-      let buf = "";
-      const timer = setTimeout(
-        () => resolve("HOLDER_BOOT_FAILED:no answer within the boot bound"),
-        this.opts.bootTimeoutMs ?? 10_000,
-      );
-      bootStream?.on("data", (chunk) => {
-        buf += chunk.toString();
-        if (buf.includes("\n")) {
-          clearTimeout(timer);
-          resolve(buf.split("\n")[0] ?? "");
-        }
-      });
-      bootStream?.on("end", () => {
-        clearTimeout(timer);
-        resolve(buf.trim() || "HOLDER_BOOT_FAILED:the holder closed the boot pipe");
-      });
-      bootStream?.on("error", () => resolve("HOLDER_BOOT_FAILED:boot pipe error"));
-    });
-    // The holder keeps its own end of the boot pipe; closing ours lets this process exit.
-    bootStream?.destroy();
+    const bootLine = await this.awaitBoot(dir);
     middle.unref();
     if (bootLine !== "ready") {
       // A holder that never reported cannot be trusted: nothing ran (or it is dead), so name and folder go.
@@ -202,6 +191,21 @@ export class PipesSessionAdapter implements SessionAdapter {
       );
     }
     return { id, ...(spec.name !== undefined ? { name: foldSessionName(spec.name) } : {}) };
+  }
+
+  /** The holder reports its boot in `boot.txt` of the session folder; the wait is bounded (10 s by default). */
+  private async awaitBoot(dir: string): Promise<string> {
+    const end = Date.now() + (this.opts.bootTimeoutMs ?? 10_000);
+    for (;;) {
+      try {
+        const text = readFileSync(join(dir, BOOT_FILE), "utf8").trim();
+        if (text !== "") return text;
+      } catch {
+        // not written yet
+      }
+      if (Date.now() >= end) return "HOLDER_BOOT_FAILED:no answer within the boot bound";
+      await sleep(20);
+    }
   }
 
   /** Read-only: never writes a tombstone. */
@@ -333,6 +337,35 @@ export class PipesSessionAdapter implements SessionAdapter {
       }
     }
     return this.settle(id);
+  }
+
+  /**
+   * Writes into the child's stdin (a session started with `input: true`). A pipe is not a terminal, so there is no
+   * bracketed paste: the text and a newline. It returns the bytes written and promises nothing about a program that
+   * does not read.
+   */
+  async send(
+    id: string,
+    text: string,
+    opts: { submit?: boolean } = {},
+  ): Promise<{ bytes: number }> {
+    const dir = sessionDirOf(this.place, id);
+    const status = this.settle(id);
+    if (status.state !== "running")
+      throw new SessionError("NOT_RUNNING", `session ${id} is ${status.state}`);
+    const record = readSession(dir);
+    if (record === "missing" || record === "unreadable" || !record.spec.input) {
+      throw new SessionError("UNSUPPORTED", `session ${id} was not started with input`);
+    }
+    const plan = planSend(text, false, "\n");
+    const data = opts.submit === false ? plan.paste : `${plan.paste}${plan.submit}`;
+    const fd = openSync(join(dir, INPUT_FIFO), constants.O_WRONLY | constants.O_NONBLOCK);
+    try {
+      writeSync(fd, data);
+    } finally {
+      closeSync(fd);
+    }
+    return { bytes: Buffer.byteLength(data) };
   }
 
   async remove(id: string): Promise<void> {
