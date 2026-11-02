@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { processIdentity } from "@kodel-ai/local";
-import { AGENT_HUMAN_COMMANDS, AGENT_READ_COMMANDS } from "../src/agent-commands";
+import { AGENT_HUMAN_COMMANDS, AGENT_READ_COMMANDS, stateLabel } from "../src/agent-commands";
 import { runCli } from "../src/cli";
 
 // `stop` signals only a process whose identity it can check; a sandbox without the process table skips these, visibly.
@@ -172,7 +172,7 @@ describe("kodel agent", () => {
     const id = /started (a_\S+)/.exec(started.out)?.[1] as string;
     for (
       let i = 0;
-      i < 80 && !(await cli({ interactive: false }, "agent", "ls")).out.includes("exit 0");
+      i < 80 && !(await cli({ interactive: false }, "agent", "ls")).out.includes("exited (0)");
       i++
     ) {
       await new Promise((r) => setTimeout(r, 100));
@@ -204,7 +204,7 @@ describe("kodel agent", () => {
     const id = /started (a_\S+)/.exec(started.out)?.[1] as string;
     for (
       let i = 0;
-      i < 80 && !(await cli({ interactive: false }, "agent", "ls")).out.includes("exit 0");
+      i < 80 && !(await cli({ interactive: false }, "agent", "ls")).out.includes("exited (0)");
       i++
     ) {
       await new Promise((r) => setTimeout(r, 100));
@@ -218,6 +218,61 @@ describe("kodel agent", () => {
       expect(r.err).toContain("positive whole number");
     }
   }, 30_000);
+
+  test("tA_state_label_reads_as_one_word_with_its_detail", () => {
+    const row = (status: Record<string, unknown>, problem?: string) =>
+      ({ id: "a_000000000_0000", status, ...(problem ? { problem } : {}) }) as never;
+    expect(stateLabel(row({ state: "running" }))).toBe("running");
+    expect(stateLabel(row({ state: "starting" }))).toBe("starting");
+    expect(stateLabel(row({ state: "exited", exitCode: 0 }))).toBe("exited (0)");
+    expect(stateLabel(row({ state: "exited", exitCode: 3 }))).toBe("exited (3)");
+    expect(stateLabel(row({ state: "killed", reason: "stopped" }))).toBe("stopped");
+    expect(stateLabel(row({ state: "killed", reason: "timeout" }))).toBe("killed (timeout)");
+    expect(stateLabel(row({ state: "killed", signal: "SIGKILL" }))).toBe("killed (SIGKILL)");
+    expect(stateLabel(row({ state: "lost", reason: "holder_gone" }))).toBe("lost (holder gone)");
+    expect(stateLabel(row({ state: "lost", reason: "no_status" }))).toBe("lost (no answer)");
+    expect(stateLabel(row({ state: "lost", reason: "holder_gone", childAlive: true }))).toBe(
+      "lost (holder gone, child still runs)",
+    );
+    expect(stateLabel(row({ state: "lost" }, "FOREIGN"))).toBe("unknown (another machine)");
+    expect(stateLabel(row({ state: "lost" }, "NEWER_FORMAT"))).toBe("unknown (newer kodel)");
+    expect(stateLabel(row({ state: "lost" }, "CANNOT_READ"))).toBe("unknown (cannot be read)");
+  });
+
+  tableTest(
+    "tA_ls_has_no_detail_column_and_rm_asks_a_plain_question",
+    async () => {
+      const started = await cli({ interactive: true }, "agent", "exec", "--", "sh", "-c", "exit 3");
+      const id = /started (a_\S+)/.exec(started.out)?.[1] as string;
+      for (
+        let i = 0;
+        i < 80 && !(await cli({ interactive: false }, "agent", "ls")).out.includes("exited (3)");
+        i++
+      ) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      const listed = await cli({ interactive: false }, "agent", "ls");
+      expect(listed.out.split("\n")[0]).toMatch(/^ID\s+NAME\s+STATE\s+COMMAND$/);
+      expect(listed.out).not.toContain("DETAIL");
+      expect(listed.out).toContain("exited (3)");
+      let asked = "";
+      await runCli(["agent", "rm", id], {
+        cwd: dir,
+        out: () => {},
+        err: () => {},
+        interactive: true,
+        environment: { KODEL_STATE_DIR: state },
+        confirm: async (q) => {
+          asked = q;
+          return true;
+        },
+        select: async () => [],
+        sessionLauncher: launcher,
+      });
+      expect(asked).toBe(`Remove agent ${id}?`);
+    },
+    30_000,
+  );
 
   test("tA_agents_alias_works", async () => {
     expect((await cli({ interactive: false }, "agents", "ls")).out).toBe("no agents\n");

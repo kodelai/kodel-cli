@@ -40,11 +40,28 @@ export interface AgentContext {
   launcher?: { exec: string; args: string[] };
 }
 
-/** What a person reads as the state: a session that `stop` ended is "stopped", not "killed". */
-const stateOf = (entry: SessionListEntry): string => {
+/**
+ * What a person reads as the state, with the detail in brackets: how it ended, or why it is not known. A session
+ * that `stop` ended is "stopped", not "killed".
+ */
+export const stateLabel = (entry: SessionListEntry): string => {
+  if (entry.problem === "FOREIGN") return "unknown (another machine)";
+  if (entry.problem === "NEWER_FORMAT") return "unknown (newer kodel)";
+  if (entry.problem) return "unknown (cannot be read)";
   const s = entry.status;
-  if (s.state === "killed" && s.reason === "stopped") return "stopped";
-  return s.state;
+  switch (s.state) {
+    case "exited":
+      return `exited (${s.exitCode ?? 0})`;
+    case "killed":
+      if (s.reason === "stopped") return "stopped";
+      return `killed (${s.reason ?? s.signal ?? "unknown"})`;
+    case "lost": {
+      const why = s.reason === "no_status" ? "no answer" : "holder gone";
+      return `lost (${why}${s.childAlive ? ", child still runs" : ""})`;
+    }
+    default:
+      return s.state;
+  }
 };
 
 /** A command cut to a width for the table; the full text is in `--json`. */
@@ -52,17 +69,6 @@ const shorten = (text: string, width = 48): string => {
   const flat = text.replace(/\s+/g, " ").trim();
   const chars = [...flat];
   return chars.length > width ? `${chars.slice(0, width - 1).join("")}…` : flat;
-};
-
-const detailOf = (entry: SessionListEntry): string => {
-  if (entry.problem === "FOREIGN") return "another machine's agent";
-  if (entry.problem)
-    return entry.problem === "NEWER_FORMAT" ? "written by a newer kodel" : "cannot be read";
-  const s = entry.status;
-  if (s.state === "exited") return `exit ${s.exitCode ?? 0}`;
-  if (s.state === "killed") return s.reason === "stopped" ? "" : (s.reason ?? s.signal ?? "killed");
-  if (s.state === "lost") return `${s.reason ?? "lost"}${s.childAlive ? ", child alive" : ""}`;
-  return "";
 };
 
 export function registerAgentCommands(
@@ -118,12 +124,11 @@ export function registerAgentCommands(
       const table = rows.map((r) => [
         plain(r.id),
         plain(r.name ?? "-"),
-        stateOf(r),
-        plain(detailOf(r)),
+        plain(stateLabel(r)),
         plain(shorten(r.command ?? "")),
       ]);
       for (const line of formatTable(
-        ["ID", "NAME", "STATE", "DETAIL", "COMMAND"],
+        ["ID", "NAME", "STATE", "COMMAND"],
         table,
         opts.headers !== false,
       )) {
@@ -173,9 +178,7 @@ export function registerAgentCommands(
     .action(async (id: string) => {
       platform();
       ctx.requireHuman();
-      await ctx.mustConfirm(
-        `Remove agent ${plain(id)}? (A name a program started under stays used until you free it.)`,
-      );
+      await ctx.mustConfirm(`Remove agent ${plain(id)}?`);
       await guard(async () => (await adapter()).remove(id));
       ctx.out(`${plain(id)}: removed\n`);
     });
