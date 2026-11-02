@@ -737,8 +737,8 @@ describe("where a run works", () => {
 describe("the tool surface", () => {
   test("t40_contract_version_and_surface_snapshot", () => {
     // Bumped from 2 for pipeline_take_step, node_slug/subagents on next_step, claim_token on complete;
-    // from 3 for UNSUPPORTED_FORMAT_FEATURE and details.how_to_upgrade (T-41).
-    expect(CONTRACT_VERSION).toBe(4);
+    // from 3 for UNSUPPORTED_FORMAT_FEATURE and details.how_to_upgrade (T-41); from 4 for the history tools.
+    expect(CONTRACT_VERSION).toBe(5);
     expect(TOOLS.map((t) => t.name)).toEqual([
       "pipeline_list",
       "pipeline_docs",

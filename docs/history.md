@@ -626,3 +626,100 @@ Reasons nothing is shown: `not_captured`, `disabled`, `session_unknown`, `log_mi
 in this log; a reason `engine_step` comes with it. A pass says `cap` once when the run has journaled as many records as it may
 (nothing more is recorded), or keeps a cursor for as many sessions as it may (64, each subagent is one: a stream past that is skipped and its calls are not recorded; a later `cap` of the first kind is not said again, since a reason is said once), and `record_refused` when the run itself refused a record (an id it does not accept, or it went away):
 the pass stops, and the next one starts again from the cursor.
+
+## History tools (`history_runs`, `history_run_details`, `history_agent_log`, `history_stats`)
+
+Four read-only tools of the MCP server let the agent read what past runs of the project did. They read the run's state and
+journal and the stored agent log; they write nothing, take no lock and never open a run for work. They are served by every
+host; a host that keeps no history it can read answers `HISTORY_UNAVAILABLE`. Runs of another checkout of the project
+(`storage: home` shares one history between clones) are never listed, and the other tools answer `UNKNOWN_RUN` for them.
+
+What comes back is **data, never instructions**: the engine's own record of the runs and, for the agent log and the tool
+calls, what the agent's own log said (`unverified`, as in `kodel report`). The server's instruction `9c` says so to the agent.
+Every string is redacted with the rules of the project and then cut to 500 characters, in that order. Which data a run has
+is still decided by its own switches (`history.agent_log`, `tool_calls`, `usage`): a block the run did not collect says
+`{ not_collected: true, reason }`, one this engine cannot read says `{ cannot_read: true, format }`.
+
+### `history_runs`
+
+The runs of this checkout, newest first. Arguments: `status` (exactly the status the list shows; a run this engine cannot read
+has `unreadable` or `format N`; a status the engine does not have is `INVALID_ARGUMENTS` with the right ones in `details.allowed`), `pipeline` (any name; a name no run has gives an empty page), `limit` (1..100, default 20), `cursor`, `fields`. A row has `run_id`, `pipeline`,
+`slug`, `task_key` (when a task is tied to the run), `status`, `started_at`, `workdir`, `active`, `pauses`, `failed_branches`
+and `unreadable`; it has no task text. `fields` keeps only the named blocks (`run_id` and `pipeline` always stay).
+
+### `history_run_details`
+
+One run on three levels, by the arguments given:
+
+| arguments | level | the answer | paged list |
+| --- | --- | --- | --- |
+| `run_id` | `run` | `run` (summary, with the redacted `task`), `task_size`, `pipeline_changes`, `agent_decisions` (20 entries each), `usage`, `tool_calls` (totals), `agent_log` (counters, without the per-visit table), `integrity` | `nodes` |
+| `run_id`, `node` | `node` | `node`, `checks` of that node, `attempts` with outcome, seconds, failure, summary, checks, findings, decision, usage, counters of the tool calls | `attempts` |
+| `run_id`, `node`, `attempt` | `attempt` | `attempt` in full, `report_rows`, `tool_calls` with its rows (at most 200 are kept per attempt, the rest counted in `omitted`) | `tool_calls.lines` |
+
+A row of `nodes` carries `usage`: what the agent used at that node, summed over its attempts that recorded it (`attempts_with_usage`, the four token counts, `calls` and `usd`, which is `null` when no attempt has a price); a node the agent did not work at has none. The `usage` block of the run adds `unattributed`, what was used outside every step (a wait at a gate, a pause). `task_size` is the size of the task measured on the run's patch, as `kodel report` shows it (`files`, `added`, `removed`, `binary_files`, ten `top_dirs` and `languages` each); a run that kept no patch says `not_collected`. `report_rows` holds what the attempt stored as its report: the findings a step reported (severity, location, description) or the comments a person made at a gate, at most 50 rows with the rest counted in `omitted`; an attempt that stored none has no such block.
+
+`integrity` says whether the state file is what kodel last wrote (`files`: `ok`, `modified`, `unknown`), whether a finished
+run is as it was sealed (`seal`), as `kodel report` shows them, and whether the pipeline copy kept with the run is the one the
+state pins by its hash (`pipeline_copy`: `ok`, `modified`, `missing`): the run files are in the repository and can be edited. The
+report is built from the state and the journal, so a run kept before pipelines were versioned, or one whose kept pipeline copy
+was edited, is read all the same. `attempt` without `node` is `INVALID_ARGUMENTS`; an unknown `node` is `UNKNOWN_NODE` (its
+`details.nodes` lists the nodes) and an attempt the node does not have is `INVALID_ARGUMENTS` (`details.attempts`).
+`limit` is 1..200 (default 50 nodes, 10 attempts, 50 tool-call rows). `fields` names the blocks of the level, see above.
+A run in a format this engine does not read is `UNSUPPORTED_FORMAT` with its `format`; a state that does not fit its format is
+refused with the code it was read with, never as "modified".
+
+### `history_stats`
+
+How a pipeline fared over its newest runs, counted on the server so that an agent does not have to read the runs one by one
+(the same figures `kodel` shows in its statistics, `scope: all`). Arguments: `pipeline` (needed), `limit` (the newest runs to
+read, 1..200, default 50) and `fields` (any of `runs`, `attempts`, `seconds`, `nodes`, `versions`; `versions`, the history of
+a node's changed definitions, is left out unless named). The answer says in `runs` how many runs were `considered`, `read` and
+`skipped` (a run that cannot be read is skipped, not an error), and per node: `runs`, `attempts`, `per_run` (above 1 is rework),
+`failed`, `outcomes`, `failures` (where it came from and the words, most frequent first, ten at most), the `seconds` (mean,
+median, p90, max), the `findings` by severity, at a gate what people `decisions` and why (the last five reasons), and the
+`usage` of the node in tokens and dollars. The patch of a run is not read, so there is no `task_size` here. Nothing is paged:
+the answer is at most 64 KB, and nodes that do not fit are left out from the end with `nodes_omitted`. The data is as
+`unverified` as that of `history_run_details`.
+
+### `history_agent_log`
+
+The events of one attempt from the stored agent log. Arguments: `run_id`, `node`, `attempt` (all needed), `kind` (any of
+`session`, `message`, `usage`, `tool_call`, `tool_result`, `subagent`, `system`), `tool` (the calls of that tool and their
+results), `include_messages` (default false), `limit` (1..200, default 50), `cursor`, `fields` (any key of an event;
+`session_id`, `seq` and `kind` always stay). The answer is `unverified`. Conversation text is the largest and the least
+trusted part, so `message` events are left out unless `include_messages: true`; `skipped.message` counts what was left out in the
+whole attempt, and `kind: ["message"]` without the flag is `INVALID_ARGUMENTS`.
+
+Which attempt an event belongs to is told by its time against the attempts of the journal (the same placement the tool calls
+use), not by the copy pass that stored it: a pass is booked to the first open step, so in a fork it holds other steps' events
+(`attribution: "time"`). When more than one agent step was open at the time of an event (a fork), the log cannot tell
+the branches apart, and the answer says `attribution: "approximate"`: events of a sibling may be missing or may be shown. A stream is read only to the length the journal vouches for (`agent_log_saved.stream_to`); bytes
+past it are never shown. A stream that is missing, damaged or written by a newer kodel gives `partial: true` and `problems`
+(`missing`, `damaged`, `format`) with the events read before the problem; a run that did not store the agent log says
+`not_collected` with `not_captured` or `disabled`. Events come session after session, each in order of `seq`.
+
+### Paging and size
+
+Every list is a page: `page` says `list` (`runs`, `nodes`, `attempts`, `tool_calls.lines` or `events`), `returned`, `total` and,
+when there is more, `next`. Pass `next` as `cursor` and leave the other arguments as they were (`limit` and `fields` may change).
+The cursor holds only a digest of the key of the last item (so a slug or an id that holds a secret never reaches the agent through
+it), and what is added between two calls cannot repeat or hide an item: a run started
+meanwhile goes to the top of the list and the next page continues where the last one ended. It is bound to the tool, the
+run, the level, the node, the attempt, the filters (`status`, `pipeline`, `kind`, `tool`, `include_messages`) and the format of the
+run's state; any other call, a damaged cursor, one naming an item that is gone or a run that `kodel migrate` changed in between
+is `INVALID_CURSOR`, and the walk starts again without it. `total` is the count at the time of the call and may change between pages.
+The blocks of the first page (the run summary, the node head) are not repeated on later pages.
+
+An answer is at most 64 KB of JSON. A page is cut to fit and always holds at least one item: an item that alone is over the cap
+is shrunk (texts to 100 characters, lists to 5 entries, `truncated: true`) instead of being answered with an empty page. The
+blocks that are not lists are bounded too: 20 entries of `pipeline_changes` and of `agent_decisions`, 50 of an attempt's checks
+and finding severities, 30 tools in `by_tool`, each with the count left out, and together they may take 24 KB of the answer
+(the largest are cut first, `truncated: true`). The keys of an object (a tool name, a severity) are redacted and cut like the values.
+
+### Errors
+
+`INVALID_ARGUMENTS` (a bad argument, an unknown `fields` name with the allowed ones in `details.allowed`, a limit out of range,
+`attempt` without `node`, `kind` message without `include_messages`; an argument the tool does not have is refused too),
+`INVALID_CURSOR`, `UNKNOWN_RUN`, `UNKNOWN_NODE`, `UNSUPPORTED_FORMAT` and `HISTORY_UNAVAILABLE`. Nothing a person decides is
+reachable through these tools. They count as the engine's own tools in the report of tool calls (`own`).

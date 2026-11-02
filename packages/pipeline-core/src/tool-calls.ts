@@ -36,6 +36,17 @@ export const PIPELINE_TOOL_NAMES: readonly string[] = [
 ];
 
 /**
+ * The history tools (`mcp/history-tools.ts`). They are the engine's own tools too, so what the agent reads of past
+ * runs is not counted as its work on the task; a test keeps this list equal to what the server registers.
+ */
+export const HISTORY_TOOL_NAMES: readonly string[] = [
+  "history_runs",
+  "history_run_details",
+  "history_agent_log",
+  "history_stats",
+];
+
+/**
  * The MCP server and the tool of a name as Claude Code writes it, `mcp__<server>__<tool>`, split at the first `__` after the
  * prefix: a server whose own name holds `__` is not told apart (a stated limit). Anything else is a tool of the agent.
  */
@@ -49,7 +60,8 @@ export function splitToolName(name: string): { server?: string; tool: string } {
 
 /** Whether the tool is one of the engine's own, by the name of the tool and whatever the server is called. */
 export function isOwnTool(name: string): boolean {
-  return PIPELINE_TOOL_NAMES.includes(splitToolName(name).tool);
+  const tool = splitToolName(name).tool;
+  return PIPELINE_TOOL_NAMES.includes(tool) || HISTORY_TOOL_NAMES.includes(tool);
 }
 
 // ── where a call belongs ────────────────────────────────────────────────────

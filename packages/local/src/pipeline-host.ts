@@ -12,12 +12,16 @@ import {
   canonicalPipeline,
   commandsOf,
   diffNodes,
+  type HistoryAgentLogData,
   type HistoryConfig,
+  type HistoryRunData,
+  type HistoryRunRow,
   hiddenCharacterProblem,
   isRunId,
   KodelError,
   MAX_PIPELINE_PROPOSAL_BYTES,
   MAX_PIPELINE_PROPOSALS,
+  measurePatch,
   type NodeDiff,
   type PipelineChoice,
   type PipelineHost,
@@ -27,14 +31,20 @@ import {
   type PipelineSpec,
   type PreparedTask,
   parsePipeline,
+  placeCall,
+  placementFromJournal,
   proposalNameProblem,
+  type ResultReport,
+  type RunReport,
   type RunState,
   type RunTaskLink,
   redactText,
+  runSlug,
   type ServedSurface,
   type StartOutcome,
+  summarizeRun,
 } from "@kodel-ai/pipeline-core";
-import { AgentLogWriter } from "./agent-log";
+import { AgentLogWriter, logVisitOf, readStoredAgentLog } from "./agent-log";
 import { AgentLogTickers, type Timers } from "./agent-log-ticker";
 import { loadConfig, type ProjectConfig, type WorktreeConfig } from "./config";
 import { GitSnapshotter, git } from "./git";
@@ -46,6 +56,7 @@ import {
   type LocalRun,
   normalizeTask,
 } from "./host";
+import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integrity";
 import { type StoragePlace, samePlace } from "./storage-paths";
 import {
   FileStore,
@@ -55,6 +66,7 @@ import {
   type RunMeta,
 } from "./store";
 import { openTaskService } from "./tasks";
+import { outsideSpans } from "./usage";
 
 export interface LocalPipelineHostOptions extends HostOptions {
   /** Where the pipeline files are; defaults to `<root>/.kodel/pipelines`. */
@@ -87,6 +99,10 @@ export interface LocalPipelineHostOptions extends HostOptions {
 const ENTRY_POINTS = [
   "open",
   "runSummaries",
+  "historyRuns",
+  "historyRun",
+  "historyAttemptReport",
+  "historyAgentLog",
   "proposePipeline",
   "pipelineProposals",
   "pipelineProposal",
@@ -138,6 +154,13 @@ function askWhich(found: Loaded, file: string, committedText: string): PipelineC
       "or the committed version? Do not choose yourself. Then call pipeline_start again with the same " +
       "arguments and pipeline_version set to what they say.",
   };
+}
+
+/** A join was entered after branches of a fork had failed: the run's end stands on failed branches. */
+function failedBranches(state: RunState): boolean {
+  return Object.values(state.forks ?? {}).some(
+    (fork) => fork.joined > 0 && Object.values(fork.arrived).some((a) => a.failure !== undefined),
+  );
 }
 
 /** A run on disk, with its state, or with why it could not be read (`format`: its run-state format, when that is why). */
@@ -801,6 +824,254 @@ export class LocalPipelineHost implements PipelineHost {
         }
       }),
     );
+  }
+
+  /** The redaction of this host, project rules included, for what the history tools send to an agent. */
+  historyRedact(text: string): string {
+    return redactText(text, this.options.rules ?? []);
+  }
+
+  private integrityStore: IntegrityStore | undefined;
+  private integrity(): IntegrityStore {
+    this.integrityStore ??=
+      this.options.integrity ??
+      new FileIntegrity(
+        this.options.integrityDir ?? defaultIntegrityDir(),
+        this.storeRoot,
+        this.options.storage?.hashKey,
+      );
+    return this.integrityStore;
+  }
+
+  /** The runs of this checkout for the history tools; a run that cannot be read is a row with `unreadable`. */
+  async historyRuns(): Promise<HistoryRunRow[]> {
+    const rows: HistoryRunRow[] = [];
+    for (const { meta, state, unreadable } of await this.runSummaries()) {
+      if (this.foreignRootOf(meta) !== undefined) continue;
+      const workdir = state?.workdir ?? meta.workdir;
+      rows.push({
+        run_id: meta.runId,
+        pipeline: meta.pipeline,
+        slug: meta.slug ?? state?.slug ?? runSlug(undefined, meta.task),
+        ...(state?.taskKey === undefined ? {} : { task_key: state.taskKey }),
+        status: state
+          ? String(state.status)
+          : unreadable?.format === undefined
+            ? "unreadable"
+            : `format ${unreadable.format}`,
+        started_at: meta.createdAt,
+        ...(workdir === undefined ? {} : { workdir }),
+        active: (state?.active ?? []).map((v) => ({
+          node: v.node,
+          attempt: v.attempt,
+          phase: v.phase,
+          ...(v.fork === undefined ? {} : { branch: v.fork.branch }),
+        })),
+        pauses: (state?.pauses ?? []).map((p) => ({
+          reason: p.reason,
+          node: p.node,
+          ...(p.fork === undefined ? {} : { branch: p.fork.branch }),
+        })),
+        ...(state !== undefined && failedBranches(state) ? { failed_branches: true as const } : {}),
+        ...(unreadable === undefined
+          ? {}
+          : {
+              unreadable: {
+                code: unreadable.code,
+                ...(unreadable.format === undefined ? {} : { format: unreadable.format }),
+              },
+            }),
+      });
+    }
+    return rows;
+  }
+
+  /**
+   * One run for the history tools, read from its state and journal only: not through `open`, which needs the kept
+   * pipeline copy (a run from before pipelines were kept, or one whose copy was edited, would be refused there),
+   * keeps the run in the host's cache and can start work. Nothing is written and no lock is taken.
+   */
+  async historyRun(
+    runId: string,
+    options: { patch?: boolean } = {},
+  ): Promise<HistoryRunData | undefined> {
+    await this.assertPlace(false);
+    if (!isRunId(runId)) return undefined;
+    const meta = await this.store.readMeta(runId);
+    if (!meta || this.store.isForeign(meta)) return undefined;
+    // An unreadable state throws with its own code: "unsupported format", "cannot read" and "modified" stay apart.
+    const raw = await this.store.readStateRaw(runId);
+    if (!raw) return undefined;
+    const { state } = raw;
+    const journal = await this.store.readJournal(runId);
+    const summary = await this.withFindings(runId, summarizeRun(state, journal));
+    // The size of the task is measured on the run's patch, as `kodel report` does; a count over many runs asks
+    // for none (`patch: false`). A run that did not record changes has no patch to measure, whatever file is there.
+    const started = journal.find((r) => r.event === "run_started");
+    const changesOff =
+      (started?.history as { changes?: { enabled?: boolean } } | undefined)?.changes?.enabled ===
+      false;
+    const patch =
+      options.patch === false || changesOff ? undefined : await this.store.readRunPatch(runId);
+    const report =
+      options.patch === false
+        ? summary
+        : {
+            ...summary,
+            task_size: patch === undefined ? { not_collected: true as const } : measurePatch(patch),
+          };
+    const workdir = state.workdir ?? meta.workdir;
+    const trusted = await this.integrity().trusts(runId, raw.hash);
+    const seal =
+      state.status === "running" || state.status === "paused"
+        ? ("open" as const)
+        : await this.store.checkSeal(runId, await this.integrity().get(`${runId}.seal`));
+    // The copy of the pipeline kept with the run is held against the hash the state pins it by, as `specFor` does.
+    const kept = await this.store.readSpec(runId, state.specHash).catch(() => undefined);
+    const pipelineCopy =
+      kept === undefined ? "missing" : hashSource(kept) === state.specHash ? "ok" : "modified";
+    return {
+      pipeline: meta.pipeline,
+      report: workdir === undefined ? report : { ...report, workdir },
+      format: state.v,
+      integrity: trusted === undefined ? "unknown" : trusted ? "ok" : "modified",
+      seal,
+      pipeline_copy: pipelineCopy,
+    };
+  }
+
+  /** What an attempt stored as its report: the findings of a step, the comments a person made at a gate. */
+  async historyAttemptReport(
+    runId: string,
+    node: string,
+    attempt: number,
+  ): Promise<ResultReport | undefined> {
+    await this.assertPlace(false);
+    if (!isRunId(runId)) return undefined;
+    const meta = await this.store.readMeta(runId);
+    if (!meta || this.store.isForeign(meta)) return undefined;
+    return this.store.readReport(runId, node, attempt).catch(() => undefined);
+  }
+
+  /** The findings of each attempt's reports counted by severity; the journal only knows how many rows. */
+  private async withFindings(runId: string, report: RunReport): Promise<RunReport> {
+    const nodes = await Promise.all(
+      report.nodes.map(async (node) => ({
+        ...node,
+        attempts: await Promise.all(
+          node.attempts.map(async (attempt) => {
+            if (!attempt.reports?.length) return attempt;
+            const stored = await this.store
+              .readReport(runId, node.node, attempt.attempt)
+              .catch(() => undefined);
+            if (!stored) return attempt;
+            const findings: Record<string, number> = {};
+            for (const row of stored.rows) {
+              const severity = typeof row.severity === "string" ? row.severity : "other";
+              findings[severity] = (findings[severity] ?? 0) + 1;
+            }
+            return { ...attempt, findings };
+          }),
+        ),
+      })),
+    );
+    return { ...report, nodes };
+  }
+
+  /**
+   * The events of the agent's log that belong to one attempt. The sessions and how far each stored stream may be
+   * read come from the journal (`agent_log_saved`), and nothing past that length is shown. A copy pass is booked to
+   * the first open step, so which attempt an event belongs to is told by its time against the attempts of the
+   * journal, as the tool calls are.
+   */
+  async historyAgentLog(
+    runId: string,
+    node: string,
+    attempt: number,
+  ): Promise<HistoryAgentLogData | undefined> {
+    await this.assertPlace(false);
+    if (!isRunId(runId)) return undefined;
+    const meta = await this.store.readMeta(runId);
+    if (!meta || this.store.isForeign(meta)) return undefined;
+    const state = await this.store.readState(runId);
+    if (!state) return undefined;
+    const known = state.nodes[node];
+    if (known === undefined) {
+      throw new KodelError("UNKNOWN_NODE", `the run has no node "${node}"`, undefined, {
+        nodes: Object.keys(state.nodes),
+      });
+    }
+    if (attempt < 1 || attempt > known.attempt) {
+      throw new KodelError(
+        "INVALID_ARGUMENTS",
+        `node "${node}" has no attempt ${attempt}`,
+        undefined,
+        { attempts: known.attempt },
+      );
+    }
+    if (state.agentLog === undefined) {
+      return {
+        not_collected: true,
+        reason: state.history?.agent_log?.enabled === false ? "disabled" : "not_captured",
+      };
+    }
+    const journal = await this.store.readJournal(runId);
+    const streams = new Map<string, { parent?: string; length: number }>();
+    for (const record of journal) {
+      if (record.event !== "agent_log_saved" || typeof record.session !== "string") continue;
+      const length = typeof record.stream_to === "number" ? record.stream_to : 0;
+      const found = streams.get(record.session);
+      const parent = typeof record.parent === "string" ? record.parent : found?.parent;
+      streams.set(record.session, {
+        ...(parent === undefined ? {} : { parent }),
+        length: Math.max(found?.length ?? 0, length),
+      });
+    }
+    const now = (this.options.clock ?? Date.now)();
+    const agentSteps = state.active.filter((v) => v.phase === "agent");
+    const handedIn = [...journal].reverse().find((r) => r.event === "agent_completed");
+    const current =
+      handedIn !== undefined &&
+      typeof handedIn.node === "string" &&
+      typeof handedIn.attempt === "number"
+        ? { node: handedIn.node, attempt: handedIn.attempt }
+        : logVisitOf(state);
+    const waits = outsideSpans(journal, now, agentSteps, state.pauses).map((span) => ({
+      from: Date.parse(span.from),
+      to: Date.parse(span.to),
+    }));
+    const placement = placementFromJournal(journal, current, now, waits, undefined, agentSteps);
+    const sessions: Extract<HistoryAgentLogData, { sessions: unknown }>["sessions"] = [];
+    // In a fork the log cannot tell the branches apart: an event placed while more than one agent step was open may
+    // belong to a sibling, so the answer then says it is approximate.
+    let approximate = false;
+    for (const [session, { parent, length }] of streams) {
+      // A session name comes from the journal, which can be edited: one that is not a file name is a problem of that
+      // stream, as a damaged file is, and not a refusal of the whole call.
+      const read = await readStoredAgentLog(this.store, runId, session, length).catch(
+        (error: unknown) => {
+          if (!(error instanceof KodelError) || error.code !== "INVALID_ARGUMENTS") throw error;
+          return {
+            ok: false as const,
+            problem: "damaged" as const,
+            detail: "the journal names a session that is not a file name",
+            events: [],
+          };
+        },
+      );
+      const events = read.events.filter((event) => {
+        const placed = placeCall(Date.parse(event.ts), placement);
+        if (placed.kind === "step" && placed.shared) approximate = true;
+        return placed.kind === "step" && placed.node === node && placed.attempt === attempt;
+      });
+      sessions.push({
+        session,
+        ...(parent === undefined ? {} : { parent }),
+        events,
+        ...(read.ok ? {} : { problem: { kind: read.problem, detail: read.detail } }),
+      });
+    }
+    return { format: state.v, sessions, attribution: approximate ? "approximate" : "time" };
   }
 
   /**
