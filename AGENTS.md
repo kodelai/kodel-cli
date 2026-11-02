@@ -35,9 +35,9 @@ This repository adds these rules:
 - To add a pipeline, or to change one outside a run, use `pipeline_propose_change` without `run_id`; never
   write into `.kodel/pipelines/` yourself. The proposal waits in `.kodel/proposals/` (with `storage: home`, in the
   project's folder under `~/.kodel`; do not edit it) until the person accepts it.
-- Do not run `gate`, `ack`, `seal`, `resume`, `migrate`, `pipeline changes apply|discard|restore` or
-  `pipeline proposals apply|discard`: they refuse to run without a terminal and ask for a confirmation, so
-  trying them only fails.
+- Do not run `gate`, `ack`, `seal`, `resume`, `migrate`, `pipeline changes apply|discard|restore`,
+  `pipeline proposals apply|discard` or `agent stop|rm|exec|forget-name`: they refuse to run without a terminal and
+  ask for a confirmation, so trying them only fails. `agent ls` only reads and is yours.
 - `kodel wait <run>` is yours: it only watches and prints one line when the person has decided, so start it
   in the background (Claude Code: the Bash tool with `run_in_background`) when an answer offers it (a
   `waiting` answer, or a `node` or `running` answer whose text names it because a decision waits besides),
@@ -171,6 +171,17 @@ A run of format 1 keeps the behaviour its engine had where the codec says so (it
 it does not keep a declared outcome after a failed check, it reads two equal edges as one); every
 other fix since applies to every run. The limits that a new engine cannot lift in an older one are in
 `docs/run-formats.md`.
+
+**Session records** (`<state base>/run/`, the processes `kodel agent` runs) are machine-local state, not history. Their
+format follows rules 1-5: a `v` on every record, one codec each (`decode`, `encode`) in
+`pipeline-core/src/sessions/`, a golden fixture taken from a real holder in `fixtures/session-formats/`, a newer `v`
+refused with "upgrade kodel"; a `decode` is never removed once a published version has written the format. They
+differ from history in one way: records may be removed (`kodel agent rm`), but the name marker a session leaves
+stays until a person frees it. Unlike the run codecs (an allow-list that refuses an unknown field), the `decode` of
+this family ignores unknown optional fields of a known `v`, because builds of different age write one directory;
+after the format is declared frozen every new field bumps `v`. Session errors are `SessionError` with
+`SESSION_ERROR_CODES`, outside the MCP error contract. The `t41_*` tests do not cover this family; its own tests do
+(`docs/session-formats.md`).
 
 Decision T-41 (a run keeps its format; `kodel migrate` is the person's way up) is refuted if a user
 outside this repository reports a run of a supported format refused, orphaned or changed by an update.

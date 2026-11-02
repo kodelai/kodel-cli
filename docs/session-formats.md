@@ -1,0 +1,27 @@
+# Session records
+
+`kodel agent` runs long-lived processes ("agents") and keeps one folder per session under
+`<state base>/run/<uid>/<checkout key>/<id>/`, outside the repository and independent of the `storage` key.
+The state base is `KODEL_STATE_DIR` or `~/.kodel`. A session folder holds:
+
+| File | Written by | When |
+|------|------------|------|
+| `session.json` | the starter | once, in a temporary folder that is renamed into place |
+| `status.json` | the holder (or once, as a `lost` tombstone, by the first reader that finds no holder) | at start, when the child runs, at the end |
+| `stop.json` | `agent stop` | before the child is signalled |
+| `tail.txt` | the holder | redacted output tail, rewritten while output arrives |
+| `boot.txt` | the holder | the boot report: `ready` or `HOLDER_BOOT_FAILED:<why>` |
+| `in.fifo` | the holder | only for a session started with `input` |
+
+A **name marker** (`<checkout key>.names/<name>.json`) is written once by `start` and stays after `rm`: a name that was
+used and is gone answers `NAME_USED`, so a retried step never runs its command a second time. Only a person frees it
+(`kodel agent forget-name`).
+
+Every record carries `v`. Version 1 is **not frozen yet**: until a person says so, no beta is cut from `main` and a
+field may still change. A reader that meets a newer `v` answers `NEWER_FORMAT` ("upgrade kodel"). This family is not
+history: `decode` ignores unknown optional fields of a known `v`, `encode` refuses anything outside the model.
+
+The word "session" also names `sessions.jsonl` in a run's storage (the index of coding-agent hook sessions). That is a
+different thing and is not touched here.
+
+Golden fixtures: `fixtures/session-formats/v1/` (`scripts/take-session-fixtures.mjs`).
