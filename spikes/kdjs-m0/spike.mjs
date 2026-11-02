@@ -110,13 +110,15 @@ if (process.argv[2] === "holder") {
   let sock;
   if (input.mode === "pty") {
     // spike-only PTY: python3's pty module as the PTY owner; the holder relays over a unix socket
-    const py = `import pty,sys,os,select,socket
+    const py = `import pty,sys,os,select,socket,fcntl,termios,struct
 s=socket.socket(socket.AF_UNIX);p=${JSON.stringify(path.join(dir, "s.sock"))}
 s.bind(p);s.listen(1)
 pid,fd=pty.fork()
 if pid==0:
   os.chdir(${JSON.stringify(input.cwd)});os.execvp(sys.argv[1],sys.argv[1:])
-o=open(${JSON.stringify(path.join(dir, "out.log"))},'ab',buffering=0);c=None;ring=b''
+def sz(c,r): fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack('HHHH',r,c,0,0))
+sz(80,24)
+o=open(${JSON.stringify(path.join(dir, "out.log"))},'ab',buffering=0);c=None;ring=b'';buf=b''
 while True:
   r=[fd,s]+([c] if c else [])
   x,_,_=select.select(r,[],[])
@@ -129,11 +131,19 @@ while True:
       try:c.sendall(d)
       except OSError:c=None
   if s in x:
-    c,_=s.accept();c.sendall(ring)
+    c,_=s.accept();buf=b'';c.sendall(ring)
   if c and c in x:
     d=c.recv(4096)
     if not d:c=None
-    else: os.write(fd,d)
+    else:
+      buf+=d
+      while len(buf)>=3:
+        t=buf[0];n=struct.unpack('>H',buf[1:3])[0]
+        if len(buf)<3+n:break
+        q=buf[3:3+n];buf=buf[3+n:]
+        if t==0:os.write(fd,q)
+        else:
+          cc,rr=struct.unpack('>HH',q);sz(cc,rr)
 _,st=os.waitpid(pid,0);sys.exit(os.waitstatus_to_exitcode(st))`;
     child = spawn("python3", ["-c", py, ...input.argv], {
       cwd: input.cwd,
@@ -196,14 +206,31 @@ _,st=os.waitpid(pid,0);sys.exit(os.waitstatus_to_exitcode(st))`;
     process.stdout.write(fs.readFileSync(path.join(dirOf(name), "out.log")));
   } else if (cmd === "attach") {
     const s = net.connect(status(name).sock);
+    const send = (t, payload) => {
+      const h = Buffer.alloc(3);
+      h[0] = t;
+      h.writeUInt16BE(payload.length, 1);
+      s.write(Buffer.concat([h, payload]));
+    };
+    const size = () => {
+      const p = Buffer.alloc(4);
+      p.writeUInt16BE(process.stdout.columns || 80, 0);
+      p.writeUInt16BE(process.stdout.rows || 24, 2);
+      send(1, p);
+    };
+    s.on("connect", size);
+    process.stdout.on("resize", size);
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
-    s.pipe(process.stdout);
+    s.on("close", () => process.exit(0));
+    s.on("data", (d) => process.stdout.write(d));
+    // Ctrl+\ in three encodings: raw byte, kitty CSI-u, xterm modifyOtherKeys
+    const chords = [Buffer.from([0x1c]), Buffer.from("\x1b[92;5u"), Buffer.from("\x1b[27;5;92~")];
     process.stdin.on("data", (d) => {
-      if (d.includes(0x1c)) {
-        s.destroy(); // detach: Ctrl+\
+      if (chords.some((c) => d.includes(c))) {
+        s.destroy(); // detach
         process.exit(0);
       }
-      s.write(d);
+      for (let i = 0; i < d.length; i += 4000) send(0, d.subarray(i, i + 4000));
     });
   } else if (cmd === "ls") {
     for (const n of fs.readdirSync(path.join(BASE, "run"))) console.log(n, status(n).state);
