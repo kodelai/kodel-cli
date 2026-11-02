@@ -18,6 +18,8 @@ export * from "./memory-task-adapter";
 export * from "./run";
 export * from "./scenarios/feature";
 export * from "./scripted-engine";
+export * from "./session-contract";
+export * from "./session-fake";
 export * from "./task-adapter-contract";
 export * from "./types";
 export * from "./validate";
