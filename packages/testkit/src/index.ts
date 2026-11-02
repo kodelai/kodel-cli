@@ -7,6 +7,7 @@
 export * from "./agent-history-contract";
 export * from "./claude-log-builder";
 export * from "./dsl";
+export * from "./engine-step-sketch";
 export * from "./fake-agent-history";
 export * from "./history-fixtures";
 export * from "./latch-runner";
