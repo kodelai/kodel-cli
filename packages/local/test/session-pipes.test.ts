@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { encodeRecord, SessionError } from "@kodel-ai/pipeline-core";
-import { liveProcess, processIdentity } from "../src/process-table";
+import { liveProcess, machineId, processIdentity } from "../src/process-table";
 import { ensurePrivateDir } from "../src/session-paths";
 import { PipesSessionAdapter } from "../src/session-pipes";
 import { publishSession, replaceRecord } from "../src/session-records";
@@ -331,6 +331,52 @@ describe("pipes adapter, real processes", () => {
     writeFileSync(join(adapter.place.dir, id, "session.json"), "{ not json");
     const rows = await adapter.list();
     expect(rows).toEqual([{ id, status: { state: "lost" }, problem: "CANNOT_READ" }]);
+  });
+
+  test("tA_foreign_machine_session_is_never_judged_removed_or_signalled", async () => {
+    if (machineId() === undefined) return; // no machine id readable here: no session is foreign
+    const id = "a_000000000_0005";
+    ensurePrivateDir(adapter.place.runDir);
+    ensurePrivateDir(adapter.place.dir);
+    publishSession(join(adapter.place.dir, id), {
+      v: 1,
+      id,
+      mode: "pipes",
+      spec: { cwd: root, envNames: [] },
+      started: Date.now() - 60_000,
+      root,
+      machine: "another-machine-entirely",
+    });
+    await expect(adapter.remove(id)).rejects.toMatchObject({ code: "IDENTITY_UNKNOWN" });
+    await expect(adapter.stop(id)).rejects.toMatchObject({ code: "IDENTITY_UNKNOWN" });
+    await expect(adapter.wait(id, { timeoutMs: 100 })).rejects.toMatchObject({
+      code: "IDENTITY_UNKNOWN",
+    });
+    expect(existsSync(join(adapter.place.dir, id))).toBe(true);
+    expect(existsSync(join(adapter.place.dir, id, "status.json"))).toBe(false); // no tombstone either
+  });
+
+  test("tA_list_shows_a_session_whose_status_is_unreadable_and_rm_removes_a_dead_unreadable_one", async () => {
+    ensurePrivateDir(adapter.place.runDir);
+    ensurePrivateDir(adapter.place.dir);
+    const id = "a_000000000_0006";
+    publishSession(join(adapter.place.dir, id), {
+      v: 1,
+      id,
+      name: "odd",
+      mode: "pipes",
+      spec: { cwd: root, envNames: [] },
+      started: Date.now(),
+      root,
+    });
+    writeFileSync(join(adapter.place.dir, id, "status.json"), "{ broken");
+    const rows = await adapter.list();
+    expect(rows).toEqual([{ id, name: "odd", status: { state: "lost" }, problem: "CANNOT_READ" }]);
+    const bad = "a_000000000_0007";
+    mkdirSync(join(adapter.place.dir, bad), { recursive: true });
+    writeFileSync(join(adapter.place.dir, bad, "session.json"), "{ not json");
+    await adapter.remove(bad);
+    expect(existsSync(join(adapter.place.dir, bad))).toBe(false);
   });
 
   test("tA_unsupported_lifetime_and_parent_are_refused", async () => {

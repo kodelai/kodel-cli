@@ -11,6 +11,7 @@ import {
 import { join } from "node:path";
 import {
   encodeRecord,
+  MAX_SESSION_TIMEOUT_MS,
   type RedactRule,
   redactCutPrivateKey,
   redactText,
@@ -43,7 +44,7 @@ const holderInputSchema = z.object({
   argv: z.array(z.string()).optional(),
   cwd: z.string().min(1),
   env: z.record(z.string()),
-  timeoutMs: z.number().positive().optional(),
+  timeoutMs: z.number().positive().max(MAX_SESSION_TIMEOUT_MS).optional(),
   input: z.boolean().optional(),
   graceMs: z.number().nonnegative(),
   started: z.number(),
@@ -175,6 +176,19 @@ export async function runHolder(deps: HolderDeps): Promise<number> {
     return failBoot("rules_unknown", "a project redaction rule cannot be given to the holder");
   }
 
+  // The input channel exists before the child does: a failure here means nothing ran, so the starter may roll back.
+  let fifoFd: number | undefined;
+  if (input.input) {
+    const fifo = join(input.dir, INPUT_FIFO);
+    try {
+      if (spawnSync("mkfifo", [fifo]).status !== 0) throw new Error("mkfifo failed");
+      // Opened for reading and writing, the FIFO never reports end of file; `send` writes into it.
+      fifoFd = openSync(fifo, constants.O_RDWR);
+    } catch {
+      return failBoot("holder_error", "could not make the input channel");
+    }
+  }
+
   let child: ChildProcess;
   try {
     // The mark is forced here too: a starter that did not use `sessionEnv` still gets a marked child.
@@ -231,27 +245,23 @@ export async function runHolder(deps: HolderDeps): Promise<number> {
     dirty = false;
     const text = tail.toString("utf8").replace(/^�+/, "");
     try {
+      const target = join(input.dir, TAIL_FILE);
       writeFileSync(
-        join(input.dir, TAIL_FILE),
+        `${target}.tmp`,
         lastBytes(safe(cut ? redactCutPrivateKey(text) : text), tailBytes),
-        { mode: 0o600 },
+        {
+          mode: 0o600,
+        },
       );
+      renameSync(`${target}.tmp`, target);
     } catch {
       // the directory may be gone; the watcher below handles that
     }
   };
 
-  if (input.input && child.stdin) {
-    // A FIFO opened for reading and writing by the holder never reports end of file; `send` writes into it.
-    const fifo = join(input.dir, INPUT_FIFO);
-    if (spawnSync("mkfifo", [fifo]).status === 0) {
-      const fd = openSync(fifo, constants.O_RDWR);
-      createReadStream("", { fd, autoClose: false }).pipe(child.stdin);
-      child.stdin.on("error", () => {});
-    } else {
-      killTree(child.pid);
-      return failBoot("holder_error", "could not make the input channel");
-    }
+  if (fifoFd !== undefined && child.stdin) {
+    createReadStream("", { fd: fifoFd, autoClose: false }).pipe(child.stdin);
+    child.stdin.on("error", () => {});
   }
 
   const spawnFailure = await new Promise<Error | undefined>((resolve) => {

@@ -71,6 +71,9 @@ export interface SessionSpec {
   parent?: string;
 }
 
+/** The longest timer a process can set (Node fires at once above it). */
+export const MAX_SESSION_TIMEOUT_MS = 2 ** 31 - 1;
+
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const WINDOWS_ABSOLUTE = /^[A-Za-z]:[\\/]/;
 
@@ -91,6 +94,7 @@ export const validateSpec = (spec: SessionSpec): string | undefined => {
     if (!Number.isFinite(spec.timeoutMs) || spec.timeoutMs <= 0) {
       return "timeoutMs must be a positive number";
     }
+    if (spec.timeoutMs > MAX_SESSION_TIMEOUT_MS) return "timeoutMs is longer than 24 days";
   }
   if (spec.env !== undefined) {
     for (const [key, value] of Object.entries(spec.env)) {

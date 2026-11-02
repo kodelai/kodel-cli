@@ -36,6 +36,7 @@ import {
   machineId,
   processIdentity,
   sameIdentity,
+  sameProcess,
 } from "./process-table";
 import { sessionEnv } from "./session-env";
 import {
@@ -135,27 +136,43 @@ export class PipesSessionAdapter implements SessionAdapter {
     const dir = sessionDirOf(this.place, id);
     let marker: string | undefined;
     if (spec.name !== undefined) {
-      marker = this.markerPath(spec.name);
+      const markerFile = this.markerPath(spec.name);
+      marker = markerFile;
       const claim: NameMarker = {
         v: SESSION_FORMAT_VERSION,
         name: foldSessionName(spec.name),
         id,
         started,
       };
-      if (!createExclusive(marker, encodeRecord("name", claim))) {
-        marker = undefined; // not ours: never rolled back
-        const held = readMarker(this.markerPath(spec.name));
-        if (held === "newer") {
-          throw new SessionError("NEWER_FORMAT", "the name marker was written by a newer kodel");
+      let retried = false;
+      for (;;) {
+        if (!createExclusive(markerFile, encodeRecord("name", claim))) {
+          marker = undefined; // not ours: never rolled back
+          const held = readMarker(markerFile);
+          if (held === "missing" && !retried) {
+            // it was removed between our create and our read: claim again once
+            retried = true;
+            continue;
+          }
+          if (held === "newer") {
+            throw new SessionError("NEWER_FORMAT", "the name marker was written by a newer kodel");
+          }
+          // The marker's own id decides: its folder is there (taken) or it is gone (used). A starter that has
+          // claimed the name but not yet published its folder is told apart by looking once more a moment later.
+          let live = typeof held !== "string" && existsSync(sessionDirOf(this.place, held.id));
+          if (!live && typeof held !== "string") {
+            await sleep(150);
+            live = existsSync(sessionDirOf(this.place, held.id));
+          }
+          throw new SessionError(
+            live || held === "unreadable" ? "NAME_TAKEN" : "NAME_USED",
+            live || held === "unreadable"
+              ? `a session named ${spec.name} exists`
+              : `the name ${spec.name} was used by a session that is gone; a person frees it with \`kodel agent forget-name\``,
+          );
         }
-        // The marker's own id decides: its folder is there (taken, maybe still being published) or it is gone (used).
-        const live = typeof held !== "string" && existsSync(sessionDirOf(this.place, held.id));
-        throw new SessionError(
-          live || held === "unreadable" ? "NAME_TAKEN" : "NAME_USED",
-          live || held === "unreadable"
-            ? `a session named ${spec.name} exists`
-            : `the name ${spec.name} was used by a session that is gone; a person frees it with \`kodel agent forget-name\``,
-        );
+        marker = markerFile; // ours now, and rolled back if the start fails
+        break;
       }
     }
 
@@ -330,6 +347,9 @@ export class PipesSessionAdapter implements SessionAdapter {
   ): Promise<SessionStatus & { timedOut?: boolean }> {
     const deadline =
       opts.timeoutMs === undefined ? Number.POSITIVE_INFINITY : this.now() + opts.timeoutMs;
+    if (this.isForeign(sessionDirOf(this.place, id))) {
+      throw new SessionError("IDENTITY_UNKNOWN", `session ${id} belongs to another machine`);
+    }
     for (;;) {
       const status = this.settle(id);
       if (status.state !== "starting" && status.state !== "running") return status;
@@ -356,8 +376,17 @@ export class PipesSessionAdapter implements SessionAdapter {
     if (this.isForeign(dir)) {
       throw new SessionError("IDENTITY_UNKNOWN", `session ${id} belongs to another machine`);
     }
-    const recorded = readStatus(dir);
+    let recorded = readStatus(dir);
+    // A session that is still starting has no child to signal yet: give the holder a moment to record it.
+    for (let i = 0; before.state === "starting" && i < 60; i++) {
+      if (typeof recorded !== "string" && recorded.child) break;
+      await sleep(50);
+      recorded = readStatus(dir);
+    }
     if (typeof recorded === "string") return before;
+    if (before.state === "starting" && !recorded.child) {
+      throw new SessionError("NOT_RUNNING", `session ${id} is still starting; try again`);
+    }
     const child = recorded.child;
     if (before.state !== "running" && !(before.childAlive && child)) return before;
     if (!child) return before;
@@ -410,12 +439,23 @@ export class PipesSessionAdapter implements SessionAdapter {
     signalDescendants("SIGTERM");
     // stop waits past the kill grace so the escalation in killTree runs in this process
     const limit = this.now() + KILL_GRACE_MS + 3_000;
+    const descendantsAlive = () =>
+      descendants.some((d) => {
+        const alive = processIdentity(d.pid);
+        return alive && d.identity && sameIdentity(d.identity, alive);
+      });
     while (this.now() < limit) {
       const s = this.settle(id);
-      if (s.state !== "running" && s.state !== "starting" && !liveProcess(child.pid)) break;
+      const over = s.state !== "running" && s.state !== "starting" && !liveProcess(child.pid);
+      if (over && !descendantsAlive()) break;
       await sleep(this.poll);
     }
     signalDescendants("SIGKILL");
+    try {
+      process.kill(-child.pid, "SIGKILL"); // members of the group that ignored SIGTERM (the identity was checked above)
+    } catch {
+      // the group is gone
+    }
     return this.settle(id);
   }
 
@@ -439,24 +479,32 @@ export class PipesSessionAdapter implements SessionAdapter {
     }
     const plan = planSend(text, false, "\n");
     const data = opts.submit === false ? plan.paste : `${plan.paste}${plan.submit}`;
+    const bytes = Buffer.from(data);
     let written = 0;
     try {
       const fd = openSync(join(dir, INPUT_FIFO), constants.O_WRONLY | constants.O_NONBLOCK);
       try {
-        written = writeSync(fd, data);
+        // A full pipe answers EAGAIN: keep writing what is left for a while, so a line is never left cut in two.
+        const until = this.now() + 5_000;
+        while (written < bytes.length) {
+          try {
+            written += writeSync(fd, bytes, written);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EAGAIN" || this.now() >= until)
+              throw error;
+            await sleep(10);
+          }
+        }
       } finally {
         closeSync(fd);
       }
     } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
       throw new SessionError(
-        "NOT_RUNNING",
-        `could not write to session ${id}: ${(error as Error).message}`,
-      );
-    }
-    if (written < Buffer.byteLength(data)) {
-      throw new SessionError(
-        "UNSUPPORTED",
-        `only ${written} of ${Buffer.byteLength(data)} bytes were taken; send less at once`,
+        code === "EAGAIN" ? "UNSUPPORTED" : "NOT_RUNNING",
+        code === "EAGAIN"
+          ? `session ${id} did not read its input; ${written} of ${bytes.length} bytes were taken`
+          : `could not write to session ${id}: ${(error as Error).message}`,
       );
     }
     return { bytes: written };
@@ -469,6 +517,31 @@ export class PipesSessionAdapter implements SessionAdapter {
     if (record === "missing") {
       removeDir(dir); // an orphan without session.json: nothing runs there
       return;
+    }
+    if (record === "newer") {
+      throw new SessionError(
+        "NEWER_FORMAT",
+        `session ${id} was written by a newer kodel; upgrade kodel`,
+      );
+    }
+    if (record === "unreadable") {
+      // The folder cannot be judged; it goes only when no holder of it is alive.
+      const written = readStatus(dir);
+      if (
+        typeof written !== "string" &&
+        written.holder &&
+        sameProcess(written.holder.pid, written.holder.identity)
+      ) {
+        throw new SessionError("STILL_RUNNING", `session ${id} still runs; stop it first`);
+      }
+      removeDir(dir);
+      return;
+    }
+    if (this.isForeign(dir)) {
+      throw new SessionError(
+        "IDENTITY_UNKNOWN",
+        `session ${id} belongs to another machine; remove it there`,
+      );
     }
     const status = this.settle(id);
     if (status.state === "starting" || status.state === "running" || status.childAlive) {
@@ -501,8 +574,16 @@ export class PipesSessionAdapter implements SessionAdapter {
           ...(record.name !== undefined ? { name: record.name } : {}),
           status: this.read(entry),
         });
-      } catch {
-        // an unreadable or newer entry is skipped by this listing
+      } catch (error) {
+        entries.push({
+          id: entry,
+          ...(record.name !== undefined ? { name: record.name } : {}),
+          status: { state: "lost" },
+          problem:
+            error instanceof SessionError && error.code === "NEWER_FORMAT"
+              ? "NEWER_FORMAT"
+              : "CANNOT_READ",
+        });
       }
     }
     return entries;

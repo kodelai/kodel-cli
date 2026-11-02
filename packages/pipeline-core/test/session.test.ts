@@ -99,6 +99,8 @@ describe("validateSpec, rules added after review", () => {
     expect(validateSpec({ ...base, origin: "host", timeoutMs: 1000 })).toBeUndefined();
     expect(validateSpec({ ...base, origin: "host", lifetime: "with-starter" })).toBeUndefined();
     expect(validateSpec({ ...base, origin: "cli" })).toBeUndefined();
+    expect(validateSpec({ ...base, timeoutMs: 2 ** 31 })).toContain("24 days");
+    expect(validateSpec({ ...base, timeoutMs: 2 ** 31 - 1 })).toBeUndefined();
   });
 });
 

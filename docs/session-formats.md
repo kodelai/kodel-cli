@@ -32,3 +32,9 @@ that is not the one the record names.
 
 **Not built yet** (the first version of the family): the `parent` cascade, `lifetime: with-starter`, the PTY mode and
 `attach`, the check of a record written by another build, and Windows.
+
+**Limits worth knowing.** On macOS and without `/proc` a process identity is its start time at one-second resolution, so a
+pid recycled within the same second compares as the same process; `stop` signals only a process whose recorded identity
+matches, and refuses (`IDENTITY_UNKNOWN`) when none was recorded. The redacted tail is cut after redaction with a
+margin of 1 KiB (as `runCommand` does), which is a heuristic: a secret split at the cut can leave a fragment no rule
+matches. A session of another machine (a shared state folder) is listed but never judged, removed or signalled.
