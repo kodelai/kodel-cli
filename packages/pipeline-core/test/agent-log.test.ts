@@ -558,6 +558,8 @@ describe("t41 a consumer that has to know every event", () => {
     agent_session_named: true,
     usage_recorded: true,
     usage_failed: true,
+    tool_calls_recorded: true,
+    tool_calls_failed: true,
     acknowledge: true,
     tick: true,
     resume: true,

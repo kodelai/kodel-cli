@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { JournalRecord, NextStep, RunState } from "@kodel-ai/pipeline-core";
 import { fit, stripAnsi, visibleLength } from "../src/tui/ansi";
 import { demoGateDetail, demoSessions } from "../src/tui/demo";
@@ -333,7 +334,7 @@ describe("session_label the TUI reads the journal, never a transcript", () => {
   });
 
   test("session_label_no_screen_module_reads_a_transcript", async () => {
-    const root = new URL("../src/tui/", import.meta.url).pathname;
+    const root = fileURLToPath(new URL("../src/tui/", import.meta.url));
     for (const file of await readdir(root)) {
       const text = await readFile(join(root, file), "utf8");
       for (const word of ["logFacts", "modelFromLog", "CLAUDE_CONFIG_DIR", ".claude/projects"]) {

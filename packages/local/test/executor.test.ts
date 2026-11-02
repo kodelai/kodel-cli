@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { copyFile, mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { PipelineService, toolsFingerprint } from "@kodel-ai/pipeline-core";
 import {
   CONTRACT_VERSION,
@@ -646,7 +647,7 @@ describe("the name of the session: what the log really looks like", () => {
     const id = "11111111-1111-4111-8111-111111111111";
     await mkdir(join(claude, "projects", projectFolderName(dir)), { recursive: true });
     await copyFile(
-      new URL("./fixtures/claude-code-names.jsonl", import.meta.url).pathname,
+      fileURLToPath(new URL("./fixtures/claude-code-names.jsonl", import.meta.url)),
       logPath(id),
     );
     expect((await logFacts(logPath(id), id)).name).toBe("wait timeout");
