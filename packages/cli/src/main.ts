@@ -5,6 +5,14 @@ import type { Choice } from "./init";
 if (process.argv[2] === "hook") {
   const { runHookEntry } = await import("./hook-main");
   await runHookEntry(process.argv.slice(3));
+} else if (process.argv[2] === "session-holder") {
+  // The holder processes of `kodel agent`: `session-holder intermediate <json>` and `session-holder holder`.
+  const { holderMain, intermediateMain } = await import("@kodel-ai/local");
+  if (process.argv[3] === "intermediate") {
+    intermediateMain(JSON.parse(process.argv[4] ?? "{}") as { exec: string; args: string[] });
+    process.exit(0);
+  }
+  process.exit(await holderMain());
 } else {
   await runKodel();
 }

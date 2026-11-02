@@ -169,3 +169,11 @@ export const snapshotOf = (dir: string): SessionSnapshot => {
 };
 
 export const FORMAT = SESSION_FORMAT_VERSION;
+
+/** Frees a name for good. Only a person's command calls this: it reopens an attempt that may have run. */
+export const forgetName = (namesDir: string, folded: string): boolean => {
+  const path = join(namesDir, `${folded}.json`);
+  if (!existsSync(path)) return false;
+  rmSync(path);
+  return true;
+};
