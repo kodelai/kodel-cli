@@ -12,6 +12,7 @@ import { join } from "node:path";
 import {
   DEFAULT_START_GRACE_MS,
   deriveStatus,
+  encodeRecord,
   foldSessionName,
   isLocalSessionId,
   planSend,
@@ -120,7 +121,7 @@ export class PipesSessionAdapter implements SessionAdapter {
         id,
         started,
       };
-      if (!createExclusive(marker, claim)) {
+      if (!createExclusive(marker, encodeRecord("name", claim))) {
         const holders = await this.list({ name: spec.name });
         throw new SessionError(
           holders.length > 0 ? "NAME_TAKEN" : "NAME_USED",
@@ -235,13 +236,16 @@ export class PipesSessionAdapter implements SessionAdapter {
     const status = this.read(id);
     if (status.state === "lost" && status.reason === "no_status") {
       const dir = sessionDirOf(this.place, id);
-      createExclusive(join(dir, STATUS_FILE), {
-        v: SESSION_FORMAT_VERSION,
-        state: "lost",
-        by: "reader",
-        reason: "no_status",
-        since: this.now(),
-      } satisfies StatusRecord);
+      createExclusive(
+        join(dir, STATUS_FILE),
+        encodeRecord("status", {
+          v: SESSION_FORMAT_VERSION,
+          state: "lost",
+          by: "reader",
+          reason: "no_status",
+          since: this.now(),
+        }),
+      );
       return this.read(id);
     }
     return status;
@@ -297,12 +301,15 @@ export class PipesSessionAdapter implements SessionAdapter {
       throw new SessionError("IDENTITY_UNKNOWN", `cannot read the identity of ${child.pid}`);
     }
     if (!existsSync(join(dir, STOP_FILE))) {
-      replaceRecord(join(dir, STOP_FILE), {
-        v: SESSION_FORMAT_VERSION,
-        by: "stop",
-        at: this.now(),
-        ...(now ? { identity: now } : {}),
-      });
+      replaceRecord(
+        join(dir, STOP_FILE),
+        encodeRecord("stop", {
+          v: SESSION_FORMAT_VERSION,
+          by: "stop",
+          at: this.now(),
+          ...(now ? { identity: now } : {}),
+        }),
+      );
     }
     const descendants = descendantsOf(child.pid).map((pid) => ({
       pid,
@@ -354,7 +361,7 @@ export class PipesSessionAdapter implements SessionAdapter {
     if (status.state !== "running")
       throw new SessionError("NOT_RUNNING", `session ${id} is ${status.state}`);
     const record = readSession(dir);
-    if (record === "missing" || record === "unreadable" || !record.spec.input) {
+    if (typeof record === "string" || !record.spec.input) {
       throw new SessionError("UNSUPPORTED", `session ${id} was not started with input`);
     }
     const plan = planSend(text, false, "\n");
@@ -390,7 +397,7 @@ export class PipesSessionAdapter implements SessionAdapter {
     for (const entry of readdirSync(this.place.dir)) {
       if (!isLocalSessionId(entry)) continue;
       const record = readSession(join(this.place.dir, entry));
-      if (record === "missing" || record === "unreadable") continue;
+      if (typeof record === "string") continue;
       if (wanted !== undefined && record.name !== wanted) continue;
       try {
         entries.push({

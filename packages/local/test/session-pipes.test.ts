@@ -103,7 +103,8 @@ describe("pipes adapter, real processes", () => {
       cwd: root,
       timeoutMs: 30_000,
     });
-    await eventually(() => existsSync(pidFile));
+    // the file exists before the pid is written into it
+    await eventually(() => existsSync(pidFile) && readFileSync(pidFile, "utf8").trim() !== "");
     const pid = Number(readFileSync(pidFile, "utf8").trim());
     expect(liveProcess(pid)).toBe(true);
     await adapter.stop(id);

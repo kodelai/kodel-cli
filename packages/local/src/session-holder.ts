@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { redactText, SESSION_FORMAT_VERSION } from "@kodel-ai/pipeline-core";
+import { encodeRecord, redactText, SESSION_FORMAT_VERSION } from "@kodel-ai/pipeline-core";
 import { killTree } from "./command";
 import { processIdentity } from "./process-table";
 import {
@@ -106,7 +106,7 @@ export async function runHolder(deps: HolderDeps): Promise<number> {
     since: now(),
     ...(input.build ? { build: input.build } : {}),
   };
-  if (!createExclusive(statusPath, first)) {
+  if (!createExclusive(statusPath, encodeRecord("status", first))) {
     boot("HOLDER_BOOT_FAILED:tombstone");
     return 1;
   }
@@ -128,7 +128,10 @@ export async function runHolder(deps: HolderDeps): Promise<number> {
         ? spawn(input.command, { ...options, shell: true })
         : spawn((input.argv ?? [])[0] as string, (input.argv ?? []).slice(1), options);
   } catch (error) {
-    replaceRecord(statusPath, { ...first, state: "killed", reason: "holder_error", since: now() });
+    replaceRecord(
+      statusPath,
+      encodeRecord("status", { ...first, state: "killed", reason: "holder_error", since: now() }),
+    );
     boot(`HOLDER_BOOT_FAILED:${redactText((error as Error).message)}`);
     return 1;
   }
@@ -178,7 +181,10 @@ export async function runHolder(deps: HolderDeps): Promise<number> {
     child.once("error", (error) => resolve(error));
   });
   if (spawnFailure) {
-    replaceRecord(statusPath, { ...first, state: "killed", reason: "holder_error", since: now() });
+    replaceRecord(
+      statusPath,
+      encodeRecord("status", { ...first, state: "killed", reason: "holder_error", since: now() }),
+    );
     boot(`HOLDER_BOOT_FAILED:${redactText(spawnFailure.message)}`);
     return 1;
   }
@@ -196,7 +202,7 @@ export async function runHolder(deps: HolderDeps): Promise<number> {
     boot("HOLDER_BOOT_FAILED:tombstone");
     return 1;
   }
-  replaceRecord(statusPath, running);
+  replaceRecord(statusPath, encodeRecord("status", running));
   boot("ready");
 
   let timedOut = false;
@@ -233,7 +239,7 @@ export async function runHolder(deps: HolderDeps): Promise<number> {
   if (existsSync(input.dir)) {
     const check = readStatus(input.dir);
     if (check !== "missing" && check !== "unreadable" && check.by === "holder")
-      replaceRecord(statusPath, final);
+      replaceRecord(statusPath, encodeRecord("status", final));
   }
   return 0;
 }
