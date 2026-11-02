@@ -1,15 +1,21 @@
 /** Reads the runs of a project into sessions. Read-only: nothing here writes, decides or restarts work. */
+
 import {
+  cleanSessionName,
+  EXECUTOR_SOURCES,
+  type ExecutorSource,
   type JournalRecord,
   KodelError,
   type NextStep,
   type RunState,
   runSlug,
+  SAFE_SESSION_ID,
 } from "@kodel-ai/pipeline-core";
 import type { PipeEntry } from "./pipelines";
 import { canReadPipelines, loadPipelines } from "./pipes-load";
 import {
   type Activity,
+  type AgentSession,
   formatAge,
   HEARTBEAT_STALE_MS,
   type Need,
@@ -143,7 +149,13 @@ async function buildSession(
     );
   }
   const journal = await run.journal().catch(() => [] as JournalRecord[]);
-  const full = { ...base, steps: stepLines(state), log: logLines(journal, now) };
+  const agentSession = agentSessionOf(journal);
+  const full = {
+    ...base,
+    steps: stepLines(state),
+    log: logLines(journal, now),
+    ...(agentSession === undefined ? {} : { agentSession }),
+  };
   const ended =
     state.status === "completed" || state.status === "failed" || state.status === "canceled";
 
@@ -191,7 +203,10 @@ function unreadable(base: Base, since: number, headline: string, prompt: string)
   return { ...base, status: "unreadable", step: "unreadable", since, headline, prompt };
 }
 
-type Base = Pick<Session, "id" | "title" | "pipeline" | "steps" | "log"> & { workdir?: string };
+type Base = Pick<Session, "id" | "title" | "pipeline" | "steps" | "log"> & {
+  workdir?: string;
+  agentSession?: AgentSession;
+};
 
 function waiting(
   base: Base,
@@ -255,7 +270,7 @@ function running(
   now: number,
 ): Session {
   const visit = state.active[0];
-  const heard = journal.at(-1)?.ts ?? state.startedAt;
+  const heard = lastSign(journal) ?? state.startedAt;
   let activity: Activity;
   let quietMs: number | undefined;
   if (engine) {
@@ -315,13 +330,87 @@ function lastTs(journal: JournalRecord[], event: string): number | undefined {
 
 /** A wait whose own record is not there: the latest sign of life is the nearest honest answer. */
 function sinceLast(journal: JournalRecord[], state: RunState): number {
-  return journal.at(-1)?.ts ?? state.startedAt;
+  return lastSign(journal) ?? state.startedAt;
+}
+
+/** The name of a session changing says nothing about the agent: a rename must not make a stuck agent look alive. */
+const NOT_A_SIGN_OF_LIFE = ["agent_session_named"];
+
+function lastSign(journal: JournalRecord[]): number | undefined {
+  return journal.findLast((r) => !NOT_A_SIGN_OF_LIFE.includes(r.event))?.ts;
+}
+
+// ── the agent session of a run ───────────────────────────────────────────────
+
+/** The records that say who acted, and so in which session. */
+const SESSION_RECORDS = ["run_started", "step_served", "agent_completed"];
+
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** The session a record names, if it names a valid one: a journal can be edited or written by another engine. */
+function sessionOf(record: JournalRecord): { id: string; source: ExecutorSource } | undefined {
+  if (!SESSION_RECORDS.includes(record.event) || !isObject(record.executor)) return undefined;
+  const session = record.executor.session;
+  if (!isObject(session)) return undefined;
+  const { value, source } = session;
+  if (typeof value !== "string" || !SAFE_SESSION_ID.test(value)) return undefined;
+  if (typeof source !== "string" || !(EXECUTOR_SOURCES as readonly string[]).includes(source)) {
+    return undefined;
+  }
+  return { id: value, source: source as ExecutorSource };
+}
+
+/** The session of the newest record that names one, in the order the records were written. */
+export function lastSession(
+  journal: readonly JournalRecord[],
+): { id: string; source: ExecutorSource } | undefined {
+  for (let i = journal.length - 1; i >= 0; i--) {
+    const found = sessionOf(journal[i] as JournalRecord);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+/**
+ * The newest name the journal has for a session, from a record of the executor or from the event that
+ * names a session; and whether the event names it at all, which is the copy of the agent's log saying the
+ * session called this run's tools. The name is cleaned again here: the writer cleaned it, but a journal is
+ * not trusted.
+ */
+export function sessionName(
+  journal: readonly JournalRecord[],
+  id: string,
+): { name?: string; proven: boolean } {
+  let name: string | undefined;
+  let proven = false;
+  for (let i = journal.length - 1; i >= 0; i--) {
+    const record = journal[i] as JournalRecord;
+    if (record.event === "agent_session_named") {
+      if (record.session !== id) continue;
+      proven = true;
+      name ??= cleanSessionName(record.name);
+    } else if (name === undefined && sessionOf(record)?.id === id) {
+      const named = (record.executor as Record<string, unknown>).session_name;
+      if (isObject(named)) name = cleanSessionName(named.value);
+    }
+  }
+  return { ...(name === undefined ? {} : { name }), proven };
+}
+
+/** The session the run was last worked in, with its name, or nothing when the journal names none. */
+export function agentSessionOf(journal: readonly JournalRecord[]): AgentSession | undefined {
+  const last = lastSession(journal);
+  if (last === undefined) return undefined;
+  return { ...last, ...sessionName(journal, last.id) };
 }
 
 const DETAIL_FIELDS = ["node", "outcome", "check", "reason", "code", "message"] as const;
 
 export function logLines(journal: JournalRecord[], now: number, last = 14): string[] {
-  return journal.slice(-last).map((r) => {
+  // The renaming of a session is not part of what happened to the run: no raw event name in the card.
+  const shown = journal.filter((r) => !NOT_A_SIGN_OF_LIFE.includes(r.event));
+  return shown.slice(-last).map((r) => {
     const detail = DETAIL_FIELDS.flatMap((f) =>
       typeof r[f] === "string" ? [String(r[f])] : [],
     ).join(" ");

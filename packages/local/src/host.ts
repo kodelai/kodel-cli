@@ -737,6 +737,7 @@ export class LocalHost {
                 ? {}
                 : { indexPath: this.options.storage.sessionsPath }),
               dirs: [...(workdir ? [workdir.path] : []), this.options.root],
+              rules: this.rules,
               ...(this.options.environment === undefined ? {} : { env: this.options.environment }),
             })
           : undefined;
@@ -2934,6 +2935,7 @@ export class LocalRun {
         ...(state.workdir === undefined ? [] : [await this.inProject(state.workdir)]),
         options.root,
       ],
+      rules: this.host.rules,
       ...(options.environment === undefined ? {} : { env: options.environment }),
     };
   }

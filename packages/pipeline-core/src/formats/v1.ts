@@ -26,6 +26,7 @@ export const V1_CAPABILITIES: FormatCapabilities = {
   visitSpec: false,
   keepsDeclaredAfterFailedCheck: false,
   firstDuplicateEdgeWins: true,
+  sessionNames: false,
   pipelineFeatures: [],
 };
 
@@ -195,6 +196,7 @@ export const V2_ONLY_EVENTS = [
   "join_reached",
   "step_claimed",
   "step_claim_conflict",
+  "agent_session_named",
 ];
 /**
  * The journal field a fork adds to existing events (with `branch`, which the events of format 1 use

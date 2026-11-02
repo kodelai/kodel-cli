@@ -14,6 +14,7 @@ import {
   yellow,
 } from "./ansi";
 import { firstCode, prepare, viewDiff } from "./diffview";
+import { sessionLine } from "./label";
 import { capLines, headOf, parseBlocking, parseCommentsCsv } from "./reasons";
 import {
   type Attempt,
@@ -227,7 +228,13 @@ export function headerBand(
 ): string[] {
   const inner = Math.max(10, width - 4);
   const line = (content: string) => `${dim("│")} ${fit(content, inner)} ${dim("│")}`;
-  const right = dim(`${s.id} · ${s.pipeline}`);
+  const agent = s.agentSession;
+  // Below 22 rows there is no room for a line of its own: the session stands where the id and pipeline did.
+  const right = dim(
+    compact && agent
+      ? sessionLine(agent, Math.max(16, Math.floor(inner / 2)))
+      : `${s.id} · ${s.pipeline}`,
+  );
   const left = `${glyph} ${bold(fit(s.title, Math.max(8, inner - visibleLength(right) - 3)).trimEnd())}`;
   const gap = Math.max(1, inner - visibleLength(left) - visibleLength(right));
   const m = d.metrics;
@@ -285,6 +292,7 @@ export function headerBand(
   return [
     dim(`╭${"─".repeat(width - 2)}╮`),
     line(`${left}${" ".repeat(gap)}${right}`),
+    ...(agent ? [line(dim(sessionLine(agent, inner)))] : []),
     line(where),
     ...flow([...chips, ...warnings], "  ", inner).map(line),
     dim(`╰${"─".repeat(width - 2)}╯`),

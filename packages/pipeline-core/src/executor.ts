@@ -36,6 +36,12 @@ export interface ExecutorRecord {
   client?: Sourced<Caller>;
   session?: Sourced<string>;
   model?: Sourced<string>;
+  /**
+   * The name the session has in the agent's own log (the person's `/rename`, else the title the agent
+   * shows), as it was when the record was written. Display text only: it comes from a file the agent's
+   * session can write, so it decides nothing.
+   */
+  session_name?: Sourced<string>;
 }
 
 /** The engine that wrote a run's records. Written once, at the start of a run. */
@@ -68,6 +74,48 @@ export function cleanExecutorText(raw: unknown): string | undefined {
   if (typeof raw !== "string") return undefined;
   const text = raw.replace(CONTROL, "").trim().slice(0, MAX_EXECUTOR_TEXT);
   return text === "" ? undefined : text;
+}
+
+/**
+ * What the id of a session looks like where it is used for more than display: the strict form (at most 128
+ * characters) that every reader of the agent's logs trusts, and that the screens check before they show one.
+ */
+export const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/** Longest session name kept: it is shown in a row of the list, so a long one is only noise. */
+export const MAX_SESSION_NAME = 120;
+
+// Bidirectional controls and zero-width characters: they do not move the cursor but change what a
+// line reads as, so they have no place in a name that stands for a run.
+const INVISIBLE = /[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+
+/** How much of a name is looked at before it is redacted and cut: a secret must be whole when the rules meet it. */
+export const MAX_SESSION_NAME_SCAN = 1_000;
+
+/**
+ * A session name with the characters that act on a line removed (control, bidirectional, zero-width) and
+ * the ends trimmed, not yet cut at `MAX_SESSION_NAME`: redaction comes next, and a cut before it could
+ * leave half a secret that no rule matches. Empty means there is no name.
+ */
+export function stripSessionName(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const text = [...raw.replace(CONTROL, "").replace(INVISIBLE, "").trim()]
+    .slice(0, MAX_SESSION_NAME_SCAN)
+    .join("")
+    .trim();
+  return text === "" ? undefined : text;
+}
+
+/**
+ * A session name made safe to keep and to show: stripped, then cut at `MAX_SESSION_NAME` characters (whole
+ * characters, never half of a surrogate pair). Not `cleanExecutorText`: that one also builds the key of a
+ * served step, so its rules do not move. A caller that redacts does so before this.
+ */
+export function cleanSessionName(raw: unknown): string | undefined {
+  const text = stripSessionName(raw);
+  if (text === undefined) return undefined;
+  const cut = [...text].slice(0, MAX_SESSION_NAME).join("").trim();
+  return cut === "" ? undefined : cut;
 }
 
 export function sourced<T>(value: T, source: ExecutorSource): Sourced<T> {

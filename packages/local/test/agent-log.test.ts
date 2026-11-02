@@ -1686,3 +1686,188 @@ describe("t3bk2 what the review of the build found", () => {
     }
   });
 });
+
+// The log records Claude Code writes for the name of a session (checked on real logs, 2026-11).
+const titleLine = (title: string, session = SESSION) =>
+  JSON.stringify({ type: "custom-title", customTitle: title, sessionId: session });
+const shownLine = (name: string, session = SESSION) =>
+  JSON.stringify({ type: "agent-name", agentName: name, sessionId: session });
+
+describe("session_label the name of a session proven to belong to the run", () => {
+  /** The log of the session with the run's start in it, then the given records after it. */
+  const withNames = async (r: Rig, ...lines: string[]) => {
+    const path = await installed(sessionLog(r.runId));
+    await appendFile(path, `${lines.join("\n")}\n`);
+    return path;
+  };
+  const named = async (r: Rig) =>
+    (await journalOf(r)).filter((rec) => rec.event === "agent_session_named");
+
+  test("session_label_pass_journals_a_changed_name", async () => {
+    const r = await rig();
+    const path = await withNames(r, titleLine("first"), shownLine("first"));
+    await capture(r);
+    expect(await named(r)).toMatchObject([{ session: SESSION, name: "first" }]);
+    // the same name again: nothing
+    await capture(r);
+    expect(await named(r)).toHaveLength(1);
+    // a rename, then the old name back: each change is one event
+    await appendFile(path, `${titleLine("second")}\n${shownLine("second")}\n`);
+    await capture(r);
+    await appendFile(path, `${titleLine("first")}\n${shownLine("first")}\n`);
+    await capture(r);
+    expect((await named(r)).map((rec) => rec.name)).toEqual(["first", "second", "first"]);
+  });
+
+  test("session_label_pass_hash_is_taken_after_redaction", async () => {
+    const secret = "sk-ant-abcdefghijklmnopqrstuvwxyz0123456789";
+    const r = await rig();
+    await withNames(r, titleLine(`token ${secret}`));
+    await capture(r);
+    await capture(r);
+    const events = await named(r);
+    expect(events).toHaveLength(1);
+    expect(JSON.stringify(events)).not.toContain(secret);
+    // the state holds the hash of what is journaled and no text of the name
+    const state = JSON.stringify(await stateOf(r));
+    expect(state).not.toContain(secret);
+    expect(state).not.toContain("token");
+    expect(Object.keys((await stateOf(r)).agentLog?.nameHashes ?? {})).toEqual([SESSION]);
+  });
+
+  test("session_label_pass_cleared_title_is_not_journaled", async () => {
+    const r = await rig();
+    const path = await withNames(r, titleLine("kept"));
+    await capture(r);
+    await appendFile(path, `${titleLine("   ")}\n`);
+    await capture(r);
+    expect((await named(r)).map((rec) => rec.name)).toEqual(["kept"]);
+  });
+
+  test("session_label_pass_skips_an_unproven_session", async () => {
+    const r = await rig();
+    // a log that never calls this run's tools
+    const path = await installed(sessionLog("r_someone_else"));
+    await appendFile(path, `${titleLine("not mine")}\n`);
+    await capture(r);
+    expect(await named(r)).toEqual([]);
+  });
+
+  test("session_label_pass_skips_when_executor_history_is_off", async () => {
+    const history = logConfig();
+    history.executor = { enabled: false };
+    const r = await rig({ history });
+    await withNames(r, titleLine("not recorded"));
+    const result = await capture(r);
+    expect(result.saved).toBe(1);
+    expect(await named(r)).toEqual([]);
+    expect(JSON.stringify(await journalOf(r))).not.toContain("not recorded");
+  });
+
+  test("session_label_pass_skips_when_the_copy_of_the_log_is_off", async () => {
+    const history = logConfig({ enabled: false });
+    const r = await rig({ history });
+    await withNames(r, titleLine("not recorded"));
+    expect(await capture(r)).toMatchObject({ skipped: "disabled" });
+    expect(await named(r)).toEqual([]);
+  });
+
+  test("session_label_pass_names_a_rename_without_a_call_of_the_agent", async () => {
+    const r = await rig();
+    const path = await installed(sessionLog(r.runId));
+    await capture(r);
+    expect(await named(r)).toEqual([]);
+    await appendFile(path, `${titleLine("renamed")}\n`);
+    await capture(r);
+    expect((await named(r)).map((rec) => rec.name)).toEqual(["renamed"]);
+  });
+});
+
+describe("session_label the pass: what stops the name", () => {
+  const withTitle = async (r: Rig, title: string) => {
+    const path = await installed(sessionLog(r.runId));
+    await appendFile(path, `${titleLine(title)}\n`);
+    return path;
+  };
+  const events = async (r: Rig) =>
+    (await journalOf(r)).filter((rec) => rec.event === "agent_session_named");
+
+  test("session_label_pass_apply_requires_the_lock", async () => {
+    const r = await rig();
+    await withTitle(r, "never journaled");
+    const run = r.run.agentLogRun();
+    let reads = 0;
+    const lost: AgentLogRun = {
+      ...run,
+      // after the pass has read the state once, another process takes the lock on copying over
+      state: async () => {
+        reads += 1;
+        if (reads > 1) {
+          await writeFile(
+            join(r.store.runDir(r.runId), "agent_log.lock"),
+            JSON.stringify({ token: "someone else" }),
+          );
+        }
+        return run.state();
+      },
+    };
+    await r.writer.capture(lost, { why: "tick", waitMs: 0 });
+    expect(await events(r)).toEqual([]);
+    // the name is journaled by the next pass that holds the lock
+    await rm(join(r.store.runDir(r.runId), "agent_log.lock"), { force: true });
+    await capture(r);
+    expect((await events(r)).map((rec) => rec.name)).toEqual(["never journaled"]);
+  });
+
+  test("session_label_pass_a_failure_of_the_name_never_fails_the_pass", async () => {
+    const r = await rig();
+    await withTitle(r, "a name");
+    const run = r.run.agentLogRun();
+    const failing: AgentLogRun = {
+      ...run,
+      apply: async (event) => {
+        if (event.type === "agent_session_named") throw new Error("the journal broke");
+        return run.apply(event);
+      },
+    };
+    const result = await r.writer.capture(failing, { why: "tick", waitMs: 0 });
+    expect(result.errored).toBeUndefined();
+    expect(result.saved).toBe(1);
+    expect(await events(r)).toEqual([]);
+  });
+
+  test("session_label_pass_skips_a_paused_run", async () => {
+    const r = await rig();
+    await withTitle(r, "a name");
+    const run = r.run.agentLogRun();
+    const paused: AgentLogRun = {
+      ...run,
+      state: async () => ({ ...(await run.state()), status: "paused" }),
+    };
+    expect(await r.writer.capture(paused, { why: "tick", waitMs: 0 })).toMatchObject({
+      skipped: "not_running",
+    });
+    expect(await events(r)).toEqual([]);
+  });
+
+  test("session_label_pass_leaves_the_state_alone_when_there_is_no_name", async () => {
+    // a run from before the event: no hashes in its state, and a log that holds no name
+    const r = await rig();
+    await installed(sessionLog(r.runId));
+    await capture(r);
+    const before = JSON.stringify(await stateOf(r));
+    expect((await stateOf(r)).agentLog?.nameHashes).toBeUndefined();
+    await capture(r);
+    expect(JSON.stringify(await stateOf(r))).toBe(before);
+    expect(await events(r)).toEqual([]);
+  });
+
+  test("session_label_pass_names_a_run_that_began_before_the_event_once_per_session", async () => {
+    const r = await rig();
+    await withTitle(r, "named");
+    await capture(r);
+    await capture(r);
+    await capture(r);
+    expect(await events(r)).toHaveLength(1);
+  });
+});

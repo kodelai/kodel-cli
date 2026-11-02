@@ -20,7 +20,9 @@ import {
   type AgentLogConfig,
   type AgentLogFailure,
   type CaptureOptions,
+  capabilitiesOf,
   cleanExecutorText,
+  cleanSessionName,
   HISTORY_FORMAT,
   type HistoryEvent,
   historyEventSchema,
@@ -35,7 +37,7 @@ import {
   redactText,
   type SessionRef,
 } from "@kodel-ai/pipeline-core";
-import { SESSION_ENV } from "./executor";
+import { logFacts, SESSION_ENV } from "./executor";
 import { claudeCodeCollector } from "./history/claude-code/collector";
 import { claudeConfigDir, firstTimestamp, subagentLogs } from "./history/claude-code/locate";
 import { AGENT_ID } from "./history/claude-code/normalize";
@@ -353,6 +355,8 @@ export class AgentLogWriter {
         toolLog: state.history?.tool_log.enabled !== false,
         result,
       };
+      // Before the copy and apart from it: the name does not depend on what the copy finds.
+      await this.nameSession(ctx, candidate.session, candidate.path);
       const main = await this.copy(ctx, candidate.session, undefined, memo);
       if (main === "abort") return result;
       if (!ctx.toolLog) continue;
@@ -378,6 +382,36 @@ export class AgentLogWriter {
       }
     }
     return result;
+  }
+
+  /**
+   * Journal the name of a session proven to belong to the run when it is not the one journaled last. The
+   * name is read from the log of the session as the executor records read it, cleaned, redacted and only
+   * then hashed, so that the state keeps the hash of what the journal holds. It is written only when the
+   * run keeps the executor (the name is part of it) and its format can hold the event, and with the lock
+   * on copying, like the copy. A name is display data: whatever goes wrong here is left alone.
+   */
+  private async nameSession(ctx: PassContext, session: string, path: string): Promise<void> {
+    try {
+      const { run, lock } = ctx;
+      const state = await run.state();
+      if (state.status !== "running" || state.agentLog === undefined) return;
+      if (state.history?.executor.enabled !== true || !capabilitiesOf(state.v).sessionNames) return;
+      if (!SAFE_SESSION.test(session)) return;
+      const read = (await logFacts(path, session)).name;
+      const name = cleanSessionName(read === undefined ? undefined : this.redact(read));
+      if (name === undefined) return;
+      const hash = sha256(name);
+      if (state.agentLog.nameHashes?.[session] === hash) return;
+      if (!(await lock.stillHeld())) return;
+      await run.apply({ type: "agent_session_named", session, name, name_hash: hash });
+    } catch {
+      // a name is not worth a failure
+    }
+  }
+
+  private redact(text: string): string {
+    return redactText(text, [...this.options.rules]);
   }
 
   private nodeOf(state: RunState, input: CaptureInput): { node: string; attempt: number } {

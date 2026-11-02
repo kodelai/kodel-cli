@@ -281,7 +281,7 @@ is `{ value, source }`, and a part that cannot be observed is left out, never gu
 | where | what |
 | --- | --- |
 | `run_started.engine` | `version`, `commit`, `record_version`, `meta_version`, `contract_version`, `instructions_hash`, `tools_hash` |
-| `run_started.executor`, `agent_completed.executor` | `client` (name and version), `session`, `model` |
+| `run_started.executor`, `agent_completed.executor`, `step_served.executor` | `client` (name and version), `session`, `model`, `session_name` |
 | `agent_completed.engine_version` | only when the engine that completed the step is not the one that started the run |
 
 | source | meaning |
@@ -289,12 +289,49 @@ is `{ value, source }`, and a part that cannot be observed is left out, never gu
 | `observed` | the transport says it (the MCP handshake: the client's name and version) |
 | `observed-env` | the environment of the server (`CLAUDE_CODE_SESSION_ID`): the session that was current when the server started. A server lives as long as its agent process, so after `/clear` it still names the old session |
 | `observed-hook` | the newest session the hooks registered in the session index (`.kodel/sessions.jsonl`, or its place under `~/.kodel` with `storage: home`) for the run's directories; used when the environment has none |
-| `derived` | read out of the session's own log (the model of its last answer) |
+| `derived` | read out of the session's own log (the model of its last answer, the name of the session) |
 
 Strings from outside are stripped of control characters and cut at 200 characters, and the store redacts them like
 everything else it writes. `contract_version`, `instructions_hash` and `tools_hash` are there when the host knows what
 the agent was served; they change when the instructions or a tool (its name,
 description or arguments) change. With `history.executor: false` none of these fields is written.
+
+### The name of the session (`session_name`)
+
+`session_name` is what the session is called in the agent's own log: the title the person gave it with `/rename`
+(Claude Code's `custom-title` record), else the name the agent shows for it (`agent-name`), else the summary the agent made of the session
+(`ai-title`; an automatic session may have only that record). It is
+read from the last 512 KB of the log each time a record is written, so a rename shows in the next record, and it is
+kept in the record, so it is still there after the agent has deleted its log (Claude Code does so after 30 days by
+default).
+
+- **It is personal text.** It is the person's own label, or the agent's summary of their first prompt (an automatic
+  `agent-name` equals the `ai-title`). It is written whenever `history.executor` is on, which it is by default, and
+  `history.executor` is the only switch: `false` drops the client, the session, the model and the name together. The
+  run history is in the repository unless `storage: home` says otherwise, so a project whose history is committed
+  starts to commit names when kodel is updated. Records already written are not rewritten.
+- **It may belong to another window.** The session of an `observed-hook` record is a guess (the newest session the
+  hooks registered), so its name is a guess too, and it is written all the same.
+- **It is display text, not the agent's word.** It comes from a file the agent's session can write, so it decides
+  nothing, and kodel never names a run by it alone. It is stripped of control, bidirectional and zero-width
+  characters, redacted, and only then cut at 120 characters (so that a secret is whole when the rules meet it).
+- **A rename shows without a call of the agent.** The copy of the agent's log (`history.agent_log`, every
+  `interval_s` seconds while the run goes, and at the end of each step) looks at the name of every session that is
+  proven to belong to the run (its log calls the run's tools) and journals `agent_session_named` (`session`,
+  `name`) when it is not the name journaled last. The state keeps only the sha256 of that name
+  (`agentLog.nameHashes`), never the text, because the state is not redacted. The event is written only when
+  `history.executor` and `history.agent_log` are on (also in `metadata` mode), only for a run of format 2, and
+  there is no limit to how many are written: one per session per pass at most, and only on a change. A session
+  that was proven and has a name gets one on the first pass of every run.
+- **When it does not.** The run is `running` (a paused or finished run keeps its last name); the server that
+  holds the timer is alive and has seen a call of the run since it started (after a restart, `/resume` or a restart
+  of Claude Code nothing is journaled until the agent calls); `interval_s` is not 0 (then only at the end of a
+  step); fewer than 4000 `agent_log_saved` events were journaled (the timer stops there; it counts saves, not time);
+  with `storage: home` the copy sees only the session of the environment of the server; a cleared title is not
+  journaled, so the old name stays; a stopped stream is not looked at.
+- **Limits.** A session that was renamed has the name in its log every few KB; one that was not may have it farther
+  back than the last 512 KB, and then there is no name. No log, no name. After `/clear` or `/resume` the server still
+  names the session it started in (`observed-env`), so it is that session's name that is recorded.
 
 ## What the agent was shown (`served/`)
 

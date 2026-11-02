@@ -1,6 +1,7 @@
 /** The screens as pure functions: a model and a size in, lines out; a key and a model in, a model out. */
 import {
   bold,
+  clip,
   cyan,
   dim,
   fit,
@@ -14,6 +15,7 @@ import {
 } from "./ansi";
 import { firstCode, moveCode, moveHunk, type Prepared, placeOf, prepare } from "./diffview";
 import type { InputEvent } from "./input";
+import { renderLabel, rowLabels, sessionLine } from "./label";
 import type { Loaded } from "./load";
 import {
   emptyPipes,
@@ -895,6 +897,7 @@ function listLines(m: Model, width: number): ListLines {
   let selectedAt = 0;
   const tagWidth = Math.min(13, Math.max(7, ...m.sessions.map((s) => tagOf(s).length)));
   const titleWidth = Math.max(8, width - tagWidth - 13);
+  const labels = rowLabels(m.sessions);
   for (const g of GROUPS) {
     const members = m.sessions.filter(g.of);
     if (members.length === 0) continue;
@@ -909,7 +912,8 @@ function listLines(m: Model, width: number): ListLines {
       const tagStyled =
         s.status === "waiting" ? yellow(tag) : s.activity === "quiet" ? dim(tag) : tag;
       const time = timeOf(s, m.now, g.ago).padStart(TIME_WIDTH);
-      const row = `${bar}${glyph(s, m.frame)} ${fit(s.title, titleWidth)} ${tagStyled} ${time}`;
+      const label = labels.get(s.id) ?? { name: s.title, guess: false };
+      const row = `${bar}${glyph(s, m.frame)} ${fit(renderLabel(label, titleWidth), titleWidth)} ${tagStyled} ${time}`;
       if (s.id === m.selected) {
         selectedAt = lines.length;
         const plain = fit(stripAnsi(row), width);
@@ -955,6 +959,7 @@ function cardLines(s: Session | undefined, m: Model, width: number): string[] {
   if (!s) return [dim("No session selected.")];
   const out: string[] = [];
   out.push(`${glyph(s, m.frame)} ${bold(s.title)}`);
+  if (s.agentSession) out.push(dim(sessionLine(s.agentSession, Math.max(20, width - 2))));
   out.push(dim(`${s.id} · ${s.pipeline}`));
   if (s.workdir) out.push(dim(s.workdir));
   out.push("");
@@ -1083,6 +1088,23 @@ function menuLine(m: Model, cols: number): string {
   return fit(gap >= 1 ? `${left}${" ".repeat(gap)}${right}` : left, cols);
 }
 
+/**
+ * What a gate prompt adds to the slug so that the row the person picked can be told from a look-alike: the
+ * end of the id of the run, which only the engine writes, and the label of the row when it is not the slug.
+ */
+/** How much of the label of a row a gate prompt repeats: it is only there to be compared with the row. */
+const ROW_IN_PROMPT = 30;
+
+function rowOf(m: Model, s: Session | undefined): string {
+  if (!s) return "";
+  const label = rowLabels(m.sessions).get(s.id);
+  const shown =
+    label === undefined || label.name === s.title
+      ? ""
+      : ` · row «${clip(label.name, ROW_IN_PROMPT)}»`;
+  return dim(` · ${s.id.slice(-8)}${shown}`);
+}
+
 function hints(m: Model): string {
   if (m.section === 1) return pipeHints(entryOf(m.pipelines, m.pipe), m.pipe, m.focus === "card");
   if (m.legend !== null) return `${bold("↑↓")} scroll   any other key closes the legend`;
@@ -1092,7 +1114,8 @@ function hints(m: Model): string {
     return `${bold("Delete this comment?")}  ${bold("y")} yes   ${bold("n")} no`;
   if (m.confirm !== null) {
     const label = current?.need ? (NEED_KEYS[current.need][m.confirm] ?? "") : "";
-    return `${bold(label)} «${current?.title ?? ""}»?  ${bold("y")} yes   ${bold("n")} no`;
+    // The keys come first: text that the agent's session wrote must not push them off a narrow screen.
+    return `${bold("y")} yes   ${bold("n")} no   ${bold(label)} «${current?.title ?? ""}»${rowOf(m, current)}?`;
   }
   const keys = current?.need ? NEED_KEYS[current.need] : {};
   const decide = `${keys.a ? `   ${bold("a")} ${keys.a}` : ""}${keys.r ? `   ${bold("r")} ${keys.r}` : ""}`;

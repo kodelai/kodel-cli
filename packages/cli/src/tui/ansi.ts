@@ -46,9 +46,95 @@ export function stripAnsi(text: string): string {
     .join("");
 }
 
-/** Width on screen. Every glyph the screens use takes one column. */
+/**
+ * How many terminal columns a character takes: none for a combining mark, a joiner or a variation selector,
+ * two for the wide scripts and emoji, one for everything else (every glyph the screens use themselves).
+ */
+function charWidth(code: number): number {
+  if (
+    (code >= 0x300 && code <= 0x36f) ||
+    (code >= 0x1ab0 && code <= 0x1aff) ||
+    (code >= 0x1dc0 && code <= 0x1dff) ||
+    (code >= 0x20d0 && code <= 0x20ff) ||
+    (code >= 0xfe00 && code <= 0xfe0f) ||
+    (code >= 0xfe20 && code <= 0xfe2f) ||
+    code === 0x200d
+  ) {
+    return 0;
+  }
+  if (
+    (code >= 0x1100 && code <= 0x115f) ||
+    (code >= 0x231a && code <= 0x231b) ||
+    (code >= 0x23e9 && code <= 0x23ec) ||
+    code === 0x23f0 ||
+    code === 0x23f3 ||
+    (code >= 0x25fd && code <= 0x25fe) ||
+    (code >= 0x2614 && code <= 0x2615) ||
+    (code >= 0x2648 && code <= 0x2653) ||
+    code === 0x267f ||
+    code === 0x2693 ||
+    code === 0x26a1 ||
+    (code >= 0x26aa && code <= 0x26ab) ||
+    (code >= 0x26bd && code <= 0x26be) ||
+    (code >= 0x26c4 && code <= 0x26c5) ||
+    code === 0x26ce ||
+    code === 0x26d4 ||
+    code === 0x26ea ||
+    (code >= 0x26f2 && code <= 0x26f3) ||
+    code === 0x26f5 ||
+    code === 0x26fa ||
+    code === 0x26fd ||
+    code === 0x2705 ||
+    (code >= 0x270a && code <= 0x270b) ||
+    code === 0x2728 ||
+    code === 0x274c ||
+    code === 0x274e ||
+    (code >= 0x2753 && code <= 0x2755) ||
+    code === 0x2757 ||
+    (code >= 0x2795 && code <= 0x2797) ||
+    code === 0x27b0 ||
+    code === 0x27bf ||
+    (code >= 0x2b1b && code <= 0x2b1c) ||
+    code === 0x2b50 ||
+    code === 0x2b55 ||
+    (code >= 0x2e80 && code <= 0x303e) ||
+    (code >= 0x3041 && code <= 0x33ff) ||
+    (code >= 0x3400 && code <= 0x4dbf) ||
+    (code >= 0x4e00 && code <= 0x9fff) ||
+    (code >= 0xa000 && code <= 0xa4cf) ||
+    (code >= 0xac00 && code <= 0xd7a3) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe30 && code <= 0xfe6f) ||
+    (code >= 0xff00 && code <= 0xff60) ||
+    (code >= 0xffe0 && code <= 0xffe6) ||
+    (code >= 0x1f300 && code <= 0x1faff) ||
+    (code >= 0x20000 && code <= 0x3fffd)
+  ) {
+    return 2;
+  }
+  return 1;
+}
+
+/** Width on screen, in terminal columns. */
 export function visibleLength(text: string): number {
-  return [...stripAnsi(text)].length;
+  let columns = 0;
+  for (const ch of stripAnsi(text)) columns += charWidth(ch.codePointAt(0) ?? 0);
+  return columns;
+}
+
+/** Plain text cut to `columns` columns, ending in an ellipsis when something was left out. */
+export function clip(text: string, columns: number): string {
+  if (columns <= 0) return "";
+  if (visibleLength(text) <= columns) return text;
+  let out = "";
+  let used = 0;
+  for (const ch of text) {
+    const w = charWidth(ch.codePointAt(0) ?? 0);
+    if (used + w > columns - 1) break;
+    out += ch;
+    used += w;
+  }
+  return `${out}…`;
 }
 
 /** Cut to `width` columns (ending in an ellipsis) or pad with spaces, keeping the color codes. */
@@ -60,18 +146,25 @@ export function fit(raw: string, width: number): string {
   if (length <= width) return text + " ".repeat(width - length);
   let out = "";
   let count = 0;
+  let full = false;
   for (const [i, part] of text.split(SEQUENCE).entries()) {
     if (i % 2 === 1) {
       out += part;
       continue;
     }
     for (const ch of part) {
-      if (count >= width - 1) break;
-      out += ch;
-      count++;
+      if (full) break;
+      const w = charWidth(ch.codePointAt(0) ?? 0);
+      // A wide character that does not fit ends the text: nothing narrower is taken after it.
+      if (count + w > width - 1) full = true;
+      else {
+        out += ch;
+        count += w;
+      }
     }
   }
-  return `${out}${RESET}…`;
+  // The room a wide character left is kept, so that the line is as wide as it was asked to be.
+  return `${out}${" ".repeat(width - 1 - count)}${RESET}…`;
 }
 
 /** Break plain text into lines no longer than `width`, at spaces where it can. */

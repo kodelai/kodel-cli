@@ -30,6 +30,12 @@ export function demoSessions(now: number): Loaded {
     {
       id: "r_0mvo6g4mi",
       title: "capture-usage-cost",
+      agentSession: {
+        id: "9f3c2a71-5d0e-4b86-a1c4-0c7e2d9b3f10",
+        source: "observed-env",
+        name: "usage and cost capture",
+        proven: true,
+      },
       pipeline: "dev",
       status: "waiting",
       need: "approve",
@@ -50,6 +56,12 @@ export function demoSessions(now: number): Loaded {
     {
       id: "r_1kd93xa07",
       title: "pipeline-format-version",
+      agentSession: {
+        id: "4be81f06-2c3d-47a9-8e55-1d6a90c7b2e3",
+        source: "observed-hook",
+        name: "pipeline format",
+        proven: false,
+      },
       pipeline: "dev",
       status: "waiting",
       need: "pipeline_edit",
@@ -75,6 +87,12 @@ export function demoSessions(now: number): Loaded {
     {
       id: "r_0vb88k4fn",
       title: "decisions-docs",
+      agentSession: {
+        id: "c7d02e94-61fa-4a38-9b0d-3e5f81a2c6d4",
+        source: "observed-env",
+        name: "docs fixes",
+        proven: false,
+      },
       pipeline: "docs",
       status: "waiting",
       need: "paused",
@@ -93,6 +111,12 @@ export function demoSessions(now: number): Loaded {
     {
       id: "r_0t55c8k21",
       title: "task-link-fix",
+      agentSession: {
+        id: "c7d02e94-61fa-4a38-9b0d-3e5f81a2c6d4",
+        source: "observed-env",
+        name: "docs fixes",
+        proven: false,
+      },
       pipeline: "dev",
       status: "waiting",
       need: "hand_edit",
@@ -107,6 +131,11 @@ export function demoSessions(now: number): Loaded {
     {
       id: "r_1kd9q22vb",
       title: "fix-wait-timeout",
+      agentSession: {
+        id: "2a6e94d8-07bc-4f13-b5e9-8c1d3a70f5b2",
+        source: "observed-env",
+        proven: false,
+      },
       pipeline: "dev",
       status: "running",
       activity: "working",

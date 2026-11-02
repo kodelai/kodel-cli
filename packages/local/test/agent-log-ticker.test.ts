@@ -730,3 +730,27 @@ describe("t3bk2 the timer on Windows", () => {
     expect(failures).toBe(0);
   });
 });
+
+describe("session_label the timer journals a rename", () => {
+  test("session_label_a_rename_between_two_ticks_is_journaled_once", async () => {
+    const r = await rig();
+    const path = await sessionLog(r.runId).install(claude);
+    await appendFile(
+      path,
+      `${JSON.stringify({ type: "custom-title", customTitle: "first", sessionId: SESSION })}\n`,
+    );
+    const names = async () =>
+      (await r.run.journal())
+        .filter((rec) => rec.event === "agent_session_named")
+        .map((rec) => rec.name);
+    await tickersOf(r.host).tick(r.runId);
+    expect(await names()).toEqual(["first"]);
+    await appendFile(
+      path,
+      `${JSON.stringify({ type: "custom-title", customTitle: "second", sessionId: SESSION })}\n`,
+    );
+    await tickersOf(r.host).tick(r.runId);
+    await tickersOf(r.host).tick(r.runId);
+    expect(await names()).toEqual(["first", "second"]);
+  });
+});

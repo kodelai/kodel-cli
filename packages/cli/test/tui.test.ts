@@ -58,7 +58,8 @@ describe("tui sessions list", () => {
     expect(text).toContain("waiting for");
     expect(text).toContain("running for");
     expect(text).toMatch(/report-pdf-export.*1d ago/);
-    expect(text).toMatch(/capture-usage-cost.*\b21m\b/);
+    // the row shows the name of the agent session, the slug only where there is none
+    expect(text).toMatch(/usage and cost capture.*\b21m\b/);
     expect(formatAge(59_000)).toBe("59s");
     expect(formatAge(3_900_000)).toBe("1h05");
     expect(formatAge(26 * 3_600_000)).toBe("1d");
@@ -985,7 +986,8 @@ describe("tui card tabs with the mouse", () => {
     const onCard = mouseUpdate(m, SIZE, press(100, 25));
     expect(onCard.focus).toBe("card");
     const row =
-      plain(render(m, SIZE)).findIndex((l) => l.slice(0, 50).includes("capture-usage-cost")) + 1;
+      plain(render(m, SIZE)).findIndex((l) => l.slice(0, 50).includes("usage and cost capture")) +
+      1;
     expect(mouseUpdate(onCard, SIZE, press(3, row)).focus).toBe("list");
   });
 
@@ -993,7 +995,9 @@ describe("tui card tabs with the mouse", () => {
     const m = { ...loaded(), tab: 2, cursor: 3, focus: "card" as const };
     const other = ordered(m.sessions).find((s) => s.id !== m.selected && s.status === "waiting");
     const row =
-      plain(render(m, SIZE)).findIndex((l) => l.slice(0, 50).includes(other?.title ?? "?")) + 1;
+      plain(render(m, SIZE)).findIndex((l) =>
+        l.slice(0, 50).includes(other?.agentSession?.name ?? other?.title ?? "?"),
+      ) + 1;
     const next = mouseUpdate(m, SIZE, press(3, row));
     expect([next.selected, next.tab, next.cursor, next.focus]).toEqual([
       other?.id ?? "",

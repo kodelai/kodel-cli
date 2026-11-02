@@ -17,7 +17,7 @@
 import { canonicalNode, checkIdOf, type NodeForms, stableJson } from "./canonical";
 import { type ChangesRef, changesField, isTreeId, MAX_CHANGES_ERROR } from "./changes";
 import { type ErrorCode, KodelError } from "./errors";
-import type { EngineRecord, ExecutorRecord } from "./executor";
+import { cleanSessionName, type EngineRecord, type ExecutorRecord } from "./executor";
 import { cannotHoldError, withRunId } from "./formats/messages";
 import { capabilitiesOf, encodeJournalRecord, encodeRunState } from "./formats/registry";
 import type { FormatCapabilities } from "./formats/types";
@@ -418,6 +418,12 @@ export interface AgentLogState {
    * its share and a step that comes again is told from it. Runs from before this have none. Bounded.
    */
   visits?: Record<string, number>;
+  /**
+   * The sha256 of the last name journaled for each session (`agent_session_named`), so that the same name
+   * is not journaled twice. Hashes, never the text: the state is not redacted. Runs from before this, and
+   * runs of a format that cannot hold the event, have none.
+   */
+  nameHashes?: Record<string, string>;
 }
 
 /** How many visits are told apart in the account of the bytes; beyond it a visit counts only in the total. */
@@ -680,6 +686,13 @@ export type RunEvent =
     }
   /** The agent's log could not be copied, for this reason; journaled once per reason. */
   | { type: "agent_log_failed"; reason: AgentLogFailure; session?: string }
+  /**
+   * The name a session of the agent has in its own log changed (a session proven to belong to the run:
+   * its log calls the run's tools). `name` is display text, already cleaned. `name_hash` is the sha256 of
+   * the name as it is journaled, computed by the host: the state keeps the hash, never the text, because
+   * the state is not redacted. Only a format that can hold the event takes it.
+   */
+  | { type: "agent_session_named"; session: string; name: string; name_hash: string }
   /**
    * What the agent used since the last record of this session, as a delta. With `node` and `attempt` it is credited to
    * that attempt, which must be the agent step the run is at; without them it is use outside every step. `cursor` is
@@ -1697,6 +1710,7 @@ class Machine {
     if (event.type === "step_claimed") return this.claim(event);
     if (event.type === "agent_log_saved") return this.agentLogSaved(event);
     if (event.type === "agent_log_failed") return this.agentLogFailed(event);
+    if (event.type === "agent_session_named") return this.agentSessionNamed(event);
     if (event.type === "usage_recorded") return this.usageRecorded(event);
     if (event.type === "usage_failed") return this.usageFailed(event);
     if (event.type === "tool_calls_recorded") return this.toolCallsRecorded(event);
@@ -2161,6 +2175,31 @@ class Machine {
       entries: event.entries,
       ...(event.cut === undefined || event.cut === 0 ? {} : { cut: event.cut }),
     });
+  }
+
+  /**
+   * Journal the new name of a session of the agent. Display data like the copy of the agent's log, so
+   * anything that does not hold is a quiet no-op, and so is a format that has no place for the event
+   * (a refusal from the codec would offer the agent an upgrade it does not need). The same name is not
+   * journaled twice: the state keeps its hash.
+   */
+  private agentSessionNamed(event: Extract<RunEvent, { type: "agent_session_named" }>) {
+    const log = this.s.agentLog;
+    if (log === undefined || this.s.status !== "running" || !this.caps.sessionNames) {
+      throw new Repeat();
+    }
+    if (
+      !SAFE_ID.test(event.session) ||
+      !HEX64.test(event.name_hash) ||
+      cleanSessionName(event.name) !== event.name
+    ) {
+      throw new Repeat();
+    }
+    const hashes = log.nameHashes ?? {};
+    if (hashes[event.session] === event.name_hash) throw new Repeat();
+    hashes[event.session] = event.name_hash;
+    log.nameHashes = hashes;
+    this.log("agent_session_named", { session: event.session, name: event.name });
   }
 
   private agentLogFailed(event: Extract<RunEvent, { type: "agent_log_failed" }>) {
