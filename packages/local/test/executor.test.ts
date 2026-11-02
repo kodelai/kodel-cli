@@ -525,11 +525,15 @@ describe("the name of the session", () => {
   test("session_label_cache_hit_returns_the_name", async () => {
     await transcript(SID, [shown("old name")]);
     const path = logPath(SID);
+    // A time that is whole milliseconds, set by the test: the mtime of a file written a moment ago has a
+    // fraction of a millisecond that a Date cannot give back, and the cache compares it.
+    const fixed = new Date(2030, 0, 1);
+    await utimes(path, fixed, fixed);
     expect((await logFacts(path, SID)).name).toBe("old name");
-    const { mtime } = await stat(path);
     // The same size and the same mtime: the file is taken to be as it was.
     await writeFile(path, `${JSON.stringify(shown("new name"))}\n`);
-    await utimes(path, mtime, mtime);
+    await utimes(path, fixed, fixed);
+    expect((await stat(path)).mtimeMs).toBe(fixed.getTime());
     expect((await logFacts(path, SID)).name).toBe("old name");
   });
 
