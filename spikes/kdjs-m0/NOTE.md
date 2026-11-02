@@ -31,6 +31,12 @@ First hand run of Q4 (the person, Claude Code) found two defects in the spike, b
    modifyOtherKeys), plus Ctrl+] (0x1d and kitty) which is what the plan already says.
 6. The child's `cwd` has to be in the spec; the holder's own `chdir("/")` must not leak into the child (it did first).
 
+7. The child switches modes on in the person's terminal through its output (mouse tracking, focus events, bracketed
+   paste, kitty keyboard, application keys, alternate screen). On detach, session end or kill the client must switch them
+   all off and print a visible "[detached: name]" line; otherwise mouse movement types characters into the shell. This is
+   the plan's mode tracker in its smallest form: a fixed reset string is enough for leaving, tracking is needed only for
+   replay on re-attach.
+
 Not answered (unknown): whether `claude "/kodel-run ..."` expands the skill as a positional prompt, and whether a `--bg`
 session goes on when a background `kodel wait` reports. These need a real Claude Code and the person.
 

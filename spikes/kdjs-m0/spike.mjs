@@ -205,8 +205,19 @@ _,st=os.waitpid(pid,0);sys.exit(os.waitstatus_to_exitcode(st))`;
   } else if (cmd === "tail") {
     process.stdout.write(fs.readFileSync(path.join(dirOf(name), "out.log")));
   } else if (cmd === "attach") {
-    const exitRaw = (code) => {
+    // Modes the child switched on in the person's terminal; switched off again on every way out.
+    const RESET = [
+      "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l", // mouse tracking
+      "\x1b[?1004l", // focus events
+      "\x1b[?2004l", // bracketed paste
+      "\x1b[?1l\x1b>", // application cursor keys and keypad
+      "\x1b[<99u\x1b[>4;0m", // kitty keyboard (pop all) and modifyOtherKeys off
+      "\x1b[?1049l\x1b[?47l", // alternate screen
+      "\x1b[0m\x1b[?25h", // attributes, cursor visible
+    ].join("");
+    const exitRaw = (code, why = "session ended") => {
       if (process.stdin.isTTY) process.stdin.setRawMode(false);
+      process.stdout.write(`${RESET}\r\n\x1b[7m [${why}: ${name}] \x1b[0m\r\n`);
       process.exit(code);
     };
     const s = net.connect(status(name).sock);
@@ -222,6 +233,7 @@ _,st=os.waitpid(pid,0);sys.exit(os.waitstatus_to_exitcode(st))`;
       p.writeUInt16BE(process.stdout.rows || 24, 2);
       send(1, p);
     };
+    for (const sig of ["SIGTERM", "SIGHUP"]) process.on(sig, () => exitRaw(1, "killed"));
     s.on("connect", size);
     process.stdout.on("resize", size);
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
@@ -243,7 +255,7 @@ _,st=os.waitpid(pid,0);sys.exit(os.waitstatus_to_exitcode(st))`;
       }
       if (chords.some((c) => d.includes(c))) {
         s.destroy(); // detach
-        exitRaw(0);
+        exitRaw(0, "detached");
       }
       for (let i = 0; i < d.length; i += 4000) send(0, d.subarray(i, i + 4000));
     });
