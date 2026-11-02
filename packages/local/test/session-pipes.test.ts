@@ -1,10 +1,21 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SessionError } from "@kodel-ai/pipeline-core";
+import { encodeRecord, SessionError } from "@kodel-ai/pipeline-core";
 import { liveProcess, processIdentity } from "../src/process-table";
+import { ensurePrivateDir } from "../src/session-paths";
 import { PipesSessionAdapter } from "../src/session-pipes";
+import { publishSession, replaceRecord } from "../src/session-records";
 
 const entry = join(import.meta.dir, "../src/session-holder-entry.ts");
 const tableAvailable = processIdentity(process.pid) !== undefined;
@@ -85,7 +96,7 @@ describe("pipes adapter, real processes", () => {
     expect(done).toMatchObject({ state: "killed", reason: "timeout" });
   });
 
-  test("tA_pipes_stop_kills_the_child_and_marks_stopped", async () => {
+  tableTest("tA_pipes_stop_kills_the_child_and_marks_stopped", async () => {
     const { id } = await adapter.start(sh("sleep 60"));
     await eventually(() => readdirSync(adapter.place.dir).length > 0);
     const running = await adapter.wait(id, { timeoutMs: 300 });
@@ -148,7 +159,7 @@ describe("pipes adapter, real processes", () => {
     expect((await adapter.wait(again.id, { timeoutMs: 15_000 })).state).toBe("exited");
   });
 
-  test("tA_pipes_remove_refuses_a_running_session_and_ignores_bad_ids", async () => {
+  tableTest("tA_pipes_remove_refuses_a_running_session_and_ignores_bad_ids", async () => {
     const { id } = await adapter.start(sh("sleep 30"));
     await expect(adapter.remove(id)).rejects.toMatchObject({ code: "STILL_RUNNING" });
     for (const bad of ["..", ".", "names", "../x"]) {
@@ -196,6 +207,139 @@ describe("pipes adapter, real processes", () => {
     const done = await adapter.wait(id, { timeoutMs: 15_000 });
     expect(done.state).toBe("exited");
     expect((await adapter.tail(id)).text).toContain("end");
+  });
+
+  test("tA_stop_without_a_recorded_identity_never_signals", async () => {
+    // a session folder written by hand: the child is a stranger's live process, no identity was recorded
+    const stranger = spawn("sleep", ["30"], { stdio: "ignore" });
+    try {
+      const id = "a_000000000_0002";
+      ensurePrivateDir(adapter.place.runDir);
+      ensurePrivateDir(adapter.place.dir);
+      publishSession(join(adapter.place.dir, id), {
+        v: 1,
+        id,
+        mode: "pipes",
+        spec: { cwd: root, envNames: [] },
+        started: Date.now(),
+        root,
+      });
+      replaceRecord(
+        join(adapter.place.dir, id, "status.json"),
+        encodeRecord("status", {
+          v: 1,
+          state: "running",
+          by: "holder",
+          holder: { pid: process.pid },
+          child: { pid: stranger.pid as number },
+          since: Date.now(),
+        }),
+      );
+      await expect(adapter.stop(id)).rejects.toMatchObject({ code: "IDENTITY_UNKNOWN" });
+      expect(liveProcess(stranger.pid as number)).toBe(true);
+    } finally {
+      stranger.kill("SIGKILL");
+    }
+  });
+
+  tableTest("tA_recycled_holder_pid_is_not_a_running_session", async () => {
+    const id = "a_000000000_0003";
+    ensurePrivateDir(adapter.place.runDir);
+    ensurePrivateDir(adapter.place.dir);
+    publishSession(join(adapter.place.dir, id), {
+      v: 1,
+      id,
+      mode: "pipes",
+      spec: { cwd: root, envNames: [] },
+      started: Date.now(),
+      root,
+    });
+    const real = processIdentity(process.pid);
+    replaceRecord(
+      join(adapter.place.dir, id, "status.json"),
+      encodeRecord("status", {
+        v: 1,
+        state: "running",
+        by: "holder",
+        holder: {
+          pid: process.pid,
+          identity: {
+            method: real?.method ?? "ps-lstart",
+            value: "not the start time",
+            ...(real?.boot ? { boot: real.boot } : {}),
+          },
+        },
+        since: Date.now(),
+      }),
+    );
+    expect(await adapter.status(id)).toMatchObject({ state: "lost" });
+  });
+
+  test("tA_boot_bound_never_leaves_a_command_running_without_its_session", async () => {
+    for (let i = 0; i < 4; i++) {
+      const ran = join(root, `ran-${i}`);
+      const quick = make({ bootTimeoutMs: 1 });
+      let outcome: "ok" | "failed" = "ok";
+      try {
+        await quick.start(sh(`touch ${ran}; sleep 2`, { name: `bound-${i}`, timeoutMs: 5_000 }));
+      } catch (error) {
+        expect((error as SessionError).code).toBe("HOLDER_BOOT_FAILED");
+        outcome = "failed";
+      }
+      await new Promise((r) => setTimeout(r, 1_500));
+      const folders = existsSync(quick.place.dir)
+        ? readdirSync(quick.place.dir).filter((n) => n.startsWith("a_"))
+        : [];
+      if (existsSync(ran)) expect(folders.length).toBeGreaterThan(0); // it ran, so its session must still be there
+      if (!existsSync(ran) && outcome === "failed") {
+        // nothing ran: the folder and the name were rolled back, so the same name starts again
+        expect(folders.length).toBe(0);
+      }
+      for (const f of folders) await quick.stop(f).catch(() => {});
+    }
+  }, 60_000);
+
+  test("tA_command_and_argv_are_redacted_in_session_json", async () => {
+    const secret = "AKIAIOSFODNN7EXAMPLE";
+    const { id } = await adapter.start({
+      command: `echo ${secret}; exit 0`,
+      cwd: root,
+      timeoutMs: 20_000,
+    });
+    await adapter.wait(id, { timeoutMs: 15_000 });
+    const text = readFileSync(join(adapter.place.dir, id, "session.json"), "utf8");
+    expect(text).not.toContain(secret);
+  });
+
+  test("tA_project_rule_with_a_function_ends_rules_unknown_and_runs_nothing", async () => {
+    const ran = join(root, "ran-rules");
+    const withRule = make({
+      rules: [{ name: "x", pattern: /x/g, replace: () => "y" }],
+    });
+    await expect(withRule.start(sh(`touch ${ran}`))).rejects.toMatchObject({
+      code: "HOLDER_BOOT_FAILED",
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(existsSync(ran)).toBe(false);
+  });
+
+  test("tA_list_marks_an_unreadable_folder", async () => {
+    ensurePrivateDir(adapter.place.runDir);
+    ensurePrivateDir(adapter.place.dir);
+    const id = "a_000000000_0004";
+    mkdirSync(join(adapter.place.dir, id), { recursive: true });
+    writeFileSync(join(adapter.place.dir, id, "session.json"), "{ not json");
+    const rows = await adapter.list();
+    expect(rows).toEqual([{ id, status: { state: "lost" }, problem: "CANNOT_READ" }]);
+  });
+
+  test("tA_unsupported_lifetime_and_parent_are_refused", async () => {
+    await expect(adapter.start(sh("true", { lifetime: "with-starter" }))).rejects.toMatchObject({
+      code: "UNSUPPORTED",
+    });
+    await expect(adapter.start(sh("true", { parent: "a_000000000_0000" }))).rejects.toMatchObject({
+      code: "UNSUPPORTED",
+    });
   });
 
   test("tA_unknown_id_and_invalid_spec", async () => {

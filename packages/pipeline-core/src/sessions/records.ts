@@ -125,23 +125,52 @@ export function decodeRecord<K extends RecordKind>(kind: K, raw: unknown): Decod
   if (typeof v !== "number" || !Number.isInteger(v))
     return { ok: false, code: "CANNOT_READ", why: "no v" };
   if (v > SESSION_FORMAT_VERSION) return { ok: false, code: "NEWER_FORMAT", why: `v ${v}` };
-  // Unknown optional fields of a known v are ignored: the strict schema is for `encode`.
-  const known = Object.fromEntries(
-    Object.entries(raw as Record<string, unknown>).filter(
-      ([key]) => key in (schemas[kind] as z.ZodObject<z.ZodRawShape>).shape,
-    ),
-  );
-  const parsed = schemas[kind].safeParse(known);
-  if (!parsed.success) {
-    const first = parsed.error.issues[0];
-    return {
-      ok: false,
-      code: "CANNOT_READ",
-      why: `${first?.path.join(".") ?? "?"}: ${first?.message ?? "invalid"}`,
-    };
+  // `encode` is strict. `decode` is tolerant at every level: a key the schema does not know is removed and the
+  // read repeated; an identity whose method this build does not know is dropped (no identity: fail closed later).
+  const candidate: unknown = structuredClone(raw);
+  for (let round = 0; round < 12; round++) {
+    const parsed = schemas[kind].safeParse(candidate);
+    if (parsed.success) return { ok: true, record: parsed.data as ModelOf[K] };
+    let changed = false;
+    for (const issue of parsed.error.issues) {
+      if (issue.code === "unrecognized_keys") {
+        const holder = at(candidate, issue.path);
+        if (holder && typeof holder === "object") {
+          for (const key of issue.keys) delete (holder as Record<string, unknown>)[key];
+          changed = true;
+        }
+      } else if (
+        issue.code === "invalid_enum_value" &&
+        issue.path.at(-1) === "method" &&
+        issue.path.at(-2) === "identity"
+      ) {
+        const owner = at(candidate, issue.path.slice(0, -2));
+        if (owner && typeof owner === "object") {
+          delete (owner as Record<string, unknown>).identity;
+          changed = true;
+        }
+      }
+    }
+    if (!changed) {
+      const first = parsed.error.issues[0];
+      return {
+        ok: false,
+        code: "CANNOT_READ",
+        why: `${first?.path.join(".") ?? "?"}: ${first?.message ?? "invalid"}`,
+      };
+    }
   }
-  return { ok: true, record: parsed.data as ModelOf[K] };
+  return { ok: false, code: "CANNOT_READ", why: "too many unknown fields" };
 }
+
+const at = (root: unknown, path: (string | number)[]): unknown => {
+  let cursor = root;
+  for (const key of path) {
+    if (typeof cursor !== "object" || cursor === null) return undefined;
+    cursor = (cursor as Record<string | number, unknown>)[key];
+  }
+  return cursor;
+};
 
 /** The text of a record as it is stored. Refuses a model with an unknown field or a missing one. */
 export function encodeRecord<K extends RecordKind>(kind: K, model: ModelOf[K]): string {

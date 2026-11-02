@@ -97,3 +97,35 @@ export const descendantsOf = (pid: number): number[] => {
   }
   return found.reverse();
 };
+
+/**
+ * The pid is alive and, when an identity was recorded, still the same process. A recycled pid is not the process
+ * that was recorded. When the identity cannot be read now the process counts as alive (never declare a session
+ * lost on a guess).
+ */
+export const sameProcess = (pid: number, identity: ProcessIdentity | undefined): boolean => {
+  if (!liveProcess(pid)) return false;
+  if (!identity) return true;
+  const now = processIdentity(pid);
+  if (!now) return true;
+  return sameIdentity(identity, now) !== false;
+};
+
+let cachedMachine: string | undefined | null = null;
+/** An id of this machine, or `undefined` when it cannot be read (then no session is judged foreign). */
+export const machineId = (): string | undefined => {
+  if (cachedMachine !== null) return cachedMachine;
+  let found: string | undefined;
+  const linux = readText("/etc/machine-id")?.trim();
+  if (linux) found = linux;
+  else if (process.platform === "darwin") {
+    const result = spawnSync("ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"], {
+      encoding: "utf8",
+      timeout: 2_000,
+    });
+    const match = /"IOPlatformUUID"\s*=\s*"([^"]+)"/.exec(result.stdout ?? "");
+    if (match?.[1]) found = match[1];
+  }
+  cachedMachine = found;
+  return found;
+};

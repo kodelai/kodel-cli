@@ -16,6 +16,7 @@ import {
   foldSessionName,
   isLocalSessionId,
   planSend,
+  type RedactRule,
   redactText,
   SESSION_FORMAT_VERSION,
   type SessionAdapter,
@@ -29,9 +30,22 @@ import {
   validateSpec,
 } from "@kodel-ai/pipeline-core";
 import { KILL_GRACE_MS, killTree } from "./command";
-import { descendantsOf, liveProcess, processIdentity, sameIdentity } from "./process-table";
+import {
+  descendantsOf,
+  liveProcess,
+  machineId,
+  processIdentity,
+  sameIdentity,
+} from "./process-table";
 import { sessionEnv } from "./session-env";
-import { BOOT_FILE, frameInput, type HolderInput, INPUT_FIFO, readTail } from "./session-holder";
+import {
+  BOOT_FILE,
+  frameInput,
+  type HolderInput,
+  INPUT_FIFO,
+  readTail,
+  type WireRule,
+} from "./session-holder";
 import {
   ensurePrivateDir,
   newSessionId,
@@ -43,6 +57,7 @@ import {
   createExclusive,
   type NameMarker,
   publishSession,
+  readMarker,
   readSession,
   readStatus,
   removeDir,
@@ -68,6 +83,8 @@ export interface PipesAdapterOptions {
   pollMs?: number;
   build?: string;
   baseEnv?: Record<string, string | undefined>;
+  /** Project redaction rules; one with a function cannot reach the holder and ends the session `rules_unknown`. */
+  rules?: RedactRule[];
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -104,13 +121,17 @@ export class PipesSessionAdapter implements SessionAdapter {
     const problem = validateSpec(spec);
     if (problem) throw new SessionError("SPEC_INVALID", problem);
     if (spec.mode === "pty") throw new SessionError("UNSUPPORTED", "this adapter runs pipes only");
+    if (spec.lifetime === "with-starter" || spec.parent !== undefined) {
+      throw new SessionError("UNSUPPORTED", "lifetime with-starter and parent are not built yet");
+    }
 
     ensurePrivateDir(this.place.runDir);
     ensurePrivateDir(this.place.dir);
     ensurePrivateDir(this.place.namesDir);
 
-    const id = newSessionId(this.now());
     const started = this.now();
+    let id = newSessionId(started);
+    while (existsSync(sessionDirOf(this.place, id))) id = newSessionId(started);
     const dir = sessionDirOf(this.place, id);
     let marker: string | undefined;
     if (spec.name !== undefined) {
@@ -122,23 +143,30 @@ export class PipesSessionAdapter implements SessionAdapter {
         started,
       };
       if (!createExclusive(marker, encodeRecord("name", claim))) {
-        const holders = await this.list({ name: spec.name });
+        marker = undefined; // not ours: never rolled back
+        const held = readMarker(this.markerPath(spec.name));
+        if (held === "newer") {
+          throw new SessionError("NEWER_FORMAT", "the name marker was written by a newer kodel");
+        }
+        // The marker's own id decides: its folder is there (taken, maybe still being published) or it is gone (used).
+        const live = typeof held !== "string" && existsSync(sessionDirOf(this.place, held.id));
         throw new SessionError(
-          holders.length > 0 ? "NAME_TAKEN" : "NAME_USED",
-          holders.length > 0
-            ? `a session named ${spec.name} exists (${holders[0]?.id})`
+          live || held === "unreadable" ? "NAME_TAKEN" : "NAME_USED",
+          live || held === "unreadable"
+            ? `a session named ${spec.name} exists`
             : `the name ${spec.name} was used by a session that is gone; a person frees it with \`kodel agent forget-name\``,
         );
       }
     }
 
+    let published = false;
     const rollback = () => {
-      removeDir(dir);
+      if (published) removeDir(dir);
       removeDir(`${dir}.tmp-${process.pid}`);
       if (marker) removeDir(marker);
     };
 
-    const { env: _env, ...safeSpec } = spec;
+    const { env: _env, command, ...safeSpec } = spec;
     const record: SessionRecord = {
       v: SESSION_FORMAT_VERSION,
       id,
@@ -146,19 +174,28 @@ export class PipesSessionAdapter implements SessionAdapter {
       mode: "pipes",
       spec: {
         ...safeSpec,
-        argv: spec.argv?.map((a) => redactText(a)),
+        ...(command !== undefined ? { command: redactText(command, this.opts.rules ?? []) } : {}),
+        ...(spec.argv !== undefined
+          ? { argv: spec.argv.map((a) => redactText(a, this.opts.rules ?? [])) }
+          : {}),
         envNames: Object.keys(spec.env ?? {}),
       },
       started,
       root: this.opts.root,
+      ...(machineId() ? { machine: machineId() as string } : {}),
     };
     try {
       publishSession(dir, record);
+      published = true;
     } catch (error) {
       rollback();
       throw new SessionError("STATE_UNWRITABLE", (error as Error).message);
     }
 
+    const rules = this.opts.rules ?? [];
+    const wire: WireRule[] = rules
+      .filter((r) => r.replace === undefined)
+      .map((r) => ({ name: r.name, source: r.pattern.source, flags: r.pattern.flags }));
     const input: HolderInput = {
       v: SESSION_FORMAT_VERSION,
       dir,
@@ -171,6 +208,8 @@ export class PipesSessionAdapter implements SessionAdapter {
       graceMs: this.graceMs,
       started,
       ...(this.opts.build ? { build: this.opts.build } : {}),
+      ...(wire.length > 0 ? { rules: wire } : {}),
+      ...(rules.some((r) => r.replace !== undefined) ? { rulesUnknown: true } : {}),
     };
 
     const middle = spawn(
@@ -181,30 +220,51 @@ export class PipesSessionAdapter implements SessionAdapter {
     middle.on("error", () => {});
     middle.stdin?.on("error", () => {});
     middle.stdin?.end(frameInput(input));
-    const bootLine = await this.awaitBoot(dir);
+    const boot = await this.awaitBoot(dir);
     middle.unref();
-    if (bootLine !== "ready") {
-      // A holder that never reported cannot be trusted: nothing ran (or it is dead), so name and folder go.
+    if (boot.line !== "ready") {
+      const why = redactText(boot.line.replace(/^HOLDER_BOOT_FAILED:?/, ""), rules);
+      if (boot.timedOut) {
+        // No answer in time. The tombstone, created exclusively, makes the session final: a holder that is late
+        // then finds it and never starts the child. If the holder was first, it may be starting the child, so the
+        // session and its name stay and the person is told.
+        const tombstone = createExclusive(
+          join(dir, STATUS_FILE),
+          encodeRecord("status", {
+            v: SESSION_FORMAT_VERSION,
+            state: "lost",
+            by: "reader",
+            reason: "no_status",
+            since: this.now(),
+          }),
+        );
+        if (!tombstone) {
+          throw new SessionError(
+            "HOLDER_BOOT_FAILED",
+            `the holder did not answer in time but has begun; the session ${id} stays (see \`kodel agent ls\`)`,
+          );
+        }
+      }
+      // The holder said it failed (or lost the race to the tombstone): nothing ran, so name and folder go.
       rollback();
-      throw new SessionError(
-        "HOLDER_BOOT_FAILED",
-        redactText(bootLine.replace(/^HOLDER_BOOT_FAILED:?/, "")),
-      );
+      throw new SessionError("HOLDER_BOOT_FAILED", why);
     }
     return { id, ...(spec.name !== undefined ? { name: foldSessionName(spec.name) } : {}) };
   }
 
   /** The holder reports its boot in `boot.txt` of the session folder; the wait is bounded (10 s by default). */
-  private async awaitBoot(dir: string): Promise<string> {
-    const end = Date.now() + (this.opts.bootTimeoutMs ?? 10_000);
+  private async awaitBoot(dir: string): Promise<{ line: string; timedOut: boolean }> {
+    const end = this.now() + (this.opts.bootTimeoutMs ?? 10_000);
     for (;;) {
       try {
         const text = readFileSync(join(dir, BOOT_FILE), "utf8").trim();
-        if (text !== "") return text;
+        if (text !== "") return { line: text, timedOut: false };
       } catch {
         // not written yet
       }
-      if (Date.now() >= end) return "HOLDER_BOOT_FAILED:no answer within the boot bound";
+      if (this.now() >= end) {
+        return { line: "HOLDER_BOOT_FAILED:no answer within the boot bound", timedOut: true };
+      }
       await sleep(20);
     }
   }
@@ -221,11 +281,7 @@ export class PipesSessionAdapter implements SessionAdapter {
     }
     const status = result.status;
     const recorded = readStatus(dir);
-    if (
-      recorded !== "missing" &&
-      recorded !== "unreadable" &&
-      recorded.lastOutputAt !== undefined
-    ) {
+    if (typeof recorded !== "string" && recorded.lastOutputAt !== undefined) {
       status.lastOutputAt = recorded.lastOutputAt;
     }
     return status;
@@ -236,6 +292,7 @@ export class PipesSessionAdapter implements SessionAdapter {
     const status = this.read(id);
     if (status.state === "lost" && status.reason === "no_status") {
       const dir = sessionDirOf(this.place, id);
+      if (this.isForeign(dir)) return status; // another machine's session is never judged lost here
       createExclusive(
         join(dir, STATUS_FILE),
         encodeRecord("status", {
@@ -249,6 +306,18 @@ export class PipesSessionAdapter implements SessionAdapter {
       return this.read(id);
     }
     return status;
+  }
+
+  /** A session of another machine (a shared folder): listed, never judged, never signalled. */
+  private isForeign(dir: string): boolean {
+    const record = readSession(dir);
+    const here = machineId();
+    return (
+      typeof record !== "string" &&
+      record.machine !== undefined &&
+      here !== undefined &&
+      record.machine !== here
+    );
   }
 
   async status(id: string): Promise<SessionStatus> {
@@ -284,22 +353,32 @@ export class PipesSessionAdapter implements SessionAdapter {
   async stop(id: string): Promise<SessionStatus> {
     const dir = sessionDirOf(this.place, id);
     const before = this.settle(id);
+    if (this.isForeign(dir)) {
+      throw new SessionError("IDENTITY_UNKNOWN", `session ${id} belongs to another machine`);
+    }
     const recorded = readStatus(dir);
-    if (recorded === "missing" || recorded === "unreadable") return before;
+    if (typeof recorded === "string") return before;
     const child = recorded.child;
     if (before.state !== "running" && !(before.childAlive && child)) return before;
     if (!child) return before;
+    if (!liveProcess(child.pid)) return this.settle(id);
 
-    // The recorded identity must still be the live process; unknown means refuse, never signal a stranger.
-    const now = processIdentity(child.pid);
-    if (child.identity && now) {
-      const same = sameIdentity(child.identity, now);
-      if (same === undefined)
-        throw new SessionError("IDENTITY_UNKNOWN", `cannot compare the identity of ${child.pid}`);
-      if (!same) return this.settle(id);
-    } else if (child.identity && !now && liveProcess(child.pid)) {
-      throw new SessionError("IDENTITY_UNKNOWN", `cannot read the identity of ${child.pid}`);
+    // The recorded identity must be the live process. Without a recorded identity, or when it cannot be read or
+    // compared now, nothing is signalled: a pid may have been taken by a stranger.
+    if (!child.identity) {
+      throw new SessionError(
+        "IDENTITY_UNKNOWN",
+        `no identity was recorded for ${child.pid}; not signalling`,
+      );
     }
+    const now = processIdentity(child.pid);
+    if (!now)
+      throw new SessionError("IDENTITY_UNKNOWN", `cannot read the identity of ${child.pid}`);
+    const same = sameIdentity(child.identity, now);
+    if (same === undefined) {
+      throw new SessionError("IDENTITY_UNKNOWN", `cannot compare the identity of ${child.pid}`);
+    }
+    if (!same) return this.settle(id); // another process has the pid now: the session's child is gone
     if (!existsSync(join(dir, STOP_FILE))) {
       replaceRecord(
         join(dir, STOP_FILE),
@@ -307,7 +386,7 @@ export class PipesSessionAdapter implements SessionAdapter {
           v: SESSION_FORMAT_VERSION,
           by: "stop",
           at: this.now(),
-          ...(now ? { identity: now } : {}),
+          identity: now,
         }),
       );
     }
@@ -315,17 +394,20 @@ export class PipesSessionAdapter implements SessionAdapter {
       pid,
       identity: processIdentity(pid),
     }));
-    killTree(child.pid);
-    for (const d of descendants) {
-      const alive = processIdentity(d.pid);
-      if (alive && d.identity && sameIdentity(d.identity, alive)) {
-        try {
-          process.kill(d.pid, "SIGTERM");
-        } catch {
-          // gone
+    const signalDescendants = (signal: NodeJS.Signals) => {
+      for (const d of descendants) {
+        const alive = processIdentity(d.pid);
+        if (alive && d.identity && sameIdentity(d.identity, alive)) {
+          try {
+            process.kill(d.pid, signal);
+          } catch {
+            // gone
+          }
         }
       }
-    }
+    };
+    killTree(child.pid);
+    signalDescendants("SIGTERM");
     // stop waits past the kill grace so the escalation in killTree runs in this process
     const limit = this.now() + KILL_GRACE_MS + 3_000;
     while (this.now() < limit) {
@@ -333,16 +415,7 @@ export class PipesSessionAdapter implements SessionAdapter {
       if (s.state !== "running" && s.state !== "starting" && !liveProcess(child.pid)) break;
       await sleep(this.poll);
     }
-    for (const d of descendants) {
-      const alive = processIdentity(d.pid);
-      if (alive && d.identity && sameIdentity(d.identity, alive)) {
-        try {
-          process.kill(d.pid, "SIGKILL");
-        } catch {
-          // gone
-        }
-      }
-    }
+    signalDescendants("SIGKILL");
     return this.settle(id);
   }
 
@@ -366,13 +439,27 @@ export class PipesSessionAdapter implements SessionAdapter {
     }
     const plan = planSend(text, false, "\n");
     const data = opts.submit === false ? plan.paste : `${plan.paste}${plan.submit}`;
-    const fd = openSync(join(dir, INPUT_FIFO), constants.O_WRONLY | constants.O_NONBLOCK);
+    let written = 0;
     try {
-      writeSync(fd, data);
-    } finally {
-      closeSync(fd);
+      const fd = openSync(join(dir, INPUT_FIFO), constants.O_WRONLY | constants.O_NONBLOCK);
+      try {
+        written = writeSync(fd, data);
+      } finally {
+        closeSync(fd);
+      }
+    } catch (error) {
+      throw new SessionError(
+        "NOT_RUNNING",
+        `could not write to session ${id}: ${(error as Error).message}`,
+      );
     }
-    return { bytes: Buffer.byteLength(data) };
+    if (written < Buffer.byteLength(data)) {
+      throw new SessionError(
+        "UNSUPPORTED",
+        `only ${written} of ${Buffer.byteLength(data)} bytes were taken; send less at once`,
+      );
+    }
+    return { bytes: written };
   }
 
   async remove(id: string): Promise<void> {
@@ -397,7 +484,16 @@ export class PipesSessionAdapter implements SessionAdapter {
     for (const entry of readdirSync(this.place.dir)) {
       if (!isLocalSessionId(entry)) continue;
       const record = readSession(join(this.place.dir, entry));
-      if (typeof record === "string") continue;
+      if (typeof record === "string") {
+        if (wanted === undefined && record !== "missing") {
+          entries.push({
+            id: entry,
+            status: { state: "lost" },
+            problem: record === "newer" ? "NEWER_FORMAT" : "CANNOT_READ",
+          });
+        }
+        continue;
+      }
       if (wanted !== undefined && record.name !== wanted) continue;
       try {
         entries.push({

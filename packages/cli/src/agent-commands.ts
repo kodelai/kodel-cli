@@ -1,4 +1,12 @@
-import { forgetName, PipesSessionAdapter, resolveBase } from "@kodel-ai/local";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import {
+  forgetName,
+  PipesSessionAdapter,
+  readMarker,
+  resolveBase,
+  sessionDirOf,
+} from "@kodel-ai/local";
 import {
   foldSessionName,
   isSessionName,
@@ -33,6 +41,8 @@ export interface AgentContext {
 }
 
 const detailOf = (entry: SessionListEntry): string => {
+  if (entry.problem)
+    return entry.problem === "NEWER_FORMAT" ? "written by a newer kodel" : "cannot be read";
   const s = entry.status;
   if (s.state === "exited") return `exit ${s.exitCode ?? 0}`;
   if (s.state === "killed") return s.reason ?? s.signal ?? "killed";
@@ -50,9 +60,16 @@ export function registerAgentCommands(
     new PipesSessionAdapter({
       base: resolveBase(ctx.environment),
       root: await ctx.root(),
+      baseEnv: ctx.environment,
       holder: { exec: launcher.exec, args: [...launcher.args, "session-holder", "holder"] },
       intermediate: { exec: launcher.exec, args: [...launcher.args, "session-holder"] },
     });
+
+  // Before anything else, also before the check for a person: the answer on Windows is the same for everyone.
+  const platform = (): void => {
+    if (process.platform === "win32")
+      ctx.fail("PLATFORM_UNSUPPORTED: agents are not supported on Windows yet");
+  };
 
   const guard = async <T>(work: () => Promise<T>): Promise<T> => {
     try {
@@ -73,6 +90,7 @@ export function registerAgentCommands(
     .option("--json", "print the list as JSON")
     .option("--no-headers", "do not print the header row")
     .action(async (opts: { json?: boolean; headers?: boolean }) => {
+      platform();
       const rows = await guard(async () => (await adapter()).list());
       if (opts.json) {
         ctx.out(`${JSON.stringify(rows, null, 2)}\n`);
@@ -101,6 +119,7 @@ export function registerAgentCommands(
     .command("stop <id>")
     .description("Stop an agent and the processes it started")
     .action(async (id: string) => {
+      platform();
       ctx.requireHuman();
       await ctx.mustConfirm(`Stop agent ${plain(id)}?`);
       const status = await guard(async () => (await adapter()).stop(id));
@@ -111,6 +130,7 @@ export function registerAgentCommands(
     .command("rm <id>")
     .description("Remove a finished agent")
     .action(async (id: string) => {
+      platform();
       ctx.requireHuman();
       await ctx.mustConfirm(`Remove agent ${plain(id)}? Its name stays used.`);
       await guard(async () => (await adapter()).remove(id));
@@ -124,6 +144,7 @@ export function registerAgentCommands(
     .option("--pty", "run it in a terminal of its own (not in this build)")
     .allowUnknownOption()
     .action(async (command: string[], opts: { name?: string; pty?: boolean }) => {
+      platform();
       ctx.requireHuman();
       if (opts.pty) ctx.fail("UNSUPPORTED: a terminal session is not in this build");
       if (opts.name !== undefined && !isSessionName(opts.name)) ctx.fail("the name is not valid");
@@ -141,12 +162,18 @@ export function registerAgentCommands(
     .command("forget-name <name>", { hidden: true })
     .description("Free a name that a finished agent still holds (a retry may run again)")
     .action(async (name: string) => {
+      platform();
       ctx.requireHuman();
       if (!isSessionName(name)) ctx.fail("the name is not valid");
       await ctx.mustConfirm(
         `Free the name ${plain(name)}? A step that is retried under it may run its command again.`,
       );
       const place = (await adapter()).place;
+      const marker = readMarker(join(place.namesDir, `${foldSessionName(name)}.json`));
+      if (marker === "newer") ctx.fail("the marker was written by a newer kodel; upgrade kodel");
+      if (typeof marker !== "string" && existsSync(sessionDirOf(place, marker.id))) {
+        ctx.fail(`the session ${plain(marker.id)} still exists; remove it first (kodel agent rm)`);
+      }
       const freed = forgetName(place.namesDir, foldSessionName(name));
       ctx.out(freed ? `${plain(name)}: freed\n` : `${plain(name)}: was not used\n`);
     });

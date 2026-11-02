@@ -104,6 +104,23 @@ export const validateSpec = (spec: SessionSpec): string | undefined => {
   if (spec.parent !== undefined && !isSessionId(spec.parent)) return "parent is not a session id";
   if (spec.mode !== undefined && spec.mode !== "pipes" && spec.mode !== "pty")
     return "mode is not valid";
+  if (
+    spec.lifetime !== undefined &&
+    spec.lifetime !== "detached" &&
+    spec.lifetime !== "with-starter"
+  ) {
+    return "lifetime is not valid";
+  }
+  if (spec.origin !== undefined && spec.origin !== "cli" && spec.origin !== "host") {
+    return "origin is not valid";
+  }
+  if (spec.inheritEnv !== undefined && typeof spec.inheritEnv !== "boolean") {
+    return "inheritEnv must be a boolean";
+  }
+  // A session started for a host outlives its starter, so it must end by itself.
+  if (spec.origin === "host" && spec.lifetime !== "with-starter" && spec.timeoutMs === undefined) {
+    return "a host session needs timeoutMs";
+  }
   return undefined;
 };
 
@@ -246,6 +263,8 @@ export interface SessionListEntry {
   id: string;
   name?: string;
   status: SessionStatus;
+  /** The entry could not be read (`CANNOT_READ`) or was written by a newer kodel (`NEWER_FORMAT`); its status is not real. */
+  problem?: "CANNOT_READ" | "NEWER_FORMAT";
 }
 
 export interface SessionAdapter {

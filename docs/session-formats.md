@@ -25,3 +25,10 @@ The word "session" also names `sessions.jsonl` in a run's storage (the index of 
 different thing and is not touched here.
 
 Golden fixtures: `fixtures/session-formats/v1/` (`scripts/take-session-fixtures.mjs`).
+
+**Refutation.** The record format is wrong if a reader of the same `v` must change to read a record a later compatible build
+writes, if a run in flight is refused, orphaned or changed by an update of kodel, or if `stop` ever signals a process
+that is not the one the record names.
+
+**Not built yet** (the first version of the family): the `parent` cascade, `lifetime: with-starter`, the PTY mode and
+`attach`, the check of a record written by another build, and Windows.

@@ -114,6 +114,30 @@ describe("session record codec (format v1)", () => {
     if (r.ok) expect("futureField" in r.record).toBe(false);
   });
 
+  test("tA_session_decode_is_tolerant_inside_nested_objects", () => {
+    const raw = load("status-running.json") as {
+      holder: { identity: Record<string, unknown> };
+      child: Record<string, unknown>;
+    };
+    raw.holder.identity.futureKey = "x";
+    raw.child.futureKey = 1;
+    const r = decodeRecord("status", raw);
+    expect(r.ok).toBe(true);
+    if (r.ok)
+      expect(r.record.holder?.identity && "futureKey" in r.record.holder.identity).toBe(false);
+    const session = load("session.json") as { spec: Record<string, unknown> };
+    session.spec.futureField = true;
+    expect(decodeRecord("session", session).ok).toBe(true);
+  });
+
+  test("tA_session_unknown_identity_method_is_dropped_not_unreadable", () => {
+    const raw = load("status-running.json") as { holder: { identity: { method: string } } };
+    raw.holder.identity.method = "windows-creation-time";
+    const r = decodeRecord("status", raw);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.record.holder?.identity).toBeUndefined();
+  });
+
   test("tA_session_encode_refuses_an_unknown_or_missing_field", () => {
     const decoded = decodeRecord("status", load("status-running.json"));
     if (!decoded.ok) throw new Error("fixture");

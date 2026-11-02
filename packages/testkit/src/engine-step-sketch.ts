@@ -15,7 +15,9 @@ export type StepOutcome =
   | { kind: "unknown"; why: string };
 
 export const stepSessionName = (run: string, node: string, attempt: number): string =>
-  `n${createHash("sha256").update(`${run}\0${node}\0${attempt}`).digest("hex").slice(0, 10)}`;
+  `n${BigInt(`0x${createHash("sha256").update(`${run}\0${node}\0${attempt}`).digest("hex")}`)
+    .toString(36)
+    .slice(0, 24)}`;
 
 export async function runStepAsSession(
   adapter: SessionAdapter,
@@ -41,7 +43,18 @@ export async function runStepAsSession(
     if (!found) return { kind: "unknown", why: "the name is taken but no session was found" };
     id = found.id;
   }
-  const done = await adapter.wait(id, opts.waitMs === undefined ? {} : { timeoutMs: opts.waitMs });
+  let done: Awaited<ReturnType<SessionAdapter["wait"]>>;
+  try {
+    done = await adapter.wait(id, opts.waitMs === undefined ? {} : { timeoutMs: opts.waitMs });
+  } catch (error) {
+    if (error instanceof SessionError) {
+      return {
+        kind: "unknown",
+        why: `the session cannot be read (${error.code}); a person decides`,
+      };
+    }
+    throw error;
+  }
   if (done.timedOut) return { kind: "unknown", why: "still running at the bound" };
   if (done.state === "lost")
     return { kind: "unknown", why: "the session was lost; a person decides" };

@@ -90,6 +90,18 @@ describe("validateSpec", () => {
   });
 });
 
+describe("validateSpec, rules added after review", () => {
+  test("tA_validate_spec_lifetime_origin_and_host_timeout", () => {
+    expect(validateSpec({ ...base, lifetime: "forever" as never })).toBeTypeOf("string");
+    expect(validateSpec({ ...base, origin: "robot" as never })).toBeTypeOf("string");
+    expect(validateSpec({ ...base, inheritEnv: "yes" as never })).toBeTypeOf("string");
+    expect(validateSpec({ ...base, origin: "host" })).toContain("timeoutMs");
+    expect(validateSpec({ ...base, origin: "host", timeoutMs: 1000 })).toBeUndefined();
+    expect(validateSpec({ ...base, origin: "host", lifetime: "with-starter" })).toBeUndefined();
+    expect(validateSpec({ ...base, origin: "cli" })).toBeUndefined();
+  });
+});
+
 describe("deriveStatus", () => {
   const started = 1_000_000;
   const snap = (over: Partial<SessionSnapshot>): SessionSnapshot => ({

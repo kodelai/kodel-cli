@@ -2,8 +2,14 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { processIdentity } from "@kodel-ai/local";
 import { AGENT_HUMAN_COMMANDS, AGENT_READ_COMMANDS } from "../src/agent-commands";
 import { runCli } from "../src/cli";
+
+// `stop` signals only a process whose identity it can check; a sandbox without the process table skips these, visibly.
+const tableTest = test.skipIf(
+  processIdentity(process.pid) === undefined && process.env.KODEL_REQUIRE_PROCTABLE !== "1",
+);
 
 const launcher = { exec: process.execPath, args: [join(import.meta.dir, "../src/main.ts")] };
 
@@ -76,48 +82,89 @@ describe("kodel agent", () => {
     expect(await readdir(state)).toEqual([]); // nothing was written by a refusal
   });
 
-  test("tA_agent_exec_ls_stop_rm_by_hand", async () => {
+  tableTest(
+    "tA_agent_exec_ls_stop_rm_by_hand",
+    async () => {
+      const started = await cli(
+        { interactive: true },
+        "agent",
+        "exec",
+        "--name",
+        "hand",
+        "--",
+        "sleep",
+        "60",
+      );
+      expect(started.code, started.err).toBe(0);
+      const id = /started (a_\S+)/.exec(started.out)?.[1] as string;
+      expect(id).toBeDefined();
+      const listed = await cli({ interactive: false }, "agent", "ls");
+      expect(listed.out).toContain(id);
+      expect(listed.out).toContain("running");
+      expect(listed.out).toContain("hand");
+      const refusedRm = await cli({ interactive: true }, "agent", "rm", id);
+      expect(refusedRm.code).toBe(1);
+      expect(refusedRm.err).toContain("STILL_RUNNING");
+      const stopped = await cli({ interactive: true }, "agent", "stop", id);
+      expect(stopped.out).toContain("killed (stopped)");
+      const removed = await cli({ interactive: true }, "agent", "rm", id);
+      expect(removed.out).toContain("removed");
+      const again = await cli(
+        { interactive: true },
+        "agent",
+        "exec",
+        "--name",
+        "hand",
+        "--",
+        "true",
+      );
+      expect(again.code).toBe(1);
+      expect(again.err).toContain("NAME_USED");
+      const freed = await cli({ interactive: true }, "agent", "forget-name", "hand");
+      expect(freed.out).toContain("freed");
+      const retry = await cli(
+        { interactive: true },
+        "agent",
+        "exec",
+        "--name",
+        "hand",
+        "--",
+        "true",
+      );
+      expect(retry.code, retry.err).toBe(0);
+    },
+    60_000,
+  );
+
+  tableTest(
+    "tA_agent_stop_not_confirmed_changes_nothing",
+    async () => {
+      const started = await cli({ interactive: true }, "agent", "exec", "--", "sleep", "60");
+      const id = /started (a_\S+)/.exec(started.out)?.[1] as string;
+      const declined = await cli({ interactive: true, confirm: false }, "agent", "stop", id);
+      expect(declined.code).toBe(1);
+      expect(declined.err).toContain("not confirmed");
+      expect((await cli({ interactive: false }, "agent", "ls")).out).toContain("running");
+    },
+    60_000,
+  );
+
+  test("tA_forget_name_refuses_while_the_session_exists", async () => {
     const started = await cli(
       { interactive: true },
       "agent",
       "exec",
       "--name",
-      "hand",
+      "keep",
       "--",
       "sleep",
-      "60",
+      "30",
     );
     expect(started.code, started.err).toBe(0);
-    const id = /started (a_\S+)/.exec(started.out)?.[1] as string;
-    expect(id).toBeDefined();
-    const listed = await cli({ interactive: false }, "agent", "ls");
-    expect(listed.out).toContain(id);
-    expect(listed.out).toContain("running");
-    expect(listed.out).toContain("hand");
-    const refusedRm = await cli({ interactive: true }, "agent", "rm", id);
-    expect(refusedRm.code).toBe(1);
-    expect(refusedRm.err).toContain("STILL_RUNNING");
-    const stopped = await cli({ interactive: true }, "agent", "stop", id);
-    expect(stopped.out).toContain("killed (stopped)");
-    const removed = await cli({ interactive: true }, "agent", "rm", id);
-    expect(removed.out).toContain("removed");
-    const again = await cli({ interactive: true }, "agent", "exec", "--name", "hand", "--", "true");
-    expect(again.code).toBe(1);
-    expect(again.err).toContain("NAME_USED");
-    const freed = await cli({ interactive: true }, "agent", "forget-name", "hand");
-    expect(freed.out).toContain("freed");
-    const retry = await cli({ interactive: true }, "agent", "exec", "--name", "hand", "--", "true");
-    expect(retry.code, retry.err).toBe(0);
-  }, 60_000);
-
-  test("tA_agent_stop_not_confirmed_changes_nothing", async () => {
-    const started = await cli({ interactive: true }, "agent", "exec", "--", "sleep", "60");
-    const id = /started (a_\S+)/.exec(started.out)?.[1] as string;
-    const declined = await cli({ interactive: true, confirm: false }, "agent", "stop", id);
-    expect(declined.code).toBe(1);
-    expect(declined.err).toContain("not confirmed");
-    expect((await cli({ interactive: false }, "agent", "ls")).out).toContain("running");
-  }, 60_000);
+    const refused = await cli({ interactive: true }, "agent", "forget-name", "keep");
+    expect(refused.code).toBe(1);
+    expect(refused.err).toContain("still exists");
+  }, 30_000);
 
   test("tA_agent_exec_pty_is_not_in_this_build", async () => {
     const r = await cli({ interactive: true }, "agent", "exec", "--pty", "--", "true");

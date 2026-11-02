@@ -19,7 +19,7 @@ import {
   type SessionSnapshot,
   type StatusRecord,
 } from "@kodel-ai/pipeline-core";
-import { liveProcess } from "./process-table";
+import { sameProcess } from "./process-table";
 
 export type { NameMarker, SessionRecord, StatusRecord, StopRecord } from "@kodel-ai/pipeline-core";
 
@@ -53,15 +53,13 @@ const readRecord = <K extends RecordKind>(
 export const readSession = (dir: string): Read<SessionRecord> =>
   readRecord("session", join(dir, SESSION_FILE));
 
-export const readStatus = (dir: string): "missing" | "unreadable" | StatusRecord => {
-  const value = readRecord("status", join(dir, STATUS_FILE));
-  return value === "newer" ? "unreadable" : value;
-};
+export const readStatus = (dir: string): Read<StatusRecord> =>
+  readRecord("status", join(dir, STATUS_FILE));
 
-export const readStop = (dir: string): "missing" | "unreadable" | "present" => {
+export const readStop = (dir: string): "missing" | "unreadable" | "newer" | "present" => {
   const value = readRecord("stop", join(dir, STOP_FILE));
   if (value === "missing") return "missing";
-  return typeof value === "string" ? "unreadable" : "present";
+  return typeof value === "string" ? value : "present";
 };
 
 export const readMarker = (path: string): Read<NameMarker> => readRecord("name", path);
@@ -113,29 +111,32 @@ export const snapshotOf = (dir: string): SessionSnapshot => {
   }
   const session = readSession(dir);
   const status = readStatus(dir);
-  const holderPid =
-    status !== "missing" && status !== "unreadable" ? status.holder?.pid : undefined;
-  const childPid = status !== "missing" && status !== "unreadable" ? status.child?.pid : undefined;
+  const stop = readStop(dir);
+  const live =
+    status !== "missing" && status !== "unreadable" && status !== "newer" ? status : undefined;
+  // A newer format anywhere in the folder is "upgrade kodel", whichever file it is in.
+  const newer = session === "newer" || status === "newer" || stop === "newer";
   return {
     exists: true,
-    session:
-      session === "newer"
-        ? { v: SESSION_FORMAT_VERSION + 1, started: 0 }
-        : typeof session === "string"
-          ? session
-          : { v: session.v, started: session.started },
+    session: newer
+      ? { v: SESSION_FORMAT_VERSION + 1, started: 0 }
+      : typeof session === "string"
+        ? session
+        : { v: session.v, started: session.started },
     status:
       typeof status === "string"
-        ? status
+        ? status === "newer"
+          ? "unreadable"
+          : status
         : {
             state: status.state,
             ...(status.exitCode !== undefined ? { exitCode: status.exitCode } : {}),
             ...(status.signal !== undefined ? { signal: status.signal } : {}),
             ...(status.reason !== undefined ? { reason: status.reason } : {}),
           },
-    holderAlive: holderPid !== undefined && liveProcess(holderPid),
-    childAlive: childPid !== undefined && liveProcess(childPid),
-    stop: readStop(dir),
+    holderAlive: live?.holder !== undefined && sameProcess(live.holder.pid, live.holder.identity),
+    childAlive: live?.child !== undefined && sameProcess(live.child.pid, live.child.identity),
+    stop: stop === "newer" ? "unreadable" : stop,
   };
 };
 
