@@ -28,6 +28,7 @@ export * from "./run";
 export * from "./run-id";
 export * from "./run-task";
 export * from "./service";
+export * from "./session";
 export * from "./slug";
 export * from "./task-service";
 export * from "./task-size";
