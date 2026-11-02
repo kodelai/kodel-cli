@@ -21,6 +21,7 @@ export const SESSION_ERROR_CODES = [
   "HOLDER_BOOT_FAILED",
   "STATE_UNWRITABLE",
   "NOT_RUNNING",
+  "STILL_RUNNING",
   "UNSUPPORTED",
 ] as const;
 export type SessionErrorCode = (typeof SESSION_ERROR_CODES)[number];
@@ -127,7 +128,7 @@ export interface SessionSnapshot {
   status:
     | "missing"
     | "unreadable"
-    | { state: SessionState; exitCode?: number; signal?: string; reason?: KilledReason };
+    | { state: SessionState; exitCode?: number; signal?: string; reason?: SessionStatus["reason"] };
   holderAlive: boolean;
   childAlive: boolean;
   stop: "missing" | "unreadable" | "present";

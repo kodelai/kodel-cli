@@ -44,7 +44,7 @@ const OMITTED = "[earlier output omitted]\n";
 export const KILL_GRACE_MS = 2_000;
 const PIPE_GRACE_MS = 2_000;
 
-function killTree(pid: number | undefined) {
+export function killTree(pid: number | undefined) {
   if (pid === undefined) return;
   if (process.platform === "win32") {
     spawn("taskkill", ["/pid", String(pid), "/t", "/f"], { stdio: "ignore", windowsHide: true }).on(
