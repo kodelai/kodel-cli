@@ -105,23 +105,16 @@ describe("kodel agent", () => {
       const refusedRm = await cli({ interactive: true }, "agent", "rm", id);
       expect(refusedRm.code).toBe(1);
       expect(refusedRm.err).toContain("STILL_RUNNING");
+      expect(listed.out).toContain("COMMAND");
+      expect(listed.out).toContain("sleep 60");
       const stopped = await cli({ interactive: true }, "agent", "stop", id);
-      expect(stopped.out).toContain("killed (stopped)");
+      expect(stopped.out).toContain(`${id}: stopped`);
+      const afterStop = await cli({ interactive: false }, "agent", "ls");
+      expect(afterStop.out).toContain("stopped");
+      expect(afterStop.out).not.toContain("killed");
       const removed = await cli({ interactive: true }, "agent", "rm", id);
       expect(removed.out).toContain("removed");
-      const again = await cli(
-        { interactive: true },
-        "agent",
-        "exec",
-        "--name",
-        "hand",
-        "--",
-        "true",
-      );
-      expect(again.code).toBe(1);
-      expect(again.err).toContain("NAME_USED");
-      const freed = await cli({ interactive: true }, "agent", "forget-name", "hand");
-      expect(freed.out).toContain("freed");
+      // a session started from the command line frees its name with its folder
       const retry = await cli(
         { interactive: true },
         "agent",
@@ -164,6 +157,40 @@ describe("kodel agent", () => {
     const refused = await cli({ interactive: true }, "agent", "forget-name", "keep");
     expect(refused.code).toBe(1);
     expect(refused.err).toContain("still exists");
+  }, 30_000);
+
+  test("tA_agent_logs_prints_stdout_and_stderr_apart", async () => {
+    const started = await cli(
+      { interactive: true },
+      "agent",
+      "exec",
+      "--",
+      "sh",
+      "-c",
+      "echo to-out; echo to-err >&2",
+    );
+    const id = /started (a_\S+)/.exec(started.out)?.[1] as string;
+    for (
+      let i = 0;
+      i < 80 && !(await cli({ interactive: false }, "agent", "ls")).out.includes("exit 0");
+      i++
+    ) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const both = await cli({ interactive: false }, "agent", "logs", id);
+    expect(both.out).toContain("to-out");
+    expect(both.out).toContain("to-err");
+    const out = await cli({ interactive: false }, "agent", "logs", id, "--stdout");
+    expect(out.out).toContain("to-out");
+    expect(out.out).not.toContain("to-err");
+    const err = await cli({ interactive: false }, "agent", "logs", id, "--stderr");
+    expect(err.out).toContain("to-err");
+    expect(err.out).not.toContain("to-out");
+    const bad = await cli({ interactive: false }, "agent", "logs", id, "--stdout", "--stderr");
+    expect(bad.code).toBe(1);
+    expect((await cli({ interactive: false }, "agent", "logs", "a_000000000_0000")).err).toContain(
+      "NOT_FOUND",
+    );
   }, 30_000);
 
   test("tA_agent_exec_pty_is_not_in_this_build", async () => {

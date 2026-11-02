@@ -16,6 +16,7 @@ import {
   type SessionStatus,
   type StartResult,
   type TailResult,
+  type TailStream,
   validateSpec,
 } from "@kodel-ai/pipeline-core";
 
@@ -38,18 +39,21 @@ export class FakeSessionAdapter implements SessionAdapter {
   private counter = 0;
 
   capabilities(): SessionCapabilities {
-    return { pty: false, send: false, attach: false, lastOutputAt: false };
+    return { pty: false, send: false, attach: false, lastOutputAt: false, streams: true };
   }
 
   async start(spec: SessionSpec): Promise<StartResult> {
     const problem = validateSpec(spec);
     if (problem) throw new SessionError("SPEC_INVALID", problem);
     const name = spec.name === undefined ? undefined : foldSessionName(spec.name);
-    if (name !== undefined && this.usedNames.has(name)) {
+    if (name !== undefined) {
       const live = [...this.entries.values()].some((e) => e.name === name);
-      throw new SessionError(live ? "NAME_TAKEN" : "NAME_USED", `name ${name}`);
+      if (live || this.usedNames.has(name)) {
+        throw new SessionError(live ? "NAME_TAKEN" : "NAME_USED", `name ${name}`);
+      }
     }
-    if (name !== undefined) this.usedNames.add(name);
+    // a name outlives its session only when a host started it (the consumer's retry rule)
+    if (name !== undefined && spec.origin === "host") this.usedNames.add(name);
     this.counter += 1;
     const id = `a_${this.counter.toString(36).padStart(9, "0")}_0000`;
     const entry: Entry = {
@@ -127,8 +131,10 @@ export class FakeSessionAdapter implements SessionAdapter {
     return this.derive(entry);
   }
 
-  async tail(id: string, _bytes?: number): Promise<TailResult> {
-    return { text: this.entry(id).tail, complete: true };
+  async tail(id: string, _bytes?: number, stream: TailStream = "both"): Promise<TailResult> {
+    const entry = this.entry(id);
+    // everything the fake prints is stdout
+    return { text: stream === "stderr" ? "" : entry.tail, complete: true };
   }
 
   async stop(id: string): Promise<SessionStatus> {
@@ -171,7 +177,7 @@ export class RemoteStyleSessionAdapter implements SessionAdapter {
   private next = 41;
 
   capabilities(): SessionCapabilities {
-    return { pty: false, send: false, attach: false, lastOutputAt: false };
+    return { pty: false, send: false, attach: false, lastOutputAt: false, streams: false };
   }
 
   private inside(id: string): string {
@@ -200,7 +206,10 @@ export class RemoteStyleSessionAdapter implements SessionAdapter {
   ): Promise<SessionStatus & { timedOut?: boolean }> {
     return this.inner.wait(this.inside(id), opts);
   }
-  async tail(id: string, bytes?: number): Promise<TailResult> {
+  async tail(id: string, bytes?: number, stream?: TailStream): Promise<TailResult> {
+    if (stream !== undefined && stream !== "both") {
+      throw new SessionError("UNSUPPORTED", "this runner gives one stream");
+    }
     return this.inner.tail(this.inside(id), bytes);
   }
   async stop(id: string): Promise<SessionStatus> {

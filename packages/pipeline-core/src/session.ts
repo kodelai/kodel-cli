@@ -250,12 +250,17 @@ export interface SessionCapabilities {
   send: boolean;
   attach: boolean;
   lastOutputAt: boolean;
+  /** `tail` can give stdout and stderr apart (a terminal session cannot: it has one stream). */
+  streams: boolean;
 }
 
 export interface StartResult {
   id: string;
   name?: string;
 }
+
+/** `both` is the interleaved output; `stdout` and `stderr` need `capabilities().streams`. */
+export type TailStream = "both" | "stdout" | "stderr";
 
 export interface TailResult {
   text: string;
@@ -266,6 +271,8 @@ export interface TailResult {
 export interface SessionListEntry {
   id: string;
   name?: string;
+  /** The command as the starter gave it, redacted (a shell command, or the argv joined by spaces). */
+  command?: string;
   status: SessionStatus;
   /** The entry could not be read (`CANNOT_READ`), was written by a newer kodel (`NEWER_FORMAT`) or by another machine (`FOREIGN`); its status is not real. */
   problem?: "CANNOT_READ" | "NEWER_FORMAT" | "FOREIGN";
@@ -280,7 +287,7 @@ export interface SessionAdapter {
     id: string,
     opts?: { timeoutMs?: number; signal?: AbortSignal },
   ): Promise<SessionStatus & { timedOut?: boolean }>;
-  tail(id: string, bytes?: number): Promise<TailResult>;
+  tail(id: string, bytes?: number, stream?: TailStream): Promise<TailResult>;
   stop(id: string): Promise<SessionStatus>;
   remove(id: string): Promise<void>;
   list(filter?: { name?: string }): Promise<SessionListEntry[]>;

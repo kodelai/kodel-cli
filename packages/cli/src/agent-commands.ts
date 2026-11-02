@@ -40,13 +40,27 @@ export interface AgentContext {
   launcher?: { exec: string; args: string[] };
 }
 
+/** What a person reads as the state: a session that `stop` ended is "stopped", not "killed". */
+const stateOf = (entry: SessionListEntry): string => {
+  const s = entry.status;
+  if (s.state === "killed" && s.reason === "stopped") return "stopped";
+  return s.state;
+};
+
+/** A command cut to a width for the table; the full text is in `--json`. */
+const shorten = (text: string, width = 48): string => {
+  const flat = text.replace(/\s+/g, " ").trim();
+  const chars = [...flat];
+  return chars.length > width ? `${chars.slice(0, width - 1).join("")}…` : flat;
+};
+
 const detailOf = (entry: SessionListEntry): string => {
   if (entry.problem === "FOREIGN") return "another machine's agent";
   if (entry.problem)
     return entry.problem === "NEWER_FORMAT" ? "written by a newer kodel" : "cannot be read";
   const s = entry.status;
   if (s.state === "exited") return `exit ${s.exitCode ?? 0}`;
-  if (s.state === "killed") return s.reason ?? s.signal ?? "killed";
+  if (s.state === "killed") return s.reason === "stopped" ? "" : (s.reason ?? s.signal ?? "killed");
   if (s.state === "lost") return `${s.reason ?? "lost"}${s.childAlive ? ", child alive" : ""}`;
   return "";
 };
@@ -104,11 +118,12 @@ export function registerAgentCommands(
       const table = rows.map((r) => [
         plain(r.id),
         plain(r.name ?? "-"),
-        r.status.state,
+        stateOf(r),
         plain(detailOf(r)),
+        plain(shorten(r.command ?? "")),
       ]);
       for (const line of formatTable(
-        ["ID", "NAME", "STATE", "DETAIL"],
+        ["ID", "NAME", "STATE", "DETAIL", "COMMAND"],
         table,
         opts.headers !== false,
       )) {
@@ -124,7 +139,29 @@ export function registerAgentCommands(
       ctx.requireHuman();
       await ctx.mustConfirm(`Stop agent ${plain(id)}?`);
       const status = await guard(async () => (await adapter()).stop(id));
-      ctx.out(`${plain(id)}: ${status.state}${status.reason ? ` (${status.reason})` : ""}\n`);
+      const label =
+        status.state === "killed" && status.reason === "stopped"
+          ? "stopped"
+          : `${status.state}${status.reason ? ` (${status.reason})` : ""}`;
+      ctx.out(`${plain(id)}: ${label}\n`);
+    });
+
+  agent
+    .command("logs <id>")
+    .description("Print the end of what an agent wrote (secrets are redacted)")
+    .option("--stdout", "only standard output")
+    .option("--stderr", "only standard error")
+    .option("--bytes <n>", "how many bytes at most (default 65536)", (v) => Number.parseInt(v, 10))
+    .action(async (id: string, opts: { stdout?: boolean; stderr?: boolean; bytes?: number }) => {
+      platform();
+      if (opts.stdout && opts.stderr) ctx.fail("give --stdout or --stderr, not both");
+      const stream = opts.stdout ? "stdout" : opts.stderr ? "stderr" : "both";
+      const tail = await guard(async () => (await adapter()).tail(id, opts.bytes, stream));
+      // line by line: what an agent printed must not move the cursor or fake a line in the person's terminal
+      ctx.out(
+        `${tail.text.replace(/\r/g, "").split("\n").map(plain).join("\n")}${tail.text.endsWith("\n") ? "" : "\n"}`,
+      );
+      if (!tail.complete) ctx.out("[earlier output omitted]\n");
     });
 
   agent

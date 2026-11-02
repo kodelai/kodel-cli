@@ -9,13 +9,14 @@ The state base is `KODEL_STATE_DIR` or `~/.kodel`. A session folder holds:
 | `session.json` | the starter | once, in a temporary folder that is renamed into place |
 | `status.json` | the holder (or once, as a `lost` tombstone, by the first reader that finds no holder) | at start, when the child runs, at the end |
 | `stop.json` | `agent stop` | before the child is signalled |
-| `tail.txt` | the holder | redacted output tail, rewritten while output arrives |
+| `tail.txt`, `stdout.txt`, `stderr.txt` | the holder | redacted output tails (interleaved, and each stream alone), replaced while output arrives; `kodel agent logs <id> [--stdout\|--stderr]` prints them |
 | `boot.txt` | the holder | the boot report: `ready` or `HOLDER_BOOT_FAILED:<why>` |
 | `in.fifo` | the holder | only for a session started with `input` |
 
-A **name marker** (`<checkout key>.names/<name>.json`) is written once by `start` and stays after `rm`: a name that was
-used and is gone answers `NAME_USED`, so a retried step never runs its command a second time. Only a person frees it
-(`kodel agent forget-name`).
+A **name marker** (`<checkout key>.names/<name>.json`) is written once by `start`. For a session a host started
+(`origin: host`) it stays after `rm`: a name that was used and is gone answers `NAME_USED`, so a retried step never runs
+its command a second time; only a person frees it (`kodel agent forget-name`). A session started from the command line
+frees its name with its folder.
 
 Every record carries `v`. Version 1 is **not frozen yet**: until a person says so, no beta is cut from `main` and a
 field may still change. A reader that meets a newer `v` answers `NEWER_FORMAT` ("upgrade kodel"). This family is not

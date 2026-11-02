@@ -106,7 +106,7 @@ describe("session contract can fail", () => {
       cwd: "/work",
       unknownId: "a_000000000_0000",
     }));
-    const target = cases.find((c) => c.name.startsWith("name_taken"));
+    const target = cases.find((c) => c.name.startsWith("host_name_taken"));
     await expect(target?.run()).rejects.toThrow(/used/);
   });
 });

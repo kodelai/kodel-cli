@@ -131,20 +131,30 @@ export function sessionContract(
         "reserved env",
       );
     }),
-    withSubject("name_taken_while_live_used_after_remove_case_folded", true, async (s) => {
-      const first = await s.adapter.start(spec(s, s.programs.hang(), { name: "Step-1" }));
+    withSubject("host_name_taken_while_live_used_after_remove_case_folded", true, async (s) => {
+      // a session a host started keeps its name after `remove`: the consumer's retry rule rests on it
+      const host = { origin: "host", timeoutMs: 120_000 } as const;
+      const first = await s.adapter.start(spec(s, s.programs.hang(), { name: "Step-1", ...host }));
       assert(
-        (await code(s.adapter.start(spec(s, s.programs.exit(0), { name: "step-1" })))) ===
+        (await code(s.adapter.start(spec(s, s.programs.exit(0), { name: "step-1", ...host })))) ===
           "NAME_TAKEN",
         "taken",
       );
       await s.adapter.stop(first.id);
       await s.adapter.remove(first.id);
       assert(
-        (await code(s.adapter.start(spec(s, s.programs.exit(0), { name: "STEP-1" })))) ===
+        (await code(s.adapter.start(spec(s, s.programs.exit(0), { name: "STEP-1", ...host })))) ===
           "NAME_USED",
         "used",
       );
+    }),
+    withSubject("cli_session_frees_its_name_on_remove", true, async (s) => {
+      // a session a person started from the command line does not hold its name once it is removed
+      const first = await s.adapter.start(spec(s, s.programs.exit(0), { name: "mine" }));
+      await s.adapter.wait(first.id, { timeoutMs: 15_000 });
+      await s.adapter.remove(first.id);
+      const again = await s.adapter.start(spec(s, s.programs.exit(0), { name: "mine" }));
+      assert(again.id !== first.id, "the name starts again");
     }),
     withSubject("list_by_name_finds_a_live_session_again", true, async (s) => {
       const { id } = await s.adapter.start(spec(s, s.programs.hang(), { name: "n1" }));

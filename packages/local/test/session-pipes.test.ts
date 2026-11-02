@@ -132,13 +132,14 @@ describe("pipes adapter, real processes", () => {
   });
 
   test("tA_session_name_race_taken_then_used_after_remove", async () => {
-    const first = await adapter.start(sh("exit 0", { name: "Step-1" }));
-    await expect(adapter.start(sh("exit 0", { name: "step-1" }))).rejects.toMatchObject({
+    const host = { origin: "host" };
+    const first = await adapter.start(sh("exit 0", { name: "Step-1", ...host }));
+    await expect(adapter.start(sh("exit 0", { name: "step-1", ...host }))).rejects.toMatchObject({
       code: "NAME_TAKEN",
     });
     await adapter.wait(first.id, { timeoutMs: 15_000 });
     await adapter.remove(first.id);
-    await expect(adapter.start(sh("exit 0", { name: "STEP-1" }))).rejects.toMatchObject({
+    await expect(adapter.start(sh("exit 0", { name: "STEP-1", ...host }))).rejects.toMatchObject({
       code: "NAME_USED",
     });
     expect((await adapter.list({ name: "step-1" })).length).toBe(0);
@@ -169,10 +170,46 @@ describe("pipes adapter, real processes", () => {
   });
 
   test("tA_rm_and_prune_never_touch_name_markers", async () => {
-    const { id } = await adapter.start(sh("exit 0", { name: "keep" }));
+    const { id } = await adapter.start(sh("exit 0", { name: "keep", origin: "host" }));
     await adapter.wait(id, { timeoutMs: 15_000 });
     await adapter.remove(id);
     expect(readdirSync(adapter.place.namesDir)).toEqual(["keep.json"]);
+  });
+
+  test("tA_cli_session_frees_its_name_on_remove_a_host_session_keeps_it", async () => {
+    const mine = await adapter.start(sh("exit 0", { name: "mine" }));
+    await adapter.wait(mine.id, { timeoutMs: 15_000 });
+    await adapter.remove(mine.id);
+    expect(readdirSync(adapter.place.namesDir)).toEqual([]);
+    const again = await adapter.start(sh("exit 0", { name: "mine" }));
+    expect(again.id).not.toBe(mine.id);
+  });
+
+  test("tA_pipes_tail_gives_stdout_and_stderr_apart", async () => {
+    const { id } = await adapter.start(sh("echo to-out; echo to-err >&2; exit 0"));
+    await adapter.wait(id, { timeoutMs: 15_000 });
+    const both = (await adapter.tail(id)).text;
+    const out = (await adapter.tail(id, undefined, "stdout")).text;
+    const err = (await adapter.tail(id, undefined, "stderr")).text;
+    expect(both).toContain("to-out");
+    expect(both).toContain("to-err");
+    expect(out).toContain("to-out");
+    expect(out).not.toContain("to-err");
+    expect(err).toContain("to-err");
+    expect(err).not.toContain("to-out");
+    expect(adapter.capabilities().streams).toBe(true);
+  });
+
+  test("tA_list_carries_the_redacted_command", async () => {
+    const { id } = await adapter.start({
+      argv: ["sh", "-c", "echo AKIAIOSFODNN7EXAMPLE"],
+      cwd: root,
+      timeoutMs: 20_000,
+    });
+    await adapter.wait(id, { timeoutMs: 15_000 });
+    const [row] = await adapter.list();
+    expect(row?.command).toContain("sh -c");
+    expect(row?.command).not.toContain("AKIAIOSFODNN7EXAMPLE");
   });
 
   test("tA_pipes_send_reaches_a_child_that_reads_stdin_twice", async () => {

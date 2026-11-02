@@ -14,6 +14,9 @@ export type StepOutcome =
   | { kind: "failed"; why: string }
   | { kind: "unknown"; why: string };
 
+/** How long a step's command may run when its program does not say (6 hours). */
+export const STEP_TIMEOUT_MS = 6 * 3600_000;
+
 export const stepSessionName = (run: string, node: string, attempt: number): string =>
   `n${BigInt(`0x${createHash("sha256").update(`${run}\0${node}\0${attempt}`).digest("hex")}`)
     .toString(36)
@@ -28,7 +31,15 @@ export async function runStepAsSession(
   const name = stepSessionName(step.run, step.node, step.attempt);
   let id: string;
   try {
-    id = (await adapter.start({ ...program, name })).id;
+    // A host session keeps its name after `remove`, which is what makes a retry safe; it must end by itself.
+    id = (
+      await adapter.start({
+        ...program,
+        name,
+        origin: "host",
+        timeoutMs: program.timeoutMs ?? STEP_TIMEOUT_MS,
+      })
+    ).id;
   } catch (error) {
     if (!(error instanceof SessionError)) throw error;
     if (error.code === "NAME_USED") {

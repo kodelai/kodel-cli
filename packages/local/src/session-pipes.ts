@@ -27,6 +27,7 @@ import {
   type SessionStatus,
   type StartResult,
   type TailResult,
+  type TailStream,
   validateSpec,
 } from "@kodel-ai/pipeline-core";
 import { KILL_GRACE_MS, killTree } from "./command";
@@ -88,6 +89,10 @@ export interface PipesAdapterOptions {
   rules?: RedactRule[];
 }
 
+/** The command a person typed, for `ls`: a shell command, or the argv joined (already redacted in the record). */
+const commandOf = (record: SessionRecord): string =>
+  record.spec.command ?? (record.spec.argv ?? []).join(" ");
+
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class PipesSessionAdapter implements SessionAdapter {
@@ -108,7 +113,7 @@ export class PipesSessionAdapter implements SessionAdapter {
   }
 
   capabilities(): SessionCapabilities {
-    return { pty: false, send: true, attach: false, lastOutputAt: true };
+    return { pty: false, send: true, attach: false, lastOutputAt: true, streams: true };
   }
 
   private markerPath(name: string): string {
@@ -367,10 +372,10 @@ export class PipesSessionAdapter implements SessionAdapter {
     }
   }
 
-  async tail(id: string, bytes = 64 * 1024): Promise<TailResult> {
+  async tail(id: string, bytes = 64 * 1024, stream: TailStream = "both"): Promise<TailResult> {
     const dir = sessionDirOf(this.place, id);
     if (!existsSync(dir)) throw new SessionError("NOT_FOUND", `no session ${id}`);
-    const text = readTail(dir);
+    const text = readTail(dir, stream);
     const cut = Buffer.from(text).length > bytes;
     return {
       text: cut ? Buffer.from(text).subarray(-bytes).toString("utf8") : text,
@@ -567,7 +572,14 @@ export class PipesSessionAdapter implements SessionAdapter {
     if (status.state === "starting" || status.state === "running" || status.childAlive) {
       throw new SessionError("STILL_RUNNING", `session ${id} still runs; stop it first`);
     }
-    removeDir(dir); // the name marker stays
+    removeDir(dir);
+    // The name marker stays for a session a host started: its retry rule needs 'used' to outlive the folder. A
+    // session a person started from the command line frees its name with its folder.
+    if (record.name !== undefined && record.spec.origin !== "host") {
+      const markerFile = this.markerPath(record.name);
+      const held = readMarker(markerFile);
+      if (typeof held !== "string" && held.id === id) removeDir(markerFile);
+    }
   }
 
   async list(filter?: { name?: string }): Promise<SessionListEntry[]> {
@@ -602,6 +614,7 @@ export class PipesSessionAdapter implements SessionAdapter {
         entries.push({
           id: entry,
           ...(record.name !== undefined ? { name: record.name } : {}),
+          command: commandOf(record),
           status: this.read(entry),
         });
       } catch (error) {

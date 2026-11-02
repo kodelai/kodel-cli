@@ -27,7 +27,6 @@ import {
   STATUS_FILE,
   STOP_FILE,
   type StatusRecord,
-  TAIL_FILE,
 } from "./session-records";
 
 /** A redaction rule that can cross to the holder: a pattern, no function. */
@@ -121,6 +120,28 @@ const lastBytes = (text: string, bytes: number): string => {
     .toString("utf8")
     .replace(/^�+/, "");
 };
+
+/** The last bytes of a stream, kept with a margin so redaction sees a secret whole before the end is cut. */
+class Ring {
+  private data = Buffer.alloc(0);
+  cut = false;
+  dirty = false;
+  constructor(private readonly keep: number) {}
+  add(chunk: Buffer): void {
+    this.data = Buffer.concat([this.data, chunk]);
+    if (this.data.length > this.keep) {
+      this.data = this.data.subarray(this.data.length - this.keep);
+      this.cut = true;
+    }
+    this.dirty = true;
+  }
+  text(): string {
+    return this.data.toString("utf8").replace(/^\uFFFD+/, "");
+  }
+}
+
+/** The redacted tail files: `both` is the interleaved output, the others one stream each. */
+export const TAIL_FILES = { both: "tail.txt", stdout: "stdout.txt", stderr: "stderr.txt" } as const;
 
 /** Runs one session to its end. Returns the holder's exit code. */
 export async function runHolder(deps: HolderDeps): Promise<number> {
@@ -224,38 +245,38 @@ export async function runHolder(deps: HolderDeps): Promise<number> {
 
   const tailBytes = input.tailBytes ?? DEFAULT_TAIL_BYTES;
   const keepBytes = tailBytes + REDACT_MARGIN_BYTES;
-  let tail = Buffer.alloc(0);
-  let cut = false;
-  let lastOutputAt: number | undefined;
-  let dirty = false;
-  const collect = (chunk: Buffer) => {
-    tail = Buffer.concat([tail, chunk]);
-    if (tail.length > keepBytes) {
-      tail = tail.subarray(tail.length - keepBytes);
-      cut = true;
-    }
-    lastOutputAt = now();
-    dirty = true;
+  // Three views of one output: as it came (both streams), and each stream alone. Each keeps its own margin.
+  const rings = {
+    both: new Ring(keepBytes),
+    stdout: new Ring(keepBytes),
+    stderr: new Ring(keepBytes),
   };
-  child.stdout?.on("data", collect);
-  child.stderr?.on("data", collect);
+  let lastOutputAt: number | undefined;
+  const collect = (own: "stdout" | "stderr") => (chunk: Buffer) => {
+    rings.both.add(chunk);
+    rings[own].add(chunk);
+    lastOutputAt = now();
+  };
+  child.stdout?.on("data", collect("stdout"));
+  child.stderr?.on("data", collect("stderr"));
   // Redaction runs on the text with its margin, then the end is cut; a cut start loses a private key's header.
   const flush = () => {
-    if (!dirty && existsSync(join(input.dir, TAIL_FILE))) return;
-    dirty = false;
-    const text = tail.toString("utf8").replace(/^�+/, "");
-    try {
-      const target = join(input.dir, TAIL_FILE);
-      writeFileSync(
-        `${target}.tmp`,
-        lastBytes(safe(cut ? redactCutPrivateKey(text) : text), tailBytes),
-        {
-          mode: 0o600,
-        },
-      );
-      renameSync(`${target}.tmp`, target);
-    } catch {
-      // the directory may be gone; the watcher below handles that
+    for (const [stream, ring] of Object.entries(rings) as [keyof typeof rings, Ring][]) {
+      const file = TAIL_FILES[stream];
+      if (!ring.dirty && existsSync(join(input.dir, file))) continue;
+      ring.dirty = false;
+      const text = ring.text();
+      try {
+        const target = join(input.dir, file);
+        writeFileSync(
+          `${target}.tmp`,
+          lastBytes(safe(ring.cut ? redactCutPrivateKey(text) : text), tailBytes),
+          { mode: 0o600 },
+        );
+        renameSync(`${target}.tmp`, target);
+      } catch {
+        // the directory may be gone; the watcher below handles that
+      }
     }
   };
 
@@ -390,9 +411,9 @@ export function intermediateMain(launch: { exec: string; args: string[] }): void
   child.unref();
 }
 
-export const readTail = (dir: string): string => {
+export const readTail = (dir: string, stream: keyof typeof TAIL_FILES = "both"): string => {
   try {
-    return readFileSync(join(dir, TAIL_FILE), "utf8");
+    return readFileSync(join(dir, TAIL_FILES[stream]), "utf8");
   } catch {
     return "";
   }
