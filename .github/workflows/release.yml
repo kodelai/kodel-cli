@@ -58,3 +58,21 @@ jobs:
       - name: Publish
         run: npm publish --tag "${{ inputs.tag }}" --provenance --access public
         working-directory: packages/cli
+
+  # The version of the package is set at publish time and is not in the repository, so the tag is
+  # what says which commit a version was built from. A separate job: only this one may write.
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Tag the commit and create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          flags=""
+          if echo "$VERSION" | grep -q -- '-'; then flags="--prerelease"; fi
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "v$VERSION" --generate-notes $flags
