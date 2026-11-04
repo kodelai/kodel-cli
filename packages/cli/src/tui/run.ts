@@ -86,7 +86,10 @@ export function applyInput(
     const after = model.flow;
     if (
       after !== null &&
-      (before === null || after.phase !== before.phase || after.at !== before.at)
+      (before === null ||
+        after.phase !== before.phase ||
+        after.at !== before.at ||
+        after.readOnAt !== before.readOnAt)
     ) {
       break;
     }

@@ -33,6 +33,8 @@ export interface Flow {
   scroll: number;
   /** When the window last changed what it asks (the screen's clock): a click right after it is not an answer. */
   shownAt: number;
+  /** When a yes last only read a long question on to its end: a yes right after it is not an answer. */
+  readOnAt?: number;
 }
 
 /** The part of the model the flow works on. */
@@ -190,7 +192,7 @@ export function flowKey<M extends FlowFields>(m: M, key: string): M {
         if (reason === "") {
           return { ...m, flow: null, notice: "A rejection needs a reason; nothing was written." };
         }
-        const asking: Flow = { ...f, phase: "asking", reason };
+        const asking: Flow = { ...f, phase: "asking", reason, shownAt: m.now };
         return { ...m, flow: asking, effects: [...m.effects, checkEffect(asking)] };
       }
       if (key === "backspace") {

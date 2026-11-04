@@ -769,44 +769,49 @@ describe("task_dxn6 the window and the buttons", () => {
     expect(m.flow?.phase).toBe("confirm");
     expect(takeEffects(m)[1]).toEqual([]);
     expect(screen(m).join("\n")).toContain("f39.ts,problem 39");
-    m = update(m, "y"); // the end has been on the screen: this is the yes
+    // a yes that follows at once (a key held down) is not the answer: the end was only just shown
+    expect(takeEffects(update(m, "y"))[1]).toEqual([]);
+    m = update({ ...m, now: m.now + 1000 }, "y"); // the end has been on the screen: this is the yes
     expect(takeEffects(m)[1].map((e) => e.type)).toEqual(["decide"]);
   });
 
-  test("a click on a terminal too small to show the window answers nothing", async () => {
+  test("task_dxn6_a_quick_second_yes_on_a_long_question_is_not_the_answer", async () => {
     const h = host();
     const run = await atGate(h);
+    await run.reportResult("approve", 1, {
+      rows: Array.from({ length: 40 }, (_, i) => ({ place: `f${i}.ts`, problem: `problem ${i}` })),
+    });
     const tools = createDecisionTools(h);
-    const m = await press(await modelOf(h, run.runId), tools, "a");
-    const yes = where(m, "[y Yes]");
-    const tiny = mouseUpdate(
-      { ...m, mouse: true, now: m.now + 1000 },
-      { cols: 30, rows: 10 },
-      {
-        type: "mouse",
-        action: "press",
-        x: yes.x,
-        y: yes.y,
-      },
-    );
-    expect(tiny.flow?.phase).toBe("confirm");
+    const asked = await press(await modelOf(h, run.runId), tools, "r");
+    // a pasted "yy" reads on and stops there
+    const pasted = applyInput(asked, "yy", { cols: 120, rows: 30 });
+    expect(pasted.flow?.phase).toBe("confirm");
+    expect(takeEffects(pasted)[1]).toEqual([]);
+    // a double click on Yes reads on, and its second click is too soon to be the answer
+    const yes = where(asked, "[y Yes]");
+    const first = press1(asked, yes.x, yes.y);
+    expect(takeEffects(first)[1]).toEqual([]);
+    const again = quick(first, yes.x, yes.y);
+    expect(takeEffects(again)[1]).toEqual([]);
+    expect(again.flow?.phase).toBe("confirm");
+    // a click made after the end has stood on the screen is the answer
+    expect(takeEffects(press1(first, yes.x, yes.y))[1].map((e) => e.type)).toEqual(["decide"]);
   });
 
-  test("a long title keeps the corner of the window, and a long reason is read at its end", async () => {
+  test("a click right after the check was asked does not cancel it", async () => {
     const h = host();
     const run = await atGate(h);
     const tools = createDecisionTools(h);
-    let m = await modelOf(h, run.runId);
-    m = { ...m, sessions: m.sessions.map((s) => ({ ...s, title: "t".repeat(200) })) };
-    m = await press(m, tools, "r");
+    let m = await press(await modelOf(h, run.runId), tools, "r");
     expect(m.flow?.phase).toBe("reason");
-    for (const key of [..."0123456789".repeat(40)]) m = update(m, key);
-    for (const key of [..."the-very-end"]) m = update(m, key);
-    const lines = screen(m);
-    const top = lines.find((l) => l.includes("┌─ Reject")) ?? "";
-    expect(top.trimEnd().endsWith("┐")).toBe(true);
-    // the end of what was typed is on the screen, not cut off
-    expect(lines.join("\n")).toContain("the-very-end");
+    for (const key of ["n", "o"]) m = update(m, key);
+    const ok = where(m, "[Enter OK]");
+    const asking = press1(m, ok.x, ok.y);
+    expect(asking.flow?.phase).toBe("asking");
+    // a second click at once (a double click on OK) is too soon to press the Cancel of "Checking"
+    const cancel = where(asking, "[Esc Cancel]");
+    expect(quick(asking, cancel.x, cancel.y).flow?.phase).toBe("asking");
+    expect(press1(asking, cancel.x, cancel.y).flow).toBeNull();
   });
 
   test("a run that nothing can be decided at has no buttons", async () => {

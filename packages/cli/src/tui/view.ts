@@ -442,7 +442,12 @@ function updateKey(input: Model, key: string, size: Size): Model {
     // The yes is for a question that has been read: with lines still out of the window it reads on first.
     if (key === "y" && m.flow.phase === "confirm") {
       const max = modalOf(m.flow, size.cols, size.rows - 3).maxScroll;
-      if (m.flow.scroll < max) return { ...m, flow: { ...m.flow, scroll: max } };
+      // The window and the clicks get a new moment to stand still, so a second yes that comes at once
+      // (a double click, a key held down) is not taken for the answer.
+      if (m.flow.scroll < max) {
+        return { ...m, flow: { ...m.flow, scroll: max, shownAt: m.now, readOnAt: m.now } };
+      }
+      if (m.flow.readOnAt !== undefined && m.now - m.flow.readOnAt < CLICK_GUARD_MS) return m;
     }
     return clampFlowScroll(flowKey(m, key), size);
   }
@@ -1505,7 +1510,10 @@ export function mouseUpdate(
   return wanting(mouseEvent(input, size, event));
 }
 
-/** How long after the window changes its question a click is not taken as an answer (milliseconds). */
+/**
+ * How long after the window changes its question a click is not taken as an answer (milliseconds). The
+ * clock is the screen's, which moves with the frames (every 100 ms), so in time it is a little less.
+ */
 const CLICK_GUARD_MS = 400;
 
 /** A click while a decision is asked: only the buttons of its window answer. */
