@@ -138,6 +138,12 @@ describe("task_dxn6 gate-decision: prepare", () => {
     expect(
       (await prepareGateDecision(run, { decision: "approve", ignorePendingChange: true })).node,
     ).toBe("g");
+    // the screen has no such flag to name
+    const quiet = await refused(
+      prepareGateDecision(run, { decision: "approve", offerIgnore: false }),
+    );
+    expect(quiet.message).toContain("a change of the pipeline");
+    expect(quiet.message).not.toContain("--ignore-pending-change");
   });
 
   test("a changesSinceGate that throws is not turned into a decision", async () => {
@@ -184,7 +190,7 @@ describe("task_dxn6 gate-decision: commit", () => {
     expect(later.calls).not.toContain("decide");
   });
 
-  test("with recheck, comments that changed or went are refused; a typed reason survives the loss", async () => {
+  test("with recheck, comments that went or changed are refused, and a typed reason does not hide a change", async () => {
     const shown = { csv: "a.ts,too big", count: 1 };
     const prepared = await prepareGateDecision(fake({ comments: shown }), { decision: "reject" });
     const gone = fake({ comments: undefined });

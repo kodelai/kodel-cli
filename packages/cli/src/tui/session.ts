@@ -91,6 +91,8 @@ export interface Session {
    * set at all on sample data: the older keys then stand.
    */
   decisions?: DecisionRef[];
+  /** What waits for a person in a run shown as running, which a key here cannot decide. */
+  besides?: { kind: "gate" | "pause"; node: string; command: string }[];
   /** Why a failed run failed. */
   reason?: string;
   steps: StepLine[];

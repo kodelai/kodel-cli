@@ -8,14 +8,15 @@ import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalPipelineHost, type LocalRun } from "@kodel-ai/local";
+import { type ChangeReport, LocalPipelineHost, type LocalRun } from "@kodel-ai/local";
 import { runCli } from "../src/cli";
 import { stripAnsi } from "../src/tui/ansi";
 import { createDecisionTools, type DecisionTools, decisionOptions } from "../src/tui/decide";
 import { demoSessions } from "../src/tui/demo";
 import { loadRunDetail } from "../src/tui/gate";
 import { loadSessions } from "../src/tui/load";
-import { runTui } from "../src/tui/run";
+import { applyInput, runTui } from "../src/tui/run";
+import type { CheckResult } from "../src/tui/session";
 import {
   detailKey,
   initialModel,
@@ -411,6 +412,9 @@ describe("task_dxn6 the picker", () => {
     expect(m.flow?.questions[0]).toContain('Approve "b-gate"');
     m = await press(m, tools, "y");
     expect(m.notice).toBe("Approved «b-gate».");
+    // the read made right after the write does not take the confirmation away
+    m = withData(m, await loadSessions(h, Date.now()), Date.now());
+    expect(m.notice).toBe("Approved «b-gate».");
     const decided = await record(run, "gate_decided");
     expect(decided.map((r) => r.node)).toEqual(["b-gate"]);
     // the other gate still waits
@@ -499,6 +503,11 @@ describe("task_dxn6 resume", () => {
     const tools = createDecisionTools(h);
     const m = await press(await modelOf(h, run.runId), tools, "a");
     expect(m.flow).toBeNull();
+    // the card says which command decides it
+    const text = render(m, { cols: 120, rows: 30 }).map(stripAnsi).join("\n");
+    expect(text).toContain("Also waiting for you");
+    // the engine words the command (`--node` only when several branches are paused)
+    expect(text).toContain(`$ kodel resume ${run.runId}`);
     expect((await cli("resume", run.runId)).code).toBe(0);
   });
 });
@@ -516,7 +525,7 @@ describe("task_dxn6 keys during a decision", () => {
     const [, first] = takeEffects(m);
     expect(first.map((e) => e.type)).toEqual(["check_decision"]);
     // a pasted "ay" stops after the a
-    const { applyInput } = await import("../src/tui/run");
+
     const pasted = applyInput(m0, "ay", { cols: 120, rows: 30 });
     expect(pasted.flow?.phase).toBe("asking");
     expect(takeEffects(pasted)[1].map((e) => e.type)).toEqual(["check_decision"]);
@@ -577,14 +586,11 @@ describe("task_dxn6 one function for the command and the screen", () => {
     // a rejection with neither reason nor comments
     const noReason = await asked("reject");
     expect(noReason).toMatchObject({ ok: false, needsReason: true });
-    expect((await cli("gate", "reject", run.runId)).err).toContain(
-      noReason.ok ? "" : noReason.message,
-    );
+    expect((await cli("gate", "reject", run.runId)).err).toContain(refusal(noReason));
     // a step that is not waiting
     const wrong = await asked("approve", "write");
-    expect(wrong.ok).toBe(false);
     expect((await cli("gate", "approve", run.runId, "--node", "write")).err).toContain(
-      wrong.ok ? "" : wrong.message,
+      refusal(wrong),
     );
     // a change of the pipeline that waits
     await writeFile(
@@ -592,13 +598,13 @@ describe("task_dxn6 one function for the command and the screen", () => {
       ONE.replace("write }", "write2 }"),
     );
     const pending = await asked("approve");
-    expect(pending.ok).toBe(false);
-    expect((await cli("gate", "approve", run.runId)).err).toContain(
-      pending.ok ? "" : pending.message,
-    );
+    // the screen words it without the flag it does not have; the rest is the command's own text
+    const head = refusal(pending).split(" To decide here")[0] ?? "";
+    expect((await cli("gate", "approve", run.runId)).err).toContain(head);
+    expect(refusal(pending)).not.toContain("--ignore-pending-change");
   });
 
-  test("the screen and the commands import the checks from the one module", async () => {
+  test("the screen and the commands import the checks from the one module (a source check)", async () => {
     const shared = await import("../src/gate-decision");
     const text = await Bun.file(join(import.meta.dir, "../src/tui/decide.ts")).text();
     const command = await Bun.file(join(import.meta.dir, "../src/cli.ts")).text();
@@ -614,6 +620,137 @@ describe("task_dxn6 one function for the command and the screen", () => {
     }
     expect(text).toContain('from "../gate-decision"');
     expect(command).toContain('from "./gate-decision"');
+  });
+});
+
+describe("task_dxn6 changes that cannot be checked, and a run of another checkout", () => {
+  const gateRef = { kind: "gate" as const, node: "g", attempt: 1, prompt: "", command: "" };
+
+  function fakeRun(over: {
+    changes?: ChangeReport | (() => ChangeReport);
+    foreign?: string;
+    calls?: string[];
+  }) {
+    return {
+      runId: "r_fake",
+      foreignRoot: async () => over.foreign,
+      state: async () =>
+        ({
+          status: "running",
+          active: [{ node: "g", phase: "human", attempt: 1 }],
+          pauses: [],
+        }) as never,
+      pendingChange: async () => undefined,
+      changesSinceGate: async () => {
+        const c = over.changes ?? { kind: "changes" as const, files: {} };
+        return typeof c === "function" ? c() : c;
+      },
+      gateResults: async () => undefined,
+      decideHuman: async () => {
+        over.calls?.push("decide");
+        return { ok: true } as never;
+      },
+      resume: async () => ({ ok: true }) as never,
+      waitForRest: async () => undefined,
+      settle: async () => undefined,
+    };
+  }
+
+  const modelFor = () =>
+    initialModel(
+      {
+        sessions: [
+          {
+            id: "r_fake",
+            title: "fake",
+            pipeline: "p",
+            status: "waiting",
+            need: "approve",
+            step: "approve",
+            since: NOW,
+            steps: [],
+            log: [],
+            decisions: [gateRef],
+          },
+        ],
+        proposals: 0,
+      },
+      "project",
+      NOW,
+    );
+
+  test("task_dxn6_unavailable_changes_need_second_yes", async () => {
+    const calls: string[] = [];
+    const unavailable: ChangeReport = { kind: "unavailable", reason: "git failed" };
+    const tools = createDecisionTools({
+      open: async () => fakeRun({ changes: unavailable, calls }),
+    });
+    let m = await press(modelFor(), tools, "a");
+    expect(m.flow?.questions).toHaveLength(2);
+    expect(m.flow?.questions[0]).toContain("WARNING");
+    // the first yes asks the second question and writes nothing
+    m = await press(m, tools, "y");
+    expect(m.flow?.at).toBe(1);
+    expect(calls).toEqual([]);
+    // a pasted "yy" does not answer the second question unseen, nor does "yq" drop the write
+    const fresh = await press(modelFor(), tools, "a");
+    const pasted = applyInput(fresh, "yy", { cols: 120, rows: 30 });
+    expect(pasted.flow?.at).toBe(1);
+    expect(takeEffects(pasted)[1]).toEqual([]);
+    const last = applyInput(m, "yq", { cols: 120, rows: 30 });
+    expect(last.quit).toBe(false);
+    expect(takeEffects(last)[1].map((e) => e.type)).toEqual(["decide"]);
+    // n at the second question writes nothing
+    const cancelled = await press(m, tools, "n");
+    expect(cancelled.flow).toBeNull();
+    expect(calls).toEqual([]);
+    // the second yes writes
+    m = await press(m, tools, "y");
+    expect(calls).toEqual(["decide"]);
+    expect(m.notice).toBe("Approved «g».");
+  });
+
+  test("the shared-tree note keeps a decision whose files moved; without it they are refused", async () => {
+    const shown: ChangeReport = {
+      kind: "changes",
+      files: { "a.ts": 1 },
+      note: "other branches ran",
+    };
+    const moved: ChangeReport = {
+      kind: "changes",
+      files: { "a.ts": 9 },
+      note: "other branches ran",
+    };
+    let calls = 0;
+    const calls1: string[] = [];
+    const tools = createDecisionTools({
+      open: async () => fakeRun({ changes: () => (++calls === 1 ? shown : moved), calls: calls1 }),
+    });
+    const m = await press(await press(modelFor(), tools, "a"), tools, "y");
+    expect(calls1).toEqual(["decide"]);
+    expect(m.notice).toBe("Approved «g».");
+    let again = 0;
+    const calls2: string[] = [];
+    const strict = createDecisionTools({
+      open: async () =>
+        fakeRun({
+          changes: () =>
+            ++again === 1
+              ? { kind: "changes", files: { "a.ts": 1 } }
+              : { kind: "changes", files: { "a.ts": 9 } },
+          calls: calls2,
+        }),
+    });
+    const n = await press(await press(modelFor(), strict, "a"), strict, "y");
+    expect(calls2).toEqual([]);
+    expect(n.notice).toContain("the files changed while you were reading");
+  });
+
+  test("a gate on a run of another checkout is allowed, and the sentence is part of the question", async () => {
+    const tools = createDecisionTools({ open: async () => fakeRun({ foreign: "/other/clone" }) });
+    const m = await press(modelFor(), tools, "a");
+    expect(m.flow?.phase).toBe("confirm");
+    expect(m.flow?.questions[0]).toContain("was made by the checkout at /other/clone");
   });
 });
 
@@ -804,6 +941,12 @@ describe("task_dxn6 the checks are not shown without a decision tool", () => {
 });
 
 // helpers for the loop
+
+/** The words of a refusal; a check that did not refuse fails the test. */
+function refusal(result: CheckResult): string {
+  if (result.ok) throw new Error("expected a refusal");
+  return result.message;
+}
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 

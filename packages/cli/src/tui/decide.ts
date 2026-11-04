@@ -86,13 +86,14 @@ export function createDecisionTools(
       const run = await source.open(runId);
       if (!run) return { ok: false, message: `Run ${plain(runId)} is gone.` };
       if (request.decision === "resume") {
-        const prepared = await prepareResume(run, { node: request.ref.node });
+        const prepared = await prepareResume(run, { node: request.ref.node, offerIgnore: false });
         checked.set(request.flow, { kind: "resume", run, prepared });
         return { ok: true, questions: [prepared.question] };
       }
       const prepared = await prepareGateDecision(run, {
         decision: request.decision,
         node: request.ref.node,
+        offerIgnore: false,
         ...(request.reason === undefined ? {} : { reason: request.reason }),
         ...(request.ref.attempt === undefined ? {} : { expectAttempt: request.ref.attempt }),
       });

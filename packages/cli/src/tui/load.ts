@@ -184,7 +184,21 @@ async function buildSession(
     return problem(full, error, state.startedAt, "This run cannot be read");
   }
   if ("waiting" in next) return fromWaiting(full, state, journal, next.waiting);
-  return running(full, state, journal, "running" in next, now);
+  const session = running(full, state, journal, "running" in next, now);
+  // Besides what the run does, a person is wanted: the answer names it with an open agent step
+  // (`node`) or with the engine's own work (`running`).
+  const others =
+    "running" in next
+      ? next.running.also_waiting
+      : "node" in next
+        ? next.node.also_waiting
+        : undefined;
+  const besides = (others ?? []).map((e) => ({
+    kind: e.reason === "gate" ? ("gate" as const) : ("pause" as const),
+    node: e.node_slug,
+    command: e.how_to_decide.cli,
+  }));
+  return besides.length > 0 ? { ...session, besides } : session;
 }
 
 /** A run that refuses to open: changed by hand (a person can accept it) or unreadable (nothing to decide). */

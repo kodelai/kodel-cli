@@ -74,15 +74,21 @@ export function applyInput(
 ): Model {
   let model = start;
   const typing = start.input !== null;
-  const deciding = start.flow !== null;
   for (const event of parseInput(chunk)) {
+    const before = model.flow;
     model =
       event.type === "key" ? update(model, event.name, size) : mouseUpdate(model, size, event);
     if (model.quit) break;
     if (typing && model.input === null) break;
-    // A decision that has just been asked for is answered by what comes back, not by the rest of a
-    // pasted chunk: "ay" must not answer the question it has not seen.
-    if (!deciding && model.flow !== null) break;
+    // A decision moves on only by what comes back, or by a key that has seen what is on the screen:
+    // the rest of a pasted chunk ("ay", "yy", "yq") must not answer a question it has not seen.
+    const after = model.flow;
+    if (
+      after !== null &&
+      (before === null || after.phase !== before.phase || after.at !== before.at)
+    ) {
+      break;
+    }
   }
   return model;
 }

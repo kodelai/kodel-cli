@@ -38,12 +38,16 @@ export interface DecisionRun {
 }
 
 /** The decisions at a gate or a pause go after the pipeline change that is waiting, not before it. */
-export async function refuseWhilePending(run: DecisionRun, ignore: boolean): Promise<void> {
+export async function refuseWhilePending(
+  run: DecisionRun,
+  ignore: boolean,
+  offerIgnore = true,
+): Promise<void> {
   if (ignore) return;
   const found = await run.pendingChange().catch(() => undefined);
   if (!found?.info.blocking) return;
   throw new DecisionRefused(
-    `a change of the pipeline of run ${run.runId} is waiting for you: look at it and accept it with "${plain(found.info.apply)}", or put the pipeline file back as it was. To decide here without it: --ignore-pending-change`,
+    `a change of the pipeline of run ${run.runId} is waiting for you: look at it and accept it with "${plain(found.info.apply)}", or put the pipeline file back as it was.${offerIgnore ? " To decide here without it: --ignore-pending-change" : ""}`,
   );
 }
 
@@ -60,6 +64,8 @@ export interface GateInput {
   /** The attempt the person looked at; the command has none. */
   expectAttempt?: number;
   ignorePendingChange?: boolean;
+  /** The command names its flag in a refusal; the screen has none to name. */
+  offerIgnore?: boolean;
 }
 
 export interface PreparedGate {
@@ -80,7 +86,7 @@ export async function prepareGateDecision(
   run: DecisionRun,
   input: GateInput,
 ): Promise<PreparedGate> {
-  await refuseWhilePending(run, input.ignorePendingChange === true);
+  await refuseWhilePending(run, input.ignorePendingChange === true, input.offerIgnore !== false);
   const state = await run.state();
   const waiting = state.active.filter((v) => v.phase === "human");
   if (input.node === undefined && waiting.length > 1) {
@@ -176,7 +182,7 @@ async function recheckGate(
       `"${plain(prepared.node)}" is no longer waiting for this decision (it was decided or reworked meanwhile); look again`,
     );
   }
-  await refuseWhilePending(run, false);
+  await refuseWhilePending(run, false, false);
   if (prepared.decision === "reject") {
     const now = await run.gateResults(prepared.node);
     if (!reason && !now) {
@@ -214,6 +220,7 @@ export interface ResumeInput {
   /** Which paused step, when more than one is paused; the UI always names it. */
   node?: string;
   ignorePendingChange?: boolean;
+  offerIgnore?: boolean;
 }
 
 export interface PreparedResume {
@@ -233,7 +240,7 @@ export async function prepareResume(run: DecisionRun, input: ResumeInput): Promi
       `run ${plain(run.runId)} belongs to the checkout at ${plain(owner)}; it is resumed from there`,
     );
   }
-  await refuseWhilePending(run, input.ignorePendingChange === true);
+  await refuseWhilePending(run, input.ignorePendingChange === true, input.offerIgnore !== false);
   const state = await run.state();
   if (state.pauses.length === 0 || (state.status !== "running" && state.status !== "paused")) {
     throw new DecisionRefused(`run ${run.runId} is not paused`);
@@ -270,7 +277,7 @@ export async function commitResume(
         `run ${plain(run.runId)} belongs to the checkout at ${plain(owner)}; it is resumed from there`,
       );
     }
-    await refuseWhilePending(run, false);
+    await refuseWhilePending(run, false, false);
     const state = await run.state();
     if (!state.pauses.some((p) => p.node === prepared.node)) {
       throw new DecisionRefused(

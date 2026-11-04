@@ -368,7 +368,8 @@ export function withData(m: Model, loaded: Loaded, now: number): Model {
     now,
   };
   const dropped = flowGone(next, sessions);
-  return moved && dropped.notice === next.notice
+  // The notice of what was just written is not taken over by this one.
+  return moved && m.notice === "" && dropped.notice === m.notice
     ? {
         ...dropped,
         notice: "The decision you had picked is gone (decided elsewhere); showing the first one.",
@@ -921,8 +922,10 @@ function panel(m: Model, width: number, height: number): Panel {
   const box = flowBox(m);
   return {
     head: [...band, ...pickerLine(m, s, width), tabs.line, dim("─".repeat(width))],
-    body: [...box, ...content.lines],
-    ...(content.anchor === undefined ? {} : { anchor: content.anchor + box.length }),
+    body: [...box, ...besideLines(s), ...content.lines],
+    ...(content.anchor === undefined
+      ? {}
+      : { anchor: content.anchor + box.length + besideLines(s).length }),
     spans: tabs.spans,
   };
 }
@@ -940,6 +943,20 @@ function pickerLine(m: Model, s: Session, width: number): string[] {
   const at = Math.max(0, picked ? all.indexOf(picked) : 0);
   const what = picked ? `${picked.kind === "gate" ? "gate" : "paused"} «${picked.node}»` : "";
   return [fit(dim(`decision ${at + 1} of ${all.length} · ${what} · g/G pick`), width)];
+}
+
+/**
+ * What waits for a person in a run that is shown as running (a paused branch beside a branch that
+ * still moves): a key here cannot decide it, so the commands are named.
+ */
+function besideLines(s: Session): string[] {
+  const all = s.besides ?? [];
+  if (all.length === 0) return [];
+  return [
+    dim("Also waiting for you (decide in a terminal):"),
+    ...all.map((b) => dim(`  $ ${b.command}`)),
+    "",
+  ];
 }
 
 /** The panel as `height` lines: the head, then the part of the body that fits. */
@@ -1144,7 +1161,7 @@ function cardLines(s: Session | undefined, m: Model, width: number): string[] {
     );
     out.push("");
   }
-  if (s.status === "running") out.push(dim("Reading the details…"), "");
+  if (s.status === "running") out.push(dim("Reading the details…"), "", ...besideLines(s));
   if (s.steps.length > 0) {
     out.push(dim("STEPS"));
     for (const st of s.steps) {
