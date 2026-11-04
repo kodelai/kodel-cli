@@ -31,10 +31,13 @@ export interface Flow {
   at: number;
   /** How many lines of the question in the window are scrolled off the top. */
   scroll: number;
+  /** When the window last changed what it asks (the screen's clock): a click right after it is not an answer. */
+  shownAt: number;
 }
 
 /** The part of the model the flow works on. */
 export interface FlowFields {
+  now: number;
   flow: Flow | null;
   flowSeq: number;
   effects: Effect[];
@@ -84,6 +87,7 @@ export function beginFlow<M extends FlowFields>(
     questions: [],
     at: 0,
     scroll: 0,
+    shownAt: m.now,
   };
   return { ...m, flow, flowSeq: id, notice: "", effects: [...m.effects, checkEffect(flow)] };
 }
@@ -93,10 +97,15 @@ export function flowChecked<M extends FlowFields>(m: M, id: number, result: Chec
   const f = m.flow;
   if (!f || f.id !== id || f.phase !== "asking") return m;
   if (!result.ok) {
-    if (result.needsReason) return { ...m, flow: { ...f, phase: "reason", text: "" } };
+    if (result.needsReason) {
+      return { ...m, flow: { ...f, phase: "reason", text: "", shownAt: m.now } };
+    }
     return { ...m, flow: null, notice: result.message };
   }
-  return { ...m, flow: { ...f, phase: "confirm", questions: result.questions, at: 0, scroll: 0 } };
+  return {
+    ...m,
+    flow: { ...f, phase: "confirm", questions: result.questions, at: 0, scroll: 0, shownAt: m.now },
+  };
 }
 
 /** The write has been made, or refused. */
@@ -166,7 +175,7 @@ export function flowKey<M extends FlowFields>(m: M, key: string): M {
       }
       if (key !== "y") return { ...m, flow: null, notice: "Cancelled." };
       if (f.at + 1 < f.questions.length) {
-        return { ...m, flow: { ...f, at: f.at + 1, scroll: 0 } };
+        return { ...m, flow: { ...f, at: f.at + 1, scroll: 0, shownAt: m.now } };
       }
       return {
         ...m,

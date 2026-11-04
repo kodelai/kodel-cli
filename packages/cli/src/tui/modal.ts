@@ -92,9 +92,11 @@ export function modalOf(f: Flow, cols: number, height: number): Modal {
   // The title, the borders, a gap and the row of buttons are not content.
   const room = Math.max(3, height - 7);
   const maxScroll = Math.max(0, all.length - room);
-  const scroll = Math.min(maxScroll, Math.max(0, f.scroll));
+  // A reason being typed is read at its end, where the cursor is.
+  const scroll = f.phase === "reason" ? maxScroll : Math.min(maxScroll, Math.max(0, f.scroll));
   const shown = all.slice(scroll, scroll + room);
-  const title = titleOf(f);
+  // A long title (it is the run's) must not push the corner of the box out.
+  const title = [...titleOf(f)].slice(0, width - 6).join("");
   const hint =
     maxScroll > 0 ? ` ↑↓ scroll ${scroll + 1}-${scroll + shown.length} of ${all.length} ` : "";
   const left = Math.max(0, Math.floor((cols - width) / 2));

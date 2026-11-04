@@ -612,7 +612,15 @@ describe("task_dxn6 a gate and a paused branch together", () => {
 describe("task_dxn6 the window and the buttons", () => {
   const SIZE = { cols: 120, rows: 30 };
   const screen = (m: Model) => render(m, SIZE).map(stripAnsi);
+  /** A click made a moment after the window changed (see `quick` for one made at once). */
   const press1 = (m: Model, x: number, y: number) =>
+    mouseUpdate({ ...m, mouse: true, now: m.now + 1000 }, SIZE, {
+      type: "mouse",
+      action: "press",
+      x,
+      y,
+    });
+  const quick = (m: Model, x: number, y: number) =>
     mouseUpdate({ ...m, mouse: true }, SIZE, { type: "mouse", action: "press", x, y });
   /** Where a button is on the screen: the 1-based column and row a click needs. */
   const where = (m: Model, text: string) => {
@@ -722,6 +730,83 @@ describe("task_dxn6 the window and the buttons", () => {
     m = await settle(press1(m, yes.x, yes.y), tools);
     expect(m.notice).toBe("Approved «approve».");
     expect((await run.state()).status).toBe("completed");
+  });
+
+  test("task_dxn6_a_click_right_after_the_window_changed_is_not_an_answer", async () => {
+    const h = host();
+    const run = await start(h, "paused");
+    await run.completeStep("write", 1);
+    await run.waitForRest(10_000);
+    const tools = createDecisionTools(h);
+    // A resume asks one line, so its Yes is drawn where the Cancel of "Checking" was.
+    const asking = update(await modelOf(h, run.runId), "a");
+    expect(screen(asking).join("\n")).toContain("[Esc Cancel]");
+    const cancel = where(asking, "[Esc Cancel]");
+    const m = await settle(asking, tools);
+    expect(m.flow?.phase).toBe("confirm");
+    const yes = where(m, "[y Yes]");
+    expect(yes).toEqual(cancel);
+    // a double click on the same cell does not answer the question it has not seen ...
+    const early = quick(m, cancel.x, cancel.y);
+    expect(early.flow?.phase).toBe("confirm");
+    expect(takeEffects(early)[1]).toEqual([]);
+    expect((await record(run, "run_resumed")).length).toBe(0);
+    // ... a click made after the window has stood for a moment does
+    const later = press1(m, yes.x, yes.y);
+    expect(takeEffects(later)[1].map((e) => e.type)).toEqual(["decide"]);
+  });
+
+  test("the yes reads a long question on to its end first", async () => {
+    const h = host();
+    const run = await atGate(h);
+    await run.reportResult("approve", 1, {
+      rows: Array.from({ length: 40 }, (_, i) => ({ place: `f${i}.ts`, problem: `problem ${i}` })),
+    });
+    const tools = createDecisionTools(h);
+    let m = await press(await modelOf(h, run.runId), tools, "r");
+    expect(screen(m).join("\n")).not.toContain("f39.ts,problem 39");
+    m = update(m, "y"); // reads on, writes nothing
+    expect(m.flow?.phase).toBe("confirm");
+    expect(takeEffects(m)[1]).toEqual([]);
+    expect(screen(m).join("\n")).toContain("f39.ts,problem 39");
+    m = update(m, "y"); // the end has been on the screen: this is the yes
+    expect(takeEffects(m)[1].map((e) => e.type)).toEqual(["decide"]);
+  });
+
+  test("a click on a terminal too small to show the window answers nothing", async () => {
+    const h = host();
+    const run = await atGate(h);
+    const tools = createDecisionTools(h);
+    const m = await press(await modelOf(h, run.runId), tools, "a");
+    const yes = where(m, "[y Yes]");
+    const tiny = mouseUpdate(
+      { ...m, mouse: true, now: m.now + 1000 },
+      { cols: 30, rows: 10 },
+      {
+        type: "mouse",
+        action: "press",
+        x: yes.x,
+        y: yes.y,
+      },
+    );
+    expect(tiny.flow?.phase).toBe("confirm");
+  });
+
+  test("a long title keeps the corner of the window, and a long reason is read at its end", async () => {
+    const h = host();
+    const run = await atGate(h);
+    const tools = createDecisionTools(h);
+    let m = await modelOf(h, run.runId);
+    m = { ...m, sessions: m.sessions.map((s) => ({ ...s, title: "t".repeat(200) })) };
+    m = await press(m, tools, "r");
+    expect(m.flow?.phase).toBe("reason");
+    for (const key of [..."0123456789".repeat(40)]) m = update(m, key);
+    for (const key of [..."the-very-end"]) m = update(m, key);
+    const lines = screen(m);
+    const top = lines.find((l) => l.includes("┌─ Reject")) ?? "";
+    expect(top.trimEnd().endsWith("┐")).toBe(true);
+    // the end of what was typed is on the screen, not cut off
+    expect(lines.join("\n")).toContain("the-very-end");
   });
 
   test("a run that nothing can be decided at has no buttons", async () => {

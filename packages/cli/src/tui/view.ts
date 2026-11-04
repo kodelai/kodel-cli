@@ -439,6 +439,11 @@ function updateKey(input: Model, key: string, size: Size): Model {
   if (m.flow) {
     // Leaving is never held back by a decision that is being asked or written.
     if (key === "q" && flowYieldsQuit(m.flow)) return { ...m, quit: true };
+    // The yes is for a question that has been read: with lines still out of the window it reads on first.
+    if (key === "y" && m.flow.phase === "confirm") {
+      const max = modalOf(m.flow, size.cols, size.rows - 3).maxScroll;
+      if (m.flow.scroll < max) return { ...m, flow: { ...m.flow, scroll: max } };
+    }
     return clampFlowScroll(flowKey(m, key), size);
   }
   if (m.legend !== null) return legendKey(m, key, size);
@@ -1500,10 +1505,18 @@ export function mouseUpdate(
   return wanting(mouseEvent(input, size, event));
 }
 
+/** How long after the window changes its question a click is not taken as an answer (milliseconds). */
+const CLICK_GUARD_MS = 400;
+
 /** A click while a decision is asked: only the buttons of its window answer. */
 function modalClick(m: Model, size: Size, event: Extract<InputEvent, { type: "mouse" }>): Model {
   const f = m.flow;
   if (!f || event.action !== "press") return m;
+  // Not drawn on a terminal this small, so not answered either.
+  if (size.cols < 40 || size.rows < 12) return m;
+  // A click right after the window changed what it asks (a double click on a button, say) lands on
+  // the button that took its place, which its maker never saw.
+  if (m.now - f.shownAt < CLICK_GUARD_MS) return m;
   const modal = modalOf(f, size.cols, size.rows - 3);
   const row = event.y - 3;
   const col = event.x - 1;
