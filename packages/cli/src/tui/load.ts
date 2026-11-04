@@ -16,6 +16,7 @@ import { canReadPipelines, loadPipelines } from "./pipes-load";
 import {
   type Activity,
   type AgentSession,
+  type DecisionRef,
   formatAge,
   HEARTBEAT_STALE_MS,
   type Need,
@@ -219,6 +220,40 @@ function waiting(
 
 type Waiting = Extract<NextStep, { waiting: unknown }>["waiting"];
 
+/**
+ * Every gate and pause a key can decide in this run, the one the engine names first in front. The
+ * attempt of a gate comes from the very state this session is built from (the first from the answer
+ * itself), so it is the one that was on the screen when the person looked.
+ */
+function decisionsOf(state: RunState, w: Waiting): DecisionRef[] {
+  if (w.reason !== "gate" && w.reason !== "paused") return [];
+  const attemptOf = (node: string) =>
+    state.active.find((v) => v.node === node && v.phase === "human")?.attempt;
+  const ref = (
+    kind: DecisionRef["kind"],
+    node: string,
+    attempt: number | undefined,
+    prompt: string,
+    command: string,
+  ): DecisionRef => ({
+    kind,
+    node,
+    ...(attempt === undefined ? {} : { attempt }),
+    prompt,
+    command,
+  });
+  const first =
+    w.reason === "gate"
+      ? ref("gate", w.node_slug, w.attempt, w.prompt, w.how_to_decide.cli)
+      : ref("pause", w.node_slug, undefined, w.prompt, w.how_to_decide.cli);
+  const others = (w.also_waiting ?? []).map((e) =>
+    e.reason === "gate"
+      ? ref("gate", e.node_slug, attemptOf(e.node_slug), e.prompt, e.how_to_decide.cli)
+      : ref("pause", e.node_slug, undefined, e.prompt, e.how_to_decide.cli),
+  );
+  return [first, ...others];
+}
+
 function fromWaiting(base: Base, state: RunState, journal: JournalRecord[], w: Waiting): Session {
   const command = w.how_to_decide.cli;
   if (w.reason === "pipeline_changed") {
@@ -252,6 +287,7 @@ function fromWaiting(base: Base, state: RunState, journal: JournalRecord[], w: W
       headline: `Paused at «${w.node_slug}»: ${why}`,
       prompt: w.prompt,
       command,
+      decisions: decisionsOf(state, w),
     });
   }
   return waiting(base, "approve", lastTs(journal, "gate_waiting") ?? sinceLast(journal, state), {
@@ -259,6 +295,7 @@ function fromWaiting(base: Base, state: RunState, journal: JournalRecord[], w: W
     headline: `Step «${w.node_slug}» waits for your decision`,
     prompt: w.prompt,
     command,
+    decisions: decisionsOf(state, w),
   });
 }
 

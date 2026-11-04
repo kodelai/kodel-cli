@@ -99,3 +99,11 @@ Checks: `bun run typecheck`, `bun run lint`, `bun test`, `bun run build && node 
 - `elicit.ts:510-560` re-reads state and changes before the write, with the shared-tree exception; `changesFingerprint` private (L421). `agent-decisions.ts:61-96` is a third copy.
 - `mcp-server.ts:141-178`: stop with a kill grace; `main.ts` calls `process.exit` after `runTui`; commands are detached (`command.ts:119`); `LocalPipelineHost.open` caches one `LocalRun` per run (`pipeline-host.ts:1121-1125`), each with its own `pending` (`host.ts:865`); `host.stop()` covers every cached run, `host.settle(ms)` only end jobs; `.kodel` is excluded from the change list (`git.ts:265`).
 - Regression guard: `describe("gate")` and `gate_comments` in `cli.test.ts`.
+
+## Implementation notes (where the code differs from the plan)
+
+- The fork fixtures live in `packages/cli/test/tui-decide.test.ts` itself (copied from `fork-join-cli.test.ts`); no testkit helper was added.
+- `tuiOptionsFor(source)` became `decisionOptions(source, tools)` in `tui/decide.ts`; the quit limits are options of `createDecisionTools` (`waitMs`, `stopWaitMs`, `hardStop`), and the loop reads them through `TuiOptions.work`.
+- A run that waits for a change of its pipeline (`pipeline_edit`) or a hand edit has no `decisions`, so `a` there names the command; the check-time refusal "a change of the pipeline" is reached by a screen that was read before the file was edited.
+- `g` / `G` collide with the diff reader's first/last-line keys only while a diff is open; elsewhere they move the pick.
+- Not run by me, as the pipeline's own steps do it: the full suite, the full lint and the build.

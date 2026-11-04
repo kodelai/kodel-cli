@@ -29,6 +29,36 @@ export interface AgentSession {
   proven: boolean;
 }
 
+/**
+ * One decision that waits in a run: a gate or a paused step. A fork can hold several; the screen lets
+ * the person pick one, and `a` / `r` / `c` act on the picked one by its node and attempt.
+ */
+export interface DecisionRef {
+  kind: "gate" | "pause";
+  node: string;
+  /** The attempt of a gate (the one the person looked at); a pause has none. */
+  attempt?: number;
+  prompt: string;
+  /** The command that decides it, as the engine words it. */
+  command: string;
+}
+
+/** Tells one decision of a run from another. */
+export function decisionKey(d: DecisionRef): string {
+  return `${d.kind}:${d.node}:${d.attempt ?? 0}`;
+}
+
+/** What the checks said before anything is written: the questions to ask, or why not. */
+export type CheckResult =
+  | { ok: true; questions: string[] }
+  | { ok: false; message: string; needsReason?: true };
+
+/** What came of a write: the notice for the person. */
+export interface DecisionOutcome {
+  ok: boolean;
+  message: string;
+}
+
 export interface Session {
   id: string;
   title: string;
@@ -55,6 +85,12 @@ export interface Session {
   after?: string;
   /** The command that decides it, as the engine words it. */
   command?: string;
+  /**
+   * Every gate and pause of a waiting run that a key here can decide, the one the engine names first
+   * in front. Empty when what waits is not one of them (a change of the pipeline, a hand edit). Not
+   * set at all on sample data: the older keys then stand.
+   */
+  decisions?: DecisionRef[];
   /** Why a failed run failed. */
   reason?: string;
   steps: StepLine[];

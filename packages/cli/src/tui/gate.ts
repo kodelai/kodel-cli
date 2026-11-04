@@ -14,6 +14,7 @@ import type {
   ChangeSummary,
   CheckLine,
   Comment,
+  DecisionRef,
   DiffState,
   Finding,
   GateDetail,
@@ -76,12 +77,21 @@ export async function loadRunDetail(
   source: GateSource,
   runId: string,
   now: number = Date.now(),
+  pick?: DecisionRef,
 ): Promise<GateDetail | undefined> {
   const run = await source.open(runId);
   if (!run) return undefined;
+  // A paused step has no card of this kind.
+  if (pick?.kind === "pause") return undefined;
   const [state, journal, next] = await Promise.all([run.state(), run.journal(), run.inspect()]);
   if ("waiting" in next) {
     if (next.waiting.reason !== "gate") return undefined;
+    // Another gate of the fork than the one the engine names first: its card carries the prompt the
+    // engine gave for it and the engine's own facts, but not the instructions (the answer has none).
+    if (pick && pick.node !== next.waiting.node_slug) {
+      if (!state.active.some((v) => v.node === pick.node && v.phase === "human")) return undefined;
+      return build(run, state, journal, now, { node_slug: pick.node, prompt: pick.prompt });
+    }
     return build(run, state, journal, now, next.waiting);
   }
   return state.status === "running" ? build(run, state, journal, now, undefined) : undefined;
@@ -89,7 +99,8 @@ export async function loadRunDetail(
 
 export const loadGateDetail = loadRunDetail;
 
-type Waiting = Extract<NextStep, { waiting: unknown }>["waiting"];
+/** What a card needs of what the engine said the run waits for. */
+type Waiting = { node_slug: string; prompt: string; instructions?: string };
 
 async function build(
   run: GateRun,

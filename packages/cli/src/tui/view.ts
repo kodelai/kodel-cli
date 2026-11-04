@@ -13,6 +13,17 @@ import {
   wrapText,
   yellow,
 } from "./ansi";
+import {
+  beginFlow,
+  type Flow,
+  flowBar,
+  flowChecked,
+  flowDecided,
+  flowGone,
+  flowKey,
+  flowLines,
+  flowYieldsQuit,
+} from "./decision-flow";
 import { firstCode, moveCode, moveHunk, type Prepared, placeOf, prepare } from "./diffview";
 import type { InputEvent } from "./input";
 import { renderLabel, rowLabels, sessionLine } from "./label";
@@ -33,8 +44,12 @@ import {
   withEntries,
 } from "./pipelines";
 import {
+  type CheckResult,
   type Comment,
+  type DecisionOutcome,
+  type DecisionRef,
   type DiffState,
+  decisionKey,
   formatAge,
   type GateDetail,
   NEED_KEYS,
@@ -97,6 +112,11 @@ export interface Model {
   /** On a narrow terminal the list and the card take turns. */
   focus: "list" | "card";
   confirm: "a" | "r" | "d" | null;
+  /** A decision at a gate or a pause being made for real (project mode); see `decision-flow.ts`. */
+  flow: Flow | null;
+  flowSeq: number;
+  /** Which decision of a run is picked, by run id; a run that has none picked uses its first. */
+  picked: Record<string, string>;
   notice: string;
   quit: boolean;
   /** `demo`: sample data, and a decision only moves a sample around. `project`: nothing can be decided here yet. */
@@ -141,11 +161,81 @@ export type Effect =
   | { type: "add_comment"; runId: string; node: string; attempt: number; comment: Comment }
   | { type: "delete_comment"; runId: string; node: string; attempt: number; index: number }
   | { type: "load_diff"; runId: string; path: string }
-  | { type: "load_stats"; pipeline: string };
+  | { type: "load_stats"; pipeline: string }
+  | {
+      type: "check_decision";
+      flow: number;
+      runId: string;
+      ref: DecisionRef;
+      decision: "approve" | "reject" | "resume";
+      reason?: string;
+    }
+  | {
+      type: "decide";
+      flow: number;
+      runId: string;
+      ref: DecisionRef;
+      decision: "approve" | "reject" | "resume";
+      reason?: string;
+    };
 
-/** A run's gate detail is good for the wait it was read for: a new wait is a new key. */
-export function detailKey(s: Session): string {
-  return `${s.id}:${s.since}`;
+/**
+ * A run's gate detail is good for the wait it was read for: a new wait is a new key. With several
+ * gates waiting, each has its own card, so the picked one's node and attempt are part of the key.
+ */
+export function detailKey(s: Session, pick?: DecisionRef): string {
+  const base = `${s.id}:${s.since}`;
+  return pick ? `${base}:${pick.node}:${pick.attempt ?? 0}` : base;
+}
+
+/** The decision of a run that `a`, `r` and `c` act on: the one picked, or the first. */
+export function pickedDecision(m: Pick<Model, "picked">, s: Session): DecisionRef | undefined {
+  const all = s.decisions ?? [];
+  const key = m.picked[s.id];
+  return all.find((d) => decisionKey(d) === key) ?? all[0];
+}
+
+/**
+ * What `a` and `r` mean here. On sample data, or for a session that carries no decisions (older
+ * callers), what the need says; in a project, what the picked decision says.
+ */
+function keysOf(m: Model, s: Session | undefined): { a?: string; r?: string } {
+  if (!s?.need) return {};
+  if (m.source !== "project" || s.decisions === undefined) return NEED_KEYS[s.need];
+  const d = pickedDecision(m, s);
+  if (!d) return {};
+  return d.kind === "gate" ? { a: "approve", r: "reject" } : { a: "resume" };
+}
+
+/** Moves the pick of the selected run by one among its decisions, wrapping round. */
+function movePick(m: Model, by: 1 | -1): Model {
+  const s = selectedSession(m);
+  const all = s?.decisions ?? [];
+  if (!s || all.length < 2) return m;
+  const current = pickedDecision(m, s);
+  const at = Math.max(0, current ? all.indexOf(current) : 0);
+  const next = all[(at + by + all.length) % all.length];
+  if (!next) return m;
+  return {
+    ...m,
+    picked: { ...m.picked, [s.id]: decisionKey(next) },
+    notice: "",
+    cardScroll: 0,
+    tab: 0,
+    cursor: 0,
+    open: false,
+    sub: 0,
+  };
+}
+
+/** The checks for a decision have answered. */
+export function withCheck(m: Model, flow: number, result: CheckResult): Model {
+  return flowChecked(m, flow, result);
+}
+
+/** The write for a decision has been made, or refused. */
+export function withDecided(m: Model, flow: number, outcome: DecisionOutcome): Model {
+  return flowDecided(m, flow, outcome);
 }
 
 export interface Size {
@@ -194,6 +284,9 @@ export function initialModel(
     selected: ordered(loaded.sessions)[0]?.id ?? "",
     focus: "list",
     confirm: null,
+    flow: null,
+    flowSeq: 0,
+    picked: {},
     notice: "",
     quit: false,
     source,
@@ -220,7 +313,7 @@ export function withDetail(m: Model, key: string, detail: GateDetail): Model {
   // A run that is going on changes under the person's eyes, so what was read of its files may be out
   // of date: a read that failed is forgotten, and the file that is open is read again (what was shown
   // stays until the new text arrives).
-  const runId = key.slice(0, key.lastIndexOf(":"));
+  const runId = key.slice(0, key.indexOf(":"));
   if (m.sessions.find((s) => s.id === runId)?.status !== "running") return next;
   const mine = `${runId}:`;
   const diffs = Object.fromEntries(
@@ -250,7 +343,19 @@ export function withData(m: Model, loaded: Loaded, now: number): Model {
     ? m.confirm
     : null;
   const pipelines = sortEntries(loaded.pipelines ?? []);
-  return {
+  // A pick that is no longer among the decisions of its run (decided elsewhere) is forgotten; the run
+  // then shows its first decision, and a person who had picked is told.
+  const picked = { ...m.picked };
+  let moved = false;
+  for (const s of sessions) {
+    const key = picked[s.id];
+    if (key === undefined) continue;
+    if (!(s.decisions ?? []).some((d) => decisionKey(d) === key)) {
+      delete picked[s.id];
+      moved = moved || s.id === m.selected;
+    }
+  }
+  const next: Model = {
     ...m,
     sessions,
     proposals: loaded.proposals,
@@ -259,8 +364,16 @@ export function withData(m: Model, loaded: Loaded, now: number): Model {
     rep: withNames(m.rep, repNames(pipelines)),
     selected,
     confirm,
+    picked,
     now,
   };
+  const dropped = flowGone(next, sessions);
+  return moved && dropped.notice === next.notice
+    ? {
+        ...dropped,
+        notice: "The decision you had picked is gone (decided elsewhere); showing the first one.",
+      }
+    : dropped;
 }
 
 export function tick(m: Model, now: number): Model {
@@ -303,6 +416,11 @@ export function update(input: Model, key: string, size: Size = DEFAULT_SIZE): Mo
 function updateKey(input: Model, key: string, size: Size): Model {
   const m = normalized(input);
   if (key === "ctrl-c") return { ...m, quit: true };
+  if (m.flow) {
+    // Leaving is never held back by a decision that is being asked or written.
+    if (key === "q" && flowYieldsQuit(m.flow)) return { ...m, quit: true };
+    return flowKey(m, key);
+  }
   if (m.legend !== null) return legendKey(m, key, size);
   if (m.input) return typing(m, key);
   const current = selectedSession(m);
@@ -357,14 +475,22 @@ function updateKey(input: Model, key: string, size: Size): Model {
     case "escape":
     case "left":
       return { ...m, focus: "list", zoom: false };
+    case "g":
+    case "G":
+      return movePick(m, key === "g" ? 1 : -1);
     case "a":
     case "r": {
-      if (current?.need === undefined || NEED_KEYS[current.need][key] === undefined) return m;
+      if (current?.need === undefined || keysOf(m, current)[key] === undefined) return m;
       if (m.source === "project") {
-        return {
-          ...m,
-          notice: `Deciding from here comes later. In a terminal: ${current.command ?? "see the card"}`,
-        };
+        const ref = current.decisions === undefined ? undefined : pickedDecision(m, current);
+        if (!ref) {
+          return {
+            ...m,
+            notice: `This one is decided with a command, not from here. In a terminal: ${current.command ?? "see the card"}`,
+          };
+        }
+        const decision = ref.kind === "pause" ? "resume" : key === "a" ? "approve" : "reject";
+        return beginFlow(m, current, ref, decision);
       }
       return { ...m, confirm: key, notice: "" };
     }
@@ -685,7 +811,7 @@ function moveCursor(m: Model, d: GateDetail, by: number): Model {
 /** The selected run's gate detail, once it has been read. */
 function detailOf(m: Model): { s: Session; d: GateDetail } | undefined {
   const s = selectedSession(m);
-  const d = s ? m.details[detailKey(s)] : undefined;
+  const d = s ? m.details[detailKey(s, pickedDecision(m, s))] : undefined;
   return s && d ? { s, d } : undefined;
 }
 
@@ -780,7 +906,7 @@ function panel(m: Model, width: number, height: number): Panel {
   const s = selectedSession(m);
   if (!s) return { head: [], body: [dim("No session selected.")] };
   const found = detailOf(m);
-  if (!found) return { head: [], body: cardLines(s, m, width) };
+  if (!found) return { head: [], body: [...flowBox(m), ...cardLines(s, m, width)] };
   const focused = m.focus === "card";
   const tabs = tabStrip(found.d, m.tab, width, focused);
   const content = tabContent(found.d, tabState(m, found.d), {
@@ -792,12 +918,28 @@ function panel(m: Model, width: number, height: number): Panel {
     instructions: m.instructions,
   });
   const band = headerBand(s, found.d, width, glyph(s, m.frame), m.now, height < 22);
+  const box = flowBox(m);
   return {
-    head: [...band, tabs.line, dim("─".repeat(width))],
-    body: content.lines,
-    ...(content.anchor === undefined ? {} : { anchor: content.anchor }),
+    head: [...band, ...pickerLine(m, s, width), tabs.line, dim("─".repeat(width))],
+    body: [...box, ...content.lines],
+    ...(content.anchor === undefined ? {} : { anchor: content.anchor + box.length }),
     spans: tabs.spans,
   };
+}
+
+/** The question of a decision being made, at the top of the card. */
+function flowBox(m: Model): string[] {
+  return m.flow ? flowLines(m.flow) : [];
+}
+
+/** Which decision of the run is picked, when the run holds more than one. */
+function pickerLine(m: Model, s: Session, width: number): string[] {
+  const all = s.decisions ?? [];
+  if (all.length < 2) return [];
+  const picked = pickedDecision(m, s);
+  const at = Math.max(0, picked ? all.indexOf(picked) : 0);
+  const what = picked ? `${picked.kind === "gate" ? "gate" : "paused"} «${picked.node}»` : "";
+  return [fit(dim(`decision ${at + 1} of ${all.length} · ${what} · g/G pick`), width)];
 }
 
 /** The panel as `height` lines: the head, then the part of the body that fits. */
@@ -876,7 +1018,9 @@ const STEP_GLYPH: Record<StepState, string> = {
 const TIME_WIDTH = 8;
 
 function tagOf(s: Session): string {
-  return s.status === "waiting" && s.need ? NEED_TAG[s.need] : s.step;
+  if (s.status !== "waiting" || !s.need) return s.step;
+  const more = (s.decisions?.length ?? 0) > 1 ? ` ×${s.decisions?.length}` : "";
+  return `${NEED_TAG[s.need]}${more}`;
 }
 
 function timeOf(s: Session, now: number, ago: boolean): string {
@@ -944,14 +1088,16 @@ function listWidthFor(cols: number): number {
   return Math.min(58, Math.max(44, Math.floor(cols * 0.42)));
 }
 
-function actionLine(s: Session, project: boolean): string {
-  const keys = s.need ? NEED_KEYS[s.need] : {};
+function actionLine(m: Model, s: Session): string {
+  const keys = keysOf(m, s);
   const parts = [
     ...(keys.a ? [`${bold("a")} ${keys.a}`] : []),
     ...(keys.r ? [`${bold("r")} ${keys.r}`] : []),
   ];
   if (parts.length === 0) return "";
-  return `${parts.join("   ")}${project ? dim("   (shows the command for now)") : ""}`;
+  // A project whose sessions carry no decisions still only shows the command.
+  const commandOnly = m.source === "project" && s.decisions === undefined;
+  return `${parts.join("   ")}${commandOnly ? dim("   (shows the command for now)") : ""}`;
 }
 
 /** Every line of the card; the screen shows the part from `cardScroll` on. */
@@ -971,7 +1117,7 @@ function cardLines(s: Session | undefined, m: Model, width: number): string[] {
     out.push(`${yellow("│")} ${green("Ready to decide")}`);
     if (s.after) out.push(`${yellow("│")} ${dim(`After that: ${s.after}`)}`);
     if (s.command) out.push(`${yellow("│")} ${dim(`$ ${s.command}`)}`);
-    out.push(`${yellow("└")} ${actionLine(s, m.source === "project")}`);
+    out.push(`${yellow("└")} ${actionLine(m, s)}`);
     if (s.need === "approve") out.push(dim("Reading the details…"));
     out.push("");
   } else if (s.status === "failed") {
@@ -1117,8 +1263,9 @@ function hints(m: Model): string {
     // The keys come first: text that the agent's session wrote must not push them off a narrow screen.
     return `${bold("y")} yes   ${bold("n")} no   ${bold(label)} «${current?.title ?? ""}»${rowOf(m, current)}?`;
   }
-  const keys = current?.need ? NEED_KEYS[current.need] : {};
-  const decide = `${keys.a ? `   ${bold("a")} ${keys.a}` : ""}${keys.r ? `   ${bold("r")} ${keys.r}` : ""}`;
+  const keys = keysOf(m, current);
+  const pick = (current?.decisions?.length ?? 0) > 1 ? `   ${bold("g/G")} pick` : "";
+  const decide = `${pick}${keys.a ? `   ${bold("a")} ${keys.a}` : ""}${keys.r ? `   ${bold("r")} ${keys.r}` : ""}`;
   const zoom = `   ${bold("z")} ${m.zoom ? "show list" : "zoom"}`;
   if (m.focus === "card" && m.section === 0) {
     const found = detailOf(m);
@@ -1200,7 +1347,13 @@ export function render(model: Model, { cols, rows }: Size): string[] {
   if (m.legend !== null && m.section === 3) body = legendOverlay(m, body, cols, bodyHeight);
   for (let i = 0; i < bodyHeight; i++) out.push(fit(body[i] ?? "", cols));
 
-  const status = m.input ? inputLine(m.input) : m.notice !== "" ? green(m.notice) : hints(m);
+  const status = m.flow
+    ? flowBar(m.flow)
+    : m.input
+      ? inputLine(m.input)
+      : m.notice !== ""
+        ? green(m.notice)
+        : hints(m);
   out.push(fit(` ${status}`, cols));
   return out;
 }
@@ -1266,7 +1419,7 @@ function mouseEvent(
   event: Extract<InputEvent, { type: "mouse" }>,
 ): Model {
   const m = normalized(input);
-  if (!m.mouse || m.confirm !== null || m.legend !== null) return m;
+  if (!m.mouse || m.confirm !== null || m.flow !== null || m.legend !== null) return m;
   const layout = layoutOf(m, size.cols);
   if (event.action !== "press") {
     if (m.section !== 0) return m;

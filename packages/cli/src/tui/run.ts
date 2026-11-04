@@ -1,8 +1,16 @@
 /** The terminal loop: alternate screen, raw keys, redraw on a key, a resize, a frame or new data. */
 import { neutralize } from "./ansi";
+import type { DecisionRequest, WorkHandle } from "./decide";
 import { MOUSE_OFF, MOUSE_ON, parseInput } from "./input";
 import type { Loaded } from "./load";
-import type { Comment, DiffState, GateDetail } from "./session";
+import type {
+  CheckResult,
+  Comment,
+  DecisionOutcome,
+  DecisionRef,
+  DiffState,
+  GateDetail,
+} from "./session";
 import type { StatsData } from "./stats-load";
 import { diffKey } from "./tabs";
 import {
@@ -12,11 +20,14 @@ import {
   isAnimated,
   type Model,
   mouseUpdate,
+  pickedDecision,
   render,
   takeEffects,
   tick,
   update,
+  withCheck,
   withData,
+  withDecided,
   withDetail,
   withDiff,
   withStats,
@@ -32,8 +43,16 @@ const STATS_REFRESH_MS = 60_000;
 export interface TuiOptions {
   /** Start with mouse events on; `m` turns them on and off while the screen is open. */
   mouse?: boolean;
-  /** Reads what the card of a run at a human step shows; called for the selected run only. */
-  loadDetail?: (runId: string) => Promise<GateDetail | undefined>;
+  /** How often the list of runs is read again (milliseconds); tests make it long or short. */
+  refreshMs?: number;
+  /** Reads what the card of a run at a human step shows; called for the selected run only, for the picked gate. */
+  loadDetail?: (runId: string, pick?: DecisionRef) => Promise<GateDetail | undefined>;
+  /** Looks at a decision before anything is written: the questions to ask, or why not. */
+  checkDecision?: (runId: string, request: DecisionRequest) => Promise<CheckResult>;
+  /** Writes a decision a person confirmed. A person's act, never an agent's. */
+  decide?: (runId: string, request: DecisionRequest) => Promise<DecisionOutcome>;
+  /** The engine work the decisions started here, waited for when the screen is left. */
+  work?: WorkHandle;
   /** Reads the diff of one changed file of a run. */
   loadDiff?: (runId: string, path: string) => Promise<DiffState>;
   /** Records a comment at the gate of a run, or takes one out. A person's act, never an agent's. */
@@ -55,11 +74,15 @@ export function applyInput(
 ): Model {
   let model = start;
   const typing = start.input !== null;
+  const deciding = start.flow !== null;
   for (const event of parseInput(chunk)) {
     model =
       event.type === "key" ? update(model, event.name, size) : mouseUpdate(model, size, event);
     if (model.quit) break;
     if (typing && model.input === null) break;
+    // A decision that has just been asked for is answered by what comes back, not by the rest of a
+    // pasted chunk: "ay" must not answer the question it has not seen.
+    if (!deciding && model.flow !== null) break;
   }
   return model;
 }
@@ -85,14 +108,15 @@ export async function runTui(
     const wanted = model.sessions.find((x) => x.id === model.selected);
     if (!options.loadDetail || !wanted) return;
     if (wanted.need !== "approve" && wanted.status !== "running") return;
-    const key = detailKey(wanted);
+    const pick = pickedDecision(model, wanted);
+    const key = detailKey(wanted, pick);
     const stale =
       wanted.status === "running" && Date.now() - (readAt.get(key) ?? 0) > DETAIL_REFRESH_MS;
     if (reading.has(key) || (!again && !stale && key in model.details)) return;
     reading.add(key);
     readAt.set(key, Date.now());
     options
-      .loadDetail(wanted.id)
+      .loadDetail(wanted.id, pick)
       .then((detail) => {
         if (detail) {
           model = withDetail(model, key, detail);
@@ -138,6 +162,50 @@ export async function runTui(
         .finally(draw);
       return;
     }
+    if (effect.type === "check_decision") {
+      const checking = options.checkDecision;
+      if (!checking) {
+        model = withCheck(model, effect.flow, { ok: false, message: "Cannot decide here." });
+        return;
+      }
+      checking(effect.runId, effect)
+        .catch(
+          (error: unknown): CheckResult => ({
+            ok: false,
+            message: `Could not check: ${error instanceof Error ? error.message : String(error)}`,
+          }),
+        )
+        .then((result) => {
+          model = withCheck(model, effect.flow, result);
+          // A refusal usually means the run moved on: it is read again at once.
+          if (!result.ok) return reload();
+        })
+        .finally(draw);
+      return;
+    }
+    if (effect.type === "decide") {
+      const writing = options.decide;
+      if (!writing) {
+        model = withDecided(model, effect.flow, { ok: false, message: "Cannot decide here." });
+        return;
+      }
+      writing(effect.runId, effect)
+        .catch(
+          (error: unknown): DecisionOutcome => ({
+            ok: false,
+            message: `Not written: ${error instanceof Error ? error.message : String(error)}`,
+          }),
+        )
+        .then((outcome) => {
+          model = withDecided(model, effect.flow, outcome);
+          return reload();
+        })
+        .finally(() => {
+          ensureDetail(true);
+          draw();
+        });
+      return;
+    }
     if (effect.type === "load_diff") {
       const read = options.loadDiff?.(effect.runId, effect.path);
       if (!read) return;
@@ -167,6 +235,21 @@ export async function runTui(
       })
       .catch(failed("Could not change the comments"))
       .finally(draw);
+  };
+  // Several reads can be in flight (the timer's, one after a decision): the latest to start wins.
+  let loadSeq = 0;
+  const reload = (): Promise<void> => {
+    const mine = ++loadSeq;
+    return load()
+      .then((loaded) => {
+        if (mine === loadSeq) model = withData(model, loaded, Date.now());
+      })
+      .catch((error: unknown) => {
+        model = {
+          ...model,
+          notice: `Cannot read the runs: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      });
   };
   const flush = () => {
     const [clean, effects] = takeEffects(model);
@@ -204,22 +287,12 @@ export async function runTui(
     const refresh = setInterval(() => {
       if (refreshing) return;
       refreshing = true;
-      load()
-        .then((loaded) => {
-          model = withData(model, loaded, Date.now());
-        })
-        .catch((error: unknown) => {
-          model = {
-            ...model,
-            notice: `Cannot read the runs: ${error instanceof Error ? error.message : String(error)}`,
-          };
-        })
-        .finally(() => {
-          refreshing = false;
-          ensureDetail();
-          draw();
-        });
-    }, REFRESH_MS);
+      reload().finally(() => {
+        refreshing = false;
+        ensureDetail();
+        draw();
+      });
+    }, options.refreshMs ?? REFRESH_MS);
 
     const statsRefresh = setInterval(() => {
       if (model.section === 3 && model.rep.selected !== "") {
@@ -237,11 +310,50 @@ export async function runTui(
       restore();
       resolve(0);
     };
+    // Leaving while a decision's work goes on: the screen stays for it, and a second request to leave
+    // stops it (the step is then started again by whoever asks next).
+    let leaving = false;
+    let stopRequested: () => void = () => undefined;
+    const stopped = new Promise<void>((resolve) => {
+      stopRequested = resolve;
+    });
+    const leave = async () => {
+      const work = options.work;
+      if (!work?.pending()) {
+        finish();
+        return;
+      }
+      leaving = true;
+      model = {
+        ...model,
+        quit: false,
+        flow: null,
+        notice:
+          "Finishing the work of the run (it may grow while waiting). q again stops it; the step is then started again by the next caller.",
+      };
+      draw();
+      const outcome = await Promise.race([
+        work.wait().then(
+          () => "done" as const,
+          () => "done" as const,
+        ),
+        stopped.then(() => "stop" as const),
+      ]);
+      if (outcome === "stop") await work.stop().catch(() => undefined);
+      finish();
+    };
     const onData = (chunk: string) => {
+      if (leaving) {
+        const again = parseInput(chunk).some(
+          (e) => e.type === "key" && (e.name === "q" || e.name === "ctrl-c"),
+        );
+        if (again) stopRequested();
+        return;
+      }
       const before = model.selected;
       model = applyInput(model, chunk, size());
       if (model.quit) {
-        finish();
+        void leave();
         return;
       }
       flush();

@@ -60,7 +60,7 @@ import {
   WORK_WAIT_MS,
 } from "./gate-decision";
 import { type Choice, InitError, runInit } from "./init";
-import { dialogTimeoutFrom, noProjectHost, serveStdio } from "./mcp-server";
+import { dialogTimeoutFrom, noProjectHost, serveStdio, stopAndWait } from "./mcp-server";
 import { plain, UNSAFE_CODES } from "./plain";
 import { formatTable } from "./table";
 import {
@@ -733,8 +733,10 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         } = await import("./tui/demo");
         // One start time for the whole run, so the sample waits keep their identity and only age.
         const base = Date.now();
+        const { decisionOptions } = await import("./tui/decide");
         await runTui(process.stdin, process.stdout, async () => demoSessions(base), "demo", {
           mouse: opts.mouse === true,
+          ...decisionOptions("demo", undefined),
           loadDetail: async (runId) =>
             demoGateDetail(runId, base) ?? demoRunningDetail(runId, base),
           loadDiff: (_runId, path) => demoDiff(path),
@@ -747,11 +749,14 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const { loadSessions } = await import("./tui/load");
       const { addComment, loadDiff, loadRunDetail, removeComment } = await import("./tui/gate");
       const { createStatsLoader } = await import("./tui/stats-load");
+      const { createDecisionTools, decisionOptions } = await import("./tui/decide");
       const h = await host();
       const loadStats = createStatsLoader(h, hashSource);
+      const tools = createDecisionTools(h, { hardStop: () => stopAndWait(h) });
       await runTui(process.stdin, process.stdout, () => loadSessions(h, Date.now()), "project", {
         mouse: opts.mouse === true,
-        loadDetail: (runId) => loadRunDetail(h, runId),
+        ...decisionOptions("project", tools),
+        loadDetail: (runId, pick) => loadRunDetail(h, runId, Date.now(), pick),
         loadDiff: (runId, path) => loadDiff(h, runId, path),
         addComment: (runId, node, attempt, comment) => addComment(h, runId, node, attempt, comment),
         deleteComment: (runId, node, attempt, index) =>
