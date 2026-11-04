@@ -536,3 +536,35 @@ describe("opening the service from the config", () => {
     expect((await refused(openTaskService({ storeRoot: root }))).message).toContain("prefx");
   });
 });
+
+describe("task_g4jy_local_list_order_is_priority_then_age", () => {
+  test("task_g4jy_local_list_order_is_priority_then_age: priority, then oldest first, then key", async () => {
+    const a = adapter();
+    const lowFirst = await a.create({ title: "low, created first", priority: "low" });
+    const highOldest = await a.create({ title: "high, created second", priority: "high" });
+    const normal = await a.create({ title: "normal", priority: "normal" });
+    const highNewest = await a.create({ title: "high, created last", priority: "high" });
+    // The high ones come first and the older of the two before the newer; then normal, then low.
+    // (A record without `created_at` cannot be written: the local schema requires it.)
+    const answer = await a.list({ state: ALL, limit: 50 }, signal());
+    expect(answer.tasks.map((t) => t.key)).toEqual([
+      highOldest.key,
+      highNewest.key,
+      normal.key,
+      lowFirst.key,
+    ]);
+  });
+
+  test("task_g4jy_local_list_order_is_priority_then_age: a tie on priority and date is broken by the key", async () => {
+    const same = new LocalTaskAdapter({
+      storeRoot: root,
+      prefix: "KDL",
+      clock: () => Date.UTC(2026, 9, 22),
+      random: Math.random,
+    });
+    const x = await same.create({ title: "x", priority: "normal" });
+    const y = await same.create({ title: "y", priority: "normal" });
+    const answer = await same.list({ state: ALL, limit: 50 }, signal());
+    expect(answer.tasks.map((t) => t.key)).toEqual([x.key, y.key].sort());
+  });
+});

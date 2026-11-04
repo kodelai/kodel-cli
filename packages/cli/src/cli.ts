@@ -743,6 +743,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           addComment: (runId, _node, _attempt, comment) => demoAddComment(runId, comment),
           deleteComment: (runId, _node, _attempt, index) => demoDeleteComment(runId, index),
           loadStats: async (pipeline) => (await import("./tui/demo-stats")).demoStats(pipeline),
+          ...(await import("./tui/tasks-open")).tuiTaskOptions("demo", base),
         });
         return;
       }
@@ -750,7 +751,9 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const { addComment, loadDiff, loadRunDetail, removeComment } = await import("./tui/gate");
       const { createStatsLoader } = await import("./tui/stats-load");
       const { createDecisionTools, decisionOptions } = await import("./tui/decide");
+      const { openTasksForTui, tuiTaskOptions } = await import("./tui/tasks-open");
       const h = await host();
+      const tasks = await openTasksForTui(await storeRoot());
       const loadStats = createStatsLoader(h, hashSource);
       const tools = createDecisionTools(h, { hardStop: () => stopAndWait(h) });
       await runTui(process.stdin, process.stdout, () => loadSessions(h, Date.now()), "project", {
@@ -762,6 +765,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         deleteComment: (runId, node, attempt, index) =>
           removeComment(h, runId, node, attempt, index),
         loadStats: (pipeline) => loadStats(pipeline),
+        ...tuiTaskOptions(tasks),
       });
     });
 

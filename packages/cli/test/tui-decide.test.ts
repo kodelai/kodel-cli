@@ -474,7 +474,9 @@ describe("task_dxn6 the picker", () => {
     m = { ...m, focus: "card" };
     m = update(m, "c");
     expect(m.input).not.toBeNull();
-    for (const key of ["h", "i", "enter"]) m = update(m, key);
+    for (const key of ["h", "i"]) m = update(m, key);
+    // an Enter at once after the input opened is not a person pressing it
+    m = update({ ...m, now: m.now + 1000 }, "enter");
     const [, effects] = takeEffects(m);
     expect(effects[0]).toMatchObject({ type: "add_comment", node: "b-gate", attempt: 1 });
     // a pick whose decision is decided elsewhere is dropped, with a notice

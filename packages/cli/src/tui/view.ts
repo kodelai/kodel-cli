@@ -91,6 +91,24 @@ import {
   tabStrip,
   visibleTabs,
 } from "./tabs";
+import {
+  backlogBlock,
+  backlogOf,
+  type CardView,
+  initialTasks,
+  orderedRows,
+  type Picked,
+  type RowId,
+  scrolled,
+  scrollTo,
+  type TasksState,
+  taskCardView,
+  taskListLines,
+  tasksNotice,
+  withTaskCard,
+  withTasksLoad,
+} from "./tasks";
+import type { CardSlot, TasksLoad } from "./tasks-load";
 
 export const SECTIONS = ["Sessions", "Pipeline", "Tasks", "Report"] as const;
 
@@ -102,6 +120,10 @@ export interface Model {
   /** What the Pipeline screen shows, and where it is. */
   pipelines: PipeEntry[];
   pipe: PipeState;
+  /** The Tasks screen and the Backlog block: what was read, and where the Tasks screen is. */
+  tasks: TasksState;
+  /** What the Sessions selection is on: the run `selected` names, or a task of the Backlog. */
+  pick: Picked;
   /** The Report screen: where it is, and what has been read for it, by pipeline. */
   rep: RepState;
   stats: Record<string, StatsSlot>;
@@ -144,10 +166,32 @@ export interface Model {
   line: number;
   /** A comment being typed, or nothing. */
   input: Input | null;
+  /** A comment on a task being typed, or nothing. It is the one thing this screen writes to a task. */
+  taskInput: TaskInput | null;
+  /** Set by a jump from a task card into a run: where Esc in Sessions goes back to. */
+  back: Back | undefined;
   /** The diffs read so far, by `diffKey`. */
   diffs: Record<string, DiffState>;
   /** Things the screen cannot do by itself (write a comment, read a diff); the loop does them. */
   effects: Effect[];
+}
+
+/** The card a jump into a run came from: the Tasks screen (2) or the Backlog in Sessions (0), the task it was on, what was opened from it. */
+export interface Back {
+  section: 0 | 2;
+  key: string;
+  drill: string[];
+}
+
+/**
+ * A comment on a task being typed. `openedAt` and `confirmAt` (the model's clock when the input opened and when the
+ * question "save it?" appeared) are what the time guards measure from; `confirmAt` is set only while the question is up.
+ */
+export interface TaskInput {
+  key: string;
+  text: string;
+  openedAt: number;
+  confirmAt?: number;
 }
 
 export interface Input {
@@ -155,6 +199,8 @@ export interface Input {
   severity: string;
   /** The file or the step the comment is about. */
   place: string;
+  /** The model's clock when the input opened: Enter is ignored for `COMMENT_GUARD_MS` after it. */
+  openedAt: number;
 }
 
 export type Effect =
@@ -177,7 +223,9 @@ export type Effect =
       ref: DecisionRef;
       decision: "approve" | "reject" | "resume";
       reason?: string;
-    };
+    }
+  | { type: "load_task"; key: string }
+  | { type: "add_task_comment"; key: string; text: string };
 
 /**
  * A run's gate detail is good for the wait it was read for: a new wait is a new key. With several
@@ -279,6 +327,8 @@ export function initialModel(
     pipelines: sortEntries(loaded.pipelines ?? []),
     pipe: initialPipeState(sortEntries(loaded.pipelines ?? [])),
     rep: initialRepState(repNames(sortEntries(loaded.pipelines ?? []))),
+    tasks: initialTasks(),
+    pick: { kind: "run" },
     stats: {},
     legend: null,
     selected: ordered(loaded.sessions)[0]?.id ?? "",
@@ -303,6 +353,8 @@ export function initialModel(
     instructions: false,
     line: -1,
     input: null,
+    taskInput: null,
+    back: undefined,
     diffs: {},
     effects: [],
   };
@@ -355,18 +407,20 @@ export function withData(m: Model, loaded: Loaded, now: number): Model {
       moved = moved || s.id === m.selected;
     }
   }
-  const next: Model = {
-    ...m,
-    sessions,
-    proposals: loaded.proposals,
-    pipelines,
-    pipe: withEntries(m.pipe, pipelines),
-    rep: withNames(m.rep, repNames(pipelines)),
-    selected,
-    confirm,
-    picked,
-    now,
-  };
+  const next: Model = settled(
+    reconciled({
+      ...m,
+      sessions,
+      proposals: loaded.proposals,
+      pipelines,
+      pipe: withEntries(m.pipe, pipelines),
+      rep: withNames(m.rep, repNames(pipelines)),
+      selected,
+      confirm,
+      picked,
+      now,
+    }),
+  );
   const dropped = flowGone(next, sessions);
   // A comment being typed, or a deletion being asked, is about the card that was on the screen: when
   // that card is another one now (its decision went, a new wait began), it is cancelled, not moved
@@ -396,6 +450,114 @@ function cardIdentity(m: Model): string | undefined {
   return s ? detailKey(s, pickedDecision(m, s)) : undefined;
 }
 
+/** An answer of the tasks reader. The runs are not read with it: a slow tracker never holds them up. */
+export function withTasks(m: Model, load: TasksLoad): Model {
+  return settled(reconciled({ ...m, tasks: withTasksLoad(m.tasks, load) }));
+}
+
+// biome-ignore lint/suspicious/noControlCharactersInRegex: this is what the pasted text is cleaned of
+const PASTE_CONTROLS = /\r\n|[\u0000-\u001f\u007f-\u009f]/g;
+
+/** A comment being typed belongs to the task whose card was open; if the card moves on, the comment is let go, not saved elsewhere. */
+function settled(m: Model): Model {
+  if (m.taskInput === null || shownTask(m) === m.taskInput.key) return m;
+  return { ...m, taskInput: null, notice: "Comment cancelled: the task is no longer on the card." };
+}
+
+/**
+ * Text the terminal marked as pasted. It only ever goes into an input that is already open, as one line
+ * (line breaks and control characters become spaces) and never saves it; with no input open it is ignored whole,
+ * so a pasted `c`, `q` or Enter is never read as a key. `givenUp` is a paste that was not finished in time: the text
+ * so far is taken like any other, and the person is told why the keys that follow are dropped for a moment.
+ */
+export function pasteText(m: Model, text: string, givenUp = false): Model {
+  const line = stripLoneSurrogates(text.replace(PASTE_CONTROLS, " "));
+  const told = (): Model => (givenUp ? { ...m, notice: PASTE_GIVEN_UP } : m);
+  if (m.taskInput) {
+    // While the question "save it?" is up the text is not touched, and the person is told so.
+    if (m.taskInput.confirmAt !== undefined) {
+      return text === "" ? told() : { ...m, notice: PASTE_IGNORED };
+    }
+    const room = TASK_COMMENT_MAX - m.taskInput.text.length;
+    if (room <= 0) return told();
+    return {
+      ...told(),
+      taskInput: { ...m.taskInput, text: m.taskInput.text + cutChars(line, room) },
+    };
+  }
+  if (m.input) {
+    const room = TASK_COMMENT_MAX - m.input.text.length;
+    if (room <= 0) return told();
+    return { ...told(), input: { ...m.input, text: m.input.text + cutChars(line, room) } };
+  }
+  return told();
+}
+
+/** The card of a task, as the reader answered. */
+export function withTask(m: Model, key: string, slot: CardSlot): Model {
+  return { ...m, tasks: withTaskCard(m.tasks, key, slot) };
+}
+
+/** The tasks the Backlog shows now, in order. */
+function backlogKeys(m: Model): string[] {
+  return backlogOf(m.tasks, m.sessions)?.rows.map((r) => r.key) ?? [];
+}
+
+/** The card of a task is asked for once: it is marked as being read, and the loop is told to read it. */
+function askCard(m: Model, key: string): Model {
+  if (key in m.tasks.cards) return m;
+  const marked = withTask(m, key, { status: "loading" });
+  if (m.effects.some((e) => e.type === "load_task" && e.key === key)) return marked;
+  return { ...marked, effects: [...marked.effects, { type: "load_task", key }] };
+}
+
+/**
+ * The task whose card is on the screen: the one the person opened from a card, else the one the list is on
+ * (the Tasks screen's selection, or the Backlog row that is picked). Nothing on the other screens.
+ */
+export function shownTask(m: Model): string | undefined {
+  const base =
+    m.section === 2
+      ? m.tasks.selected
+      : m.section === 0 && m.pick.kind === "task"
+        ? m.pick.key
+        : "";
+  if (base === "") return undefined;
+  return m.tasks.drill.at(-1) ?? base;
+}
+
+/**
+ * A task that is picked in Sessions but has left the block (it got a run, it was finished, the list changed)
+ * gives the pick to the first row of the list, and the focus back to the list: a card must never show a row
+ * the person did not pick. With no runs at all, the first task of the block is picked at once, so its keys work.
+ */
+function reconciled(m: Model): Model {
+  const first = m.sessions[0];
+  const task = backlogKeys(m)[0];
+  const pickTask = (base: Model, key: string): Model =>
+    askCard({ ...base, pick: { kind: "task", key } }, key);
+  if (m.pick.kind === "run" && first === undefined && task !== undefined) {
+    return pickTask(m, task);
+  }
+  if (m.pick.kind !== "task" || backlogKeys(m).includes(m.pick.key)) return m;
+  // The Tasks screen has its own selection and card: only Sessions gives up the focus and what was opened.
+  const onSessions = m.section === 0;
+  const base = {
+    ...m,
+    ...(onSessions ? { focus: "list" as const } : {}),
+    cardScroll: 0,
+    tab: 0,
+    cursor: 0,
+    open: false,
+    sub: 0,
+    back: undefined,
+    tasks: onSessions ? { ...m.tasks, drill: [], item: 0 } : m.tasks,
+  };
+  if (first) return { ...base, pick: { kind: "run" }, selected: first.id };
+  if (task !== undefined) return pickTask(base, task);
+  return { ...base, pick: { kind: "run" }, selected: "" };
+}
+
 export function tick(m: Model, now: number): Model {
   return { ...m, frame: m.frame + 1, now };
 }
@@ -410,7 +572,9 @@ export function isAnimated(m: Model): boolean {
   );
 }
 
+/** The run the Sessions selection is on; none while it is on a task, so no key or read can reach a run that is not shown. */
 function selectedSession(m: Model): Session | undefined {
+  if (m.pick.kind === "task") return undefined;
   return m.sessions.find((s) => s.id === m.selected) ?? m.sessions[0];
 }
 
@@ -421,6 +585,10 @@ export function withStats(m: Model, pipeline: string, slot: StatsSlot): Model {
 
 /** On the Report screen a pipeline that has not been read is asked for, once. */
 function wanting(m: Model): Model {
+  if (m.section === 2) {
+    const key = shownTask(m);
+    return key === undefined ? m : askCard(m, key);
+  }
   const name = m.rep.selected;
   if (m.section !== 3 || name === "" || m.stats[name]) return m;
   return {
@@ -429,11 +597,11 @@ function wanting(m: Model): Model {
   };
 }
 
-export function update(input: Model, key: string, size: Size = DEFAULT_SIZE): Model {
-  return wanting(updateKey(input, key, size));
+export function update(input: Model, key: string, size: Size = DEFAULT_SIZE, alone = true): Model {
+  return wanting(updateKey(input, key, size, alone));
 }
 
-function updateKey(input: Model, key: string, size: Size): Model {
+function updateKey(input: Model, key: string, size: Size, alone: boolean): Model {
   const m = normalized(input);
   if (key === "ctrl-c") return { ...m, quit: true };
   if (m.flow) {
@@ -459,28 +627,30 @@ function updateKey(input: Model, key: string, size: Size): Model {
     return clampFlowScroll(flowKey(m, key), size);
   }
   if (m.legend !== null) return legendKey(m, key, size);
-  if (m.input) return typing(m, key);
+  if (m.input) return typing(m, key, alone);
+  if (m.taskInput) return typingTask(m, key, alone);
   const current = selectedSession(m);
   if (m.confirm !== null && current) {
     if (key === "y") return decide(m, current, m.confirm);
     return { ...m, confirm: null, notice: "Cancelled." };
   }
   if (m.section === 1 && !SHARED_KEYS.has(key)) return pipesUpdate(m, key, size);
+  if (m.section === 2 && !SHARED_KEYS.has(key)) return tasksUpdate(m, key, size);
   if (m.section === 3 && !SHARED_KEYS.has(key)) return reportUpdate(m, key, size);
   if (m.focus === "card" && m.section === 0) {
-    const moved = cardKey(m, key, size);
+    const moved = taskCardKey(m, key, size) ?? cardKey(m, key, size);
     if (moved) return moved;
   }
   switch (key) {
     case "q":
       return { ...m, quit: true };
     case "tab":
-      return { ...m, section: (m.section + 1) % SECTIONS.length, notice: "" };
+      return go(m, (m.section + 1) % SECTIONS.length);
     case "1":
     case "2":
     case "3":
     case "4":
-      return { ...m, section: Number(key) - 1, notice: "" };
+      return go(m, Number(key) - 1);
     case "up":
     case "k":
       return moveSelection(m, -1);
@@ -498,7 +668,13 @@ function updateKey(input: Model, key: string, size: Size): Model {
         const any = m.section === 1 ? m.pipelines.length > 0 : m.rep.selected !== "";
         return any ? { ...m, zoom: !m.zoom, focus: m.zoom ? m.focus : "card" } : m;
       }
-      if (m.section !== 0 || m.sessions.length === 0) return m;
+      if (m.section === 2) {
+        // Nothing to zoom into when the list is empty.
+        return m.tasks.selected !== ""
+          ? { ...m, zoom: !m.zoom, focus: m.zoom ? m.focus : "card" }
+          : m;
+      }
+      if (m.section !== 0 || !canShow(m)) return m;
       return { ...m, zoom: !m.zoom, focus: m.zoom ? m.focus : "card" };
     case "m":
       return {
@@ -508,9 +684,42 @@ function updateKey(input: Model, key: string, size: Size): Model {
       };
     case "enter":
     case "right":
-      return m.section === 0 && m.sessions.length > 0 ? { ...m, focus: "card" } : m;
+      return m.section === 0 && canShow(m) ? { ...m, focus: "card" } : m;
+    case "t": {
+      // From a Backlog row to the same task on the Tasks screen. Its card is asked for again there.
+      if (m.section !== 0 || m.pick.kind !== "task") return m;
+      const key = m.pick.key;
+      return {
+        ...m,
+        section: 2,
+        focus: "list",
+        zoom: false,
+        notice: "",
+        // Marked as asked for, so the Tasks screen does not ask for it a second time.
+        back: undefined,
+        tasks: {
+          ...m.tasks,
+          selected: key,
+          pinned: true,
+          scroll: 0,
+          drill: [],
+          item: 0,
+          cards:
+            key in m.tasks.cards
+              ? m.tasks.cards
+              : { ...m.tasks.cards, [key]: { status: "loading" } },
+        },
+        effects: [...m.effects, { type: "load_task", key }],
+      };
+    }
+    case "c":
+      // Only from a card that has the focus: never from a list row, where a stray key could open it.
+      return m.focus === "card" ? startTaskComment(m) : m;
     case "escape":
     case "left":
+      // After a jump from a task into a run, Esc from the list goes back to that task's card.
+      if (m.back !== undefined && m.focus === "list" && m.pick.kind === "run")
+        return restoreBack(m);
       return { ...m, focus: "list", zoom: false };
     case "g":
     case "G":
@@ -535,6 +744,271 @@ function updateKey(input: Model, key: string, size: Size): Model {
     }
     default:
       return m;
+  }
+}
+
+/** Goes to a screen. What belonged to the card that was on the screen before (what was opened from it, the way back) is let go. */
+function go(m: Model, section: number): Model {
+  // The focus does not come along: `c` on the new screen must never find a card the person did not open there.
+  return {
+    ...m,
+    section,
+    focus: "list",
+    notice: "",
+    back: undefined,
+    tasks: { ...m.tasks, drill: [], item: 0 },
+  };
+}
+
+/** `c` on a task's card: a one-line input for a comment on the task the card shows. */
+function startTaskComment(m: Model): Model {
+  const key = shownTask(m);
+  if (key === undefined || key === "") return m;
+  return { ...m, taskInput: { key, text: "", openedAt: m.now }, notice: "" };
+}
+
+/** Enter on a new input and `y` on the question are ignored for this long: a burst of pasted text is over by then. */
+export const COMMENT_GUARD_MS = 400;
+
+/**
+ * A comment on a task is being typed. Saving takes three steps, each of them a key alone in its chunk and after a
+ * pause: Enter asks "save it?", `y` saves. A paste, however it reaches the program, cannot do all of that: its line
+ * breaks arrive with other text, and the question needs a second, later chunk that is exactly `y`. Nothing else about
+ * the task can change here.
+ */
+function typingTask(m: Model, key: string, alone: boolean): Model {
+  const input = m.taskInput;
+  if (!input) return m;
+  if (key === "escape") return { ...m, taskInput: null, notice: "Cancelled." };
+  if (input.confirmAt !== undefined) {
+    if ((key === "y" || key === "Y") && alone) {
+      // The notice would hide the question, so it is said on the question's own line (see `taskInputLine`).
+      if (m.now - input.confirmAt < COMMENT_GUARD_MS) return { ...m, notice: WAIT_FOR_Y };
+      const effect: Effect = {
+        type: "add_task_comment",
+        key: input.key,
+        text: cleanComment(input.text).trim(),
+      };
+      return { ...m, taskInput: null, notice: "", effects: [...m.effects, effect] };
+    }
+    // Any other key goes back to the text, which is kept.
+    const { confirmAt: _asked, ...back } = input;
+    return { ...m, taskInput: back, notice: "" };
+  }
+  switch (key) {
+    case "enter": {
+      // Enter with other bytes in its chunk is a burst, not a press: it is not taken, and the person is told.
+      if (!alone || m.now - input.openedAt < COMMENT_GUARD_MS) {
+        return { ...m, notice: WAIT_FOR_ENTER };
+      }
+      // Blank means blank to a reader: the service refuses a text with nothing visible in it, and the person must
+      // not be asked to confirm a text it will refuse.
+      if (isBlank(input.text))
+        return { ...m, taskInput: null, notice: "Nothing to save: the comment is empty." };
+      return { ...m, taskInput: { ...input, confirmAt: m.now }, notice: "" };
+    }
+    case "backspace":
+      return {
+        ...m,
+        taskInput: { ...input, text: [...input.text].slice(0, -1).join("") },
+        notice: "",
+      };
+    default:
+      // One printable character is text; the names of other keys (up, enter, ...) are longer.
+      return [...key].length === 1 &&
+        !CONTROL_OR_LONE.test(key) &&
+        input.text.length + key.length <= TASK_COMMENT_MAX
+        ? { ...m, taskInput: { ...input, text: input.text + key }, notice: "" }
+        : m;
+  }
+}
+
+/** The longest comment the contract takes (`TASK_LIMITS.comment`), counted as the contract counts: in UTF-16 units. */
+const TASK_COMMENT_MAX = 500;
+
+// A surrogate that has no partner is not a character; it must not reach the tracker.
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+const LONE_SURROGATES = new RegExp(LONE_SURROGATE.source, "g");
+
+export function stripLoneSurrogates(text: string): string {
+  return text.replace(LONE_SURROGATES, "");
+}
+
+// biome-ignore lint/suspicious/noControlCharactersInRegex: this is what a comment is cleaned of
+const CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
+const CONTROL_OR_LONE = new RegExp(`[\\u0000-\\u001f\\u007f-\\u009f]|${LONE_SURROGATE.source}`);
+
+/**
+ * What a comment is cleaned of before it is sent: the control characters and surrogates with no partner, and nothing
+ * else. The joiners and marks that words and emoji are made of (ZWNJ in Persian, ZWJ and VS16 in emoji) stay, so the
+ * text the tracker gets is the text the person confirmed. The service validates and redacts it again.
+ */
+export function cleanComment(text: string): string {
+  return stripLoneSurrogates(text.replace(CONTROLS, ""));
+}
+
+// Nothing a reader can see: spaces, and the zero-width characters that `trim` keeps.
+const BLANK = /^[\s\u200b-\u200d\u2060\ufeff]*$/u;
+
+/** A text with nothing visible in it. */
+const isBlank = (text: string): boolean => BLANK.test(text);
+
+const WAIT_FOR_ENTER = "Wait a moment, then press Enter again.";
+const PASTE_IGNORED = "Press y to save, any other key to edit; pasted text was ignored.";
+const PASTE_GIVEN_UP = "Paste given up; keys dropped until you pause for a second.";
+const WAIT_FOR_Y = "Wait a moment, then press y.";
+
+/** `text` cut to at most `room` UTF-16 units without ever splitting a character in two. */
+function cutChars(text: string, room: number): string {
+  let out = "";
+  for (const char of text) {
+    if (out.length + char.length > room) break;
+    out += char;
+  }
+  return out;
+}
+
+/** The card of the task on the screen as lines, with the line of the item the cursor is on. */
+function taskView(m: Model, width: number): CardView | undefined {
+  const key = shownTask(m);
+  if (key === undefined) return undefined;
+  const load = m.tasks.load?.status === "ready" ? m.tasks.load : undefined;
+  const rows = load ? [...load.rows, ...load.todo] : [];
+  return taskCardView({
+    slot: m.tasks.cards[key],
+    row: rows.find((r) => r.key === key),
+    key,
+    sessions: m.sessions,
+    rows,
+    width,
+    cursor: m.tasks.item,
+    focused: m.focus === "card",
+  });
+}
+
+/** Opens a task from the card: on top of the ones already opened. Its card is asked for. */
+function drillTo(m: Model, key: string): Model {
+  if (key === "") return m;
+  const base = m.section === 2 ? m.tasks.selected : m.pick.kind === "task" ? m.pick.key : "";
+  // A parent that is already under this card on the way down is the way back: the tasks above it are put away.
+  const path = [base, ...m.tasks.drill];
+  const at = path.slice(0, -1).lastIndexOf(key);
+  const drill = at >= 0 ? path.slice(1, at + 1) : [...m.tasks.drill, key];
+  return askCard(
+    {
+      ...m,
+      notice: "",
+      cardScroll: 0,
+      tasks: { ...m.tasks, drill, item: 0, scroll: 0 },
+    },
+    key,
+  );
+}
+
+/** Jumps from a task's card into a run of Sessions, remembering the card so Esc can come back to it. */
+function jumpToRun(m: Model, id: string): Model {
+  if (id === "") return m;
+  const base = m.section === 2 ? m.tasks.selected : m.pick.kind === "task" ? m.pick.key : "";
+  if (base === "" || (m.section !== 0 && m.section !== 2)) return m;
+  return {
+    ...m,
+    section: 0,
+    pick: { kind: "run" },
+    selected: id,
+    focus: "list",
+    zoom: false,
+    notice: "",
+    cardScroll: 0,
+    tab: 0,
+    cursor: 0,
+    open: false,
+    sub: 0,
+    back: { section: m.section, key: base, drill: m.tasks.drill },
+    tasks: { ...m.tasks, drill: [], item: 0 },
+  };
+}
+
+/** Esc in Sessions after such a jump: the task's card again, as it was left. */
+function restoreBack(m: Model): Model {
+  const back = m.back;
+  if (back === undefined) return m;
+  const tasks = { ...m.tasks, drill: back.drill, item: 0, scroll: 0 };
+  const shown = back.drill.at(-1) ?? back.key;
+  const restored: Model =
+    back.section === 2
+      ? {
+          ...m,
+          back: undefined,
+          section: 2,
+          focus: "card",
+          zoom: false,
+          notice: "",
+          tasks: { ...tasks, selected: back.key, pinned: true },
+        }
+      : {
+          ...m,
+          back: undefined,
+          section: 0,
+          pick: { kind: "task", key: back.key },
+          focus: "card",
+          zoom: false,
+          notice: "",
+          cardScroll: 0,
+          tasks,
+        };
+  // A Backlog task that has got a run meanwhile is no longer a row; the pick then falls back as it always does.
+  return askCard(back.section === 0 ? reconciled(restored) : restored, shown);
+}
+
+/**
+ * The keys of a task's card that has the focus: the arrows walk its items (the parent, the subtasks, the runs), Enter
+ * opens one, Esc or Left takes back what was opened. Anything else goes on to the general keys. A card without items
+ * leaves the arrows to scrolling.
+ */
+function taskCardKey(m: Model, key: string, size: Size): Model | undefined {
+  const shown = shownTask(m);
+  if (shown === undefined) return undefined;
+  const width = layoutOf(m, size.cols).cardWidth;
+  const view = taskView(m, width);
+  if (!view) return undefined;
+  const count = view.items.length;
+  const at = Math.min(m.tasks.item, count - 1);
+  const room = Math.max(1, size.rows - 3);
+  const scrollKey = m.section === 2 ? "scroll" : "cardScroll";
+  const current = m.section === 2 ? m.tasks.scroll : m.cardScroll;
+  switch (key) {
+    case "up":
+    case "k":
+    case "down":
+    case "j": {
+      if (count === 0) return undefined;
+      const next = Math.min(count - 1, Math.max(0, at + (key === "up" || key === "k" ? -1 : 1)));
+      const moved: Model = { ...m, tasks: { ...m.tasks, item: next } };
+      const lines = taskView(moved, width);
+      if (lines?.anchor === undefined) return moved;
+      const to = scrollTo(current, lines.anchor, room, lines.lines.length);
+      return scrollKey === "scroll"
+        ? { ...moved, tasks: { ...moved.tasks, scroll: to } }
+        : { ...moved, cardScroll: to };
+    }
+    case "enter":
+    case "right": {
+      const item = view.items[at];
+      if (item === undefined) return undefined;
+      if (item.kind === "run") return jumpToRun(m, item.id);
+      return drillTo(m, item.key);
+    }
+    case "escape":
+    case "left":
+      if (m.tasks.drill.length === 0) return undefined;
+      return {
+        ...m,
+        notice: "",
+        cardScroll: 0,
+        tasks: { ...m.tasks, drill: m.tasks.drill.slice(0, -1), item: 0, scroll: 0 },
+      };
+    default:
+      return undefined;
   }
 }
 
@@ -617,6 +1091,62 @@ function reportUpdate(m: Model, key: string, size: Size): Model {
   return next;
 }
 
+/** The card of the task on the Tasks screen, as lines. */
+function tasksCardBody(m: Model, width: number): string[] {
+  return taskView(m, width)?.lines ?? [dim("No task selected.")];
+}
+
+/** A key on the Tasks screen. The only thing that can change a task from here is `c`, a comment the person types. */
+function tasksUpdate(m: Model, key: string, size: Size): Model {
+  const load = m.tasks.load;
+  if (load?.status !== "ready") return key === "escape" ? { ...m, zoom: false } : m;
+  if (m.focus === "card") {
+    const moved = taskCardKey(m, key, size);
+    if (moved) return moved;
+  }
+  const rows = orderedRows(load.rows);
+  const scroll = (by: number): Model => {
+    const room = Math.max(1, size.rows - 3);
+    const max = Math.max(0, tasksCardBody(m, layoutOf(m, size.cols).cardWidth).length - room);
+    return { ...m, tasks: { ...m.tasks, scroll: Math.min(max, Math.max(0, m.tasks.scroll + by)) } };
+  };
+  switch (key) {
+    case "up":
+    case "k":
+    case "down":
+    case "j": {
+      const by = key === "up" || key === "k" ? -1 : 1;
+      if (m.focus === "card") return scroll(by);
+      const at = rows.findIndex((r) => r.key === m.tasks.selected);
+      const next = rows[at < 0 ? 0 : Math.min(rows.length - 1, Math.max(0, at + by))];
+      if (!next || (at >= 0 && next.key === m.tasks.selected)) return m;
+      return {
+        ...m,
+        notice: "",
+        tasks: { ...m.tasks, selected: next.key, pinned: false, scroll: 0, drill: [], item: 0 },
+        effects: [...m.effects, { type: "load_task", key: next.key }],
+      };
+    }
+    case "pagedown":
+    case " ":
+      return scroll(PAGE);
+    case "pageup":
+    case "b":
+      return scroll(-PAGE);
+    case "enter":
+    case "right":
+      return m.tasks.selected !== "" ? { ...m, focus: "card" } : m;
+    case "c":
+      // Only from a card that has the focus: never from a list row, where a stray key could open it.
+      return m.focus === "card" ? startTaskComment(m) : m;
+    case "escape":
+    case "left":
+      return { ...m, focus: "list", zoom: false };
+    default:
+      return m;
+  }
+}
+
 /** A key on the Pipeline screen. */
 function pipesUpdate(m: Model, key: string, size: Size): Model {
   const layout = layoutOf(m, size.cols);
@@ -636,6 +1166,8 @@ function pipesUpdate(m: Model, key: string, size: Size): Model {
     next = {
       ...next,
       section: 0,
+      pick: { kind: "run" },
+      back: undefined,
       selected: r.open,
       focus: "card",
       zoom: false,
@@ -652,14 +1184,21 @@ function pipesUpdate(m: Model, key: string, size: Size): Model {
 /** Where a comment lands in the middle of being typed. */
 const SEVERITIES = ["blocker", "critical", "major", "minor", "info"];
 
-/** A comment is being typed: every key is the comment's, except the few that end it. */
-function typing(m: Model, key: string): Model {
+/**
+ * A comment is being typed: every key is the comment's, except the few that end it. Enter saves it at once, but,
+ * like the one on a task, only as the whole of its chunk and after `COMMENT_GUARD_MS`: Enter that comes with other
+ * bytes, or right after the input opened, is a paste or a burst and is not taken.
+ */
+function typing(m: Model, key: string, alone: boolean): Model {
   const input = m.input;
   if (!input) return m;
   switch (key) {
     case "escape":
       return { ...m, input: null, notice: "Cancelled." };
     case "enter": {
+      if (!alone || m.now - input.openedAt < COMMENT_GUARD_MS) {
+        return { ...m, notice: WAIT_FOR_ENTER };
+      }
       const description = input.text.trim();
       const found = detailOf(m);
       if (description === "" || !found) return { ...m, input: null, notice: "" };
@@ -750,7 +1289,7 @@ function cardKey(m: Model, key: string, size: Size): Model | undefined {
     case "c": {
       if (found.d.kind !== "gate") return undefined;
       const place = commentPlace(found.d, tabState(m, found.d));
-      return { ...m, input: { text: "", severity: "major", place }, notice: "" };
+      return { ...m, input: { text: "", severity: "major", place, openedAt: m.now }, notice: "" };
     }
     case "d":
       return m.tab === COMMENTS && onList && found.d.comments.length > 0
@@ -810,7 +1349,11 @@ function readingKey(
       if (!canComment) return undefined;
       const row = p.rows[at];
       return row
-        ? { ...m, input: { text: "", severity: "major", place: placeOf(path, row) }, notice: "" }
+        ? {
+            ...m,
+            input: { text: "", severity: "major", place: placeOf(path, row), openedAt: m.now },
+            notice: "",
+          }
         : undefined;
     }
     default:
@@ -873,22 +1416,47 @@ function around(d: GateDetail, tab: number, by: 1 | -1, wrap: boolean): number {
   return tabs[Math.min(tabs.length - 1, Math.max(0, next))] ?? tab;
 }
 
-function moveSelection(m: Model, by: -1 | 1): Model {
-  const at = Math.max(
-    0,
-    m.sessions.findIndex((s) => s.id === selectedSession(m)?.id),
-  );
-  const next = m.sessions[Math.min(m.sessions.length - 1, Math.max(0, at + by))];
-  return {
+/** The rows the arrows walk in Sessions: the runs, then the tasks of the Backlog. */
+function navRows(m: Model): RowId[] {
+  return [
+    ...m.sessions.map((s): RowId => ({ kind: "run", id: s.id })),
+    ...backlogKeys(m).map((key): RowId => ({ kind: "task", key })),
+  ];
+}
+
+/** Something the Sessions card can show: a run, or a task that is picked. */
+function canShow(m: Model): boolean {
+  return m.pick.kind === "task" || m.sessions.length > 0;
+}
+
+function select(m: Model, row: RowId): Model {
+  const base = {
     ...m,
-    selected: next?.id ?? m.selected,
     notice: "",
     cardScroll: 0,
     tab: 0,
     cursor: 0,
     open: false,
     sub: 0,
+    back: undefined,
+    tasks: { ...m.tasks, drill: [], item: 0 },
   };
+  if (row.kind === "run") return { ...base, selected: row.id, pick: { kind: "run" } };
+  return {
+    ...base,
+    pick: { kind: "task", key: row.key },
+    effects: [...m.effects, { type: "load_task", key: row.key }],
+  };
+}
+
+function moveSelection(m: Model, by: -1 | 1): Model {
+  const rows = navRows(m);
+  const here = m.pick.kind === "task" ? m.pick.key : selectedSession(m)?.id;
+  const at = rows.findIndex(
+    (r) => (r.kind === "task" ? r.key : r.id) === here && r.kind === m.pick.kind,
+  );
+  const next = rows[at < 0 ? 0 : Math.min(rows.length - 1, Math.max(0, at + by))];
+  return next ? select(m, next) : m;
 }
 
 const DEFAULT_SIZE: Size = { cols: 120, rows: 30 };
@@ -942,6 +1510,9 @@ function tabState(m: Model, d: GateDetail): TabState {
 
 /** What the right side shows for the selected run. */
 function panel(m: Model, width: number, height: number): Panel {
+  if (m.pick.kind === "task") {
+    return { head: [], body: taskView(m, width)?.lines ?? [dim("No task selected.")] };
+  }
   const s = selectedSession(m);
   if (!s) return { head: [], body: [dim("No session selected.")] };
   const found = detailOf(m);
@@ -1085,14 +1656,14 @@ function timeOf(s: Session, now: number, ago: boolean): string {
 
 interface ListLines {
   lines: string[];
-  /** The session each line shows, or nothing for a group heading or a gap. */
-  ids: (string | undefined)[];
+  /** The run or the task each line shows, or nothing for a group heading or a gap. */
+  ids: (RowId | undefined)[];
   selectedAt: number;
 }
 
 function listLines(m: Model, width: number): ListLines {
   const lines: string[] = [];
-  const ids: (string | undefined)[] = [];
+  const ids: (RowId | undefined)[] = [];
   let selectedAt = 0;
   const tagWidth = Math.min(13, Math.max(7, ...m.sessions.map((s) => tagOf(s).length)));
   const titleWidth = Math.max(8, width - tagWidth - 13);
@@ -1113,7 +1684,7 @@ function listLines(m: Model, width: number): ListLines {
       const time = timeOf(s, m.now, g.ago).padStart(TIME_WIDTH);
       const label = labels.get(s.id) ?? { name: s.title, guess: false };
       const row = `${bar}${glyph(s, m.frame)} ${fit(renderLabel(label, titleWidth), titleWidth)} ${tagStyled} ${time}`;
-      if (s.id === m.selected) {
+      if (m.pick.kind === "run" && s.id === m.selected) {
         selectedAt = lines.length;
         const plain = fit(stripAnsi(row), width);
         // With the card in focus the list keeps its place but stops shouting.
@@ -1121,10 +1692,24 @@ function listLines(m: Model, width: number): ListLines {
       } else {
         lines.push(fit(row, width));
       }
-      ids.push(s.id);
+      ids.push({ kind: "run", id: s.id });
     }
     lines.push("");
     ids.push(undefined);
+  }
+  const block = backlogBlock(
+    m.tasks,
+    m.sessions,
+    m.pick.kind === "task" ? m.pick.key : undefined,
+    m.focus === "list",
+    width,
+  );
+  const picked = m.pick.kind === "task" ? m.pick.key : undefined;
+  for (const [i, line] of block.lines.entries()) {
+    const id = block.ids[i];
+    if (id?.kind === "task" && id.key === picked) selectedAt = lines.length;
+    lines.push(line);
+    ids.push(id);
   }
   return { lines, ids, selectedAt };
 }
@@ -1275,6 +1860,19 @@ function reportBody(m: Model, cols: number, height: number): string[] {
   return panes(m, layout, left, right, height);
 }
 
+function tasksBody(m: Model, cols: number, height: number): string[] {
+  const notice = tasksNotice(m.tasks);
+  if (notice) return ["", `  ${bold(SECTIONS[2])}`, ...notice];
+  const layout = layoutOf(m, cols);
+  const left = layout.showList
+    ? taskListLines(m.tasks, layout.listWidth, height, m.focus === "list")
+    : [];
+  const right = layout.showCard
+    ? scrolled(tasksCardBody(m, layout.cardWidth), m.tasks.scroll, height, layout.cardWidth)
+    : [];
+  return panes(m, layout, left, right, height);
+}
+
 function pipesBody(m: Model, cols: number, height: number): string[] {
   const entry = entryOf(m.pipelines, m.pipe);
   if (!entry) return emptyPipes();
@@ -1328,7 +1926,8 @@ interface BarButton {
 
 /** The buttons in front of the hints, while nothing else holds the bottom line. */
 function barButtons(m: Model): BarButton[] {
-  if (m.section !== 0 || m.flow || m.input || m.legend !== null || m.confirm !== null) return [];
+  if (m.section !== 0 || m.pick.kind !== "run") return [];
+  if (m.flow || m.input || m.legend !== null || m.confirm !== null) return [];
   if (m.notice !== "") return [];
   const keys = keysOf(m, selectedSession(m));
   const out: BarButton[] = [];
@@ -1350,7 +1949,25 @@ function barText(m: Model): string {
   return buttons.length > 0 ? `${front}   ${hints(m)}` : hints(m);
 }
 
+/** The hints of a task's card that has the focus: the keys of its items first, `c` last where a narrow screen cuts. */
+function taskCardHints(m: Model): string {
+  const width = 80;
+  const view = taskView(m, width);
+  const items = view?.items.length ?? 0;
+  const nav = items > 0 ? `${bold("↑↓")} select   ${bold("Enter")} open` : `${bold("↑↓")} scroll`;
+  const esc = m.tasks.drill.length > 0 ? "back" : "list";
+  return `${nav}   ${bold("Esc")} ${esc}   ${bold("z")} ${m.zoom ? "show list" : "zoom"}   ${bold("q")} quit   ${bold("c")} comment`;
+}
+
+function tasksHints(m: Model): string {
+  const keys = (s: string) => bold(s);
+  if (m.focus === "card") return taskCardHints(m);
+  const comment = m.tasks.selected === "" ? "" : `   ${keys("c")} comment`;
+  return `${keys("↑↓")} select   ${keys("Enter")} card   ${keys("z")} zoom   ${keys("Tab")} menu   ${keys("q")} quit${comment}`;
+}
+
 function hints(m: Model): string {
+  if (m.section === 2) return tasksHints(m);
   if (m.section === 1) return pipeHints(entryOf(m.pipelines, m.pipe), m.pipe, m.focus === "card");
   if (m.legend !== null) return `${bold("↑↓")} scroll   any other key closes the legend`;
   if (m.section === 3) return repHints(m.rep, m.focus === "card");
@@ -1362,13 +1979,19 @@ function hints(m: Model): string {
     // The keys come first: text that the agent's session wrote must not push them off a narrow screen.
     return `${bold("y")} yes   ${bold("n")} no   ${bold(label)} «${current?.title ?? ""}»${rowOf(m, current)}?`;
   }
+  if (m.back !== undefined && m.pick.kind === "run" && m.focus === "list") {
+    return `${bold("Esc")} back to ${cyan(clip(m.back.key, 24))}   ${runHints(m, current)}`;
+  }
+  if (m.pick.kind === "task") {
+    // No key of a run works on a task, and none starts it: the card is for reading. `t` comes last, where a narrow screen cuts.
+    return m.focus === "card"
+      ? `${taskCardHints(m)}   ${bold("t")} tasks`
+      : `${bold("↑↓")} select   ${bold("Enter")} card   ${bold("Tab")} menu   ${bold("q")} quit   ${bold("t")} tasks   ${bold("c")} comment`;
+  }
   const keys = keysOf(m, current);
   const pick = (current?.decisions?.length ?? 0) > 1 ? `   ${bold("g/G")} pick` : "";
   // The buttons in front of these hints already say what a and r do.
-  const buttonsShown = barButtons(m).length > 0;
-  const decide = buttonsShown
-    ? pick
-    : `${pick}${keys.a ? `   ${bold("a")} ${keys.a}` : ""}${keys.r ? `   ${bold("r")} ${keys.r}` : ""}`;
+  const decide = barButtons(m).length > 0 ? pick : `${pick}${decisionKeys(keys)}`;
   const zoom = `   ${bold("z")} ${m.zoom ? "show list" : "zoom"}`;
   if (m.focus === "card" && m.section === 0) {
     const found = detailOf(m);
@@ -1391,19 +2014,61 @@ function hints(m: Model): string {
     }
     return `${nav}${decide}${zoom}   ${bold("q")} quit`;
   }
-  const open = `   ${bold("Enter")} details`;
+  return runHints(m, current);
+}
+
+const decisionKeys = (keys: { a?: string; r?: string }): string =>
+  `${keys.a ? `   ${bold("a")} ${keys.a}` : ""}${keys.r ? `   ${bold("r")} ${keys.r}` : ""}`;
+
+/** The keys of the run list: select, open, decide, menu. Also what stays on the hint line after a jump from a task. */
+function runHints(m: Model, current: Session | undefined): string {
+  const pick = (current?.decisions?.length ?? 0) > 1 ? `   ${bold("g/G")} pick` : "";
+  const decide = barButtons(m).length > 0 ? pick : `${pick}${decisionKeys(keysOf(m, current))}`;
   const proposals =
     m.proposals > 0
       ? dim(`   ${m.proposals} pipeline proposal${m.proposals === 1 ? "" : "s"} wait on 2`)
       : "";
   const mouse = `   ${bold("m")} mouse ${m.mouse ? green("on") : dim("off")}`;
-  return `${bold("↑↓")} select${open}${decide}   ${bold("Tab")} menu${mouse}   ${bold("q")} quit${proposals}`;
+  return `${bold("↑↓")} select   ${bold("Enter")} details${decide}   ${bold("Tab")} menu${mouse}   ${bold("q")} quit${proposals}`;
 }
 
 /** The line at the bottom while a comment is being typed. */
-function inputLine(input: Input): string {
+function inputLine(input: Input, notice = ""): string {
   const place = input.place.length > 28 ? `…${input.place.slice(-27)}` : input.place;
-  return `${bold("Comment")} on ${cyan(place)} [${yellow(input.severity)}]: ${input.text}${inverse(" ")}   ${dim("Enter save · Tab severity · Esc cancel")}`;
+  const hint = notice === "" ? dim("Enter save · Tab severity · Esc cancel") : yellow(notice);
+  return `${bold("Comment")} on ${cyan(place)} [${yellow(input.severity)}]: ${input.text}${inverse(" ")}   ${hint}`;
+}
+
+/** The end of a text that does not fit `room` columns, with a mark where the head was cut: what was typed last is what shows. */
+function tailOf(text: string, room: number): string {
+  if (room <= 0) return "";
+  const chars = [...text];
+  return chars.length <= room ? text : `…${chars.slice(chars.length - room + 1).join("")}`;
+}
+
+/**
+ * The line at the bottom while a comment on a task is being typed, or while the question "save it?" is up. The head
+ * of a long text is the part that is cut, never its end or the cursor: the person sees what Enter would send.
+ */
+function taskInputLine(input: TaskInput, cols: number, notice = ""): string {
+  const key = cyan(clip(input.key, 24));
+  // A notice on the comment (a key pressed too early) is told here: a notice line would hide the input itself.
+  const said = notice === "" ? "" : `${yellow(notice)} `;
+  if (input.confirmAt !== undefined) {
+    const full = `${bold("Save this comment to")} ${key}${bold("?")}  ${bold("y")} save · any other key edits · Esc cancel  «`;
+    const short = `${bold("Save to")} ${key}${bold("?")} ${bold("y")} save · Esc cancel «`;
+    // The end of the text matters more than the long wording: on a narrow screen the short lead is used.
+    const lead = said === "" && cols - 1 - visibleLength(full) - 1 >= 24 ? full : short;
+    const room = cols - 1 - visibleLength(said) - visibleLength(lead) - 1;
+    return `${said}${lead}${tailOf(input.text, room)}»`;
+  }
+  const prefix = `${bold("Comment")} on ${key}: `;
+  const hint =
+    said === "" ? `   ${dim("Enter then y to save · Esc cancel")}` : `   ${said.trimEnd()}`;
+  const full = cols - 1 - visibleLength(prefix) - 1;
+  const withHint = full - visibleLength(hint);
+  const room = withHint >= 20 ? withHint : full;
+  return `${prefix}${tailOf(input.text, room)}${inverse(" ")}${withHint >= 20 ? hint : ""}`;
 }
 
 function emptyState(): string[] {
@@ -1417,6 +2082,10 @@ function emptyState(): string[] {
   ];
 }
 
+/** The notices that tell a refusal or a failure: the loop words them with these openings. */
+const isFailure = (notice: string): boolean =>
+  /^(Could not|Cannot|Comments cannot|Tasks cannot|Nothing to save)/.test(notice);
+
 export function render(model: Model, { cols, rows }: Size): string[] {
   const m = normalized(model);
   if (cols < 40 || rows < 12) {
@@ -1428,17 +2097,18 @@ export function render(model: Model, { cols, rows }: Size): string[] {
 
   let body: string[];
   if (m.section === 2) {
-    body = [
-      "",
-      `  ${bold(SECTIONS[m.section] ?? "")}`,
-      dim("  Not in this prototype yet. The layout under test is menu, session list and card."),
-    ];
+    body = tasksBody(m, cols, bodyHeight);
   } else if (m.section === 3) {
     body = reportBody(m, cols, bodyHeight);
   } else if (m.section === 1) {
     body = pipesBody(m, cols, bodyHeight);
-  } else if (m.sessions.length === 0) {
-    body = emptyState();
+  } else if (m.sessions.length === 0 && navRows(m).length === 0) {
+    // No runs and no task to pick: the way to start, and the one line about the tasks when they are not there.
+    body = [
+      ...emptyState(),
+      "",
+      ...backlogBlock(m.tasks, m.sessions, undefined, true, cols - 2).lines.map((l) => ` ${l}`),
+    ];
   } else {
     const layout = layoutOf(m, cols);
     const right = layout.showCard
@@ -1456,10 +2126,12 @@ export function render(model: Model, { cols, rows }: Size): string[] {
   const status = m.flow
     ? flowBar(m.flow)
     : m.input
-      ? inputLine(m.input)
-      : m.notice !== ""
-        ? green(m.notice)
-        : barText(m);
+      ? inputLine(m.input, m.notice)
+      : m.taskInput
+        ? taskInputLine(m.taskInput, cols, m.notice)
+        : m.notice !== ""
+          ? (isFailure(m.notice) ? red : green)(m.notice)
+          : barText(m);
   out.push(fit(` ${status}`, cols));
   return out;
 }
@@ -1467,6 +2139,7 @@ export function render(model: Model, { cols, rows }: Size): string[] {
 export type Hit =
   | { kind: "menu"; section: number }
   | { kind: "session"; id: string }
+  | { kind: "task"; key: string }
   | { kind: "tab"; index: number }
   | { kind: "card" };
 
@@ -1486,11 +2159,12 @@ export function hitTest(model: Model, { cols, rows }: Size, x: number, y: number
   }
   const bodyHeight = rows - 3;
   const row = y - 3;
-  if (m.section !== 0 || m.sessions.length === 0 || row < 0 || row >= bodyHeight) return undefined;
+  if (m.section !== 0 || navRows(m).length === 0 || row < 0 || row >= bodyHeight) return undefined;
   const layout = layoutOf(m, cols);
   if (layout.showList && x <= layout.listWidth) {
     const id = listView(m, layout.listWidth, bodyHeight).ids[row];
-    return id === undefined ? undefined : { kind: "session", id };
+    if (id === undefined) return undefined;
+    return id.kind === "run" ? { kind: "session", id: id.id } : { kind: "task", key: id.key };
   }
   if (!layout.showCard || x < layout.cardX) return undefined;
   const found = detailOf(m);
@@ -1543,7 +2217,7 @@ function modalClick(m: Model, size: Size, event: Extract<InputEvent, { type: "mo
   const row = event.y - 3;
   const col = event.x - 1;
   const hit = modal.buttons.find((b) => b.row === row && col >= b.x0 && col < b.x1);
-  return hit ? updateKey(m, hit.key, size) : m;
+  return hit ? updateKey(m, hit.key, size, true) : m;
 }
 
 function mouseEvent(
@@ -1554,11 +2228,11 @@ function mouseEvent(
   const m = normalized(input);
   if (!m.mouse) return m;
   if (m.flow) return modalClick(m, size, event);
-  if (m.confirm !== null || m.legend !== null) return m;
+  if (m.confirm !== null || m.legend !== null || m.taskInput !== null) return m;
   if (event.action === "press" && event.y === size.rows) {
     const col = event.x - 1;
     const hit = barButtons(m).find((b) => col >= b.x0 && col < b.x1);
-    return hit ? updateKey(m, hit.key, size) : m;
+    return hit ? updateKey(m, hit.key, size, true) : m;
   }
   const layout = layoutOf(m, size.cols);
   if (event.action !== "press") {
@@ -1572,20 +2246,17 @@ function mouseEvent(
   }
   const hit = hitTest(m, size, event.x, event.y);
   if (!hit) return m;
-  if (hit.kind === "menu") return { ...m, section: hit.section, notice: "" };
+  if (hit.kind === "menu") return go(m, hit.section);
   if (hit.kind === "tab") return toTab({ ...m, focus: "card" }, hit.index);
   if (hit.kind === "card") return { ...m, focus: "card" };
-  if (hit.id === m.selected) {
+  if (hit.kind === "task") {
+    if (m.pick.kind === "task" && m.pick.key === hit.key) {
+      return { ...m, focus: size.cols < WIDE_COLS ? "card" : "list", notice: "" };
+    }
+    return { ...select(m, { kind: "task", key: hit.key }), focus: "list" };
+  }
+  if (m.pick.kind === "run" && hit.id === m.selected) {
     return { ...m, focus: size.cols < WIDE_COLS ? "card" : "list", notice: "" };
   }
-  return {
-    ...m,
-    selected: hit.id,
-    focus: "list",
-    notice: "",
-    cardScroll: 0,
-    tab: 0,
-    cursor: 0,
-    open: false,
-  };
+  return { ...select(m, { kind: "run", id: hit.id }), focus: "list" };
 }

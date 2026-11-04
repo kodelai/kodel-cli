@@ -80,6 +80,8 @@ export interface Session {
   /** How long nothing was heard from a run that is `quiet`. */
   quietMs?: number;
   workdir?: string;
+  /** The key of the task the engine tied this run to; absent when the run is not tied to one. */
+  taskKey?: string;
   /** The card's lines about what is asked of the person. */
   headline?: string;
   prompt?: string;

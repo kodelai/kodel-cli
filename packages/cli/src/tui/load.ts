@@ -119,6 +119,7 @@ async function buildSession(
     title: meta.slug ?? state?.slug ?? runSlug(undefined, meta.task),
     pipeline: meta.pipeline,
     ...(meta.workdir === undefined ? {} : { workdir: meta.workdir }),
+    ...(state?.taskKey === undefined ? {} : { taskKey: state.taskKey }),
     steps: [] as StepLine[],
     log: [] as string[],
   };
@@ -220,6 +221,7 @@ function unreadable(base: Base, since: number, headline: string, prompt: string)
 
 type Base = Pick<Session, "id" | "title" | "pipeline" | "steps" | "log"> & {
   workdir?: string;
+  taskKey?: string;
   agentSession?: AgentSession;
 };
 

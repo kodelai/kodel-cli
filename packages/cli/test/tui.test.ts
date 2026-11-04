@@ -50,7 +50,10 @@ describe("tui sessions list", () => {
     for (const word of ["approve", "pipeline edit", "paused", "hand edit"]) {
       expect(text).toContain(word);
     }
-    for (const word of ["GATE", "CHANGE", "PROPOSAL", "ACK"]) expect(text).not.toContain(word);
+    // Whole words: the BACKLOG heading holds the letters of ACK without being the engine's word.
+    for (const word of ["GATE", "CHANGE", "PROPOSAL", "ACK"]) {
+      expect(text).not.toMatch(new RegExp(`\\b${word}\\b`));
+    }
   });
 
   test("the time column counts from the start of the wait, the run, or the end", () => {
@@ -693,7 +696,12 @@ describe("tui card of a run waiting for approval", () => {
 
   test("c opens a comment about what is on the screen: the file, the step, or the gate", () => {
     const code = press(withCard(), SIZE, ...toTab(TAB.code), "down", "c");
-    expect(code.input).toEqual({ text: "", severity: "major", place: "packages/cli/src/cli.ts" });
+    expect(code.input).toEqual({
+      text: "",
+      severity: "major",
+      place: "packages/cli/src/cli.ts",
+      openedAt: code.now,
+    });
     const step = press(withCard(), SIZE, ...toTab(TAB.steps), ...n(4, "down"), "c");
     expect(step.input?.place).toBe("verify");
     const report = press(withCard(), SIZE, "enter", "c");
@@ -729,7 +737,9 @@ describe("tui card of a run waiting for approval", () => {
     expect(m.quit).toBe(false);
     expect(m.input?.text).toBe("NoWhy?q");
     expect(press(m, SIZE, "escape").input).toBeNull();
-    const saved = press(m, SIZE, "enter");
+    // Enter saves only after the pause that tells a press from a burst of pasted text.
+    expect(press(m, SIZE, "enter").input?.text).toBe("NoWhy?q");
+    const saved = press({ ...m, now: m.now + 500 }, SIZE, "enter");
     expect(saved.input).toBeNull();
     expect(saved.effects).toEqual([
       {
@@ -929,7 +939,8 @@ describe("tui card of a run waiting for approval", () => {
                 tab,
                 open,
                 sub,
-                input: sub === 1 ? { text: "hello", severity: "major", place: "x" } : null,
+                input:
+                  sub === 1 ? { text: "hello", severity: "major", place: "x", openedAt: 0 } : null,
               };
               for (const line of render(m, size)) expect(visibleLength(line)).toBe(size.cols);
             }

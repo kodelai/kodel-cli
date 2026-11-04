@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { fit, neutralize, visibleLength, wrapText } from "../src/tui/ansi";
 import { demoSessions } from "../src/tui/demo";
 import { demoStats } from "../src/tui/demo-stats";
+import { createInputReader } from "../src/tui/input";
 import { applyInput } from "../src/tui/run";
 import { initialModel, type Model, render, takeEffects, update, withStats } from "../src/tui/view";
 
@@ -170,7 +171,7 @@ describe("the screens draw hostile data safely", () => {
 describe("applyInput", () => {
   function typing(): Model {
     const m = initialModel(demoSessions(Date.now()), "demo", Date.now());
-    return { ...m, input: { text: "", severity: "major", place: "src/a.ts" } };
+    return { ...m, input: { text: "", severity: "major", place: "src/a.ts", openedAt: m.now } };
   }
 
   test("text typed goes into the comment", () => {
@@ -178,16 +179,58 @@ describe("applyInput", () => {
     expect(m.input?.text).toBe("abc");
   });
 
-  test("a paste with a line break ends the comment there, and the rest is not read as keys", () => {
-    const m = applyInput(typing(), "first line\nq", SIZE);
-    expect(m.input).toBeNull();
+  test("a line break that comes with other text does not end the comment, and nothing is read as keys", () => {
+    const start = typing();
+    const m = applyInput(start, "first line\nq", SIZE, undefined, start.now + 1000);
+    expect(m.input?.text).toBe("first lineq");
     expect(m.quit).toBe(false);
+    expect(m.effects).toEqual([]);
+    expect(m.notice).toContain("Wait a moment");
   });
 
-  test("keys after a comment that was ended by hand are read as keys", () => {
-    const ended = applyInput(typing(), "x\n", SIZE);
+  test("Enter in a chunk of its own, after the pause, ends the comment; keys after it are read as keys", () => {
+    const typed = applyInput(typing(), "x", SIZE);
+    const ended = applyInput(typed, "\n", SIZE, undefined, typed.now + 500);
     expect(ended.input).toBeNull();
     expect(applyInput(ended, "q", SIZE).quit).toBe(true);
+  });
+
+  test("Enter right after the comment opened is not taken", () => {
+    const typed = applyInput(typing(), "x", SIZE);
+    const early = applyInput(typed, "\n", SIZE, undefined, typed.now + 100);
+    expect(early.input?.text).toBe("x");
+    expect(early.notice).toContain("Wait a moment");
+  });
+
+  test("a gate comment: Enter in a burst, or too soon after it opened, is not taken and says so", () => {
+    const start = typing();
+    const reader = createInputReader();
+    const typed = applyInput(start, "abc", SIZE, reader, start.now + 100);
+    const early = applyInput(typed, "\r", SIZE, reader, start.now + 200);
+    expect(early.input?.text).toBe("abc");
+    expect(early.notice).toContain("Wait a moment");
+    const burst = applyInput(typed, "de\r", SIZE, reader, start.now + 1000);
+    expect(burst.input?.text).toBe("abcde");
+    expect(burst.notice).toContain("Wait a moment");
+    const saved = applyInput(typed, "\r", SIZE, reader, start.now + 1000);
+    expect(saved.input).toBeNull();
+  });
+
+  test("a gate comment: a paste with a line-break-only chunk in the middle saves nothing", () => {
+    const start = typing();
+    const reader = createInputReader();
+    const open = `${ESC}[200~`;
+    const close = `${ESC}[201~`;
+    let m = applyInput(start, "hi", SIZE, reader, start.now + 500);
+    for (const [chunk, at] of [
+      [`${open}line1`, 1000],
+      ["\r\n", 1100],
+      [`line2${close}`, 1200],
+    ] as const) {
+      m = applyInput(m, chunk, SIZE, reader, start.now + at);
+    }
+    expect(m.input?.text).toBe("hiline1 line2");
+    expect(m.effects).toEqual([]);
   });
 
   test("without a comment, a chunk of keys is read key by key", () => {
