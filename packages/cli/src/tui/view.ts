@@ -439,15 +439,22 @@ function updateKey(input: Model, key: string, size: Size): Model {
   if (m.flow) {
     // Leaving is never held back by a decision that is being asked or written.
     if (key === "q" && flowYieldsQuit(m.flow)) return { ...m, quit: true };
-    // The yes is for a question that has been read: with lines still out of the window it reads on first.
+    // An answer is for a window that can be seen and has stood still: not on a terminal too small to
+    // draw it, and not in the first moment after it changed what it asks (a double tap, a key held down).
+    const answers =
+      (key === "y" && m.flow.phase === "confirm") || (key === "enter" && m.flow.phase === "reason");
+    if (answers) {
+      if (tooSmall(size)) return m;
+      if (m.now - m.flow.shownAt < CLICK_GUARD_MS) return m;
+    }
+    // The yes is for a question that has been read: with lines still out of the window it reads on
+    // one window further first, and the window then stands still again.
     if (key === "y" && m.flow.phase === "confirm") {
-      const max = modalOf(m.flow, size.cols, size.rows - 3).maxScroll;
-      // The window and the clicks get a new moment to stand still, so a second yes that comes at once
-      // (a double click, a key held down) is not taken for the answer.
-      if (m.flow.scroll < max) {
-        return { ...m, flow: { ...m.flow, scroll: max, shownAt: m.now, readOnAt: m.now } };
+      const modal = modalOf(m.flow, size.cols, size.rows - 3);
+      if (m.flow.scroll < modal.maxScroll) {
+        const scroll = Math.min(modal.maxScroll, m.flow.scroll + Math.max(1, modal.room - 1));
+        return { ...m, flow: { ...m.flow, scroll, shownAt: m.now } };
       }
-      if (m.flow.readOnAt !== undefined && m.now - m.flow.readOnAt < CLICK_GUARD_MS) return m;
     }
     return clampFlowScroll(flowKey(m, key), size);
   }
@@ -511,6 +518,8 @@ function updateKey(input: Model, key: string, size: Size): Model {
     case "a":
     case "r": {
       if (current?.need === undefined || keysOf(m, current)[key] === undefined) return m;
+      // A decision is asked in a window over the Sessions screen, which is where it can be seen.
+      if (m.section !== 0 || tooSmall(size)) return m;
       if (m.source === "project") {
         const ref = current.decisions === undefined ? undefined : pickedDecision(m, current);
         if (!ref) {
@@ -1516,12 +1525,17 @@ export function mouseUpdate(
  */
 const CLICK_GUARD_MS = 400;
 
+/** Whether the screen is too small to draw anything but its warning: nothing is answered there. */
+function tooSmall(size: Size): boolean {
+  return size.cols < 40 || size.rows < 12;
+}
+
 /** A click while a decision is asked: only the buttons of its window answer. */
 function modalClick(m: Model, size: Size, event: Extract<InputEvent, { type: "mouse" }>): Model {
   const f = m.flow;
   if (!f || event.action !== "press") return m;
   // Not drawn on a terminal this small, so not answered either.
-  if (size.cols < 40 || size.rows < 12) return m;
+  if (tooSmall(size)) return m;
   // A click right after the window changed what it asks (a double click on a button, say) lands on
   // the button that took its place, which its maker never saw.
   if (m.now - f.shownAt < CLICK_GUARD_MS) return m;

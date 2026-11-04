@@ -33,8 +33,6 @@ export interface Flow {
   scroll: number;
   /** When the window last changed what it asks (the screen's clock): a click right after it is not an answer. */
   shownAt: number;
-  /** When a yes last only read a long question on to its end: a yes right after it is not an answer. */
-  readOnAt?: number;
 }
 
 /** The part of the model the flow works on. */

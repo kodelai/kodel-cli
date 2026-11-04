@@ -222,7 +222,9 @@ async function settle(m: Model, tools: DecisionTools): Promise<Model> {
 /** Keys, one after another, each followed by what it asked for. */
 async function press(m: Model, tools: DecisionTools, ...keys: string[]): Promise<Model> {
   let model = m;
-  for (const key of keys) model = await settle(update(model, key), tools);
+  // A person takes a moment between keys: a yes that comes at once is not an answer.
+  for (const key of keys)
+    model = await settle(update({ ...model, now: model.now + 1000 }, key), tools);
   return model;
 }
 
@@ -261,6 +263,7 @@ describe("task_dxn6 approve and reject from the TUI", () => {
     await until(() => t.since().includes("WAITING FOR YOU"));
     t.type("a");
     await until(() => t.since().includes("[y Yes]"));
+    await wait(600); // a yes in the first moment after the window changes is not an answer
     t.type("y");
     await until(() => t.since().includes("Approved «approve»."));
     const mark = t.mark();
@@ -765,13 +768,23 @@ describe("task_dxn6 the window and the buttons", () => {
     const tools = createDecisionTools(h);
     let m = await press(await modelOf(h, run.runId), tools, "r");
     expect(screen(m).join("\n")).not.toContain("f39.ts,problem 39");
-    m = update(m, "y"); // reads on, writes nothing
+    const later = (x: Model): Model => ({ ...x, now: x.now + 1000 });
+    m = update(later(m), "y"); // reads on one window, writes nothing
     expect(m.flow?.phase).toBe("confirm");
     expect(takeEffects(m)[1]).toEqual([]);
+    expect(m.flow?.scroll ?? 0).toBeGreaterThan(0);
+    // a yes that follows at once (a key held down) reads nothing on and answers nothing
+    const scrolled = m.flow?.scroll;
+    const hasty = update(m, "y");
+    expect(takeEffects(hasty)[1]).toEqual([]);
+    expect(hasty.flow?.scroll).toBe(scrolled);
+    // yes after yes, a moment apart, the end comes on the screen; only then is a yes the answer
+    for (let i = 0; i < 5 && !screen(m).join("\n").includes("f39.ts,problem 39"); i++) {
+      m = update(later(m), "y");
+      expect(takeEffects(m)[1]).toEqual([]);
+    }
     expect(screen(m).join("\n")).toContain("f39.ts,problem 39");
-    // a yes that follows at once (a key held down) is not the answer: the end was only just shown
-    expect(takeEffects(update(m, "y"))[1]).toEqual([]);
-    m = update({ ...m, now: m.now + 1000 }, "y"); // the end has been on the screen: this is the yes
+    m = update(later(m), "y"); // the end has been on the screen: this is the yes
     expect(takeEffects(m)[1].map((e) => e.type)).toEqual(["decide"]);
   });
 
@@ -783,19 +796,105 @@ describe("task_dxn6 the window and the buttons", () => {
     });
     const tools = createDecisionTools(h);
     const asked = await press(await modelOf(h, run.runId), tools, "r");
-    // a pasted "yy" reads on and stops there
-    const pasted = applyInput(asked, "yy", { cols: 120, rows: 30 });
+    // a pasted "yy" reads on one window and stops there
+    const pasted = applyInput({ ...asked, now: asked.now + 1000 }, "yy", { cols: 120, rows: 30 });
     expect(pasted.flow?.phase).toBe("confirm");
+    expect(pasted.flow?.scroll ?? 0).toBeGreaterThan(0);
     expect(takeEffects(pasted)[1]).toEqual([]);
-    // a double click on Yes reads on, and its second click is too soon to be the answer
+    // a double click on Yes reads on, and its second click is too soon to read on or to answer
     const yes = where(asked, "[y Yes]");
     const first = press1(asked, yes.x, yes.y);
     expect(takeEffects(first)[1]).toEqual([]);
     const again = quick(first, yes.x, yes.y);
     expect(takeEffects(again)[1]).toEqual([]);
-    expect(again.flow?.phase).toBe("confirm");
-    // a click made after the end has stood on the screen is the answer
-    expect(takeEffects(press1(first, yes.x, yes.y))[1].map((e) => e.type)).toEqual(["decide"]);
+    expect(again.flow?.scroll).toBe(first.flow?.scroll);
+    // clicks a moment apart read on to the end, and only a click after that is the answer
+    let m = first;
+    for (let i = 0; i < 5 && !screen(m).join("\n").includes("f39.ts,problem 39"); i++) {
+      m = press1(m, yes.x, yes.y);
+      expect(takeEffects(m)[1]).toEqual([]);
+    }
+    expect(screen(m).join("\n")).toContain("f39.ts,problem 39");
+    expect(takeEffects(press1(m, yes.x, yes.y))[1].map((e) => e.type)).toEqual(["decide"]);
+  });
+
+  test("task_dxn6_a_decision_cannot_be_started_or_answered_where_its_window_is_not_drawn", async () => {
+    const h = host();
+    const run = await atGate(h);
+    const tools = createDecisionTools(h);
+    const m = await modelOf(h, run.runId);
+    // the Tasks screen has no window: a and r start nothing there
+    const onTasks = update({ ...m, section: 2 }, "a");
+    expect(onTasks.flow).toBeNull();
+    expect(takeEffects(onTasks)[1]).toEqual([]);
+    // a terminal too small to draw the window starts nothing and answers nothing
+    const tiny = { cols: 30, rows: 10 };
+    expect(update({ ...m, now: m.now + 1000 }, "a", tiny).flow).toBeNull();
+    const asked = await press(m, tools, "a");
+    const answered = update({ ...asked, now: asked.now + 1000 }, "y", tiny);
+    expect(answered.flow?.phase).toBe("confirm");
+    expect(takeEffects(answered)[1]).toEqual([]);
+  });
+
+  test("task_dxn6_a_second_yes_at_once_does_not_answer_the_next_question", async () => {
+    const calls: string[] = [];
+    const tools = createDecisionTools({
+      open: async () => ({
+        runId: "r_fake",
+        foreignRoot: async () => undefined,
+        state: async () =>
+          ({
+            status: "running",
+            active: [{ node: "g", phase: "human", attempt: 1 }],
+            pauses: [],
+          }) as never,
+        pendingChange: async () => undefined,
+        changesSinceGate: async () => ({ kind: "unavailable", reason: "x" }) as never,
+        gateResults: async () => undefined,
+        decideHuman: async () => {
+          calls.push("decide");
+          return { ok: true } as never;
+        },
+        resume: async () => ({ ok: true }) as never,
+        waitForRest: async () => undefined,
+        settle: async () => undefined,
+      }),
+    });
+    const gate = { kind: "gate" as const, node: "g", attempt: 1, prompt: "", command: "" };
+    const model = initialModel(
+      {
+        sessions: [
+          {
+            id: "r_fake",
+            title: "fake",
+            pipeline: "p",
+            status: "waiting",
+            need: "approve",
+            step: "approve",
+            since: NOW,
+            steps: [],
+            log: [],
+            decisions: [gate],
+          },
+        ],
+        proposals: 0,
+      },
+      "project",
+      NOW,
+    );
+    const asked = await press(model, tools, "a");
+    expect(asked.flow?.questions).toHaveLength(2);
+    // the first yes, then a second at once (a double tap, separate chunks): the safety question is not answered
+    const one = update({ ...asked, now: asked.now + 1000 }, "y");
+    expect(one.flow?.at).toBe(1);
+    const two = update(one, "y");
+    expect(takeEffects(two)[1]).toEqual([]);
+    expect(two.flow?.at).toBe(1);
+    // a moment later the same key is the answer
+    expect(takeEffects(update({ ...one, now: one.now + 1000 }, "y"))[1].map((e) => e.type)).toEqual(
+      ["decide"],
+    );
+    expect(calls).toEqual([]);
   });
 
   test("a click right after the check was asked does not cancel it", async () => {
@@ -846,7 +945,7 @@ describe("task_dxn6 keys during a decision", () => {
     // two yes in a row write once
     const tools = createDecisionTools(h);
     m = await press(m0, tools, "a");
-    m = update(update(m, "y"), "y");
+    m = update(update({ ...m, now: m.now + 1000 }, "y"), "y");
     expect(takeEffects(m)[1].map((e) => e.type)).toEqual(["decide"]);
     // q still leaves while the write is made
     expect(update(m, "q").quit).toBe(true);
@@ -1008,10 +1107,10 @@ describe("task_dxn6 changes that cannot be checked, and a run of another checkou
     expect(calls).toEqual([]);
     // a pasted "yy" does not answer the second question unseen, nor does "yq" drop the write
     const fresh = await press(modelFor(), tools, "a");
-    const pasted = applyInput(fresh, "yy", { cols: 120, rows: 30 });
+    const pasted = applyInput({ ...fresh, now: fresh.now + 1000 }, "yy", { cols: 120, rows: 30 });
     expect(pasted.flow?.at).toBe(1);
     expect(takeEffects(pasted)[1]).toEqual([]);
-    const last = applyInput(m, "yq", { cols: 120, rows: 30 });
+    const last = applyInput({ ...m, now: m.now + 1000 }, "yq", { cols: 120, rows: 30 });
     expect(last.quit).toBe(false);
     expect(takeEffects(last)[1].map((e) => e.type)).toEqual(["decide"]);
     // n at the second question writes nothing

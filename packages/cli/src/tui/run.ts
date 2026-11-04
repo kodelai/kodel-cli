@@ -89,7 +89,7 @@ export function applyInput(
       (before === null ||
         after.phase !== before.phase ||
         after.at !== before.at ||
-        after.readOnAt !== before.readOnAt)
+        after.scroll !== before.scroll)
     ) {
       break;
     }

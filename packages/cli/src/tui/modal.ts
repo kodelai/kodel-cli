@@ -4,7 +4,7 @@
  * rejection), or the reason being typed, and the buttons that answer it. The same geometry draws it and
  * tells a click which button it hit.
  */
-import { bold, dim, fit, inverse, neutralize, stripAnsi } from "./ansi";
+import { bold, dim, fit, inverse, neutralize, stripAnsi, visibleLength } from "./ansi";
 import type { Flow } from "./decision-flow";
 
 export interface ModalButton {
@@ -25,6 +25,8 @@ export interface Modal {
   buttons: ModalButton[];
   /** How many lines of the content are scrolled off the top at most. */
   maxScroll: number;
+  /** How many lines of the content the window shows at once. */
+  room: number;
 }
 
 const WIDTH = 92;
@@ -32,10 +34,23 @@ const VERB = { approve: "Approve", reject: "Reject", resume: "Resume" } as const
 
 /** Cuts a line into pieces of `width` characters, keeping its indentation on the first piece. */
 export function hardWrap(line: string, width: number): string[] {
-  const chars = [...neutralize(line)];
-  if (chars.length <= width) return [chars.join("")];
+  const text = neutralize(line);
+  if (visibleLength(text) <= width) return [text];
+  // Cut by display columns: a wide character (CJK, emoji) takes two.
   const out: string[] = [];
-  for (let i = 0; i < chars.length; i += width) out.push(chars.slice(i, i + width).join(""));
+  let piece = "";
+  let columns = 0;
+  for (const ch of text) {
+    const w = visibleLength(ch);
+    if (columns + w > width && piece !== "") {
+      out.push(piece);
+      piece = "";
+      columns = 0;
+    }
+    piece += ch;
+    columns += w;
+  }
+  if (piece !== "") out.push(piece);
   return out;
 }
 
@@ -129,7 +144,7 @@ export function modalOf(f: Flow, cols: number, height: number): Modal {
 
   const top = Math.max(0, Math.floor((height - lines.length) / 2));
   for (const b of placed) b.row = top + buttonRow;
-  return { box: lines, top, left, buttons: placed, maxScroll };
+  return { box: lines, top, left, buttons: placed, maxScroll, room };
 }
 
 /** The box over the screen dimmed. */
