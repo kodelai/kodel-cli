@@ -125,6 +125,8 @@ export function createDecisionTools(
     if (!entry) return { ok: false, message: "Nothing was checked for this decision; look again." };
     // Registered before the write: leaving the screen while it is made must wait for it.
     const mark = `${runId}\u0000${request.ref.node}`;
+    // An earlier decision at this very node may still have work to wait for: its mark stays.
+    const had = decided.has(mark);
     decided.set(mark, { run: entry.run, node: request.ref.node });
     const write = (async (): Promise<DecisionOutcome> => {
       try {
@@ -154,7 +156,7 @@ export function createDecisionTools(
     try {
       const outcome = await write;
       // A write that was refused started no work: there is nothing to wait for at the end.
-      if (!outcome.ok) decided.delete(mark);
+      if (!outcome.ok && !had) decided.delete(mark);
       return outcome;
     } finally {
       inflight.delete(write);

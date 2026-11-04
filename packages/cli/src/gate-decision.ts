@@ -279,6 +279,9 @@ export async function commitResume(
     }
     await refuseWhilePending(run, false, false);
     const state = await run.state();
+    if (state.status !== "running" && state.status !== "paused") {
+      throw new DecisionRefused(`run ${run.runId} is not paused any more; look again`);
+    }
     if (!state.pauses.some((p) => p.node === prepared.node)) {
       throw new DecisionRefused(
         `run ${run.runId} is no longer paused at "${plain(prepared.node)}"; look again`,

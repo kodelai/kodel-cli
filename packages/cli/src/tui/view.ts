@@ -368,6 +368,19 @@ export function withData(m: Model, loaded: Loaded, now: number): Model {
     now,
   };
   const dropped = flowGone(next, sessions);
+  // A comment being typed, or a deletion being asked, is about the card that was on the screen: when
+  // that card is another one now (its decision went, a new wait began), it is cancelled, not moved
+  // to a card the person did not mean.
+  const cardBefore = cardIdentity(m);
+  const cardAfter = cardIdentity(dropped);
+  if (cardBefore !== cardAfter && (dropped.input !== null || dropped.confirm === "d")) {
+    return {
+      ...dropped,
+      input: null,
+      confirm: dropped.confirm === "d" ? null : dropped.confirm,
+      notice: "The card changed under the comment; it was cancelled.",
+    };
+  }
   // The notice of what was just written is not taken over by this one.
   return moved && m.notice === "" && dropped.notice === m.notice
     ? {
@@ -375,6 +388,12 @@ export function withData(m: Model, loaded: Loaded, now: number): Model {
         notice: "The decision you had picked is gone (decided elsewhere); showing the first one.",
       }
     : dropped;
+}
+
+/** Which card the selected run shows (its wait and its picked gate), or nothing. */
+function cardIdentity(m: Model): string | undefined {
+  const s = selectedSession(m);
+  return s ? detailKey(s, pickedDecision(m, s)) : undefined;
 }
 
 export function tick(m: Model, now: number): Model {

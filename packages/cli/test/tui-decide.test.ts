@@ -480,6 +480,34 @@ describe("task_dxn6 the picker", () => {
     expect(m.notice).toContain("had picked is gone");
   });
 
+  test("a comment being typed, or a deletion asked, is cancelled when its card goes", async () => {
+    const h = host();
+    const run = await atBothGates(h);
+    let m = await modelOf(h, run.runId);
+    m = update(m, "g");
+    const [a, b] = m.sessions[0]?.decisions ?? [];
+    const s = m.sessions[0] as never;
+    m = withDetail(m, detailKey(s, a), (await loadRunDetail(h, run.runId, Date.now(), a)) as never);
+    m = withDetail(m, detailKey(s, b), (await loadRunDetail(h, run.runId, Date.now(), b)) as never);
+    m = update({ ...m, focus: "card" }, "c");
+    m = update(m, "h");
+    expect(m.input?.text).toBe("h");
+    // the picked gate is decided in another terminal; the next read drops the pick
+    expect((await cli("gate", "approve", run.runId, "--node", "b-gate")).code).toBe(0);
+    const typing = withData(m, await loadSessions(h, Date.now()), Date.now());
+    expect(typing.input).toBeNull();
+    expect(typing.notice).toContain("cancelled");
+    // and a comment can no longer be saved onto the other gate by the Enter that follows
+    expect(takeEffects(update(typing, "enter"))[1]).toEqual([]);
+    // the same for a deletion that was being asked
+    const asking = withData(
+      { ...m, input: null, confirm: "d" },
+      await loadSessions(h, Date.now()),
+      Date.now(),
+    );
+    expect(asking.confirm).toBeNull();
+  });
+
   test("a pick cannot redirect a question that is open, and the keys that move it are ignored then", async () => {
     const h = host();
     const run = await atBothGates(h);
