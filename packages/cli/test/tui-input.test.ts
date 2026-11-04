@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { type InputEvent, MOUSE_OFF, MOUSE_ON, parseInput } from "../src/tui/input";
+import {
+  type InputEvent,
+  MOUSE_OFF,
+  MOUSE_ON,
+  PASTE_OFF,
+  PASTE_ON,
+  parseInput,
+} from "../src/tui/input";
 
 const key = (name: string): InputEvent => ({ type: "key", name });
 
@@ -60,5 +67,23 @@ describe("tui input", () => {
   test("the mode switches ask for presses in the SGR format, and undo exactly that", () => {
     expect(MOUSE_ON).toBe("\u001b[?1000h\u001b[?1006h");
     expect(MOUSE_OFF).toBe("\u001b[?1006l\u001b[?1000l");
+  });
+
+  test("task_g4jy_a_bracketed_paste_is_one_paste_event, whatever it holds", () => {
+    expect(parseInput("a\u001b[200~q\rc\u001b[A\u001b[201~b")).toEqual([
+      key("a"),
+      { type: "paste", text: "q\rc\u001b[A" },
+      key("b"),
+    ]);
+  });
+
+  test("task_g4jy_a_cut_off_marker_or_a_lone_escape_in_a_chunk_that_stands_alone_is_not_held_back", () => {
+    expect(parseInput("a\u001b")).toEqual([key("a"), key("escape")]);
+    expect(parseInput("a\u001b[2")).toEqual([key("a")]);
+  });
+
+  test("task_g4jy_the_paste_switches_ask_for_bracketed_paste_and_undo_exactly_that", () => {
+    expect(PASTE_ON).toBe("\u001b[?2004h");
+    expect(PASTE_OFF).toBe("\u001b[?2004l");
   });
 });
