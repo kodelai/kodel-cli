@@ -105,6 +105,29 @@ const BESIDE = [
   "",
 ].join("\n");
 
+/** A gate in one branch; in the other a command that fails and pauses its branch. */
+const GATE_PAUSE = [
+  "name: gate-pause",
+  "nodes:",
+  "  - { slug: plan, kind: agent, prompt: plan }",
+  "  - { slug: a, kind: agent, prompt: a }",
+  "  - { slug: a-gate, kind: human, prompt: a looks fine? }",
+  `  - { slug: b, kind: command, command: "node -e \\"process.exit(1)\\"", max_attempts: 1, max_consecutive_failures: 1 }`,
+  `  - { slug: b-fix, kind: command, command: "node -e \\"process.exit(1)\\"" }`,
+  "  - { slug: merge, kind: agent, prompt: merge, join: all }",
+  "edges:",
+  "  - { from: plan, to: a }",
+  "  - { from: plan, to: b }",
+  "  - { from: a, to: a-gate }",
+  "  - { from: a-gate, to: merge, when: approved }",
+  "  - { from: a-gate, to: a, when: rejected }",
+  "  - { from: b, to: merge }",
+  "  - { from: b, to: b-fix, when: failed }",
+  "  - { from: b-fix, to: merge }",
+  "  - { from: b-fix, to: b, when: failed }",
+  "",
+].join("\n");
+
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "kodel-tui-decide-"));
   const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
@@ -118,6 +141,7 @@ beforeEach(async () => {
     ["gates", GATES],
     ["paused", PAUSED],
     ["beside", BESIDE],
+    ["gate-pause", GATE_PAUSE],
   ]) {
     await writeFile(join(dir, ".kodel", "pipelines", `${name}.yaml`), text as string);
   }
@@ -509,6 +533,50 @@ describe("task_dxn6 resume", () => {
     // the engine words the command (`--node` only when several branches are paused)
     expect(text).toContain(`$ kodel resume ${run.runId}`);
     expect((await cli("resume", run.runId)).code).toBe(0);
+  });
+});
+
+describe("task_dxn6 a gate and a paused branch together", () => {
+  test("the pause is a picker entry, and the card follows the pick", async () => {
+    const h = host();
+    const run = await start(h, "gate-pause");
+    await run.completeStep("plan", 1);
+    await run.completeStep("a", 1);
+    await run.waitForRest(10_000);
+    const state = await run.state();
+    expect(state.pauses.map((p) => p.node)).toEqual(["b"]);
+    expect(state.active.map((v) => [v.node, v.phase])).toEqual([["a-gate", "human"]]);
+    const tools = createDecisionTools(h);
+    let m = await modelOf(h, run.runId);
+    expect(m.sessions[0]?.decisions?.map((d) => [d.kind, d.node])).toEqual([
+      ["gate", "a-gate"],
+      ["pause", "b"],
+    ]);
+    m = update(m, "g");
+    const text = render(m, { cols: 120, rows: 30 }).map(stripAnsi).join("\n");
+    expect(text).toContain("decision 2 of 2");
+    expect(text).toContain("Paused at «b»");
+    expect(text).toContain("$ kodel resume");
+    expect(text).not.toContain("kodel gate approve");
+    expect(text).not.toContain("Reading the details");
+    m = await press(m, tools, "a", "y");
+    expect(m.notice).toBe("Resumed at «b».");
+    expect((await record(run, "run_resumed")).map((r) => r.node)).toEqual(["b"]);
+    await run.waitForRest(10_000);
+  });
+
+  test("a gate reached again as a new attempt drops the open question with its own words", async () => {
+    const h = host();
+    const run = await atGate(h);
+    const tools = createDecisionTools(h);
+    let m = await press(await modelOf(h, run.runId), tools, "a");
+    expect(m.flow?.phase).toBe("confirm");
+    expect((await cli("gate", "reject", run.runId, "--reason", "again")).code).toBe(0);
+    await run.completeStep("write", 2);
+    await run.waitForRest(5_000);
+    m = withData(m, await loadSessions(h, Date.now()), Date.now());
+    expect(m.flow).toBeNull();
+    expect(m.notice).toContain("reached again (a new attempt)");
   });
 });
 

@@ -81,13 +81,21 @@ export function createDecisionTools(
   const decided = new Map<string, { run: EngineRun; node: string }>();
   const inflight = new Set<Promise<unknown>>();
 
+  /** Questions that were cancelled leave their check behind: only the latest few are kept. */
+  const remember = (flow: number, entry: Prepared) => {
+    checked.set(flow, entry);
+    for (const old of [...checked.keys()].slice(0, Math.max(0, checked.size - 8))) {
+      checked.delete(old);
+    }
+  };
+
   const check = async (runId: string, request: DecisionRequest): Promise<CheckResult> => {
     try {
       const run = await source.open(runId);
       if (!run) return { ok: false, message: `Run ${plain(runId)} is gone.` };
       if (request.decision === "resume") {
         const prepared = await prepareResume(run, { node: request.ref.node, offerIgnore: false });
-        checked.set(request.flow, { kind: "resume", run, prepared });
+        remember(request.flow, { kind: "resume", run, prepared });
         return { ok: true, questions: [prepared.question] };
       }
       const prepared = await prepareGateDecision(run, {
@@ -97,7 +105,7 @@ export function createDecisionTools(
         ...(request.reason === undefined ? {} : { reason: request.reason }),
         ...(request.ref.attempt === undefined ? {} : { expectAttempt: request.ref.attempt }),
       });
-      checked.set(request.flow, { kind: "gate", run, prepared });
+      remember(request.flow, { kind: "gate", run, prepared });
       const [first = "", ...rest] = prepared.questions;
       const lead = prepared.foreign ? `${foreignText(prepared.runId, prepared.foreign)}\n` : "";
       return { ok: true, questions: [`${lead}${first}`, ...rest] };
@@ -116,7 +124,8 @@ export function createDecisionTools(
     checked.delete(request.flow);
     if (!entry) return { ok: false, message: "Nothing was checked for this decision; look again." };
     // Registered before the write: leaving the screen while it is made must wait for it.
-    decided.set(`${runId}\u0000${request.ref.node}`, { run: entry.run, node: request.ref.node });
+    const mark = `${runId}\u0000${request.ref.node}`;
+    decided.set(mark, { run: entry.run, node: request.ref.node });
     const write = (async (): Promise<DecisionOutcome> => {
       try {
         const done =
@@ -143,7 +152,10 @@ export function createDecisionTools(
     })();
     inflight.add(write);
     try {
-      return await write;
+      const outcome = await write;
+      // A write that was refused started no work: there is nothing to wait for at the end.
+      if (!outcome.ok) decided.delete(mark);
+      return outcome;
     } finally {
       inflight.delete(write);
     }
@@ -159,6 +171,8 @@ export function createDecisionTools(
       for (const run of new Set([...decided.values()].map((d) => d.run))) {
         await run.settle(() => 0, until);
       }
+      // What was waited for is done: a later quit has nothing to wait for.
+      decided.clear();
     },
     async stop() {
       let timer: ReturnType<typeof setTimeout> | undefined;

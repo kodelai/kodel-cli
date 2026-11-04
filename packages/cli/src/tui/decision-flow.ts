@@ -109,12 +109,23 @@ export function flowGone<M extends FlowFields>(m: M, sessions: Session[]): M {
   if (!f || f.phase === "writing") return m;
   const s = sessions.find((x) => x.id === f.runId);
   const key = decisionKey(f.ref);
-  if (s?.decisions?.some((d) => decisionKey(d) === key)) return m;
-  return {
-    ...m,
-    flow: null,
-    notice: "That decision is gone (decided elsewhere); nothing was written.",
-  };
+  const now = s?.decisions?.find((d) => decisionKey(d) === key);
+  if (now === undefined) {
+    return {
+      ...m,
+      flow: null,
+      notice: "That decision is gone (decided elsewhere); nothing was written.",
+    };
+  }
+  if (f.ref.attempt !== undefined && now.attempt !== undefined && now.attempt !== f.ref.attempt) {
+    return {
+      ...m,
+      flow: null,
+      notice:
+        "That gate was decided and reached again (a new attempt); look again. Nothing was written.",
+    };
+  }
+  return m;
 }
 
 /** Whether `q` leaves at once: while the checks or the write are going the person can still quit. */

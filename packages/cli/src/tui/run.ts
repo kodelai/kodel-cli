@@ -1,4 +1,5 @@
 /** The terminal loop: alternate screen, raw keys, redraw on a key, a resize, a frame or new data. */
+import { plain } from "../plain";
 import { neutralize } from "./ansi";
 import type { DecisionRequest, WorkHandle } from "./decide";
 import { MOUSE_OFF, MOUSE_ON, parseInput } from "./input";
@@ -178,7 +179,7 @@ export async function runTui(
         .catch(
           (error: unknown): CheckResult => ({
             ok: false,
-            message: `Could not check: ${error instanceof Error ? error.message : String(error)}`,
+            message: `Could not check: ${plain(error instanceof Error ? error.message : String(error))}`,
           }),
         )
         .then((result) => {
@@ -199,7 +200,7 @@ export async function runTui(
         .catch(
           (error: unknown): DecisionOutcome => ({
             ok: false,
-            message: `Not written: ${error instanceof Error ? error.message : String(error)}`,
+            message: `Not written: ${plain(error instanceof Error ? error.message : String(error))}`,
           }),
         )
         .then((outcome) => {

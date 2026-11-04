@@ -1128,14 +1128,26 @@ function cardLines(s: Session | undefined, m: Model, width: number): string[] {
   out.push("");
   const inner = Math.max(10, width - 4);
   if (s.status === "waiting" && s.need) {
+    // With several decisions the card is about the picked one, not always the one the engine names first.
+    const picked = s.decisions && s.decisions.length > 0 ? pickedDecision(m, s) : undefined;
+    const other = picked !== undefined && picked !== s.decisions?.[0];
+    const headline = other
+      ? picked.kind === "pause"
+        ? `Paused at «${picked.node}»`
+        : `Step «${picked.node}» waits for your decision`
+      : (s.headline ?? "");
+    const prompt = other ? picked.prompt : (s.prompt ?? "");
+    const command = other ? picked.command : s.command;
+    out.push(...pickerLine(m, s, width));
     out.push(yellow(`┌ ${NEED_TAG[s.need]} · waiting ${formatAge(m.now - s.since)}`));
-    out.push(`${yellow("│")} ${bold(s.headline ?? "")}`);
-    for (const line of wrapText(s.prompt ?? "", inner)) out.push(`${yellow("│")} ${line}`);
+    out.push(`${yellow("│")} ${bold(headline)}`);
+    for (const line of wrapText(prompt, inner)) out.push(`${yellow("│")} ${line}`);
     out.push(`${yellow("│")} ${green("Ready to decide")}`);
     if (s.after) out.push(`${yellow("│")} ${dim(`After that: ${s.after}`)}`);
-    if (s.command) out.push(`${yellow("│")} ${dim(`$ ${s.command}`)}`);
+    if (command) out.push(`${yellow("│")} ${dim(`$ ${command}`)}`);
     out.push(`${yellow("└")} ${actionLine(m, s)}`);
-    if (s.need === "approve") out.push(dim("Reading the details…"));
+    // A paused step has no card to wait for.
+    if (s.need === "approve" && picked?.kind !== "pause") out.push(dim("Reading the details…"));
     out.push("");
   } else if (s.status === "failed") {
     out.push(red("┌ failed"));

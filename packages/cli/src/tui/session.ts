@@ -45,7 +45,9 @@ export interface DecisionRef {
 
 /** Tells one decision of a run from another. */
 export function decisionKey(d: DecisionRef): string {
-  return `${d.kind}:${d.node}:${d.attempt ?? 0}`;
+  // The attempt is not part of it: a gate keeps its place in the list when it is reached again, and
+  // the screens compare the attempt where it matters.
+  return `${d.kind}:${d.node}`;
 }
 
 /** What the checks said before anything is written: the questions to ask, or why not. */
