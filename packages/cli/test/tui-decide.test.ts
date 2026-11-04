@@ -21,6 +21,7 @@ import {
   detailKey,
   initialModel,
   type Model,
+  mouseUpdate,
   pickedDecision,
   render,
   takeEffects,
@@ -259,7 +260,7 @@ describe("task_dxn6 approve and reject from the TUI", () => {
     });
     await until(() => t.since().includes("WAITING FOR YOU"));
     t.type("a");
-    await until(() => t.since().includes("Approve"));
+    await until(() => t.since().includes("[y Yes]"));
     t.type("y");
     await until(() => t.since().includes("Approved «approve»."));
     const mark = t.mark();
@@ -605,6 +606,133 @@ describe("task_dxn6 a gate and a paused branch together", () => {
     m = withData(m, await loadSessions(h, Date.now()), Date.now());
     expect(m.flow).toBeNull();
     expect(m.notice).toContain("reached again (a new attempt)");
+  });
+});
+
+describe("task_dxn6 the window and the buttons", () => {
+  const SIZE = { cols: 120, rows: 30 };
+  const screen = (m: Model) => render(m, SIZE).map(stripAnsi);
+  const press1 = (m: Model, x: number, y: number) =>
+    mouseUpdate({ ...m, mouse: true }, SIZE, { type: "mouse", action: "press", x, y });
+  /** Where a button is on the screen: the 1-based column and row a click needs. */
+  const where = (m: Model, text: string) => {
+    const lines = screen(m);
+    const row = lines.findIndex((l) => l.includes(text));
+    if (row < 0) throw new Error(`no ${text} on the screen`);
+    return { x: (lines[row] ?? "").indexOf(text) + 1, y: row + 1 };
+  };
+
+  test("task_dxn6_comments_the_agent_recorded_are_read_in_the_window_before_a_rejection", async () => {
+    const h = host();
+    const run = await atGate(h);
+    await run.reportResult("approve", 1, {
+      rows: [
+        { place: "a.ts", problem: "too big\u001b[2J" },
+        { place: "b.ts", problem: `${"long ".repeat(60)}end-of-long-comment` },
+      ],
+    });
+    const tools = createDecisionTools(h);
+    let m = await press(await modelOf(h, run.runId), tools, "r");
+    expect(m.flow?.phase).toBe("confirm");
+    const text = screen(m).join("\n");
+    // a box over the screen, with the facts the command prints and the buttons that answer it
+    expect(text).toContain("┌─ Reject «");
+    expect(text).toContain("2 comment(s) recorded at this step will go back with the rejection");
+    expect(text).toContain("a.ts,too big");
+    expect(text).toContain("[y Yes]");
+    expect(text).toContain("[n No]");
+    // what could mislead is taken out, a long comment is cut into lines and read to its end
+    expect(text).not.toContain("\u001b");
+    expect(text).toContain("end-of-long-comment");
+    // the question is not also written into the card behind the window
+    expect(text.split("will go back with the rejection").length - 1).toBe(1);
+    // and it is these comments that go back
+    m = await press(m, tools, "y");
+    expect(m.notice).toBe("Rejected «approve».");
+    expect(JSON.stringify(await run.nextStep())).toContain("a.ts,too big");
+  });
+
+  test("a question longer than the window is read on with the arrows, and still needs its yes", async () => {
+    const h = host();
+    const run = await atGate(h);
+    await run.reportResult("approve", 1, {
+      rows: Array.from({ length: 40 }, (_, i) => ({ place: `f${i}.ts`, problem: `problem ${i}` })),
+    });
+    const tools = createDecisionTools(h);
+    let m = await press(await modelOf(h, run.runId), tools, "r");
+    expect(screen(m).join("\n")).toContain("↑↓ scroll");
+    expect(screen(m).join("\n")).not.toContain("f39.ts,problem 39");
+    // the arrows do not cancel it
+    for (let i = 0; i < 6; i++) m = update(m, "pagedown");
+    expect(m.flow?.phase).toBe("confirm");
+    expect(screen(m).join("\n")).toContain("f39.ts,problem 39");
+    expect(screen(m).join("\n")).toContain('Reject "approve"');
+    // and never past the end
+    for (let i = 0; i < 20; i++) m = update(m, "down");
+    expect(screen(m).join("\n")).toContain('Reject "approve"');
+    m = await press(m, tools, "y");
+    expect(m.notice).toBe("Rejected «approve».");
+  });
+
+  test("the reason for a rejection is typed in the window, with its buttons", async () => {
+    const h = host();
+    const run = await atGate(h);
+    const tools = createDecisionTools(h);
+    let m = await press(await modelOf(h, run.runId), tools, "r");
+    expect(m.flow?.phase).toBe("reason");
+    for (const key of ["t", "o", "o", " ", "b", "i", "g"]) m = update(m, key);
+    const text = screen(m).join("\n");
+    expect(text).toContain("Why is it rejected?");
+    expect(text).toContain("too big");
+    expect(text).toContain("[Enter OK]");
+    expect(text).toContain("[Esc Cancel]");
+    // a click on Cancel writes nothing
+    const cancelled = press1(m, where(m, "[Esc Cancel]").x, where(m, "[Esc Cancel]").y);
+    expect(cancelled.flow).toBeNull();
+    expect(await record(run, "gate_decided")).toHaveLength(0);
+    // a click on OK asks for the check, which then asks the yes
+    const ok = press1(m, where(m, "[Enter OK]").x, where(m, "[Enter OK]").y);
+    expect(takeEffects(ok)[1].map((e) => e.type)).toEqual(["check_decision"]);
+  });
+
+  test("task_dxn6_buttons_open_the_window_and_answer_it", async () => {
+    const h = host();
+    const run = await atGate(h);
+    const tools = createDecisionTools(h);
+    let m = await modelOf(h, run.runId);
+    // the buttons are on the bottom line
+    const bar = screen(m).at(-1) ?? "";
+    expect(bar).toContain("[a Approve]");
+    expect(bar).toContain("[r Reject]");
+    // with the mouse off a click does nothing
+    const click = where(m, "[a Approve]");
+    expect(mouseUpdate(m, SIZE, { type: "mouse", action: "press", ...click }).flow).toBeNull();
+    // a click on a button is the key: it opens the window, and writes nothing
+    m = await settle(press1(m, click.x, click.y), tools);
+    expect(m.flow?.phase).toBe("confirm");
+    expect(await record(run, "gate_decided")).toHaveLength(0);
+    // the buttons are not on the bottom line while the window is open
+    expect((screen(m).at(-1) ?? "").includes("[a Approve]")).toBe(false);
+    // a click beside the buttons does nothing; a click on No cancels
+    expect(press1(m, 2, 5).flow?.phase).toBe("confirm");
+    const no = where(m, "[n No]");
+    expect(press1(m, no.x, no.y).flow).toBeNull();
+    // a click on Yes is the yes
+    const yes = where(m, "[y Yes]");
+    m = await settle(press1(m, yes.x, yes.y), tools);
+    expect(m.notice).toBe("Approved «approve».");
+    expect((await run.state()).status).toBe("completed");
+  });
+
+  test("a run that nothing can be decided at has no buttons", async () => {
+    const h = host();
+    const run = await start(h, "beside");
+    await run.completeStep("plan", 1);
+    await run.waitForRest(10_000);
+    const m = await modelOf(h, run.runId);
+    const bar = screen(m).at(-1) ?? "";
+    expect(bar).not.toContain("[a ");
+    expect(bar).not.toContain("[r ");
   });
 });
 

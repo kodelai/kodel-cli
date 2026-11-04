@@ -21,13 +21,13 @@ import {
   flowDecided,
   flowGone,
   flowKey,
-  flowLines,
   flowYieldsQuit,
 } from "./decision-flow";
 import { firstCode, moveCode, moveHunk, type Prepared, placeOf, prepare } from "./diffview";
 import type { InputEvent } from "./input";
 import { renderLabel, rowLabels, sessionLine } from "./label";
 import type { Loaded } from "./load";
+import { modalOf, modalOverlay } from "./modal";
 import {
   emptyPipes,
   entryOf,
@@ -439,7 +439,7 @@ function updateKey(input: Model, key: string, size: Size): Model {
   if (m.flow) {
     // Leaving is never held back by a decision that is being asked or written.
     if (key === "q" && flowYieldsQuit(m.flow)) return { ...m, quit: true };
-    return flowKey(m, key);
+    return clampFlowScroll(flowKey(m, key), size);
   }
   if (m.legend !== null) return legendKey(m, key, size);
   if (m.input) return typing(m, key);
@@ -926,7 +926,7 @@ function panel(m: Model, width: number, height: number): Panel {
   const s = selectedSession(m);
   if (!s) return { head: [], body: [dim("No session selected.")] };
   const found = detailOf(m);
-  if (!found) return { head: [], body: [...flowBox(m), ...cardLines(s, m, width)] };
+  if (!found) return { head: [], body: cardLines(s, m, width) };
   const focused = m.focus === "card";
   const tabs = tabStrip(found.d, m.tab, width, focused);
   const content = tabContent(found.d, tabState(m, found.d), {
@@ -938,20 +938,20 @@ function panel(m: Model, width: number, height: number): Panel {
     instructions: m.instructions,
   });
   const band = headerBand(s, found.d, width, glyph(s, m.frame), m.now, height < 22);
-  const box = flowBox(m);
   return {
     head: [...band, ...pickerLine(m, s, width), tabs.line, dim("─".repeat(width))],
-    body: [...box, ...besideLines(s), ...content.lines],
-    ...(content.anchor === undefined
-      ? {}
-      : { anchor: content.anchor + box.length + besideLines(s).length }),
+    body: [...besideLines(s), ...content.lines],
+    ...(content.anchor === undefined ? {} : { anchor: content.anchor + besideLines(s).length }),
     spans: tabs.spans,
   };
 }
 
-/** The question of a decision being made, at the top of the card. */
-function flowBox(m: Model): string[] {
-  return m.flow ? flowLines(m.flow) : [];
+/** Scrolls a question no further than its window lets it. */
+function clampFlowScroll(m: Model, size: Size): Model {
+  const f = m.flow;
+  if (!f) return m;
+  const max = modalOf(f, size.cols, size.rows - 3).maxScroll;
+  return f.scroll > max ? { ...m, flow: { ...f, scroll: max } } : m;
 }
 
 /** Which decision of the run is picked, when the run holds more than one. */
@@ -1299,6 +1299,38 @@ function rowOf(m: Model, s: Session | undefined): string {
   return dim(` · ${s.id.slice(-8)}${shown}`);
 }
 
+interface BarButton {
+  key: "a" | "r";
+  text: string;
+  /** The columns it covers on the bottom line, from `x0` up to `x1` (0-based). */
+  x0: number;
+  x1: number;
+}
+
+/** The buttons in front of the hints, while nothing else holds the bottom line. */
+function barButtons(m: Model): BarButton[] {
+  if (m.section !== 0 || m.flow || m.input || m.legend !== null || m.confirm !== null) return [];
+  if (m.notice !== "") return [];
+  const keys = keysOf(m, selectedSession(m));
+  const out: BarButton[] = [];
+  let x = 1;
+  for (const key of ["a", "r"] as const) {
+    const label = keys[key];
+    if (!label) continue;
+    const text = `[${key} ${label.charAt(0).toUpperCase()}${label.slice(1)}]`;
+    out.push({ key, text, x0: x, x1: x + text.length });
+    x += text.length + 2;
+  }
+  return out;
+}
+
+/** The bottom line when nothing else holds it: the buttons, then the hints. */
+function barText(m: Model): string {
+  const buttons = barButtons(m);
+  const front = buttons.map((b) => inverse(b.text)).join("  ");
+  return buttons.length > 0 ? `${front}   ${hints(m)}` : hints(m);
+}
+
 function hints(m: Model): string {
   if (m.section === 1) return pipeHints(entryOf(m.pipelines, m.pipe), m.pipe, m.focus === "card");
   if (m.legend !== null) return `${bold("↑↓")} scroll   any other key closes the legend`;
@@ -1313,7 +1345,11 @@ function hints(m: Model): string {
   }
   const keys = keysOf(m, current);
   const pick = (current?.decisions?.length ?? 0) > 1 ? `   ${bold("g/G")} pick` : "";
-  const decide = `${pick}${keys.a ? `   ${bold("a")} ${keys.a}` : ""}${keys.r ? `   ${bold("r")} ${keys.r}` : ""}`;
+  // The buttons in front of these hints already say what a and r do.
+  const buttonsShown = barButtons(m).length > 0;
+  const decide = buttonsShown
+    ? pick
+    : `${pick}${keys.a ? `   ${bold("a")} ${keys.a}` : ""}${keys.r ? `   ${bold("r")} ${keys.r}` : ""}`;
   const zoom = `   ${bold("z")} ${m.zoom ? "show list" : "zoom"}`;
   if (m.focus === "card" && m.section === 0) {
     const found = detailOf(m);
@@ -1393,6 +1429,9 @@ export function render(model: Model, { cols, rows }: Size): string[] {
     body = panes(m, layout, left, right, bodyHeight);
   }
   if (m.legend !== null && m.section === 3) body = legendOverlay(m, body, cols, bodyHeight);
+  if (m.flow && m.section === 0) {
+    body = modalOverlay(modalOf(m.flow, cols, bodyHeight), body, cols, bodyHeight);
+  }
   for (let i = 0; i < bodyHeight; i++) out.push(fit(body[i] ?? "", cols));
 
   const status = m.flow
@@ -1401,7 +1440,7 @@ export function render(model: Model, { cols, rows }: Size): string[] {
       ? inputLine(m.input)
       : m.notice !== ""
         ? green(m.notice)
-        : hints(m);
+        : barText(m);
   out.push(fit(` ${status}`, cols));
   return out;
 }
@@ -1450,8 +1489,8 @@ export function hitTest(model: Model, { cols, rows }: Size, x: number, y: number
 }
 
 /**
- * A click selects a session, a menu item or a tab, and the wheel moves the selection or scrolls;
- * nothing else. A decision is never made with the mouse: it takes a key and a confirmation.
+ * A click selects a session, a menu item or a tab, presses a button, and the wheel moves the selection
+ * or scrolls. A button does what its key does; a decision is only written after the yes in its window.
  */
 export function mouseUpdate(
   input: Model,
@@ -1461,13 +1500,31 @@ export function mouseUpdate(
   return wanting(mouseEvent(input, size, event));
 }
 
+/** A click while a decision is asked: only the buttons of its window answer. */
+function modalClick(m: Model, size: Size, event: Extract<InputEvent, { type: "mouse" }>): Model {
+  const f = m.flow;
+  if (!f || event.action !== "press") return m;
+  const modal = modalOf(f, size.cols, size.rows - 3);
+  const row = event.y - 3;
+  const col = event.x - 1;
+  const hit = modal.buttons.find((b) => b.row === row && col >= b.x0 && col < b.x1);
+  return hit ? updateKey(m, hit.key, size) : m;
+}
+
 function mouseEvent(
   input: Model,
   size: Size,
   event: Extract<InputEvent, { type: "mouse" }>,
 ): Model {
   const m = normalized(input);
-  if (!m.mouse || m.confirm !== null || m.flow !== null || m.legend !== null) return m;
+  if (!m.mouse) return m;
+  if (m.flow) return modalClick(m, size, event);
+  if (m.confirm !== null || m.legend !== null) return m;
+  if (event.action === "press" && event.y === size.rows) {
+    const col = event.x - 1;
+    const hit = barButtons(m).find((b) => col >= b.x0 && col < b.x1);
+    return hit ? updateKey(m, hit.key, size) : m;
+  }
   const layout = layoutOf(m, size.cols);
   if (event.action !== "press") {
     if (m.section !== 0) return m;

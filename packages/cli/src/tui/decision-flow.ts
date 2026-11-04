@@ -7,7 +7,7 @@
  * Nothing is written before the last `y` of the questions of a check that has arrived for this very
  * decision: a `y` while the checks are still being made does nothing.
  */
-import { bold, dim, inverse, yellow } from "./ansi";
+import { bold, dim, inverse } from "./ansi";
 import type { CheckResult, DecisionOutcome, DecisionRef, Session } from "./session";
 import { decisionKey } from "./session";
 import type { Effect } from "./view";
@@ -29,6 +29,8 @@ export interface Flow {
   questions: string[];
   /** Which question is on the screen. */
   at: number;
+  /** How many lines of the question in the window are scrolled off the top. */
+  scroll: number;
 }
 
 /** The part of the model the flow works on. */
@@ -81,6 +83,7 @@ export function beginFlow<M extends FlowFields>(
     text: "",
     questions: [],
     at: 0,
+    scroll: 0,
   };
   return { ...m, flow, flowSeq: id, notice: "", effects: [...m.effects, checkEffect(flow)] };
 }
@@ -93,7 +96,7 @@ export function flowChecked<M extends FlowFields>(m: M, id: number, result: Chec
     if (result.needsReason) return { ...m, flow: { ...f, phase: "reason", text: "" } };
     return { ...m, flow: null, notice: result.message };
   }
-  return { ...m, flow: { ...f, phase: "confirm", questions: result.questions, at: 0 } };
+  return { ...m, flow: { ...f, phase: "confirm", questions: result.questions, at: 0, scroll: 0 } };
 }
 
 /** The write has been made, or refused. */
@@ -133,6 +136,19 @@ export function flowYieldsQuit(f: Flow): boolean {
   return f.phase === "asking" || f.phase === "writing";
 }
 
+const PAGE = 8;
+/** The keys that read on in a long question, and by how many lines. */
+const SCROLL: Record<string, number> = {
+  up: -1,
+  k: -1,
+  down: 1,
+  j: 1,
+  pageup: -PAGE,
+  b: -PAGE,
+  pagedown: PAGE,
+  " ": PAGE,
+};
+
 /** A key while a decision is going on. */
 export function flowKey<M extends FlowFields>(m: M, key: string): M {
   const f = m.flow;
@@ -143,8 +159,15 @@ export function flowKey<M extends FlowFields>(m: M, key: string): M {
     case "writing":
       return m;
     case "confirm": {
+      // The question can be longer than the window: the arrows read on instead of cancelling it.
+      const moved = SCROLL[key];
+      if (moved !== undefined) {
+        return { ...m, flow: { ...f, scroll: Math.max(0, f.scroll + moved) } };
+      }
       if (key !== "y") return { ...m, flow: null, notice: "Cancelled." };
-      if (f.at + 1 < f.questions.length) return { ...m, flow: { ...f, at: f.at + 1 } };
+      if (f.at + 1 < f.questions.length) {
+        return { ...m, flow: { ...f, at: f.at + 1, scroll: 0 } };
+      }
       return {
         ...m,
         flow: { ...f, phase: "writing" },
@@ -169,20 +192,6 @@ export function flowKey<M extends FlowFields>(m: M, key: string): M {
   }
 }
 
-/** The question on the card while it is asked, so the facts are read before the `y`. */
-export function flowLines(f: Flow): string[] {
-  if (f.phase === "asking") return [dim("Checking…"), ""];
-  if (f.phase !== "confirm" && f.phase !== "writing") return [];
-  const question = f.questions[Math.min(f.at, f.questions.length - 1)] ?? "";
-  const step = f.questions.length > 1 ? ` (${f.at + 1} of ${f.questions.length})` : "";
-  return [
-    yellow(`┌ ${VERB[f.decision]}${step}`),
-    ...question.split("\n").map((line) => `${yellow("│")} ${line}`),
-    `${yellow("└")} ${f.phase === "writing" ? dim("writing…") : `${bold("y")} yes   ${bold("n")} no`}`,
-    "",
-  ];
-}
-
 /** The line at the bottom while a decision is going on. */
 export function flowBar(f: Flow): string {
   switch (f.phase) {
@@ -193,7 +202,7 @@ export function flowBar(f: Flow): string {
     case "confirm": {
       const step = f.questions.length > 1 ? ` (${f.at + 1} of ${f.questions.length})` : "";
       // The keys come first: text that the agent's session wrote must not push them off a narrow screen.
-      return `${bold("y")} yes   ${bold("n")} no   ${bold(VERB[f.decision])}${step} «${f.title}»?`;
+      return `${bold("y")} yes   ${bold("n")} no   ${bold("↑↓")} read on   ${bold(VERB[f.decision])}${step} «${f.title}»?`;
     }
     case "reason":
       return `${bold("Reason")} for rejecting «${f.title}»: ${f.text}${inverse(" ")}   ${dim("Enter ok · Esc cancel")}`;
