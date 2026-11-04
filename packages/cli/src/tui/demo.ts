@@ -166,6 +166,7 @@ export function demoSessions(now: number): Loaded {
     {
       id: "r_1kd8aa019",
       title: "report-html-export",
+      taskKey: "KDL-4H7P",
       pipeline: "dev",
       status: "running",
       activity: "quiet",

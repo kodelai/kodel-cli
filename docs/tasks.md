@@ -144,6 +144,37 @@ escaped there too). A long list prints `more: kodel task list ... --cursor ...` 
 `--field name=value` always sends text; an adapter turns it into a number or a flag for a field that is
 one. While tasks are off every command refuses and says how to turn them on.
 
+## In the TUI
+
+`kodel tui` shows the tasks too. Nothing there starts a task or changes its status; the one thing a person can
+write is a comment (`c`):
+
+- **Tasks** (the third item of the menu): every task of the project in groups TODO, IN PROGRESS and DONE
+  (a declined task is done), each row with the key, the title and the priority (the key dim, the priority
+  coloured); a child task whose parent is on the list has `└` before its key. The card shows the status,
+  the priority, the parent, the body, then the **subtasks** (key, priority, status, title) and the **runs**
+  attached (and how each is doing, when it is one of the runs on the first screen), then the comments.
+  It reads one page of 200 tasks and says when there are more.
+- **Backlog**, under the runs on the first screen: the first 5 tasks that are not started (state `todo`),
+  in the order the adapter lists them (priority, then oldest first), left out when a run of that task is
+  going or waits. Enter opens a task's card, `t` shows it on the Tasks screen. The runs are the ones the engine
+  tied to the task (`task_key`). With no runs at all, the first task is picked at once.
+- **In a task's card** (focus on it, Enter): the arrows walk the parent line, the subtasks and the runs; Enter
+  on a subtask opens its card, Esc or Left comes back to the one before it, and on `parent: KEY` Enter goes
+  back to the parent. Enter on a run that is in the list of runs jumps to it on the first screen, and Esc there
+  returns to the same card. `c` adds a comment to the task on the card (only while the card has the focus, never from a list row): a line at the
+  bottom, 500 characters at most (the end of a long text stays in view). **Enter** asks "Save this comment to
+  KEY?", with the end of the text; **`y`** (or `Y`) saves, any other key goes back to the text, Esc cancels.
+  Enter (also as `\r\n`) and `y` count only when each one is a key of its own (not part of a pasted text) and
+  some time (0.4 s) after the line opened and after the question appeared (pressed too early, the line says to
+  wait). A terminal that marks pasted text (bracketed paste) never has its paste read as keys; without that
+  mark the confirmation and the pauses are what stand between a paste and a saved comment, so read the text on
+  the question before pressing `y`. The text is sent as shown: only control characters are removed. Text
+  pasted into the line is added as one line; a paste outside the line is ignored. If the card moves on to another task while a
+  comment is being typed, the comment is cancelled. Comments only grow, so there is no key to delete one.
+- With tasks off (`tasks.enabled` is not true) both say so in one line, and the config is read when the TUI
+  starts, so start it again after turning tasks on.
+
 ## Keys, subtasks, runs, comments
 
 - A key is `<PREFIX>-<4 characters>`, such as `KDL-7K3Q`. The characters are random (without `0 O 1 I L U`,
@@ -225,9 +256,10 @@ What an adapter must keep to:
 - **No `null` in a patch.** `undefined` leaves a field alone; clearing is the explicit `clear` list.
 - **Comments only append**, `create` is never retried (no studied tracker has an idempotency key), a
   partial `update` reports what was applied in `details.applied`.
-- **Lists are stable and honest.** A total, stable order; `cursor` and `next` for paging; a filter the
-  tracker cannot run is run by the adapter after paging, and `truncated: true` says when it could not
-  page everything.
+- **Lists are stable and honest.** A total, stable order: most important first (when the tracker has
+  priorities), then oldest first. `kodel tui` relies on it to pick the first tasks of its Backlog, and the
+  conformance suite checks it. `cursor` and `next` for paging; a filter the tracker cannot run is run by
+  the adapter after paging, and `truncated: true` says when it could not page everything.
 - **Distrust the agent as well.** The service validates and redacts what the agent sends, but an adapter
   that builds a path, a query or JQL from a key still checks it for its own medium.
 - **Inside a major version everything new is optional**: a new capability reads as `caps.x === true` (off

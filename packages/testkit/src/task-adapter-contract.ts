@@ -511,6 +511,35 @@ export function taskAdapterContract(
     },
   );
 
+  add(
+    "a list is ordered most important first, then oldest first (the TUI backlog relies on it)",
+    async ({ adapter }, { create }) => {
+      if (!adapter.capabilities.priority) return;
+      const schema = await adapter.schema({}, o());
+      const names = (schema.priorities ?? []).map((p) => p.name);
+      const first = names[0];
+      const last = names[names.length - 1];
+      if (first === undefined || last === undefined || first === last) return;
+      const lowOld = await create("Low and old", { priority: last });
+      const highOld = await create("High and old", { priority: first });
+      const highNew = await create("High and new", { priority: first });
+      const keys = (await listAll(adapter)).tasks.map((t) => t.key);
+      const at = (k: string) => keys.indexOf(k);
+      assert(
+        at(highOld.key) >= 0 && at(highNew.key) >= 0 && at(lowOld.key) >= 0,
+        "a task is missing",
+      );
+      assert(
+        at(highOld.key) < at(highNew.key),
+        "a newer task comes before an older one of the same priority",
+      );
+      assert(
+        at(highNew.key) < at(lowOld.key),
+        "a less important task comes before a more important one",
+      );
+    },
+  );
+
   add("the limit is honoured and a longer list says so", async ({ adapter }, { create }) => {
     for (let i = 0; i < 4; i += 1) await create(`Task ${i}`);
     const answer = await adapter.list({ state: ALL_STATES, limit: 2 }, o());
