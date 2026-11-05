@@ -440,8 +440,9 @@ describe("tui card of a run waiting for approval", () => {
     const lines = plain(render(press(withCard(), SIZE, "enter"), SIZE));
     expect(lines.some((l) => l.includes("c add a comment"))).toBe(false);
     const footer = lines.at(-1) ?? "";
-    expect(footer).toContain("a approve");
-    expect(footer).toContain("r reject");
+    // what a and r do is on buttons now, and the keys are named on them
+    expect(footer).toContain("[a Approve]");
+    expect(footer).toContain("[r Reject]");
     expect(footer).toContain("c comment");
   });
 

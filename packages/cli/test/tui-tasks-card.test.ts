@@ -848,8 +848,9 @@ describe("what the second review found", () => {
     expect(m.back).toBeDefined();
     const hint = lines(m).at(-1) ?? "";
     expect(hint).toContain("Esc back to T-A1");
-    expect(hint).toContain("a approve");
-    expect(hint).toContain("r reject");
+    // what a and r do is on buttons in front of the hints
+    expect(hint).toContain("[a Approve]");
+    expect(hint).toContain("[r Reject]");
     expect(hint).toContain("Tab menu");
     expect(hint.indexOf("Tab menu")).toBeGreaterThan(hint.indexOf("Esc back"));
     expect(hint).toContain("q quit");

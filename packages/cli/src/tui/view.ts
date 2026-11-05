@@ -13,10 +13,21 @@ import {
   wrapText,
   yellow,
 } from "./ansi";
+import {
+  beginFlow,
+  type Flow,
+  flowBar,
+  flowChecked,
+  flowDecided,
+  flowGone,
+  flowKey,
+  flowYieldsQuit,
+} from "./decision-flow";
 import { firstCode, moveCode, moveHunk, type Prepared, placeOf, prepare } from "./diffview";
 import type { InputEvent } from "./input";
 import { renderLabel, rowLabels, sessionLine } from "./label";
 import type { Loaded } from "./load";
+import { modalOf, modalOverlay } from "./modal";
 import {
   emptyPipes,
   entryOf,
@@ -33,8 +44,12 @@ import {
   withEntries,
 } from "./pipelines";
 import {
+  type CheckResult,
   type Comment,
+  type DecisionOutcome,
+  type DecisionRef,
   type DiffState,
+  decisionKey,
   formatAge,
   type GateDetail,
   NEED_KEYS,
@@ -119,6 +134,11 @@ export interface Model {
   /** On a narrow terminal the list and the card take turns. */
   focus: "list" | "card";
   confirm: "a" | "r" | "d" | null;
+  /** A decision at a gate or a pause being made for real (project mode); see `decision-flow.ts`. */
+  flow: Flow | null;
+  flowSeq: number;
+  /** Which decision of a run is picked, by run id; a run that has none picked uses its first. */
+  picked: Record<string, string>;
   notice: string;
   quit: boolean;
   /** `demo`: sample data, and a decision only moves a sample around. `project`: nothing can be decided here yet. */
@@ -188,12 +208,82 @@ export type Effect =
   | { type: "delete_comment"; runId: string; node: string; attempt: number; index: number }
   | { type: "load_diff"; runId: string; path: string }
   | { type: "load_stats"; pipeline: string }
+  | {
+      type: "check_decision";
+      flow: number;
+      runId: string;
+      ref: DecisionRef;
+      decision: "approve" | "reject" | "resume";
+      reason?: string;
+    }
+  | {
+      type: "decide";
+      flow: number;
+      runId: string;
+      ref: DecisionRef;
+      decision: "approve" | "reject" | "resume";
+      reason?: string;
+    }
   | { type: "load_task"; key: string }
   | { type: "add_task_comment"; key: string; text: string };
 
-/** A run's gate detail is good for the wait it was read for: a new wait is a new key. */
-export function detailKey(s: Session): string {
-  return `${s.id}:${s.since}`;
+/**
+ * A run's gate detail is good for the wait it was read for: a new wait is a new key. With several
+ * gates waiting, each has its own card, so the picked one's node and attempt are part of the key.
+ */
+export function detailKey(s: Session, pick?: DecisionRef): string {
+  const base = `${s.id}:${s.since}`;
+  return pick ? `${base}:${pick.node}:${pick.attempt ?? 0}` : base;
+}
+
+/** The decision of a run that `a`, `r` and `c` act on: the one picked, or the first. */
+export function pickedDecision(m: Pick<Model, "picked">, s: Session): DecisionRef | undefined {
+  const all = s.decisions ?? [];
+  const key = m.picked[s.id];
+  return all.find((d) => decisionKey(d) === key) ?? all[0];
+}
+
+/**
+ * What `a` and `r` mean here. On sample data, or for a session that carries no decisions (older
+ * callers), what the need says; in a project, what the picked decision says.
+ */
+function keysOf(m: Model, s: Session | undefined): { a?: string; r?: string } {
+  if (!s?.need) return {};
+  if (m.source !== "project" || s.decisions === undefined) return NEED_KEYS[s.need];
+  const d = pickedDecision(m, s);
+  if (!d) return {};
+  return d.kind === "gate" ? { a: "approve", r: "reject" } : { a: "resume" };
+}
+
+/** Moves the pick of the selected run by one among its decisions, wrapping round. */
+function movePick(m: Model, by: 1 | -1): Model {
+  const s = selectedSession(m);
+  const all = s?.decisions ?? [];
+  if (!s || all.length < 2) return m;
+  const current = pickedDecision(m, s);
+  const at = Math.max(0, current ? all.indexOf(current) : 0);
+  const next = all[(at + by + all.length) % all.length];
+  if (!next) return m;
+  return {
+    ...m,
+    picked: { ...m.picked, [s.id]: decisionKey(next) },
+    notice: "",
+    cardScroll: 0,
+    tab: 0,
+    cursor: 0,
+    open: false,
+    sub: 0,
+  };
+}
+
+/** The checks for a decision have answered. */
+export function withCheck(m: Model, flow: number, result: CheckResult): Model {
+  return flowChecked(m, flow, result);
+}
+
+/** The write for a decision has been made, or refused. */
+export function withDecided(m: Model, flow: number, outcome: DecisionOutcome): Model {
+  return flowDecided(m, flow, outcome);
 }
 
 export interface Size {
@@ -244,6 +334,9 @@ export function initialModel(
     selected: ordered(loaded.sessions)[0]?.id ?? "",
     focus: "list",
     confirm: null,
+    flow: null,
+    flowSeq: 0,
+    picked: {},
     notice: "",
     quit: false,
     source,
@@ -272,7 +365,7 @@ export function withDetail(m: Model, key: string, detail: GateDetail): Model {
   // A run that is going on changes under the person's eyes, so what was read of its files may be out
   // of date: a read that failed is forgotten, and the file that is open is read again (what was shown
   // stays until the new text arrives).
-  const runId = key.slice(0, key.lastIndexOf(":"));
+  const runId = key.slice(0, key.indexOf(":"));
   if (m.sessions.find((s) => s.id === runId)?.status !== "running") return next;
   const mine = `${runId}:`;
   const diffs = Object.fromEntries(
@@ -302,7 +395,19 @@ export function withData(m: Model, loaded: Loaded, now: number): Model {
     ? m.confirm
     : null;
   const pipelines = sortEntries(loaded.pipelines ?? []);
-  return settled(
+  // A pick that is no longer among the decisions of its run (decided elsewhere) is forgotten; the run
+  // then shows its first decision, and a person who had picked is told.
+  const picked = { ...m.picked };
+  let moved = false;
+  for (const s of sessions) {
+    const key = picked[s.id];
+    if (key === undefined) continue;
+    if (!(s.decisions ?? []).some((d) => decisionKey(d) === key)) {
+      delete picked[s.id];
+      moved = moved || s.id === m.selected;
+    }
+  }
+  const next: Model = settled(
     reconciled({
       ...m,
       sessions,
@@ -312,9 +417,37 @@ export function withData(m: Model, loaded: Loaded, now: number): Model {
       rep: withNames(m.rep, repNames(pipelines)),
       selected,
       confirm,
+      picked,
       now,
     }),
   );
+  const dropped = flowGone(next, sessions);
+  // A comment being typed, or a deletion being asked, is about the card that was on the screen: when
+  // that card is another one now (its decision went, a new wait began), it is cancelled, not moved
+  // to a card the person did not mean.
+  const cardBefore = cardIdentity(m);
+  const cardAfter = cardIdentity(dropped);
+  if (cardBefore !== cardAfter && (dropped.input !== null || dropped.confirm === "d")) {
+    return {
+      ...dropped,
+      input: null,
+      confirm: dropped.confirm === "d" ? null : dropped.confirm,
+      notice: "The card changed under the comment; it was cancelled.",
+    };
+  }
+  // The notice of what was just written is not taken over by this one.
+  return moved && m.notice === "" && dropped.notice === m.notice
+    ? {
+        ...dropped,
+        notice: "The decision you had picked is gone (decided elsewhere); showing the first one.",
+      }
+    : dropped;
+}
+
+/** Which card the selected run shows (its wait and its picked gate), or nothing. */
+function cardIdentity(m: Model): string | undefined {
+  const s = selectedSession(m);
+  return s ? detailKey(s, pickedDecision(m, s)) : undefined;
 }
 
 /** An answer of the tasks reader. The runs are not read with it: a slow tracker never holds them up. */
@@ -471,6 +604,28 @@ export function update(input: Model, key: string, size: Size = DEFAULT_SIZE, alo
 function updateKey(input: Model, key: string, size: Size, alone: boolean): Model {
   const m = normalized(input);
   if (key === "ctrl-c") return { ...m, quit: true };
+  if (m.flow) {
+    // Leaving is never held back by a decision that is being asked or written.
+    if (key === "q" && flowYieldsQuit(m.flow)) return { ...m, quit: true };
+    // An answer is for a window that can be seen and has stood still: not on a terminal too small to
+    // draw it, and not in the first moment after it changed what it asks (a double tap, a key held down).
+    const answers =
+      (key === "y" && m.flow.phase === "confirm") || (key === "enter" && m.flow.phase === "reason");
+    if (answers) {
+      if (tooSmall(size)) return m;
+      if (m.now - m.flow.shownAt < CLICK_GUARD_MS) return m;
+    }
+    // The yes is for a question that has been read: with lines still out of the window it reads on
+    // one window further first, and the window then stands still again.
+    if (key === "y" && m.flow.phase === "confirm") {
+      const modal = modalOf(m.flow, size.cols, size.rows - 3);
+      if (m.flow.scroll < modal.maxScroll) {
+        const scroll = Math.min(modal.maxScroll, m.flow.scroll + Math.max(1, modal.room - 1));
+        return { ...m, flow: { ...m.flow, scroll, shownAt: m.now } };
+      }
+    }
+    return clampFlowScroll(flowKey(m, key), size);
+  }
   if (m.legend !== null) return legendKey(m, key, size);
   if (m.input) return typing(m, key, alone);
   if (m.taskInput) return typingTask(m, key, alone);
@@ -566,14 +721,24 @@ function updateKey(input: Model, key: string, size: Size, alone: boolean): Model
       if (m.back !== undefined && m.focus === "list" && m.pick.kind === "run")
         return restoreBack(m);
       return { ...m, focus: "list", zoom: false };
+    case "g":
+    case "G":
+      return movePick(m, key === "g" ? 1 : -1);
     case "a":
     case "r": {
-      if (current?.need === undefined || NEED_KEYS[current.need][key] === undefined) return m;
+      if (current?.need === undefined || keysOf(m, current)[key] === undefined) return m;
+      // A decision is asked in a window over the Sessions screen, which is where it can be seen.
+      if (m.section !== 0 || tooSmall(size)) return m;
       if (m.source === "project") {
-        return {
-          ...m,
-          notice: `Deciding from here comes later. In a terminal: ${current.command ?? "see the card"}`,
-        };
+        const ref = current.decisions === undefined ? undefined : pickedDecision(m, current);
+        if (!ref) {
+          return {
+            ...m,
+            notice: `This one is decided with a command, not from here. In a terminal: ${current.command ?? "see the card"}`,
+          };
+        }
+        const decision = ref.kind === "pause" ? "resume" : key === "a" ? "approve" : "reject";
+        return beginFlow(m, current, ref, decision);
       }
       return { ...m, confirm: key, notice: "" };
     }
@@ -1228,7 +1393,7 @@ function moveCursor(m: Model, d: GateDetail, by: number): Model {
 /** The selected run's gate detail, once it has been read. */
 function detailOf(m: Model): { s: Session; d: GateDetail } | undefined {
   const s = selectedSession(m);
-  const d = s ? m.details[detailKey(s)] : undefined;
+  const d = s ? m.details[detailKey(s, pickedDecision(m, s))] : undefined;
   return s && d ? { s, d } : undefined;
 }
 
@@ -1364,11 +1529,43 @@ function panel(m: Model, width: number, height: number): Panel {
   });
   const band = headerBand(s, found.d, width, glyph(s, m.frame), m.now, height < 22);
   return {
-    head: [...band, tabs.line, dim("─".repeat(width))],
-    body: content.lines,
-    ...(content.anchor === undefined ? {} : { anchor: content.anchor }),
+    head: [...band, ...pickerLine(m, s, width), tabs.line, dim("─".repeat(width))],
+    body: [...besideLines(s), ...content.lines],
+    ...(content.anchor === undefined ? {} : { anchor: content.anchor + besideLines(s).length }),
     spans: tabs.spans,
   };
+}
+
+/** Scrolls a question no further than its window lets it. */
+function clampFlowScroll(m: Model, size: Size): Model {
+  const f = m.flow;
+  if (!f) return m;
+  const max = modalOf(f, size.cols, size.rows - 3).maxScroll;
+  return f.scroll > max ? { ...m, flow: { ...f, scroll: max } } : m;
+}
+
+/** Which decision of the run is picked, when the run holds more than one. */
+function pickerLine(m: Model, s: Session, width: number): string[] {
+  const all = s.decisions ?? [];
+  if (all.length < 2) return [];
+  const picked = pickedDecision(m, s);
+  const at = Math.max(0, picked ? all.indexOf(picked) : 0);
+  const what = picked ? `${picked.kind === "gate" ? "gate" : "paused"} «${picked.node}»` : "";
+  return [fit(dim(`decision ${at + 1} of ${all.length} · ${what} · g/G pick`), width)];
+}
+
+/**
+ * What waits for a person in a run that is shown as running (a paused branch beside a branch that
+ * still moves): a key here cannot decide it, so the commands are named.
+ */
+function besideLines(s: Session): string[] {
+  const all = s.besides ?? [];
+  if (all.length === 0) return [];
+  return [
+    dim("Also waiting for you (decide in a terminal):"),
+    ...all.map((b) => dim(`  $ ${b.command}`)),
+    "",
+  ];
 }
 
 /** The panel as `height` lines: the head, then the part of the body that fits. */
@@ -1447,7 +1644,9 @@ const STEP_GLYPH: Record<StepState, string> = {
 const TIME_WIDTH = 8;
 
 function tagOf(s: Session): string {
-  return s.status === "waiting" && s.need ? NEED_TAG[s.need] : s.step;
+  if (s.status !== "waiting" || !s.need) return s.step;
+  const more = (s.decisions?.length ?? 0) > 1 ? ` ×${s.decisions?.length}` : "";
+  return `${NEED_TAG[s.need]}${more}`;
 }
 
 function timeOf(s: Session, now: number, ago: boolean): string {
@@ -1529,14 +1728,16 @@ function listWidthFor(cols: number): number {
   return Math.min(58, Math.max(44, Math.floor(cols * 0.42)));
 }
 
-function actionLine(s: Session, project: boolean): string {
-  const keys = s.need ? NEED_KEYS[s.need] : {};
+function actionLine(m: Model, s: Session): string {
+  const keys = keysOf(m, s);
   const parts = [
     ...(keys.a ? [`${bold("a")} ${keys.a}`] : []),
     ...(keys.r ? [`${bold("r")} ${keys.r}`] : []),
   ];
   if (parts.length === 0) return "";
-  return `${parts.join("   ")}${project ? dim("   (shows the command for now)") : ""}`;
+  // A project whose sessions carry no decisions still only shows the command.
+  const commandOnly = m.source === "project" && s.decisions === undefined;
+  return `${parts.join("   ")}${commandOnly ? dim("   (shows the command for now)") : ""}`;
 }
 
 /** Every line of the card; the screen shows the part from `cardScroll` on. */
@@ -1550,14 +1751,26 @@ function cardLines(s: Session | undefined, m: Model, width: number): string[] {
   out.push("");
   const inner = Math.max(10, width - 4);
   if (s.status === "waiting" && s.need) {
+    // With several decisions the card is about the picked one, not always the one the engine names first.
+    const picked = s.decisions && s.decisions.length > 0 ? pickedDecision(m, s) : undefined;
+    const other = picked !== undefined && picked !== s.decisions?.[0];
+    const headline = other
+      ? picked.kind === "pause"
+        ? `Paused at «${picked.node}»`
+        : `Step «${picked.node}» waits for your decision`
+      : (s.headline ?? "");
+    const prompt = other ? picked.prompt : (s.prompt ?? "");
+    const command = other ? picked.command : s.command;
+    out.push(...pickerLine(m, s, width));
     out.push(yellow(`┌ ${NEED_TAG[s.need]} · waiting ${formatAge(m.now - s.since)}`));
-    out.push(`${yellow("│")} ${bold(s.headline ?? "")}`);
-    for (const line of wrapText(s.prompt ?? "", inner)) out.push(`${yellow("│")} ${line}`);
+    out.push(`${yellow("│")} ${bold(headline)}`);
+    for (const line of wrapText(prompt, inner)) out.push(`${yellow("│")} ${line}`);
     out.push(`${yellow("│")} ${green("Ready to decide")}`);
     if (s.after) out.push(`${yellow("│")} ${dim(`After that: ${s.after}`)}`);
-    if (s.command) out.push(`${yellow("│")} ${dim(`$ ${s.command}`)}`);
-    out.push(`${yellow("└")} ${actionLine(s, m.source === "project")}`);
-    if (s.need === "approve") out.push(dim("Reading the details…"));
+    if (command) out.push(`${yellow("│")} ${dim(`$ ${command}`)}`);
+    out.push(`${yellow("└")} ${actionLine(m, s)}`);
+    // A paused step has no card to wait for.
+    if (s.need === "approve" && picked?.kind !== "pause") out.push(dim("Reading the details…"));
     out.push("");
   } else if (s.status === "failed") {
     out.push(red("┌ failed"));
@@ -1583,7 +1796,7 @@ function cardLines(s: Session | undefined, m: Model, width: number): string[] {
     );
     out.push("");
   }
-  if (s.status === "running") out.push(dim("Reading the details…"), "");
+  if (s.status === "running") out.push(dim("Reading the details…"), "", ...besideLines(s));
   if (s.steps.length > 0) {
     out.push(dim("STEPS"));
     for (const st of s.steps) {
@@ -1703,6 +1916,39 @@ function rowOf(m: Model, s: Session | undefined): string {
   return dim(` · ${s.id.slice(-8)}${shown}`);
 }
 
+interface BarButton {
+  key: "a" | "r";
+  text: string;
+  /** The columns it covers on the bottom line, from `x0` up to `x1` (0-based). */
+  x0: number;
+  x1: number;
+}
+
+/** The buttons in front of the hints, while nothing else holds the bottom line. */
+function barButtons(m: Model): BarButton[] {
+  if (m.section !== 0 || m.pick.kind !== "run") return [];
+  if (m.flow || m.input || m.legend !== null || m.confirm !== null) return [];
+  if (m.notice !== "") return [];
+  const keys = keysOf(m, selectedSession(m));
+  const out: BarButton[] = [];
+  let x = 1;
+  for (const key of ["a", "r"] as const) {
+    const label = keys[key];
+    if (!label) continue;
+    const text = `[${key} ${label.charAt(0).toUpperCase()}${label.slice(1)}]`;
+    out.push({ key, text, x0: x, x1: x + text.length });
+    x += text.length + 2;
+  }
+  return out;
+}
+
+/** The bottom line when nothing else holds it: the buttons, then the hints. */
+function barText(m: Model): string {
+  const buttons = barButtons(m);
+  const front = buttons.map((b) => inverse(b.text)).join("  ");
+  return buttons.length > 0 ? `${front}   ${hints(m)}` : hints(m);
+}
+
 /** The hints of a task's card that has the focus: the keys of its items first, `c` last where a narrow screen cuts. */
 function taskCardHints(m: Model): string {
   const width = 80;
@@ -1742,8 +1988,10 @@ function hints(m: Model): string {
       ? `${taskCardHints(m)}   ${bold("t")} tasks`
       : `${bold("↑↓")} select   ${bold("Enter")} card   ${bold("Tab")} menu   ${bold("q")} quit   ${bold("t")} tasks   ${bold("c")} comment`;
   }
-  const keys = current?.need ? NEED_KEYS[current.need] : {};
-  const decide = decisionKeys(keys);
+  const keys = keysOf(m, current);
+  const pick = (current?.decisions?.length ?? 0) > 1 ? `   ${bold("g/G")} pick` : "";
+  // The buttons in front of these hints already say what a and r do.
+  const decide = barButtons(m).length > 0 ? pick : `${pick}${decisionKeys(keys)}`;
   const zoom = `   ${bold("z")} ${m.zoom ? "show list" : "zoom"}`;
   if (m.focus === "card" && m.section === 0) {
     const found = detailOf(m);
@@ -1774,7 +2022,8 @@ const decisionKeys = (keys: { a?: string; r?: string }): string =>
 
 /** The keys of the run list: select, open, decide, menu. Also what stays on the hint line after a jump from a task. */
 function runHints(m: Model, current: Session | undefined): string {
-  const decide = decisionKeys(current?.need ? NEED_KEYS[current.need] : {});
+  const pick = (current?.decisions?.length ?? 0) > 1 ? `   ${bold("g/G")} pick` : "";
+  const decide = barButtons(m).length > 0 ? pick : `${pick}${decisionKeys(keysOf(m, current))}`;
   const proposals =
     m.proposals > 0
       ? dim(`   ${m.proposals} pipeline proposal${m.proposals === 1 ? "" : "s"} wait on 2`)
@@ -1869,15 +2118,20 @@ export function render(model: Model, { cols, rows }: Size): string[] {
     body = panes(m, layout, left, right, bodyHeight);
   }
   if (m.legend !== null && m.section === 3) body = legendOverlay(m, body, cols, bodyHeight);
+  if (m.flow && m.section === 0) {
+    body = modalOverlay(modalOf(m.flow, cols, bodyHeight), body, cols, bodyHeight);
+  }
   for (let i = 0; i < bodyHeight; i++) out.push(fit(body[i] ?? "", cols));
 
-  const status = m.input
-    ? inputLine(m.input, m.notice)
-    : m.taskInput
-      ? taskInputLine(m.taskInput, cols, m.notice)
-      : m.notice !== ""
-        ? (isFailure(m.notice) ? red : green)(m.notice)
-        : hints(m);
+  const status = m.flow
+    ? flowBar(m.flow)
+    : m.input
+      ? inputLine(m.input, m.notice)
+      : m.taskInput
+        ? taskInputLine(m.taskInput, cols, m.notice)
+        : m.notice !== ""
+          ? (isFailure(m.notice) ? red : green)(m.notice)
+          : barText(m);
   out.push(fit(` ${status}`, cols));
   return out;
 }
@@ -1928,8 +2182,8 @@ export function hitTest(model: Model, { cols, rows }: Size, x: number, y: number
 }
 
 /**
- * A click selects a session, a menu item or a tab, and the wheel moves the selection or scrolls;
- * nothing else. A decision is never made with the mouse: it takes a key and a confirmation.
+ * A click selects a session, a menu item or a tab, presses a button, and the wheel moves the selection
+ * or scrolls. A button does what its key does; a decision is only written after the yes in its window.
  */
 export function mouseUpdate(
   input: Model,
@@ -1939,13 +2193,47 @@ export function mouseUpdate(
   return wanting(mouseEvent(input, size, event));
 }
 
+/**
+ * How long after the window changes its question a click is not taken as an answer (milliseconds). The
+ * clock is the screen's, which moves with the frames (every 100 ms), so in time it is a little less.
+ */
+const CLICK_GUARD_MS = 400;
+
+/** Whether the screen is too small to draw anything but its warning: nothing is answered there. */
+function tooSmall(size: Size): boolean {
+  return size.cols < 40 || size.rows < 12;
+}
+
+/** A click while a decision is asked: only the buttons of its window answer. */
+function modalClick(m: Model, size: Size, event: Extract<InputEvent, { type: "mouse" }>): Model {
+  const f = m.flow;
+  if (!f || event.action !== "press") return m;
+  // Not drawn on a terminal this small, so not answered either.
+  if (tooSmall(size)) return m;
+  // A click right after the window changed what it asks (a double click on a button, say) lands on
+  // the button that took its place, which its maker never saw.
+  if (m.now - f.shownAt < CLICK_GUARD_MS) return m;
+  const modal = modalOf(f, size.cols, size.rows - 3);
+  const row = event.y - 3;
+  const col = event.x - 1;
+  const hit = modal.buttons.find((b) => b.row === row && col >= b.x0 && col < b.x1);
+  return hit ? updateKey(m, hit.key, size, true) : m;
+}
+
 function mouseEvent(
   input: Model,
   size: Size,
   event: Extract<InputEvent, { type: "mouse" }>,
 ): Model {
   const m = normalized(input);
-  if (!m.mouse || m.confirm !== null || m.legend !== null || m.taskInput !== null) return m;
+  if (!m.mouse) return m;
+  if (m.flow) return modalClick(m, size, event);
+  if (m.confirm !== null || m.legend !== null || m.taskInput !== null) return m;
+  if (event.action === "press" && event.y === size.rows) {
+    const col = event.x - 1;
+    const hit = barButtons(m).find((b) => col >= b.x0 && col < b.x1);
+    return hit ? updateKey(m, hit.key, size, true) : m;
+  }
   const layout = layoutOf(m, size.cols);
   if (event.action !== "press") {
     if (m.section !== 0) return m;
