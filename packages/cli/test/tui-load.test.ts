@@ -254,3 +254,36 @@ describe("tui loading sessions", () => {
     expect(loaded.sessions).toHaveLength(1);
   });
 });
+
+describe("task_g4jy_session_carries_the_task_key", () => {
+  test("task_g4jy_session_carries_the_task_key: a run tied to a task names it, on every path that has a state", async () => {
+    const tied = { next: waitingNext({ reason: "gate" }), state: state({ taskKey: "KDL-7K3Q" }) };
+    expect((await one(tied)).session.taskKey).toBe("KDL-7K3Q");
+    // A run that cannot be opened still has its state, so it still names its task.
+    const broken = await one({
+      state: state({ taskKey: "KDL-7K3Q" }),
+      openError: new Error("gone"),
+    });
+    expect(broken.session.status).toBe("unreadable");
+    expect(broken.session.taskKey).toBe("KDL-7K3Q");
+    // A finished run, and a run of format 1, keep it too.
+    const done = await one({
+      state: state({ status: "completed", taskKey: "KDL-7K3Q" } as Partial<RunState>),
+    });
+    expect(done.session.taskKey).toBe("KDL-7K3Q");
+    const old = await one({
+      next: waitingNext({ reason: "gate" }),
+      state: state({ v: 1, taskKey: "KDL-7K3Q" } as unknown as Partial<RunState>),
+    });
+    expect(old.session.taskKey).toBe("KDL-7K3Q");
+  });
+
+  test("task_g4jy_session_carries_the_task_key: a run that is not tied to a task has none", async () => {
+    const { session } = await one({ next: waitingNext({ reason: "gate" }) });
+    expect(session.taskKey).toBeUndefined();
+    expect("taskKey" in session).toBe(false);
+    // A state that cannot be read has nothing to take it from.
+    const lost = await one({ state: undefined });
+    expect(lost.session.taskKey).toBeUndefined();
+  });
+});

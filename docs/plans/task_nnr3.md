@@ -241,3 +241,10 @@ Still open, and why:
   engine's run, and the built-in high-entropy rule hides such a path (checked: `redactText` of a
   `/var/folders/...` path gives `[REDACTED:high-entropy]`). The path side is now tested at unit level with
   the disk injected; the end-to-end leg checks only the secret side.
+
+### Merge of origin/main (impl attempt 8)
+
+- Main moved `kodel resume` into `gate-decision.ts` (`prepareResume`/`commitResume`, also used by the TUI):
+  `DecisionRun.resume` and `commitResume` now carry the engine `warning`, which `kodel resume` prints and the
+  TUI's decision message shows. `.kodel/pipelines/dev.yaml` is main's version (the run's own variant is not
+  part of this task).

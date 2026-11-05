@@ -11,6 +11,18 @@ import { plain } from "./plain";
 export const SHOWN_FILES = 10;
 
 /**
+ * What the person was shown about the files, as a value to compare with what is true when they
+ * answer: the changed files and their lines in a fixed order, and only the kind when the engine
+ * could not tell (its wording is not part of the facts).
+ */
+export function changesFingerprint(found: ChangeReport): string {
+  if (found.kind !== "changes") return found.kind;
+  return JSON.stringify(
+    Object.entries(found.files).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+  );
+}
+
+/**
  * Said under a gate's list of changes when other branches of a fork were active since the step was
  * reached (the host's `note`): the tree is one, so whose write is whose cannot be told (T-40).
  */

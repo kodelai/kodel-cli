@@ -29,6 +29,38 @@ export interface AgentSession {
   proven: boolean;
 }
 
+/**
+ * One decision that waits in a run: a gate or a paused step. A fork can hold several; the screen lets
+ * the person pick one, and `a` / `r` / `c` act on the picked one by its node and attempt.
+ */
+export interface DecisionRef {
+  kind: "gate" | "pause";
+  node: string;
+  /** The attempt of a gate (the one the person looked at); a pause has none. */
+  attempt?: number;
+  prompt: string;
+  /** The command that decides it, as the engine words it. */
+  command: string;
+}
+
+/** Tells one decision of a run from another. */
+export function decisionKey(d: DecisionRef): string {
+  // The attempt is not part of it: a gate keeps its place in the list when it is reached again, and
+  // the screens compare the attempt where it matters.
+  return `${d.kind}:${d.node}`;
+}
+
+/** What the checks said before anything is written: the questions to ask, or why not. */
+export type CheckResult =
+  | { ok: true; questions: string[] }
+  | { ok: false; message: string; needsReason?: true };
+
+/** What came of a write: the notice for the person. */
+export interface DecisionOutcome {
+  ok: boolean;
+  message: string;
+}
+
 export interface Session {
   id: string;
   title: string;
@@ -48,6 +80,8 @@ export interface Session {
   /** How long nothing was heard from a run that is `quiet`. */
   quietMs?: number;
   workdir?: string;
+  /** The key of the task the engine tied this run to; absent when the run is not tied to one. */
+  taskKey?: string;
   /** The card's lines about what is asked of the person. */
   headline?: string;
   prompt?: string;
@@ -55,6 +89,14 @@ export interface Session {
   after?: string;
   /** The command that decides it, as the engine words it. */
   command?: string;
+  /**
+   * Every gate and pause of a waiting run that a key here can decide, the one the engine names first
+   * in front. Empty when what waits is not one of them (a change of the pipeline, a hand edit). Not
+   * set at all on sample data: the older keys then stand.
+   */
+  decisions?: DecisionRef[];
+  /** What waits for a person in a run shown as running, which a key here cannot decide. */
+  besides?: { kind: "gate" | "pause"; node: string; command: string }[];
   /** Why a failed run failed. */
   reason?: string;
   steps: StepLine[];

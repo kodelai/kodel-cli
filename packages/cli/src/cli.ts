@@ -42,7 +42,7 @@ import { Command, CommanderError } from "commander";
 import pkg from "../package.json" with { type: "json" };
 import { registerAgentCommands } from "./agent-commands";
 import { BUILD } from "./build-info";
-import { describePendingChange, gateChangesText, gateCommentsText } from "./decide-text";
+import { describePendingChange } from "./decide-text";
 import { engineHostOptions } from "./engine-steps";
 import {
   FEEDBACK_ENDPOINT,
@@ -53,8 +53,22 @@ import {
   submitFeedback,
 } from "./feedback";
 import { formatEffects, formatProposal, formatReport } from "./format";
+import {
+  commitGateDecision,
+  commitResume,
+  DecisionRefused,
+  prepareGateDecision,
+  prepareResume,
+  WORK_WAIT_MS,
+} from "./gate-decision";
 import { type Choice, InitError, runInit } from "./init";
-import { dialogTimeoutFrom, noProjectHost, serveNoTools, serveStdio } from "./mcp-server";
+import {
+  dialogTimeoutFrom,
+  noProjectHost,
+  serveNoTools,
+  serveStdio,
+  stopAndWait,
+} from "./mcp-server";
 import { plain, UNSAFE_CODES } from "./plain";
 import { formatTable } from "./table";
 import {
@@ -93,8 +107,15 @@ export interface CliEnv {
 /** A problem to report to the user without a stack trace. */
 class UserError extends Error {}
 
-/** How long a command waits for engine work it started (a build, say) before it lets go. */
-const WORK_WAIT_MS = 30 * 60_000;
+/** A refusal of the shared decision checks, as the problem the command reports. */
+async function refusing<T>(work: () => Promise<T>): Promise<T> {
+  try {
+    return await work();
+  } catch (error) {
+    if (error instanceof DecisionRefused) throw new UserError(error.message);
+    throw error;
+  }
+}
 
 export { plain };
 
@@ -343,19 +364,6 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       return `a change of the pipeline${where} cannot be accepted: ${plain(info.refused)}`;
     }
     return `a change of the pipeline${where} waits for you: ${plain(info.apply)}`;
-  }
-
-  /** The decisions at a gate or a pause go after the pipeline change that is waiting, not before it. */
-  async function refuseWhilePending(
-    run: Awaited<ReturnType<typeof openRun>>,
-    ignore: boolean | undefined,
-  ): Promise<void> {
-    if (ignore) return;
-    const found = await run.pendingChange().catch(() => undefined);
-    if (!found?.info.blocking) return;
-    throw new UserError(
-      `a change of the pipeline of run ${run.runId} is waiting for you: look at it and accept it with "${plain(found.info.apply)}", or put the pipeline file back as it was. To decide here without it: --ignore-pending-change`,
-    );
   }
 
   /**
@@ -757,30 +765,39 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         } = await import("./tui/demo");
         // One start time for the whole run, so the sample waits keep their identity and only age.
         const base = Date.now();
+        const { decisionOptions } = await import("./tui/decide");
         await runTui(process.stdin, process.stdout, async () => demoSessions(base), "demo", {
           mouse: opts.mouse === true,
+          ...decisionOptions("demo", undefined),
           loadDetail: async (runId) =>
             demoGateDetail(runId, base) ?? demoRunningDetail(runId, base),
           loadDiff: (_runId, path) => demoDiff(path),
           addComment: (runId, _node, _attempt, comment) => demoAddComment(runId, comment),
           deleteComment: (runId, _node, _attempt, index) => demoDeleteComment(runId, index),
           loadStats: async (pipeline) => (await import("./tui/demo-stats")).demoStats(pipeline),
+          ...(await import("./tui/tasks-open")).tuiTaskOptions("demo", base),
         });
         return;
       }
       const { loadSessions } = await import("./tui/load");
       const { addComment, loadDiff, loadRunDetail, removeComment } = await import("./tui/gate");
       const { createStatsLoader } = await import("./tui/stats-load");
+      const { createDecisionTools, decisionOptions } = await import("./tui/decide");
+      const { openTasksForTui, tuiTaskOptions } = await import("./tui/tasks-open");
       const h = await host();
+      const tasks = await openTasksForTui(await storeRoot());
       const loadStats = createStatsLoader(h, hashSource);
+      const tools = createDecisionTools(h, { hardStop: () => stopAndWait(h) });
       await runTui(process.stdin, process.stdout, () => loadSessions(h, Date.now()), "project", {
         mouse: opts.mouse === true,
-        loadDetail: (runId) => loadRunDetail(h, runId),
+        ...decisionOptions("project", tools),
+        loadDetail: (runId, pick) => loadRunDetail(h, runId, Date.now(), pick),
         loadDiff: (runId, path) => loadDiff(h, runId, path),
         addComment: (runId, node, attempt, comment) => addComment(h, runId, node, attempt, comment),
         deleteComment: (runId, node, attempt, index) =>
           removeComment(h, runId, node, attempt, index),
         loadStats: (pipeline) => loadStats(pipeline),
+        ...tuiTaskOptions(tasks),
       });
     });
 
@@ -926,53 +943,19 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         }
         const run = await openRun(await host(), runId);
         await warnIfForeign(run);
-        await refuseWhilePending(run, opts.ignorePendingChange);
-        const state = await run.state();
-        const waiting = state.active.filter((v) => v.phase === "human");
-        if (opts.node === undefined && waiting.length > 1) {
-          throw new UserError(
-            `run ${runId} waits for a decision at ${waiting.length} steps: ${waiting
-              .map((v) => `"${plain(v.node)}"`)
-              .join(", ")}. Say which with --node <slug>`,
-          );
-        }
-        const node = opts.node ?? waiting[0]?.node;
-        if (!node || !waiting.some((v) => v.node === node)) {
-          throw new UserError(
-            `run ${runId} is not waiting for a decision${opts.node ? ` at "${plain(opts.node)}"` : ""}`,
-          );
-        }
-        // What the agent did after the run stopped here is not what the checks saw. When that cannot
-        // be told (the record is gone, or git fails: something an agent could make happen), it is
-        // said so and approving needs one more yes. "Nothing changed" is only ever shown when the
-        // engine really compared the files.
-        const found = await run.changesSinceGate(node);
-        // What the agent recorded as the person's comments goes back with a rejection, so it is
-        // shown before the person confirms: the agent's wording, not necessarily theirs.
-        const comments = decision === "reject" ? await run.gateResults(node) : undefined;
-        if (decision === "reject" && !opts.reason && !comments) {
-          throw new UserError('a rejection needs a reason: --reason "..."');
-        }
-        const question = [
-          gateChangesText(found),
-          comments ? gateCommentsText(comments) : undefined,
-          `${decision === "approve" ? "Approve" : "Reject"} "${plain(node)}" of run ${plain(runId)}?`,
-        ]
-          .filter((part): part is string => part !== undefined)
-          .join("\n");
-        await mustConfirm(question);
-        if (found.kind === "unavailable" && decision === "approve") {
-          await mustConfirm(
-            "Approve although what changed since the run stopped here could not be checked?",
-          );
-        }
-        failIfRefused(
-          await run.decideHuman(
-            node,
-            decision === "approve" ? "approved" : "rejected",
-            opts.reason,
-          ),
+        const prepared = await refusing(() =>
+          prepareGateDecision(run, {
+            decision,
+            ...(opts.node === undefined ? {} : { node: opts.node }),
+            ...(opts.reason === undefined ? {} : { reason: opts.reason }),
+            ...(opts.ignorePendingChange === undefined
+              ? {}
+              : { ignorePendingChange: opts.ignorePendingChange }),
+          }),
         );
+        for (const question of prepared.questions) await mustConfirm(question);
+        failIfRefused(await commitGateDecision(run, prepared, opts.reason));
+        const node = prepared.node;
         // What the decision led into is in the decided node's branch (a rejection sends the branch
         // back, an approval goes on in it or into the join): a sibling branch is not waited for,
         // whatever it entered while the person read the question.
@@ -993,40 +976,22 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .action(async (runId: string, opts: { node?: string; ignorePendingChange?: boolean }) => {
       requireHuman();
       const run = await openRun(await host(), runId);
-      // Resuming continues the run, which only the checkout that made it does: said before asking.
-      const owner = await run.foreignRoot().catch(() => undefined);
-      if (owner !== undefined) {
-        throw new UserError(
-          `run ${plain(runId)} belongs to the checkout at ${plain(owner)}; it is resumed from there`,
-        );
-      }
-      await refuseWhilePending(run, opts.ignorePendingChange);
-      const state = await run.state();
-      if (state.pauses.length === 0 || (state.status !== "running" && state.status !== "paused")) {
-        throw new UserError(`run ${runId} is not paused`);
-      }
-      if (opts.node === undefined && state.pauses.length > 1) {
-        throw new UserError(
-          `run ${runId} is paused at ${state.pauses.length} steps: ${state.pauses
-            .map((p) => `"${plain(p.node)}"`)
-            .join(", ")}. Say which with --node <slug>`,
-        );
-      }
-      const pause =
-        opts.node === undefined ? state.pauses[0] : state.pauses.find((p) => p.node === opts.node);
-      if (!pause) {
-        throw new UserError(`run ${runId} is not paused at "${plain(opts.node ?? "")}"`);
-      }
-      await mustConfirm(
-        `Resume run ${runId}${state.pauses.length > 1 ? ` at "${plain(pause.node)}"` : ""} with more attempts?`,
+      const prepared = await refusing(() =>
+        prepareResume(run, {
+          ...(opts.node === undefined ? {} : { node: opts.node }),
+          ...(opts.ignorePendingChange === undefined
+            ? {}
+            : { ignorePendingChange: opts.ignorePendingChange }),
+        }),
       );
-      const resumed = await run.resume(opts.node);
+      await mustConfirm(prepared.question);
+      const resumed = await commitResume(run, prepared);
       failIfRefused(resumed);
       // The session of an engine step whose outcome was unknown could not be judged: the person is told.
       if (resumed.warning !== undefined) env.err(`kodel: ${plain(resumed.warning)}\n`);
       // The paused node's branch: a fork held back before it fired, or the join, stands outside
       // every branch, so the resume waits for every head it entered.
-      await afterDecision(run, [pause.node]);
+      await afterDecision(run, [prepared.node]);
     });
 
   program

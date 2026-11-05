@@ -26,7 +26,12 @@ import {
   ErrorCode,
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
-import { describePendingChange, gateChangesText, gateCommentsText } from "./decide-text";
+import {
+  changesFingerprint,
+  describePendingChange,
+  gateChangesText,
+  gateCommentsText,
+} from "./decide-text";
 import { plain } from "./plain";
 
 /** One run as far as the decisions need it; `LocalRun` is one. */
@@ -412,18 +417,6 @@ const header = (runId: string, rest: string, note?: string) =>
 
 const NOT_THE_AGENT =
   "Only you decide this: the agent cannot, and what it wrote below is only its wording.";
-
-/**
- * What the person was shown about the files, as a value to compare with what is true when they
- * answer: the changed files and their lines in a fixed order, and only the kind when the engine
- * could not tell (its wording is not part of the facts).
- */
-function changesFingerprint(found: ChangeReport): string {
-  if (found.kind !== "changes") return found.kind;
-  return JSON.stringify(
-    Object.entries(found.files).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
-  );
-}
 
 const SHOWN_COMMENTS = 20;
 const SHOWN_COMMENT_CHARS = 300;

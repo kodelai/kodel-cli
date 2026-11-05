@@ -487,6 +487,21 @@ describe("only a person can decide", () => {
   });
 });
 
+describe("task_dxn6 the screen that decides is for a person", () => {
+  test("task_dxn6_tui_decisions_are_human_only", async () => {
+    const id = await runAtGate();
+    const noTerminal = await cliAs({ interactive: false }, "tui");
+    expect(noTerminal.code).not.toBe(0);
+    expect(noTerminal.err).toContain("for a person at a terminal");
+    const fromEngine = await cliAs({ environment: { KODEL_ENGINE: "1" } }, "tui");
+    expect(fromEngine.code).not.toBe(0);
+    expect(fromEngine.err).toContain("will not run from a command the engine runs");
+    // and nothing was decided by trying
+    const host = new LocalPipelineHost({ root: dir, heartbeatMs: 0 });
+    expect((await (await host.open(id))?.state())?.active[0]?.phase).toBe("human");
+  });
+});
+
 describe("gate_comments: a gate that records the person's comments", () => {
   async function runAtCommentingGate() {
     await writeFile(

@@ -76,8 +76,61 @@ nodes:
       Take what the subagents find as it is; do not soften it, merge it away or drop a finding that
       you disagree with. Send one row per finding, and start its description with the role in
       brackets, for example `[gaps]`. A finding is a real problem or a question the plan does not
-      answer. If a role finds nothing, send no row for it. Blockers and critical findings are for
-      what makes the plan wrong or unsafe to implement, not for taste.
+      answer. If a role finds nothing, send no row for it.
+
+      Severity: blocker or critical only if building the plan as written would break an invariant of
+      AGENTS.md, lose or change stored data, or run something twice or without a person's decision.
+      A missing test, a thinner argument, a residual risk or a question of scope is major or lower.
+    checks:
+      - kind: result
+        columns:
+          severity:    { enum: [blocker, critical, major, minor, info] }
+          location:    location
+          description: text
+        fail_when: { severity: [blocker, critical] }
+        on_fail: blocking_findings
+
+  # One rework after the first critique, then one narrow second look. Whatever it finds goes to the
+  # person at the gate, so the critique never loops until the run pauses.
+  - slug: plan-fix
+    kind: agent
+    prompt: |
+      The critique of the plan docs/plans/{{task.slug}}.md found blocking problems (the feedback lists
+      the findings). Edit only that file. For every finding of the feedback either fix the plan, or
+      write in "Rejected review findings" what the finding was and why it does not hold, in one or
+      two lines. Never drop a finding silently. A finding that needs the person's call goes to
+      "Decisions needed", with your recommendation. Prefer the simplest design that meets the task:
+      if a finding shows a piece is only nice to have, cut it and say so in "Decisions needed".
+      Keep the order of the sections and the top of the file to one screen.
+    checks:
+      - kind: diff
+        paths: ["docs/plans/{{task.slug}}.md"]
+        mode: changed_only
+
+  - slug: plan-recheck
+    kind: agent
+    fresh_context: true
+    prompt: |
+      Second look at the plan docs/plans/{{task.slug}}.md after it was reworked. The task is {{task}}.
+      Do not edit the plan or any other file. The feedback lists the findings of the first critique;
+      the plan's section "Rejected review findings" says what was answered and why.
+
+      Run one subagent per role (invariants: opus, tests: sonnet, gaps: fable, scope: sonnet), in
+      parallel. Give each one: the task, the path of the plan, AGENTS.md, the earlier findings, and
+      its role text (the same roles as the first critique). Each checks only two things:
+      1. Is every earlier finding of its role answered: fixed in the plan, or rejected with a reason
+         that holds?
+      2. Does the rework itself introduce a problem?
+      It does not open the plan from scratch, and it does not report a new angle on text that did not
+      change.
+
+      Take what the subagents find as it is. Send one row per finding, and start its description with
+      the role in brackets. If a role finds nothing, send no row for it.
+
+      Severity: blocker or critical only if building the plan as written would break an invariant of
+      AGENTS.md, lose or change stored data, or run something twice or without a person's decision.
+      A missing test, a thinner argument, a residual risk or a question of scope is major or lower.
+      Whatever you find, the person reads it at the gate next.
     checks:
       - kind: result
         columns:
@@ -279,7 +332,10 @@ edges:
   - { from: plan,           to: confirm-nothing-to-do, when: nothing_to_change }
   - { from: confirm-nothing-to-do, to: plan,  when: rejected }
   - { from: plan-critique,  to: plan-revise }
-  - { from: plan-critique,  to: plan,         when: blocking_findings }
+  - { from: plan-critique,  to: plan-fix,     when: blocking_findings }
+  - { from: plan-fix,       to: plan-recheck }
+  - { from: plan-recheck,   to: plan-revise }
+  - { from: plan-recheck,   to: plan-revise,  when: blocking_findings }
   - { from: plan-revise,    to: plan-approval }
   - { from: plan-approval,  to: impl,         when: approved }
   - { from: plan-approval,  to: plan,         when: rejected }
