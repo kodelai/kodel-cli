@@ -1,0 +1,21 @@
+{"v":2,"seq":1,"ts":1793744183338,"event":"run_started","run":"r_0mw18z1td_qe4s","task":"Add a liveness check","slug":"add-a-liveness-check","spec":"eef7fd77a96829b6","workdir":"/kodel-fixture/workdir/r_0mw18z1td_qe4s","branch":"kodel/r_0mw18z1td_qe4s","pipelineFile":".kodel/pipelines/engine-unknown.yaml","history":{"changes":{"enabled":false,"exclude":[],"max_kb":512},"output":{"enabled":true,"max_kb":64},"prompts":{"enabled":true},"executor":{"enabled":true},"tool_log":{"enabled":true},"agent_log":{"enabled":true,"mode":"full","preview_chars":{"user":4000,"agent":4000,"tool_input":4000,"tool_result":8000},"max_kb":20480,"interval_s":10},"usage":{"enabled":true,"prices":{}},"tool_calls":{"enabled":true,"preview_chars":200}},"engine":{"version":"0.1.0","commit":"fixture","record_version":2,"meta_version":2},"executor":{},"base_commit":"dcf77ccd76cc46116b81a12b4e3a3a88b0fd1a2c"}
+{"v":2,"seq":2,"ts":1793744183338,"event":"node_entered","node":"plan","attempt":1,"visit":1,"rework":false,"definition":{"work":"bd758d309369515e","checks":"4f53cda18c2baa0c","routing":"7d536a05953bad84"}}
+{"v":2,"seq":3,"ts":1793744183418,"event":"step_served","node":"plan","attempt":1,"n":1,"ref":"served/plan-1-1.json","prompt_hash":"75462a271aa8328b5f9ec5406189abef35e75154b9d48102460121f797e23732","executor":{}}
+{"v":2,"seq":4,"ts":1793744183419,"event":"agent_log_failed","reason":"session_unknown"}
+{"v":2,"seq":5,"ts":1793744183421,"event":"usage_failed","reason":"session_unknown"}
+{"v":2,"seq":6,"ts":1793744183422,"event":"tool_calls_failed","reason":"session_unknown"}
+{"v":2,"seq":7,"ts":1793744183452,"event":"agent_completed","node":"plan","attempt":1,"outcome":"passed","summary":"a third plan","executor":{},"head":"dcf77ccd76cc46116b81a12b4e3a3a88b0fd1a2c"}
+{"v":2,"seq":8,"ts":1793744183452,"event":"node_finished","node":"plan","attempt":1,"outcome":"passed","status":"passed"}
+{"v":2,"seq":9,"ts":1793744183452,"event":"node_entered","node":"review","attempt":1,"visit":2,"rework":false,"definition":{"work":"a1e1eb706024bf01","checks":"4f53cda18c2baa0c","routing":"5637ee29d82a4a95"}}
+{"v":2,"seq":10,"ts":1793744183459,"event":"node_finished","node":"review","attempt":1,"outcome":"failed","status":"failed","source":"session","reason":"outcome unknown, a person decides: its start was issued and no session of its name is listed. The session is ke-r_0mw18z1td_qe4s-2-1 (by name): look at it with `kodel agent logs ke-r_0mw18z1td_qe4s-2-1`, stop it with `kodel agent stop ke-r_0mw18z1td_qe4s-2-1` if it still runs, then `kodel resume` runs the step again"}
+{"v":2,"seq":11,"ts":1793744183459,"event":"run_paused","reason":"consecutive","node":"review"}
+{"v":2,"seq":12,"ts":1793744183462,"event":"run_resumed","reason":"consecutive","node":"review","session":"ke-r_0mw18z1td_qe4s-2-1"}
+{"v":2,"seq":13,"ts":1793744183462,"event":"node_entered","node":"review","attempt":2,"visit":2,"rework":true,"definition":{"work":"a1e1eb706024bf01","checks":"4f53cda18c2baa0c","routing":"5637ee29d82a4a95"}}
+{"v":2,"seq":14,"ts":1793744183601,"event":"engine_session_started","node":"review","attempt":2,"name":"ke-r_0mw18z1td_qe4s-2-2","id":"a_0mw18z1z9_gfcn","launch":"05a920ce0fa5c79a922d9695b79e778739546c7b0924818331999dbab774486f"}
+{"v":2,"seq":15,"ts":1793744183915,"event":"command_finished","node":"review","attempt":2,"passed":true,"exit":0,"duration_ms":311,"output":{"ref":"artifacts/review-2-command.txt","bytes":28,"truncated":false}}
+{"v":2,"seq":16,"ts":1793744183915,"event":"node_finished","node":"review","attempt":2,"outcome":"passed","status":"passed"}
+{"v":2,"seq":17,"ts":1793744183915,"event":"node_entered","node":"approve","attempt":1,"visit":3,"rework":false,"definition":{"work":"e3b691f92d71a03f","checks":"4f53cda18c2baa0c","routing":"04fc19d9bb2e846a"}}
+{"v":2,"seq":18,"ts":1793744183915,"event":"gate_waiting","node":"approve","attempt":1}
+{"v":2,"seq":19,"ts":1793744184011,"event":"gate_decided","node":"approve","decision":"approved","reason":null}
+{"v":2,"seq":20,"ts":1793744184011,"event":"node_finished","node":"approve","attempt":1,"outcome":"approved","status":"passed"}
+{"v":2,"seq":21,"ts":1793744184011,"event":"run_finished","status":"completed","head":"dcf77ccd76cc46116b81a12b4e3a3a88b0fd1a2c","commits":[]}

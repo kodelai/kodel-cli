@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "node": "plan",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "915b7729d98ccb9a00f2f6dfab79ae6ad2fbe86fc1c8c75b0b7c486305f829b3",
+  "answer": {
+    "slug": "plan",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "Plan Add a health check."
+  }
+}

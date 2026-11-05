@@ -529,6 +529,10 @@ export class PipelineService {
           kind: node.kind,
           ...(begin?.needs === "agent" || begin?.needs === "human" ? { prompt: begin.prompt } : {}),
           ...(begin?.needs === "engine" ? { command: begin.command } : {}),
+          // A step the engine runs itself (`engine:`): its prompt, and the profile that runs it.
+          ...(begin?.needs === "session"
+            ? { prompt: begin.spec.prompt, engine: begin.spec.profile }
+            : {}),
           checks: node.checks.map((c) => ({ kind: c.kind, on_fail: c.on_fail })),
           max_consecutive_failures: node.max_consecutive_failures,
           max_attempts: node.max_attempts,

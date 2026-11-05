@@ -1,0 +1,22 @@
+{"v":2,"seq":1,"ts":1793744181126,"event":"run_started","run":"r_0mw18z041_oscj","task":"Add a health check","slug":"add-a-health-check","spec":"2d32c2944454cca5","workdir":"/kodel-fixture/workdir/r_0mw18z041_oscj","branch":"kodel/r_0mw18z041_oscj","pipelineFile":".kodel/pipelines/engine.yaml","history":{"changes":{"enabled":false,"exclude":[],"max_kb":512},"output":{"enabled":true,"max_kb":64},"prompts":{"enabled":true},"executor":{"enabled":true},"tool_log":{"enabled":true},"agent_log":{"enabled":true,"mode":"full","preview_chars":{"user":4000,"agent":4000,"tool_input":4000,"tool_result":8000},"max_kb":20480,"interval_s":10},"usage":{"enabled":true,"prices":{}},"tool_calls":{"enabled":true,"preview_chars":200}},"engine":{"version":"0.1.0","commit":"fixture","record_version":2,"meta_version":2},"executor":{},"base_commit":"dcf77ccd76cc46116b81a12b4e3a3a88b0fd1a2c"}
+{"v":2,"seq":2,"ts":1793744181126,"event":"node_entered","node":"plan","attempt":1,"visit":1,"rework":false,"definition":{"work":"bd758d309369515e","checks":"4f53cda18c2baa0c","routing":"7d536a05953bad84"}}
+{"v":2,"seq":3,"ts":1793744181211,"event":"step_served","node":"plan","attempt":1,"n":1,"ref":"served/plan-1-1.json","prompt_hash":"915b7729d98ccb9a00f2f6dfab79ae6ad2fbe86fc1c8c75b0b7c486305f829b3","executor":{}}
+{"v":2,"seq":4,"ts":1793744181215,"event":"agent_log_failed","reason":"session_unknown"}
+{"v":2,"seq":5,"ts":1793744181218,"event":"usage_failed","reason":"session_unknown"}
+{"v":2,"seq":6,"ts":1793744181220,"event":"tool_calls_failed","reason":"session_unknown"}
+{"v":2,"seq":7,"ts":1793744181249,"event":"agent_completed","node":"plan","attempt":1,"outcome":"passed","summary":"a plan","executor":{},"head":"dcf77ccd76cc46116b81a12b4e3a3a88b0fd1a2c"}
+{"v":2,"seq":8,"ts":1793744181249,"event":"node_finished","node":"plan","attempt":1,"outcome":"passed","status":"passed"}
+{"v":2,"seq":9,"ts":1793744181249,"event":"node_entered","node":"review","attempt":1,"visit":2,"rework":false,"definition":{"work":"ac88decb004a2ec3","checks":"b451df1aad5592cf","routing":"9ce1c614b5d95d80"}}
+{"v":2,"seq":10,"ts":1793744181392,"event":"engine_session_started","node":"review","attempt":1,"name":"ke-r_0mw18z041_oscj-2-1","id":"a_0mw18z09l_cjbp","launch":"d714010461a339c292ff10db7727db3f5d85d6e8d375e8e4f33b30ab7cab62d3"}
+{"v":2,"seq":11,"ts":1793744181705,"event":"command_finished","node":"review","attempt":1,"passed":false,"exit":1,"duration_ms":310,"reason":"the step exited with code 1"}
+{"v":2,"seq":12,"ts":1793744181705,"event":"node_finished","node":"review","attempt":1,"outcome":"failed","status":"failed","source":"command","reason":"the step exited with code 1"}
+{"v":2,"seq":13,"ts":1793744181705,"event":"node_entered","node":"review","attempt":2,"visit":2,"rework":true,"definition":{"work":"ac88decb004a2ec3","checks":"b451df1aad5592cf","routing":"9ce1c614b5d95d80"}}
+{"v":2,"seq":14,"ts":1793744181852,"event":"engine_session_started","node":"review","attempt":2,"name":"ke-r_0mw18z041_oscj-2-2","id":"a_0mw18z0mq_8utn","launch":"0a57481fb91232f2e72c33c994856e15a7be78177137a64240c16037988b4575"}
+{"v":2,"seq":15,"ts":1793744182271,"event":"command_finished","node":"review","attempt":2,"passed":true,"exit":0,"duration_ms":412,"output":{"ref":"artifacts/review-2-command.txt","bytes":51,"truncated":false}}
+{"v":2,"seq":16,"ts":1793744182364,"event":"check_finished","node":"review","attempt":2,"index":0,"kind":"command","check_id":"review/command#1","params_hash":"bc2372bab9e60ded","passed":true,"exit":0,"duration_ms":88,"command":"node -e 0"}
+{"v":2,"seq":17,"ts":1793744182364,"event":"node_finished","node":"review","attempt":2,"outcome":"passed","status":"passed"}
+{"v":2,"seq":18,"ts":1793744182364,"event":"node_entered","node":"approve","attempt":1,"visit":3,"rework":false,"definition":{"work":"e3b691f92d71a03f","checks":"4f53cda18c2baa0c","routing":"04fc19d9bb2e846a"}}
+{"v":2,"seq":19,"ts":1793744182364,"event":"gate_waiting","node":"approve","attempt":1}
+{"v":2,"seq":20,"ts":1793744182446,"event":"gate_decided","node":"approve","decision":"approved","reason":null}
+{"v":2,"seq":21,"ts":1793744182446,"event":"node_finished","node":"approve","attempt":1,"outcome":"approved","status":"passed"}
+{"v":2,"seq":22,"ts":1793744182446,"event":"run_finished","status":"completed","head":"dcf77ccd76cc46116b81a12b4e3a3a88b0fd1a2c","commits":[]}

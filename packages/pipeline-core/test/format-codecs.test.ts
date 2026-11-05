@@ -791,3 +791,38 @@ describe("t41 the capabilities of a format", () => {
     expect(capabilitiesOf(2).forks).toBe(true);
   });
 });
+
+describe("t42 the format-2 runs with an engine step", () => {
+  test("t42_v2_engine_fixture_round_trip", () => {
+    const runs = fixtureRuns("v2-engine");
+    expect(runs.length).toBe(3);
+    let open = 0;
+    for (const run of runs) {
+      const state = readRunState(run.state, run.id);
+      expect(state.v).toBe(2);
+      // what the codec reads it writes back unchanged, the open record included
+      expect(canonical(encodeRunState(state))).toBe(canonical(JSON.parse(run.state)));
+      const journal = run.journal.map((line) => decodeJournalRecord(JSON.parse(line)));
+      for (const [i, record] of journal.entries()) {
+        expect(canonical(encodeJournalRecord(record))).toBe(
+          canonical(JSON.parse(run.journal[i] as string)),
+        );
+      }
+      expect(journal.some((r) => r.event === "engine_session_started")).toBe(true);
+      expect(summarizeRun(state, journal).runId).toBe(run.id);
+      if (state.engineSession !== undefined) {
+        open += 1;
+        expect(state.engineSession.id).toMatch(/^a_[0-9a-z]{9}_[0-9a-z]{4}$/);
+        // format 1 has no place for it, and says so before anything is written
+        expect(refusal(() => encodeRunState({ ...state, v: 1 } as RunState)).code).toBe(
+          "UNSUPPORTED_FORMAT_FEATURE",
+        );
+      }
+    }
+    expect(open).toBe(1);
+    // the unknown outcome and the person's resume are stored as format 2 writes them
+    const all = runs.flatMap((run) => run.journal.map((line) => JSON.parse(line)));
+    expect(all.some((r) => r.event === "node_finished" && r.source === "session")).toBe(true);
+    expect(all.some((r) => r.event === "run_resumed" && typeof r.session === "string")).toBe(true);
+  });
+});

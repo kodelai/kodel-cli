@@ -58,7 +58,8 @@ file. A report that makes them open five files to learn what changed has failed.
 Offer these when the person wants a more reliable result, and say what each costs:
 
 - **A stronger model for the review.** More tokens, slower; fewer mistakes the author did not see. The
-  model is a setting of the agent or its client, not a field of the pipeline: do not invent one. Ask for
+  model of the agent is a setting of the agent or its client, not a field of the pipeline: do not invent one
+  (the node field `model` is only for a step with `engine`, which the engine runs itself). Ask for
   it in the review's `prompt` ("on the most capable model you can choose") and tell the person to set it.
 - **More reviews from different sides.** A security review, or a review from the point of view of each business
   role that the change touches. Each is one more step, or one more role in the review, with its own text.

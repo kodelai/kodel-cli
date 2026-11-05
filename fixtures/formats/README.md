@@ -185,3 +185,33 @@ an unknown field already pins that it is kept.
 Before the first release, formats may break freely and these fixtures may be replaced; the break
 above is the one such break made so far. At the first release this directory is frozen and the rules
 above apply to every change.
+
+## `v2-engine/`
+
+Three runs of run-state format 2 with an engine step (T-42, TASK-NNR3: an agent node with `engine:` that
+kodel runs itself as a session). Format 2 was amended in place for them (`RunState.engineSession`, the
+journal event `engine_session_started`, `source: session` on `node_finished`, `session` on `run_resumed`);
+see `docs/run-formats.md`. They were made by `bun scripts/take-v2-engine-fixture.mjs`, which drives
+`LocalPipelineHost` with engine steps turned on (`engineSteps: { start: true }` for the server,
+`{ start: false }` for the person's host) and the real `PipesSessionAdapter` with its holder; the
+engine's programs are Node scripts named by `engines:` profiles of the scratch project. The script
+played the agent (`plan`) and the person (`decideHuman` at the gates, `resume`); the owners of the engine
+visits are neutral names (`fixture-host:1`, `fixture-host:2`, `fixture-gone:1`). The runs were taken with
+`node scripts/take-format-fixture.mjs v2-engine <run dir> <run dir> <run dir>`.
+
+- `r_0mw18z041_oscj` (finished): `plan`, then `review` (the engine step) failed its first session (exit
+  1, `command_finished` with `passed: false`), was entered again and passed on its second session
+  (`engine_session_started` twice, the result kept in `artifacts/`), its command check ran, and the gate
+  was approved. The final state holds no `engineSession`: the record goes when the outcome is proven.
+- `r_0mw18z17b_0uiy` (open): `plan`, then `review` #1 running in its session when the run was taken:
+  the state holds the open record (`engineSession` with the session's id) and the visit in phase
+  `engine` with no heartbeat. The script tried to stop the session after the run was taken; where `ps`
+  is not allowed it ends at its own timeout.
+- `r_0mw18z1td_qe4s` (finished, `engine-unknown`): a person's host entered `review` (no record); a
+  starting host wrote the record and stopped before `start()`; the next server took the waiting over,
+  found no session of the name and the attempt failed as unknown (`node_finished` with
+  `source: session`, `run_paused` with `reason: consecutive`); the person's `resume` looked the session
+  up, found none and cleared the record (`run_resumed` with `session`); the server started attempt 2,
+  which passed, and the gate was approved. The takeover's count (`Visit.takeovers`) lived on the visit,
+  which the unknown outcome ended, so no stored file holds it; the input `engine_session_joined` is
+  not journaled.

@@ -16,6 +16,15 @@
  */
 import { canonicalNode, checkIdOf, type NodeForms, stableJson } from "./canonical";
 import { type ChangesRef, changesField, isTreeId, MAX_CHANGES_ERROR } from "./changes";
+import {
+  ENGINE_UNKNOWN_PREFIX,
+  type EngineLaunchRequest,
+  type EngineSessionRecord,
+  enginePrompt,
+  engineSessionName,
+  MAX_ENGINE_PROMPT_BYTES,
+  neutralizeReason,
+} from "./engine-launch";
 import { type ErrorCode, KodelError } from "./errors";
 import { cleanSessionName, type EngineRecord, type ExecutorRecord } from "./executor";
 import { cannotHoldError, withRunId } from "./formats/messages";
@@ -24,7 +33,13 @@ import type { FormatCapabilities } from "./formats/types";
 import type { HistoryConfig } from "./history-config";
 import type { NodeSpec, PipelineSpec } from "./pipeline";
 import { type AcceptEffect, diffPipelines, standingOf } from "./pipeline-diff";
-import { defaultRegistry, labelsOf, RESTART_FAILED, type Registry } from "./registry";
+import {
+  beginsAsSession,
+  defaultRegistry,
+  labelsOf,
+  RESTART_FAILED,
+  type Registry,
+} from "./registry";
 import { renderContextOf, renderDeep, renderTemplate } from "./render";
 import { runSlug } from "./slug";
 import {
@@ -74,6 +89,31 @@ export interface EngineOptions {
    * hash anything itself; without this the journal simply carries no node hashes.
    */
   fingerprint?: (text: string) => string;
+  /**
+   * Whether this host runs engine steps (an agent node with `engine:`, T-42), and whether it is the
+   * one that starts their sessions (`start`: only the MCP host). Absent: a pipeline with an engine
+   * step is refused by every decision, before anything is written.
+   */
+  engineSteps?: { start: boolean; owner?: string };
+}
+
+/** Whether a pipeline has a step that runs as a session (an agent node with `engine:`). */
+export function hasEngineSteps(
+  spec: PipelineSpec,
+  registry: Registry = defaultRegistry(),
+): boolean {
+  return spec.nodes.some((node) => beginsAsSession(registry, node));
+}
+
+/** Whether an active visit is the work of an engine step: by its phase and its node, never by a record. */
+export function isSessionVisit(
+  spec: PipelineSpec,
+  visit: Visit,
+  registry: Registry = defaultRegistry(),
+): boolean {
+  if (visit.phase !== "engine") return false;
+  const node = spec.nodes.find((n) => n.slug === visit.node);
+  return node !== undefined && beginsAsSession(registry, node);
 }
 
 // ── state ───────────────────────────────────────────────────────────────────
@@ -89,7 +129,10 @@ export type NodeStatus =
   | "skipped";
 
 export interface Feedback {
-  /** Where the failure came from: `command`, `human` or `check:<kind>`. */
+  /**
+   * Where the failure came from: `command`, `human`, `check:<kind>`, `pipeline`, or `session` (the
+   * outcome of an engine step's session could not be proven; a person decides).
+   */
   source: string;
   reason: string;
   /** The node that failed, when the failure was handed to a different node along an edge. */
@@ -385,6 +428,12 @@ export interface RunState {
    * feeds a check, a route or a gate.
    */
   toolCalls?: ToolCallsState;
+  /**
+   * The run's open engine session (T-42): written by the decision that issues its start, before the
+   * session exists, and removed once its outcome is proven or a person resumes past an unknown one.
+   * While it is here no other session of the run is started. Absent for every run without one.
+   */
+  engineSession?: EngineSessionRecord;
 }
 
 /** Where the stored stream of one session ends, and what the journal vouches for. */
@@ -738,8 +787,44 @@ export type RunEvent =
        */
       nodes?: string[];
     }
-  /** Carry a paused branch on; `node` picks the pause when more than one branch is paused. */
-  | { type: "resume"; node?: string }
+  /**
+   * Carry a paused branch on; `node` picks the pause when more than one branch is paused.
+   * `engineSession: "cleared"`: the host looked the paused step's open engine session up and found it
+   * ended or gone (the person's resume is the confirmation); without it such a pause is not lifted.
+   */
+  | { type: "resume"; node?: string; engineSession?: "cleared" }
+  /**
+   * The host that starts engine sessions found a session visit with no open record (a person's command
+   * entered it, or an earlier record was cleared): the record is written and the start issued now. Not
+   * a restart: it counts nothing.
+   */
+  | { type: "engine_start_pending"; node: string; attempt: number }
+  /** `start()` answered with the session's id; written under the run's lock right after it. */
+  | {
+      type: "engine_session_started";
+      node: string;
+      attempt: number;
+      name: string;
+      id: string;
+      /** sha256 of the redacted argv, the env names and the cwd, made by the host. */
+      launch: string;
+    }
+  /**
+   * Another process takes the waiting for an open engine session over (its owner is gone): a join,
+   * never a second start. Counted in `takeovers`; past `MAX_TAKEOVERS` the outcome is unknown.
+   */
+  | { type: "engine_session_joined"; node: string; attempt: number; owner: string }
+  /**
+   * The issuer of a start found, under the lock, that the attempt is no longer to be started (the run
+   * moved on, was paused or ended) and never called `start()`: its record, which has no id, goes.
+   */
+  | { type: "engine_start_abandoned"; node: string; attempt: number; name: string }
+  /**
+   * The outcome of an engine step's session cannot be proven (lost, unreadable, a child still alive,
+   * a start that may have begun): the attempt fails with source `session` and the run pauses; only a
+   * person's `resume` goes on. The open record stays.
+   */
+  | { type: "work_unknown"; node: string; attempt: number; reason: string }
   /**
    * A person upgraded the run to the newest stored format (`kodel migrate`). The only event that
    * changes the format a run lives in, and only that command builds it: no tool of the agent does.
@@ -791,7 +876,20 @@ export type Effect =
       /** The pipeline version the check is issued under: the host labels the result with it. */
       spec?: string;
     }
-  | { type: "await_human"; node: string; attempt: number; prompt: string; instructions?: string };
+  | { type: "await_human"; node: string; attempt: number; prompt: string; instructions?: string }
+  /**
+   * Start (only the decision that wrote the open record issues it) or join the session of an engine
+   * step. The host starts only under the run's lock, after reading the record again.
+   */
+  | {
+      type: "run_engine_step";
+      node: string;
+      attempt: number;
+      mode: "start" | "join";
+      name: string;
+      request: EngineLaunchRequest;
+      spec?: string;
+    };
 
 export interface JournalRecord {
   v: RecordVersion;
@@ -839,6 +937,7 @@ class Machine {
   private readonly staleMs: number;
   private readonly maxRestarts: number;
   private readonly fingerprint: ((text: string) => string) | undefined;
+  private readonly engineSteps: EngineOptions["engineSteps"];
 
   constructor(
     private readonly spec: PipelineSpec,
@@ -852,6 +951,13 @@ class Machine {
     this.staleMs = options.staleMs ?? DEFAULT_STALE_MS;
     this.maxRestarts = options.maxRestarts ?? DEFAULT_MAX_RESTARTS;
     this.fingerprint = options.fingerprint;
+    this.engineSteps = options.engineSteps;
+  }
+
+  /** Whether a visit is the work of an engine step (a session), by its phase and its node. */
+  private isSession(visit: Visit): boolean {
+    const node = this.nodes.get(visit.node);
+    return visit.phase === "engine" && node !== undefined && beginsAsSession(this.registry, node);
   }
 
   // lookups
@@ -1104,7 +1210,7 @@ class Machine {
       node: slug,
       attempt: run.attempt,
       visitId: run.visitId,
-      phase: begin.needs === "engine" ? "engine" : begin.needs,
+      phase: begin.needs === "engine" || begin.needs === "session" ? "engine" : begin.needs,
       ...(fork === undefined ? {} : { fork }),
       checkIndex: 0,
       restarts: 0,
@@ -1141,6 +1247,9 @@ class Machine {
     } else if (begin.needs === "engine") {
       visit.heartbeatAt = this.now;
       this.effects.push(this.commandEffect(node, visit, false));
+    } else if (begin.needs === "session") {
+      // No heartbeat: the session outlives every process, so the stale rule never applies to it.
+      this.issueSessionStart(visit, node);
     } else {
       this.effects.push({
         type: "await_human",
@@ -1151,6 +1260,129 @@ class Machine {
       });
       this.log("gate_waiting", { node: slug, attempt: run.attempt });
     }
+  }
+
+  /** What the host is asked to run for an engine step: the request with the full prompt. */
+  private sessionRequest(node: NodeSpec, visit: Visit): EngineLaunchRequest {
+    const begin = this.handler(node).begin(node.params, this.render);
+    if (begin.needs !== "session") {
+      throw fail("PIPELINE_INVALID", `node "${node.slug}" is not a step with engine`);
+    }
+    const instructions = node.checks
+      .map((check) => this.registry.check(check.kind)?.instruction?.(check.params))
+      .filter((text): text is string => typeof text === "string" && text !== "");
+    return {
+      ...begin.spec,
+      prompt: enginePrompt(begin.spec.prompt, instructions, this.run(visit.node).lastFailure),
+      ...(node.timeout === undefined ? {} : { timeout: node.timeout }),
+    };
+  }
+
+  /**
+   * Write the run's open record and issue the start of an engine step's session: only the host that
+   * starts sessions, only while no record is open, and never for a node a pause names. Anything else
+   * leaves the visit waiting; the starting host's next tick sends `engine_start_pending`.
+   */
+  private issueSessionStart(visit: Visit, node: NodeSpec): boolean {
+    if (this.engineSteps?.start !== true) return false;
+    if (this.s.engineSession !== undefined) return false;
+    if (this.s.pauses.some((p) => p.node === visit.node)) return false;
+    const request = this.sessionRequest(node, visit);
+    if (new TextEncoder().encode(request.prompt).length > MAX_ENGINE_PROMPT_BYTES) {
+      // Before any record: nothing was started, so this is a known failure of the attempt.
+      this.finish(visit, node.on_fail, {
+        source: "command",
+        reason: `the prompt of this engine step is over ${MAX_ENGINE_PROMPT_BYTES / 1024} KiB; nothing was started`,
+      });
+      return false;
+    }
+    const name = engineSessionName(this.s.runId, visit.visitId, visit.attempt);
+    this.s.engineSession = {
+      node: visit.node,
+      attempt: visit.attempt,
+      visitId: visit.visitId,
+      name,
+    };
+    if (this.engineSteps.owner !== undefined) visit.owner = this.engineSteps.owner;
+    this.effects.push({
+      type: "run_engine_step",
+      node: visit.node,
+      attempt: visit.attempt,
+      mode: "start",
+      name,
+      request,
+      spec: this.issuedUnder(visit),
+    });
+    return true;
+  }
+
+  /**
+   * The outcome of an engine step cannot be proven: the attempt fails with source `session` and its
+   * branch pauses (`consecutive`) whatever the limits say; the record stays, so nothing starts again
+   * until a person resumes.
+   */
+  private unknown(visit: Visit, reason: string) {
+    const node = this.node(visit.node);
+    const run = this.run(visit.node);
+    this.s.active = this.s.active.filter((v) => v !== visit);
+    run.outcome = node.on_fail;
+    run.status = "failed";
+    run.consecutiveFailures += 1;
+    const text = reason.startsWith(ENGINE_UNKNOWN_PREFIX)
+      ? reason
+      : `${ENGINE_UNKNOWN_PREFIX}: ${reason}`;
+    run.lastFailure = { source: "session", reason: text };
+    this.log("node_finished", {
+      node: node.slug,
+      attempt: visit.attempt,
+      outcome: node.on_fail,
+      status: run.status,
+      ...this.forkFields(visit.fork),
+      source: "session",
+      reason: text,
+    });
+    this.pause({
+      reason: "consecutive",
+      node: node.slug,
+      blocked: { from: node.slug, label: node.on_fail, to: node.slug, rework: true },
+    });
+  }
+
+  /** The open engine session, when it is of this attempt. */
+  private recordOf(node: string, attempt: number): EngineSessionRecord | undefined {
+    const record = this.s.engineSession;
+    return record !== undefined && record.node === node && record.attempt === attempt
+      ? record
+      : undefined;
+  }
+
+  /**
+   * `start()` answered: the id goes on the open record. Taken whatever the run's status (a cancel may
+   * have come in between), since the id is what a person needs to find the session.
+   */
+  private sessionStarted(event: Extract<RunEvent, { type: "engine_session_started" }>) {
+    const record = this.recordOf(event.node, event.attempt);
+    if (record === undefined || record.name !== event.name) {
+      throw fail(
+        "NODE_NOT_RUNNING",
+        `the run has no open engine session ${event.name} of "${event.node}" #${event.attempt}`,
+      );
+    }
+    if (record.id === event.id) throw new Repeat();
+    if (record.id !== undefined) {
+      throw fail(
+        "STATE_MODIFIED_EXTERNALLY",
+        `the engine session ${event.name} is recorded as ${record.id}, not ${event.id}`,
+      );
+    }
+    record.id = event.id;
+    this.log("engine_session_started", {
+      node: event.node,
+      attempt: event.attempt,
+      name: event.name,
+      id: event.id,
+      launch: event.launch,
+    });
   }
 
   private commandEffect(node: NodeSpec, visit: Visit, restart: boolean): Effect {
@@ -1720,7 +1952,16 @@ class Machine {
       else throw new Repeat();
       return;
     }
-    if (event.type === "resume") return this.resume(event.node);
+    if (event.type === "resume") return this.resume(event.node, event.engineSession === "cleared");
+    if (event.type === "engine_session_started") return this.sessionStarted(event);
+    if (event.type === "engine_start_abandoned") {
+      const record = this.recordOf(event.node, event.attempt);
+      if (record === undefined || record.name !== event.name || record.id !== undefined) {
+        throw new Repeat();
+      }
+      delete this.s.engineSession;
+      return;
+    }
     if (event.type === "run_migrated") return this.migrated(event);
     if (event.type === "pipeline_accepted") return this.acceptPipeline(event);
     if (event.type === "tick" || event.type === "heartbeat") {
@@ -1845,6 +2086,13 @@ class Machine {
         // result of the run given up on is a repeat, as it was when a suspension paused the whole run.
         if (visit.suspended) throw new Repeat();
         const node = this.node(event.node);
+        const session = this.isSession(visit);
+        if (session) {
+          // The record is of this attempt, or the result is of work nobody issued now.
+          if (this.recordOf(event.node, event.attempt) === undefined) throw new Repeat();
+          delete this.s.engineSession;
+        }
+        const reason = session ? neutralizeReason(event.reason) : event.reason;
         this.log("command_finished", {
           node: event.node,
           attempt: event.attempt,
@@ -1853,10 +2101,57 @@ class Machine {
           ...(event.duration_ms === undefined ? {} : { duration_ms: event.duration_ms }),
           ...(event.output === undefined ? {} : { output: event.output }),
           ...(event.output_error === undefined ? {} : { output_error: event.output_error }),
-          ...(event.passed ? {} : { reason: event.reason }),
+          ...(event.passed ? {} : { reason }),
         });
         if (event.passed) this.afterWork(visit);
-        else this.finish(visit, node.on_fail, { source: "command", reason: event.reason });
+        else this.finish(visit, node.on_fail, { source: "command", reason });
+        return;
+      }
+      case "work_unknown": {
+        const visit = this.visitFor(event.node, event.attempt, ["engine"]);
+        if (!this.isSession(visit) || this.recordOf(event.node, event.attempt) === undefined) {
+          throw new Repeat();
+        }
+        this.unknown(visit, event.reason);
+        return;
+      }
+      case "engine_start_pending": {
+        if (this.engineSteps?.start !== true) throw new Repeat();
+        const visit = this.visitFor(event.node, event.attempt, ["engine"]);
+        if (!this.isSession(visit) || this.s.engineSession !== undefined) throw new Repeat();
+        const before = this.journal.length;
+        if (
+          !this.issueSessionStart(visit, this.node(event.node)) &&
+          this.journal.length === before
+        ) {
+          throw new Repeat();
+        }
+        return;
+      }
+      case "engine_session_joined": {
+        const visit = this.visitFor(event.node, event.attempt, ["engine"]);
+        const record = this.recordOf(event.node, event.attempt);
+        if (!this.isSession(visit) || record === undefined) throw new Repeat();
+        if (visit.owner !== event.owner) {
+          visit.takeovers = (visit.takeovers ?? 0) + 1;
+          if (visit.takeovers > MAX_TAKEOVERS) {
+            this.unknown(
+              visit,
+              `the waiting for session ${record.id ?? record.name} was taken over more than ${MAX_TAKEOVERS} times`,
+            );
+            return;
+          }
+          visit.owner = event.owner;
+        }
+        this.effects.push({
+          type: "run_engine_step",
+          node: visit.node,
+          attempt: visit.attempt,
+          mode: "join",
+          name: record.name,
+          request: this.sessionRequest(this.node(visit.node), visit),
+          spec: visit.spec ?? this.s.specHash,
+        });
         return;
       }
       case "check_finished": {
@@ -1917,7 +2212,12 @@ class Machine {
         const visit = this.s.active.find(
           (v) => v.node === event.node && v.attempt === event.attempt,
         );
-        if (!visit || visit.suspended || (visit.phase !== "engine" && visit.phase !== "checks")) {
+        if (
+          !visit ||
+          visit.suspended ||
+          (visit.phase !== "engine" && visit.phase !== "checks") ||
+          this.isSession(visit)
+        ) {
           throw new Repeat();
         }
         // Only the process that owns the work may say it is alive. One that stalled, was replaced
@@ -1936,6 +2236,8 @@ class Machine {
           if (event.nodes !== undefined && !event.nodes.includes(visit.node)) continue;
           const engineWork = visit.phase === "engine" || visit.phase === "checks";
           if (!engineWork || visit.suspended || visit.heartbeatAt === undefined) continue;
+          // A session outlives its process: it is joined, never restarted (`engine_session_joined`).
+          if (this.isSession(visit)) continue;
           const gone = visit.owner !== undefined && dead.has(visit.owner);
           if (gone || this.now - visit.heartbeatAt >= this.staleMs) this.restart(visit, gone);
         }
@@ -2461,6 +2763,24 @@ class Machine {
     ) {
       throw cannotHoldError(this.s.v, "a pipeline with a fork and a join", this.s.runId);
     }
+    if (
+      hasEngineSteps(this.spec, this.registry) &&
+      !this.caps.pipelineFeatures.includes("engine")
+    ) {
+      throw cannotHoldError(this.s.v, "a pipeline with a step with engine", this.s.runId);
+    }
+    // An unknown outcome waits for a person's resume, which looks the session up first; a change
+    // would enter the step again past it.
+    const open = this.s.engineSession;
+    if (
+      open !== undefined &&
+      this.s.pauses.some((p) => p.reason === "consecutive" && p.node === open.node)
+    ) {
+      throw fail(
+        "PIPELINE_CHANGE_REFUSED",
+        `the outcome of the engine step "${open.node}" is unknown (session ${open.id ?? open.name}); resume the run first (kodel resume), then change the pipeline`,
+      );
+    }
     // Before the change itself is judged: a change worked out for another standing may well be
     // acceptable still, but it is not the one the person looked at.
     if (event.standing !== undefined && event.standing !== standingOf(this.s)) {
@@ -2596,7 +2916,7 @@ class Machine {
     }
   }
 
-  private resume(node: string | undefined) {
+  private resume(node: string | undefined, sessionCleared = false) {
     if (this.ended) throw fail("NODE_NOT_RUNNING", `the run is ${this.s.status}`);
     const { pauses } = this.s;
     if (pauses.length === 0) throw new Repeat();
@@ -2617,11 +2937,25 @@ class Machine {
         details,
       );
     }
+    // A pause over an engine step whose outcome is unknown: its session may still run, and only the
+    // host that looked it up and found it over (or gone) may say so. Nothing is written otherwise.
+    const record = this.s.engineSession;
+    const cleared = record !== undefined && record.node === pause.node ? record : undefined;
+    if (cleared !== undefined) {
+      if (!sessionCleared) {
+        throw new KodelError(
+          "INVALID_ARGUMENTS",
+          `the session ${cleared.id ?? cleared.name} of "${pause.node}" may still run; resume from a kodel that runs engine steps, which looks it up first (if it still runs, stop it first: kodel agent stop ${cleared.id ?? cleared.name})`,
+        );
+      }
+      delete this.s.engineSession;
+    }
     this.s.pauses = pauses.filter((p) => p !== pause);
     this.log("run_resumed", {
       reason: pause.reason,
       node: pause.node,
       ...this.forkFields(pause.fork),
+      ...(cleared === undefined ? {} : { session: cleared.id ?? cleared.name }),
     });
 
     if (pause.reason === "restarts") {
@@ -2651,6 +2985,10 @@ class Machine {
     if (pause.blocked) this.proceed(pause.blocked);
   }
 }
+
+/** Why a pipeline with an engine step is refused by a host that does not run engine steps. */
+export const ENGINE_STEPS_OFF =
+  "this pipeline has a step with engine, and this kodel does not run engine steps (they are not turned on here); nothing was written";
 
 /** A run that has not started yet; `decide` fills it in on the `start` event. */
 function emptyState(now: number): RunState {
@@ -2686,6 +3024,20 @@ export function decide(
     if (state) return { ok: false, error: fail("NODE_NOT_RUNNING", "the run has already started") };
   } else if (!state) {
     return { ok: false, error: fail("NODE_NOT_RUNNING", "the run has not started") };
+  }
+
+  // A pipeline with an engine step on a host that does not run them: refused before anything, every
+  // path alike (a tick changes nothing).
+  const registry = options.registry ?? defaultRegistry();
+  if (
+    options.engineSteps === undefined &&
+    (hasEngineSteps(spec, registry) ||
+      (event.type === "pipeline_accepted" && hasEngineSteps(event.before, registry)))
+  ) {
+    if (event.type === "tick" && state) {
+      return { ok: true, state, effects: [], journal: [], noop: true };
+    }
+    return { ok: false, error: fail("PIPELINE_INVALID", ENGINE_STEPS_OFF) };
   }
 
   const draft: RunState = state ? structuredClone(state) : emptyState(now);

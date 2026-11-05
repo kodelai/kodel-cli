@@ -100,6 +100,28 @@ the cursor lags and a newer kodel catches up later. A run of format 1 never hold
 format 2 and a run that was going has no `history.tool_calls`; an older codec of format 1 would refuse them as "cannot
 read". Nothing here needs `kodel migrate`.
 
+## Engine steps (TASK-NNR3, T-42)
+
+Format 2 is amended in place, with no new version (rule 5): the state gains an optional `engineSession`
+key, the open record of a step that runs as a session (`docs/engines.md`). It is absent for every run
+without engine steps, so such a run writes the same bytes as before. No published build wrote format 2.
+
+- A new journal event, `engine_session_started` (`node`, `attempt`, `name`, `id`, `launch`), in format 2
+  only. Format 1 has no place for it or for the key: an engine step in such a run is refused with
+  `UNSUPPORTED_FORMAT_FEATURE`, and the answer offers `kodel migrate`.
+  A host that joins a session whose id was never written (it found it by name) writes the event with
+  `launch: "unknown"`: it did not build the launch, so it has no hash of it.
+- `run_resumed` may carry `session` (the session a resume cleared), and `node_finished.source` may be
+  `session` (an attempt whose outcome is unknown).
+- A run in flight is unaffected: it has no engine step, and none can be added while engine steps are off.
+- A dev build from before this change says "was modified" for a run whose pipeline has an engine step. A
+  build with this change says "upgrade kodel" for a kept copy whose hash matches but which has a field it
+  does not know.
+- The refusal of an engine step no longer guards a run whose engine node was removed by an accepted change
+  after a resume.
+
+Golden fixture: `fixtures/formats/v2-engine/`, a real run with an engine step.
+
 ## When the formats change again
 
 A change of a stored format ships a codec for the previous one, a real fixture and the tests, and

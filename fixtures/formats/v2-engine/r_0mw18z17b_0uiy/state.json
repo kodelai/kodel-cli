@@ -1,0 +1,150 @@
+{
+  "v": 2,
+  "runId": "r_0mw18z17b_0uiy",
+  "task": "Add a readiness check",
+  "specHash": "2d32c2944454cca5",
+  "status": "running",
+  "startedAt": 1793744182539,
+  "nodes": {
+    "plan": {
+      "slug": "plan",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 1
+    },
+    "review": {
+      "slug": "review",
+      "status": "running",
+      "outcome": null,
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 2
+    },
+    "approve": {
+      "slug": "approve",
+      "status": "pending",
+      "outcome": null,
+      "attempt": 0,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 0
+    }
+  },
+  "active": [
+    {
+      "node": "review",
+      "attempt": 1,
+      "visitId": 2,
+      "phase": "engine",
+      "checkIndex": 0,
+      "restarts": 0,
+      "startedAt": 1793744182644,
+      "spec": "2d32c2944454cca5",
+      "owner": "fixture-host:1"
+    }
+  ],
+  "trail": [
+    "plan",
+    "review"
+  ],
+  "pauses": [],
+  "nextVisitId": 3,
+  "seq": 10,
+  "slug": "add-a-readiness-check",
+  "workdir": "/kodel-fixture/workdir/r_0mw18z17b_0uiy",
+  "pipelineFile": ".kodel/pipelines/engine.yaml",
+  "history": {
+    "changes": {
+      "enabled": false,
+      "exclude": [],
+      "max_kb": 512
+    },
+    "output": {
+      "enabled": true,
+      "max_kb": 64
+    },
+    "prompts": {
+      "enabled": true
+    },
+    "executor": {
+      "enabled": true
+    },
+    "tool_log": {
+      "enabled": true
+    },
+    "agent_log": {
+      "enabled": true,
+      "mode": "full",
+      "preview_chars": {
+        "user": 4000,
+        "agent": 4000,
+        "tool_input": 4000,
+        "tool_result": 8000
+      },
+      "max_kb": 20480,
+      "interval_s": 10
+    },
+    "usage": {
+      "enabled": true,
+      "prices": {}
+    },
+    "tool_calls": {
+      "enabled": true,
+      "preview_chars": 200
+    }
+  },
+  "engineVersion": "0.1.0",
+  "served": {
+    "plan:1": [
+      "de6dd7acd20c7fce"
+    ]
+  },
+  "agentLog": {
+    "nodes": [
+      "plan",
+      "review",
+      "approve"
+    ],
+    "sessions": {},
+    "ticks": 0,
+    "steps": 0,
+    "bytes": 0,
+    "cut": 0,
+    "failed": [
+      "session_unknown"
+    ]
+  },
+  "usage": {
+    "sessions": {},
+    "attempts": {},
+    "unattributed": {
+      "models": {},
+      "passes": 0
+    },
+    "events": 0,
+    "failed": [
+      "session_unknown"
+    ],
+    "revisions": []
+  },
+  "toolCalls": {
+    "sessions": {},
+    "events": 0,
+    "rowBytes": 0,
+    "failed": [
+      "session_unknown"
+    ]
+  },
+  "servedEvents": 1,
+  "engineSession": {
+    "node": "review",
+    "attempt": 1,
+    "visitId": 2,
+    "name": "ke-r_0mw18z17b_0uiy-2-1",
+    "id": "a_0mw18z1c9_11yr"
+  }
+}

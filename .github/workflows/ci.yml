@@ -33,6 +33,10 @@ jobs:
       - run: bun run typecheck
       - run: bun run lint
       - run: bun test
+        env:
+          # The real process-table tests (sessions, the engine-step guard of `kodel mcp`) must run, not skip,
+          # where `ps` or `/proc` exists.
+          KODEL_REQUIRE_PROCTABLE: ${{ runner.os != 'Windows' && '1' || '' }}
       - run: bun run build
       # The shipped artifact must work on plain Node, not only under Bun.
       - run: node scripts/check-artifact.mjs

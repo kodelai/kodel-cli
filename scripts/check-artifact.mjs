@@ -494,4 +494,68 @@ try {
   fail(error instanceof Error ? error.message : String(error));
 }
 
+// Engine steps (T-42) are off in this build (`KODEL_ENGINE_STEPS`): a pipeline with an engine step is
+// refused by the built file on plain Node, and no run is written. Once the flag is turned on, this leg
+// runs one engine step with a Node-script engine instead.
+async function checkEngineStepsOff() {
+  const dir = tempDir("kodel-artifact-engine-");
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [artifact, "--root", dir, "mcp"],
+    cwd: dir,
+    env: { ...process.env },
+    stderr: "ignore",
+  });
+  const client = new Client({ name: "check-artifact", version: "0" });
+  try {
+    mkdirSync(join(dir, ".kodel", "pipelines"), { recursive: true });
+    const engine = join(dir, "engine.mjs");
+    writeFileSync(engine, "process.stdout.write(JSON.stringify({ summary: 'done' }));\n");
+    writeFileSync(
+      join(dir, ".kodel", "config.yaml"),
+      [
+        "version: 1",
+        "worktree: { mode: off }",
+        "history: { changes: { enabled: false } }",
+        "engines:",
+        "  node:",
+        `    command: [${JSON.stringify(process.execPath)}, ${JSON.stringify(engine)}]`,
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(dir, ".kodel", "pipelines", "e.yaml"),
+      ["name: e", "nodes:", "  - { slug: review, kind: agent, engine: node, prompt: x }", ""].join(
+        "\n",
+      ),
+    );
+    await client.connect(transport);
+    const result = await client.callTool({
+      name: "pipeline_start",
+      arguments: { task: "engine off", pipeline: "e", cwd: dir, title: "engine-off" },
+    });
+    const answer = JSON.parse(result.content[0].text);
+    if (answer.run_id !== undefined || answer.code !== "PIPELINE_INVALID") {
+      throw new Error(
+        `an engine step was not refused while the flag is off: ${result.content[0].text}`,
+      );
+    }
+    if (
+      existsSync(join(dir, ".kodel", "runs")) &&
+      readdirSync(join(dir, ".kodel", "runs")).length
+    ) {
+      throw new Error("a refused engine pipeline left a run behind");
+    }
+  } finally {
+    await client.close().catch(() => {});
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+try {
+  await checkEngineStepsOff();
+} catch (error) {
+  fail(error instanceof Error ? error.message : String(error));
+}
+
 console.log(`artifact ok under node ${process.version}: ${size} bytes, version ${version}`);

@@ -34,15 +34,23 @@ import {
   describeEffects,
   diffPipelines,
   type Effect,
+  ENGINE_RESULT_READ_BYTES,
+  ENGINE_STEPS_OFF,
   type EngineOptions,
+  type EngineOutcome,
+  type EngineResolver,
   type ExecutorRecord,
   effectsOf,
+  engineOutcome,
   evaluateCommand,
   evaluateDiff,
   evaluateResult,
+  foldSessionName,
   type HistoryConfig,
+  hasEngineSteps,
   inOwnBranch,
   isRunEnd,
+  isSessionVisit,
   isTreeId,
   type JournalRecord,
   KodelError,
@@ -74,12 +82,17 @@ import {
   rowsToCsv,
   runSlug,
   type ServedSurface,
+  type SessionAdapter,
+  SessionError,
+  type SessionStatus,
+  START_ERROR_OUTCOME,
   type StepResult,
   type SubagentsDeclaration,
   standingOf,
   summarizeRun,
   type TakeOutcome,
   TELL_CHANGES_NOTE,
+  unknownReason,
   validateReport,
   type WaitScope,
 } from "@kodel-ai/pipeline-core";
@@ -87,6 +100,7 @@ import { type AgentLogRun, AgentLogWriter } from "./agent-log";
 import type { AgentLogTickers } from "./agent-log-ticker";
 import { type CommandOptions, type CommandResult, runCommand } from "./command";
 import { loadAgentHints, loadConfig, type WorktreeConfig } from "./config";
+import { configEngineResolver, launchHash, literalRules } from "./engines";
 import {
   type BuildInfo,
   type ExecutorContext,
@@ -239,6 +253,80 @@ export interface HostOptions {
   dispatchDeadlineMs?: number;
   /** The bound of the git facts read when a run ends (`RUN_FACTS_DEADLINE_MS`); tests make it short. */
   runFactsDeadlineMs?: number;
+  /**
+   * Turns an engine step's request into a launch (T-42); by default the `engines:` profiles of the
+   * live project config and the allow-listed environment of this process.
+   */
+  engineResolver?: EngineResolver;
+  /**
+   * Makes the session adapter an engine step starts, joins, reads and looks up with: one per start, so
+   * that the literal values of its environment are redacted with the project's rules. Absent: this host
+   * cannot start or look up a session, and an engine step it would start fails as such.
+   */
+  engineSessions?: EngineSessionFactory;
+  /** The platform engine steps are judged for; this process's by default (tests inject another). */
+  platform?: NodeJS.Platform;
+  /** Why this host does not run engine steps, when the caller knows a reason beyond the build's flag. */
+  engineStepsOffReason?: string;
+}
+
+type WorkFinished = Extract<RunEvent, { type: "work_finished" }>;
+type Finished = (
+  passed: boolean,
+  reason: string,
+  extra?: Pick<WorkFinished, "exit" | "duration_ms" | "output" | "output_error">,
+) => WorkFinished;
+type Unknown = (why: string, session: { id?: string }, newer?: boolean) => RunEvent;
+
+/** How much of a failed engine step's output is kept, and how much of it goes into its reason. */
+const FAILED_OUTPUT_BYTES = 64 * 1024;
+const FAILED_REASON_CHARS = 1_000;
+
+/** Makes the session adapter of one start (its redaction rules, its bound on the holder's boot). */
+export type EngineSessionFactory = (options: {
+  rules: RedactRule[];
+  bootTimeoutMs: number;
+}) => SessionAdapter;
+
+/**
+ * The bound on the holder's boot for an engine step: the start runs under the run's lock, and a lock
+ * is waited for 10 s, so the boot gets half of that.
+ */
+export const ENGINE_BOOT_TIMEOUT_MS = 5_000;
+
+/**
+ * Why a pipeline with an engine step cannot be started, proposed or accepted on this host, before
+ * anything is written; `undefined` when it can (or has no engine step).
+ */
+export function engineStepsRefusal(
+  spec: PipelineSpec,
+  host: {
+    engine: EngineOptions;
+    rules: RedactRule[];
+    platform: NodeJS.Platform;
+    offReason?: string | undefined;
+  },
+): KodelError | undefined {
+  if (!hasEngineSteps(spec, host.engine.registry ?? defaultRegistry())) return undefined;
+  if (host.engine.engineSteps === undefined) {
+    return new KodelError(
+      "PIPELINE_INVALID",
+      host.offReason === undefined ? ENGINE_STEPS_OFF : `${ENGINE_STEPS_OFF} (${host.offReason})`,
+    );
+  }
+  if (host.platform === "win32") {
+    return new KodelError(
+      "PIPELINE_INVALID",
+      "this pipeline has a step with engine, and engine steps run on macOS and Linux only for now; nothing was written",
+    );
+  }
+  if (host.rules.some((rule) => rule.replace !== undefined)) {
+    return new KodelError(
+      "PIPELINE_INVALID",
+      "this pipeline has a step with engine, and the project's redaction rules include one with a function, which a session cannot apply; nothing was written",
+    );
+  }
+  return undefined;
 }
 
 /**
@@ -495,6 +583,28 @@ export class LocalHost {
   readonly toolCalls: ToolCallsWriter;
   /** What the writers of this host found about where a run begins in a log: searched once, not once per writer. */
   readonly runStarts = new RunStartCache();
+  readonly platform: NodeJS.Platform;
+  readonly engineResolver: EngineResolver;
+
+  /** Why a pipeline with an engine step cannot be used here, before anything is written. */
+  engineRefusal(spec: PipelineSpec): KodelError | undefined {
+    return engineStepsRefusal(spec, {
+      engine: this.engine,
+      rules: this.rules,
+      platform: this.platform,
+      offReason: this.options.engineStepsOffReason,
+    });
+  }
+
+  /** The adapter an engine step starts or reads its session with; `undefined` when this host has none. */
+  engineAdapter(extra: RedactRule[] = []): SessionAdapter | undefined {
+    const make = this.options.engineSessions;
+    if (make === undefined) return undefined;
+    return make({
+      rules: [...this.rules.filter((rule) => rule.replace === undefined), ...extra],
+      bootTimeoutMs: ENGINE_BOOT_TIMEOUT_MS,
+    });
+  }
 
   constructor(
     readonly spec: PipelineSpec,
@@ -543,13 +653,27 @@ export class LocalHost {
       );
     this.snapshotter = options.snapshotter ?? new GitSnapshotter(options.root);
     this.clock = options.clock ?? Date.now;
-    this.engine = { fingerprint: hashSource, ...options.engine };
+    this.ownerId = options.ownerId ?? processOwnerId();
+    const steps = options.engine?.engineSteps;
+    this.engine = {
+      fingerprint: hashSource,
+      ...options.engine,
+      // The host that starts a session waits for it; the visit names it, so another process joins
+      // only once it is gone.
+      ...(steps === undefined ? {} : { engineSteps: { owner: this.ownerId, ...steps } }),
+    };
+    this.platform = options.platform ?? process.platform;
+    this.engineResolver =
+      options.engineResolver ??
+      configEngineResolver(
+        async () => (await loadConfig(storeRoot)).engines,
+        () => options.environment ?? process.env,
+      );
     this.runner = options.runCommand ?? ((command, opts) => runCommand(command, opts));
     this.heartbeatMs =
       options.heartbeatMs ?? Math.max(1_000, (options.engine?.staleMs ?? 30_000) / 3);
     this.agentLogStepWaitMs = options.agentLogStepWaitMs ?? 5_000;
     this.maxTailBytes = options.maxTailBytes;
-    this.ownerId = options.ownerId ?? processOwnerId();
     this.isOwnerAlive = options.isOwnerAlive ?? processIsAlive;
     this.checkRunners = { ...builtinCheckRunners(this), ...options.checkRunners };
   }
@@ -595,7 +719,7 @@ export class LocalHost {
     node: string,
     attempt: number,
     part: string,
-    result: CommandResult,
+    result: Pick<CommandResult, "tail" | "truncated">,
   ): Promise<{ output?: OutputRef; output_error?: string }> {
     try {
       const settings = await this.outputSettings(runId);
@@ -670,6 +794,9 @@ export class LocalHost {
       ]);
     }
     const slug = runSlug(options.title, redactedTask);
+    // Before the start lock and before any folder: a run the host cannot carry is never made.
+    const refusal = this.engineRefusal(this.spec);
+    if (refusal) throw refusal;
     const started = await this.store.withStartLock(async () => {
       const existing = await this.store.findActive(this.spec.name, redactedTask);
       if (existing) {
@@ -863,6 +990,13 @@ export class LocalRun {
   >();
   /** The jobs of this process, each with the node whose work it is (none for a job of the whole run). */
   private readonly pending = new Map<Promise<void>, string | undefined>();
+  /** Engine sessions this process waits for, by task key; what a person is told to stop when it leaves. */
+  private readonly waitedSessions = new Map<
+    string,
+    { node: string; attempt: number; name: string; id?: string }
+  >();
+  /** Starts whose job ended before it read the record under the lock; the next tick issues them again. */
+  private readonly retryStarts = new Map<string, Extract<Effect, { type: "run_engine_step" }>>();
   /** The jobs that record the patch of the run after it ended (also in `pending`). */
   private readonly endJobs = new Set<Promise<void>>();
   /** The job that records the patch of the run gave up (the files changed, the state could not be read). */
@@ -1110,6 +1244,8 @@ export class LocalRun {
 
   /** Drop the agent's proposal. A person's act; it is journaled like the agent taking it back. */
   async discardProposal(): Promise<boolean> {
+    const carried = this.host.engineRefusal(await this.currentSpec());
+    if (carried) throw carried;
     const had = await this.host.store.removeProposal(this.runId);
     if (had) {
       await this.apply({
@@ -1179,6 +1315,9 @@ export class LocalRun {
    */
   async restoreFile(hash?: string): Promise<{ path: string; hash: string }> {
     const state = await this.state();
+    // Like every write of a run with an engine step: refused first on a host that does not run them.
+    const carried = this.host.engineRefusal(await this.currentSpec(state));
+    if (carried) throw carried;
     const target = hash ?? state.specHash;
     const where = await this.watched(state);
     if (!where) {
@@ -1278,6 +1417,9 @@ export class LocalRun {
     if (state.status !== "running" && state.status !== "paused") {
       return { ok: false, code: "NODE_NOT_RUNNING", message: `the run is ${state.status}` };
     }
+    // A run whose pipeline this host cannot carry (an engine step it does not run) is not written to at all.
+    const carried = this.host.engineRefusal(await this.currentSpec(state));
+    if (carried) return { ok: false, code: carried.code, message: carried.message };
     if (input.yaml.trim() === "") {
       const had = await store.removeProposal(this.runId);
       if (had) {
@@ -1324,6 +1466,9 @@ export class LocalRun {
         message: cannotHoldMessage(state.v, "a pipeline with a fork and a join", this.runId),
       };
     }
+    const engineProblem = this.engineProblem(spec, state);
+    if (engineProblem)
+      return { ok: false, code: engineProblem.code, message: engineProblem.message };
     const current = await this.currentSpec(state);
     if (canonicalPipeline(spec) === canonicalPipeline(current)) {
       return {
@@ -1350,6 +1495,38 @@ export class LocalRun {
       status: "proposed",
       ...(pending ? { change: change as PipelineChange } : {}),
     };
+  }
+
+  /**
+   * Why a pipeline with an engine step cannot be proposed or accepted for this run, before anything is
+   * written: this host does not run them, or the run's format cannot hold one, or the outcome of the
+   * run's engine step is unknown (a person resumes first).
+   */
+  private engineProblem(
+    spec: PipelineSpec,
+    state: RunState,
+    accepting = false,
+  ): KodelError | undefined {
+    const registry = this.host.engine.registry ?? defaultRegistry();
+    if (hasEngineSteps(spec, registry)) {
+      const refusal = this.host.engineRefusal(spec);
+      if (refusal) return refusal;
+      if (!capabilitiesOf(state.v).pipelineFeatures.includes("engine")) {
+        return cannotHoldError(state.v, "a pipeline with a step with engine", this.runId);
+      }
+    }
+    const open = state.engineSession;
+    if (
+      accepting &&
+      open !== undefined &&
+      state.pauses.some((p) => p.reason === "consecutive" && p.node === open.node)
+    ) {
+      return new KodelError(
+        "PIPELINE_CHANGE_REFUSED",
+        `the outcome of the engine step "${open.node}" is unknown (session ${open.id ?? open.name}); resume the run first (kodel resume), then change the pipeline`,
+      );
+    }
+    return undefined;
   }
 
   /**
@@ -1387,6 +1564,9 @@ export class LocalRun {
         error: cannotHoldError(state.v, "a pipeline with a fork and a join", this.runId),
       };
     }
+    const engineProblem =
+      this.engineProblem(proposed, state, true) ?? this.engineProblem(before, state);
+    if (engineProblem) return { ok: false, error: engineProblem };
     await this.host.store.writeSpec(this.runId, to, input.text);
     if (input.source === "proposal") {
       const where = await this.watched(state);
@@ -1679,10 +1859,19 @@ export class LocalRun {
   }
 
   private applyLocked(incoming: RunEvent, trust: boolean): Promise<Decision> {
+    return this.locked(() => this.decideAndWrite(incoming, trust));
+  }
+
+  /**
+   * Decide one event and write what it decided: the body of `apply`, for a caller that already holds
+   * the run's lock (an engine step's start, which must not let the lock go between its look at the
+   * record and the write of the session's id).
+   */
+  private decideAndWrite(incoming: RunEvent, trust: boolean): Promise<Decision> {
     const { store, engine, clock, integrity, rules } = this.host;
     // Whatever text came with the event (a reason, a message) reaches state and journal redacted.
     const event = redactEvent(incoming, rules);
-    return this.locked(async () => {
+    return (async () => {
       let state: RunState | undefined;
       if (event.type !== "start") {
         let raw: Awaited<ReturnType<typeof store.readStateRaw>>;
@@ -1774,7 +1963,7 @@ export class LocalRun {
       }
       await this.dispatchAll(decision.effects);
       return decision;
-    });
+    })();
   }
 
   /** The run's lock, with the hooks a test watches it through. */
@@ -2066,8 +2255,12 @@ export class LocalRun {
     const each = options.snapshotDeadlineMs ?? SNAPSHOT_DEADLINE_MS;
     const keys: { key: string; gate: boolean }[] = [];
     const work: Extract<Effect, { type: "run_command" | "run_check" }>[] = [];
+    const sessions: Extract<Effect, { type: "run_engine_step" }>[] = [];
     for (const effect of effects) {
       switch (effect.type) {
+        case "run_engine_step":
+          sessions.push(effect);
+          break;
         case "take_snapshot":
           keys.push({ key: effect.key, gate: false });
           break;
@@ -2119,6 +2312,335 @@ export class LocalRun {
       }
     }
     for (const effect of work) this.spawn(effect);
+    for (const effect of sessions) this.spawnSession(effect);
+  }
+
+  // engine steps (sessions, T-42)
+
+  /**
+   * Start or join the session of an engine step in a job of this process. Nothing is waited for here:
+   * the job takes the run's lock itself (after the decision that issued it has let it go), and what it
+   * learns comes back as an event.
+   */
+  private spawnSession(effect: Extract<Effect, { type: "run_engine_step" }>) {
+    const key = `${effect.node}#${effect.attempt}#session`;
+    if (this.tasks.has(key)) return;
+    const controller = new AbortController();
+    this.tasks.set(key, { controller, node: effect.node, attempt: effect.attempt });
+    this.retryStarts.delete(key);
+    this.waitedSessions.set(key, { node: effect.node, attempt: effect.attempt, name: effect.name });
+    const job = (async () => {
+      let reached = false;
+      try {
+        const event = await this.runEngineStep(effect, controller.signal, () => {
+          reached = true;
+        });
+        if (event !== undefined && !controller.signal.aborted) await this.applyWithRetry(event);
+      } catch {
+        // The result could not be saved; the session stays what it is, and the next tick of a host that
+        // starts sessions joins it again (by id) and reads the same outcome. A start that never got as
+        // far as `start()` (the state could not be read) is issued again by this process's next tick.
+        if (effect.mode === "start" && !reached) this.retryStarts.set(key, effect);
+      } finally {
+        this.tasks.delete(key);
+        if (!controller.signal.aborted) this.waitedSessions.delete(key);
+      }
+    })();
+    this.pending.set(job, effect.node);
+    void job.finally(() => this.pending.delete(job));
+  }
+
+  /** The state, read again under the lock; a read that fails is tried twice more, then thrown. */
+  private async readStateRetrying(): Promise<RunState | undefined> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.host.store.readState(this.runId);
+      } catch (error) {
+        if (attempt >= 3) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
+      }
+    }
+  }
+
+  /** What `apply` does after a decision is written: the end of the run's patch, the task's tie. */
+  private async afterWritten(decisions: Decision[]): Promise<void> {
+    for (const decision of decisions) {
+      this.startEndJob(decision);
+      await this.tieEnd(decision);
+    }
+  }
+
+  /** The record, the visit and the pauses still say this attempt's session is ours to start. */
+  private startable(
+    state: RunState | undefined,
+    effect: { node: string; attempt: number; name: string },
+  ) {
+    const record = state?.engineSession;
+    return (
+      state !== undefined &&
+      (state.status === "running" || state.status === "paused") &&
+      record !== undefined &&
+      record.node === effect.node &&
+      record.attempt === effect.attempt &&
+      record.name === effect.name &&
+      record.id === undefined &&
+      state.active.some(
+        (v) => v.node === effect.node && v.attempt === effect.attempt && v.phase === "engine",
+      ) &&
+      !state.pauses.some((p) => p.node === effect.node)
+    );
+  }
+
+  /**
+   * The work of an engine step: resolve the launch, start the session under the run's lock (or find it
+   * again by its id or name), wait, and turn what is proven into an event. An outcome that cannot be
+   * proven is `work_unknown`; nothing here ever starts a session twice or removes one. `reached` is
+   * called once the record was read again under the lock (from then on the start is decided).
+   */
+  private async runEngineStep(
+    effect: Extract<Effect, { type: "run_engine_step" }>,
+    signal: AbortSignal,
+    reached: () => void,
+  ): Promise<RunEvent | undefined> {
+    const step = { node: effect.node, attempt: effect.attempt };
+    const finished: Finished = (passed, reason, extra = {}) => ({
+      type: "work_finished",
+      ...step,
+      passed,
+      reason,
+      ...(effect.spec === undefined ? {} : { specHash: effect.spec }),
+      ...extra,
+    });
+    const unknown: Unknown = (why, session, newer = false) => ({
+      type: "work_unknown",
+      ...step,
+      reason: unknownReason(
+        why,
+        { ...(session.id === undefined ? {} : { id: session.id }), name: effect.name },
+        newer,
+      ),
+    });
+    const key = `${effect.node}#${effect.attempt}#session`;
+    const written: Decision[] = [];
+    const write = async (event: RunEvent): Promise<Decision> => {
+      const decision = await this.decideAndWrite(event, false);
+      written.push(decision);
+      return decision;
+    };
+
+    let id: string | undefined;
+    let literal: RedactRule[] = [];
+    if (effect.mode === "start") {
+      const cwd = await this.cwd();
+      const resolved = await this.host.engineResolver.resolve(effect.request, { cwd });
+      if (!resolved.ok) {
+        reached();
+        return finished(false, resolved.reason);
+      }
+      const { launch } = resolved;
+      literal = literalRules(launch.secrets);
+      const adapter = this.host.engineAdapter(literal);
+      if (adapter === undefined) {
+        reached();
+        return finished(false, "this kodel cannot start sessions, so it cannot run an engine step");
+      }
+      // Under the lock, after reading the record again: only the record's own attempt, with no id yet,
+      // still active and not paused, is started, and the lock is held through `start()` and the write
+      // of the id, so a joiner never classifies a record whose start is under way. A state that cannot
+      // be read throws out of here before anything is decided (the start is issued again).
+      const outcome = await this.locked(async (): Promise<"started" | undefined> => {
+        const state = await this.readStateRetrying();
+        reached();
+        if (!this.startable(state, effect)) {
+          // This process issued the record and has not called `start()`: if the record is still
+          // that one, it goes, so no later look takes a start that never happened for an unknown one.
+          const record = state?.engineSession;
+          if (
+            record !== undefined &&
+            record.id === undefined &&
+            record.node === effect.node &&
+            record.attempt === effect.attempt &&
+            record.name === effect.name
+          ) {
+            await write({ type: "engine_start_abandoned", ...step, name: effect.name });
+          }
+          return undefined;
+        }
+        try {
+          const started = await adapter.start({
+            argv: launch.argv,
+            cwd: launch.cwd,
+            env: launch.env,
+            inheritEnv: false,
+            timeoutMs: launch.timeoutMs,
+            name: effect.name,
+            origin: "host",
+          });
+          id = started.id;
+        } catch (error) {
+          const code = error instanceof SessionError ? error.code : undefined;
+          const message = redactText(error instanceof Error ? error.message : String(error), [
+            ...this.host.rules.filter((r) => r.replace === undefined),
+            ...literal,
+          ]);
+          const event =
+            code !== undefined && START_ERROR_OUTCOME[code] === "unknown"
+              ? unknown(`the start answered ${code}: ${message}`, {})
+              : await this.afterFailedStart(adapter, effect.name, code, message, finished, unknown);
+          await write(event);
+          return undefined;
+        }
+        this.waitedSessions.set(key, { ...step, name: effect.name, id });
+        const done = await write({
+          type: "engine_session_started",
+          ...step,
+          name: effect.name,
+          id,
+          launch: launchHash(launch, [...this.host.rules, ...literal]),
+        });
+        return done.ok ? "started" : undefined;
+      });
+      await this.afterWritten(written);
+      if (outcome !== "started" || id === undefined) return undefined;
+    } else {
+      reached();
+      const adapter = this.host.engineAdapter();
+      if (adapter === undefined) return undefined;
+      const found = await this.locked(async (): Promise<string | RunEvent | undefined> => {
+        const state = await this.readStateRetrying();
+        const record = state?.engineSession;
+        if (
+          record === undefined ||
+          record.node !== effect.node ||
+          record.attempt !== effect.attempt
+        ) {
+          return undefined;
+        }
+        if (record.id !== undefined) return record.id;
+        // A record without an id, whose start is not under way (that holds the lock): the session is
+        // found by its name in one full list, or its outcome is unknown.
+        let entries: Awaited<ReturnType<SessionAdapter["list"]>>;
+        try {
+          entries = await adapter.list();
+        } catch {
+          return unknown("the sessions cannot be listed", {});
+        }
+        if (entries.some((e) => e.problem !== undefined)) {
+          return unknown(
+            "a session record cannot be read, so it cannot be told whether it is this one",
+            {},
+          );
+        }
+        const mine = entries.find((e) => e.name === foldSessionName(effect.name));
+        if (mine === undefined)
+          return unknown("its start was issued and no session of its name is listed", {});
+        // The joiner did not build the launch, so the journal says so instead of a hash.
+        await write({
+          type: "engine_session_started",
+          ...step,
+          name: effect.name,
+          id: mine.id,
+          launch: "unknown",
+        });
+        return mine.id;
+      });
+      await this.afterWritten(written);
+      if (found === undefined) return undefined;
+      if (typeof found !== "string") return found;
+      id = found;
+      this.waitedSessions.set(key, { ...step, name: effect.name, id });
+    }
+    return this.awaitSession(id, effect, signal, literal, finished, unknown);
+  }
+
+  /** After `start()` threw: a full list decides between a known failure and an unknown outcome. */
+  private async afterFailedStart(
+    adapter: SessionAdapter,
+    name: string,
+    code: string | undefined,
+    message: string,
+    finished: Finished,
+    unknown: Unknown,
+  ): Promise<RunEvent> {
+    const said = `the session could not be started (${code ?? "error"}: ${message})`;
+    try {
+      const entries = await adapter.list();
+      if (entries.some((e) => e.problem !== undefined || e.name === foldSessionName(name))) {
+        return unknown(`${said}, and a session that may be it is listed`, {});
+      }
+    } catch {
+      return unknown(`${said}, and the sessions cannot be listed`, {});
+    }
+    return finished(false, said);
+  }
+
+  /** Wait for the session and turn its end into an event; a detached wait (`stop`, shutdown) gives none. */
+  private async awaitSession(
+    id: string,
+    effect: Extract<Effect, { type: "run_engine_step" }>,
+    signal: AbortSignal,
+    literal: RedactRule[],
+    finished: Finished,
+    unknown: Unknown,
+  ): Promise<RunEvent | undefined> {
+    const adapter = this.host.engineAdapter(literal);
+    if (adapter === undefined) return undefined;
+    const waitedFrom = Date.now();
+    let status: SessionStatus & { timedOut?: boolean };
+    try {
+      status = await adapter.wait(id, { signal });
+    } catch (error) {
+      // Nothing a read that failed says proves an outcome: every code is unknown.
+      return error instanceof SessionError
+        ? unknown(`it cannot be read (${error.code})`, { id }, error.code === "NEWER_FORMAT")
+        : unknown("it cannot be read", { id });
+    }
+    if (signal.aborted || status.timedOut === true) return undefined;
+    const durationMs = Date.now() - waitedFrom;
+    let output: { text: string; complete: boolean } | undefined;
+    if (status.state === "exited" && status.exitCode === 0 && status.childAlive !== true) {
+      try {
+        output = await adapter.tail(id, ENGINE_RESULT_READ_BYTES, "stdout");
+      } catch {
+        output = undefined;
+      }
+    }
+    // Every read is redacted again with the project's rules and the step's literal values.
+    const rules = [...this.host.rules.filter((r) => r.replace === undefined), ...literal];
+    const outcome: EngineOutcome = engineOutcome(
+      status,
+      output === undefined ? undefined : { text: output.text, complete: output.complete },
+    );
+    if (outcome.kind === "running") return unknown("it still runs after its wait ended", { id });
+    if (outcome.kind === "unknown") return unknown(outcome.reason, { id });
+    // A failed step keeps what it printed on both streams (the end of it), so the person and the
+    // retry's prompt see more than a code.
+    if (outcome.kind === "failed" && output === undefined) {
+      try {
+        output = await adapter.tail(id, FAILED_OUTPUT_BYTES, "both");
+      } catch {
+        output = undefined;
+      }
+    }
+    const text = output === undefined ? undefined : redactText(output.text, rules);
+    // A code only for a session that exited: a killed one has none to report.
+    const exit = status.state === "exited" ? status.exitCode : undefined;
+    const kept =
+      text === undefined
+        ? {}
+        : await this.host.keepOutput(this.runId, effect.node, effect.attempt, "command", {
+            tail: text,
+            truncated: output?.complete === false,
+          });
+    const facts = { ...(exit === undefined ? {} : { exit }), duration_ms: durationMs, ...kept };
+    if (outcome.kind === "failed" && text !== undefined && text.trim() !== "") {
+      const end = text.trim();
+      const shown =
+        end.length > FAILED_REASON_CHARS ? `...${end.slice(-FAILED_REASON_CHARS)}` : end;
+      return finished(false, `${outcome.reason}; it printed: ${shown}`, facts);
+    }
+    if (outcome.kind === "failed") return finished(false, outcome.reason, facts);
+    return finished(true, redactText(outcome.summary, rules), facts);
   }
 
   // engine work
@@ -2439,10 +2961,25 @@ export class LocalRun {
   private async engineBusy(node?: string, scope: WaitScope = "chain"): Promise<boolean> {
     const state = await this.state().catch(() => undefined);
     if (!state) return false;
+    // A person's command does not wait for an engine step's session: it may run for an hour, and the
+    // server that starts sessions is the one that waits for it.
+    const spec = await this.currentSpec(state).catch(() => undefined);
+    const registry = this.host.engine.registry ?? defaultRegistry();
+    // Without the pipeline a session visit is told by what only it lacks: engine work with no heartbeat
+    // (a command's has one from its start). Either way a person's command never waits on a session.
+    const session = (v: RunState["active"][number]) =>
+      spec === undefined
+        ? v.phase === "engine" && v.heartbeatAt === undefined
+        : isSessionVisit(spec, v, registry);
+    // The host that starts sessions waits for one as for a command, whoever waits for it (it only
+    // watches the state; a session owned by a live process is never joined from here). A person's
+    // command never waits on a session.
+    const starts = this.host.engine.engineSteps?.start === true;
     const own = state.active.filter(
       (v) =>
-        node === undefined ||
-        (scope === "chain" ? inOwnBranch(state, node, v.node) : v.node === node),
+        (starts || !session(v)) &&
+        (node === undefined ||
+          (scope === "chain" ? inOwnBranch(state, node, v.node) : v.node === node)),
     );
     return (
       own.some((v) => v.phase === "engine" || v.phase === "checks") ||
@@ -2765,8 +3302,59 @@ export class LocalRun {
     return [...owners].filter((owner) => !this.host.isOwnerAlive(owner));
   }
 
+  /**
+   * In the host that starts sessions: issue the start of an engine step that waits without a record
+   * (a person's command entered it), and join a session whose waiter is gone. Never a second start:
+   * the machine refuses one while a record is open, and a join only reads.
+   */
+  private async engineTick(): Promise<void> {
+    if (this.host.engine.engineSteps?.start !== true) return;
+    const state = await this.state().catch(() => undefined);
+    if (state === undefined || (state.status !== "running" && state.status !== "paused")) return;
+    const spec = await this.currentSpec(state).catch(() => undefined);
+    if (spec === undefined) return;
+    const registry = this.host.engine.registry ?? defaultRegistry();
+    for (const visit of state.active) {
+      if (!isSessionVisit(spec, visit, registry)) continue;
+      if (this.tasks.has(`${visit.node}#${visit.attempt}#session`)) continue;
+      const record = state.engineSession;
+      const step = { node: visit.node, attempt: visit.attempt };
+      if (record === undefined) {
+        await this.apply({ type: "engine_start_pending", ...step });
+        continue;
+      }
+      if (record.node !== visit.node || record.attempt !== visit.attempt) continue;
+      const retry = this.retryStarts.get(`${visit.node}#${visit.attempt}#session`);
+      if (retry !== undefined && record.id === undefined && visit.owner === this.host.ownerId) {
+        // This process issued the start and its job could not read the state: it is issued again,
+        // and `start()` is still called only under the lock after the record is read once more.
+        this.spawnSession(retry);
+        continue;
+      }
+      const owner = visit.owner;
+      if (owner === undefined || owner === this.host.ownerId || !this.host.isOwnerAlive(owner)) {
+        await this.apply({ type: "engine_session_joined", ...step, owner: this.host.ownerId });
+      }
+    }
+  }
+
+  /**
+   * What a person is told when this process stops waiting for engine sessions (a server that leaves, a
+   * cancel): the sessions go on, and only `kodel agent stop` ends one. `undefined` when there is none.
+   */
+  sessionsNote(): string | undefined {
+    // Only a session with an id was started: a start that never got that far has nothing to stop.
+    const started = [...this.waitedSessions.values()].filter(
+      (s): s is typeof s & { id: string } => s.id !== undefined,
+    );
+    if (started.length === 0) return undefined;
+    const named = started.map((s) => `${s.id} (step "${s.node}" #${s.attempt})`);
+    return `run ${this.runId}: the engine session${named.length > 1 ? "s" : ""} ${named.join(", ")} may still run on its own; stop it with ${started.map((s) => `kodel agent stop ${s.id}`).join(", ")}`;
+  }
+
   /** Restart stale or orphaned engine work; with `node`, only the work that is the caller's (`WaitScope`). */
   async tick(node?: string, scope: WaitScope = "chain") {
+    await this.engineTick().catch(() => undefined);
     const deadOwners = await this.deadOwners();
     let nodes: string[] | undefined;
     if (node !== undefined) {
@@ -3085,16 +3673,125 @@ export class LocalRun {
   }
 
   /** `node`: which paused branch to carry on, when more than one is paused. */
-  async resume(node?: string) {
+  async resume(node?: string): Promise<Decision & { warning?: string }> {
     await this.assertOurs();
-    return this.apply({ type: "resume", ...(node === undefined ? {} : { node }) });
+    const state = await this.state();
+    const record = state.engineSession;
+    const pause =
+      node === undefined && state.pauses.length === 1
+        ? state.pauses[0]
+        : state.pauses.find((p) => p.node === node);
+    if (record === undefined || pause === undefined || pause.node !== record.node) {
+      return this.apply({ type: "resume", ...(node === undefined ? {} : { node }) });
+    }
+    // The pause is over an engine step whose outcome is unknown. The person's resume is the
+    // confirmation, once the session is looked up: one that still runs is stopped first.
+    const found = await this.lookUpSession(record);
+    if (found.kind === "cannot") {
+      // Fail closed: a kodel that cannot look sessions up does not take a resume as the proof.
+      return {
+        ok: false,
+        error: new KodelError(
+          "INVALID_ARGUMENTS",
+          `the outcome of "${record.node}" is unknown and this kodel cannot look its session ${record.id ?? record.name} up (it does not run engine steps); resume the run with a kodel that does`,
+        ),
+      };
+    }
+    if (found.kind === "running") {
+      return {
+        ok: false,
+        error: new KodelError(
+          "INVALID_ARGUMENTS",
+          `the session ${found.handle} of "${record.node}" still runs; stop it first: kodel agent stop ${found.handle}`,
+        ),
+      };
+    }
+    const decision = await this.apply({
+      type: "resume",
+      ...(node === undefined ? {} : { node }),
+      engineSession: "cleared",
+    });
+    return found.kind === "unreadable" && decision.ok
+      ? { ...decision, warning: found.warning }
+      : decision;
   }
 
-  async cancel() {
+  /** Where the session of an open record stands, for a person's resume. */
+  private async lookUpSession(record: {
+    id?: string;
+    name: string;
+  }): Promise<
+    | { kind: "running"; handle: string }
+    | { kind: "over" }
+    | { kind: "unreadable"; warning: string }
+    | { kind: "cannot" }
+  > {
+    const handle = record.id ?? record.name;
+    const warn = (why: string) => ({
+      kind: "unreadable" as const,
+      warning: `the session ${handle} ${why}; the step runs again on resume. Look at it with kodel agent ls, and stop it if it still runs: kodel agent stop ${handle}`,
+    });
+    const adapter = this.host.engineAdapter();
+    if (adapter === undefined) return { kind: "cannot" };
+    const judge = (status: SessionStatus) =>
+      status.state === "starting" || status.state === "running" || status.childAlive === true
+        ? { kind: "running" as const, handle }
+        : { kind: "over" as const };
+    if (record.id !== undefined) {
+      try {
+        return judge(await adapter.status(record.id));
+      } catch (error) {
+        // Not found here is not "ended": a session started from another checkout, or under another
+        // state base, is not seen from this one.
+        if (error instanceof SessionError && error.code === "NOT_FOUND") {
+          return warn(
+            "is not found here (it may have ended and been removed, or it was started from another checkout or under another state base)",
+          );
+        }
+        if (error instanceof SessionError && error.code === "IDENTITY_UNKNOWN") {
+          return warn("belongs to another machine (FOREIGN)");
+        }
+        if (error instanceof SessionError && error.code === "NEWER_FORMAT") {
+          return warn("was written by a newer kodel (NEWER_FORMAT; upgrade kodel)");
+        }
+        return warn("cannot be read");
+      }
+    }
+    let entries: Awaited<ReturnType<SessionAdapter["list"]>>;
+    try {
+      entries = await adapter.list();
+    } catch {
+      return warn("cannot be listed");
+    }
+    const mine = entries.find((e) => e.name === foldSessionName(record.name));
+    if (mine === undefined) {
+      return entries.some((e) => e.problem !== undefined)
+        ? warn("is not listed, and some session records cannot be read")
+        : warn(
+            "is not listed here (its start may never have happened, or it was started from another checkout or under another state base)",
+          );
+    }
+    if (mine.problem !== undefined) return warn(`cannot be judged (${mine.problem})`);
+    return judge(mine.status);
+  }
+
+  async cancel(): Promise<Decision & { warning?: string }> {
     const decision = await this.apply({ type: "cancel" });
     // The run is over, so a command still going in this process has nothing left to report to.
     if (decision.ok) this.stop();
-    return decision;
+    // A cancel ends the run, not its engine session: the person is told which one runs on.
+    const open = decision.ok ? decision.state.engineSession : undefined;
+    if (!decision.ok || open === undefined) return decision;
+    if (open.id === undefined) {
+      return {
+        ...decision,
+        warning: `the engine session of step "${open.node}" was not recorded as started (no id); if kodel agent ls lists ${open.name}, stop it with kodel agent stop`,
+      };
+    }
+    return {
+      ...decision,
+      warning: `the engine session ${open.id} of step "${open.node}" may still run on its own; stop it with kodel agent stop ${open.id}`,
+    };
   }
 
   async feedback(input: {

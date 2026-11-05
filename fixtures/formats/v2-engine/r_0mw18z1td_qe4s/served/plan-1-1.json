@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "node": "plan",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "75462a271aa8328b5f9ec5406189abef35e75154b9d48102460121f797e23732",
+  "answer": {
+    "slug": "plan",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "Plan Add a liveness check."
+  }
+}

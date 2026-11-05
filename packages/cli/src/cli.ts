@@ -10,6 +10,7 @@ import { isAbsolute, join } from "node:path";
 import {
   findProjectRoot,
   hashSource,
+  insideHostSession,
   LocalPipelineHost,
   loadAgentHints,
   loadConfig,
@@ -42,6 +43,7 @@ import pkg from "../package.json" with { type: "json" };
 import { registerAgentCommands } from "./agent-commands";
 import { BUILD } from "./build-info";
 import { describePendingChange, gateChangesText, gateCommentsText } from "./decide-text";
+import { engineHostOptions } from "./engine-steps";
 import {
   FEEDBACK_ENDPOINT,
   FEEDBACK_MESSAGE_MAX,
@@ -52,7 +54,7 @@ import {
 } from "./feedback";
 import { formatEffects, formatProposal, formatReport } from "./format";
 import { type Choice, InitError, runInit } from "./init";
-import { dialogTimeoutFrom, noProjectHost, serveStdio } from "./mcp-server";
+import { dialogTimeoutFrom, noProjectHost, serveNoTools, serveStdio } from "./mcp-server";
 import { plain, UNSAFE_CODES } from "./plain";
 import { formatTable } from "./table";
 import {
@@ -268,7 +270,16 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
   };
   const host = async () => {
     const { root, dataDir } = await project();
-    return new LocalPipelineHost({ root, storeRoot: dataDir, storage: await storagePlace() });
+    return new LocalPipelineHost({
+      root,
+      storeRoot: dataDir,
+      storage: await storagePlace(),
+      ...engineHostOptions("human", {
+        root,
+        ...(env.environment === undefined ? {} : { environment: env.environment }),
+        ...(env.sessionLauncher ? { launcher: env.sessionLauncher } : {}),
+      }),
+    });
   };
   const storeRoot = async () => (await project()).dataDir;
 
@@ -375,6 +386,16 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     .command("mcp")
     .description("Serve the pipeline tools to a coding agent over stdio")
     .action(async () => {
+      // T-42: inside the process group of a live host session's child (an engine step), this server
+      // would be a second Kodel client of the person, so it serves nothing. A group that cannot be
+      // read fails open.
+      const guard = insideHostSession(env.environment ?? process.env);
+      if (guard.inside) {
+        const why = `inside engine step session ${guard.session ?? "?"}`;
+        env.err(`kodel: serving no tools ${why}\n`);
+        await serveNoTools(pkg.version, why);
+        return;
+      }
       // A config that cannot be used for the tasks must not take the pipelines down with it: the
       // server starts without the task tools and says why on stderr (stdout is the protocol).
       let resolved: ProjectRoot;
@@ -447,6 +468,11 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         build: BUILD,
         // This process serves the agent: it copies the agent's log into the runs while they go.
         agentLogTimer: true,
+        ...engineHostOptions("mcp", {
+          root: resolved.root,
+          ...(env.environment === undefined ? {} : { environment: env.environment }),
+          ...(env.sessionLauncher ? { launcher: env.sessionLauncher } : {}),
+        }),
         // The same tie the tools were built for; without one the host asks the config itself.
         ...(runLink === undefined ? {} : { runTaskLink: runLink }),
       });
@@ -994,7 +1020,10 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       await mustConfirm(
         `Resume run ${runId}${state.pauses.length > 1 ? ` at "${plain(pause.node)}"` : ""} with more attempts?`,
       );
-      failIfRefused(await run.resume(opts.node));
+      const resumed = await run.resume(opts.node);
+      failIfRefused(resumed);
+      // The session of an engine step whose outcome was unknown could not be judged: the person is told.
+      if (resumed.warning !== undefined) env.err(`kodel: ${plain(resumed.warning)}\n`);
       // The paused node's branch: a fork held back before it fired, or the join, stands outside
       // every branch, so the resume waits for every head it entered.
       await afterDecision(run, [pause.node]);

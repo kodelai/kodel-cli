@@ -47,7 +47,7 @@ export interface HumanRun {
     byAgent?: AgentDecision,
   ): Promise<Decision>;
   /** `node`: which paused branch, when more than one is paused. */
-  resume(node?: string): Promise<Decision>;
+  resume(node?: string): Promise<Decision & { warning?: string }>;
   acknowledge(note?: string): Promise<Decision>;
   acceptChange(input: {
     source: "file" | "proposal";
@@ -618,7 +618,15 @@ async function pausedQuestion(
         return stale("a change of the pipeline is waiting for you; decide on it first");
       }
       const done = await run.resume(pause.node);
-      return done.ok ? { done: "applied", said: "resumed the run" } : refusedBy(done);
+      if (!done.ok) return refusedBy(done);
+      // The session of an engine step whose outcome was unknown could not be judged: said, not hidden.
+      return {
+        done: "applied",
+        said:
+          done.warning === undefined
+            ? "resumed the run"
+            : `resumed the run; ${plain(done.warning)}`,
+      };
     },
   };
 }

@@ -6,7 +6,13 @@ import type { Document } from "yaml";
 import { isMap, isScalar, isSeq, LineCounter, parseDocument } from "yaml";
 import { z } from "zod";
 import { type ErrorCode, KodelError } from "./errors";
-import { defaultRegistry, labelsOf, RESTART_FAILED, type Registry } from "./registry";
+import {
+  beginsAsSession,
+  defaultRegistry,
+  labelsOf,
+  RESTART_FAILED,
+  type Registry,
+} from "./registry";
 import { MAX_SUPPORTED_MAJOR, parseVersion, resolveVersion } from "./version";
 
 export type Path = (string | number)[];
@@ -474,6 +480,9 @@ export function validatePipeline(text: string, options: ParseOptions = {}): Pars
     if (timeout !== undefined) node.timeout = timeout;
     if (expected !== undefined) node.expected_duration = expected;
     if (data.join !== undefined) node.join = data.join as "all";
+    for (const problem of handler.validateNode?.(node) ?? []) {
+      c.add([...base, "slug"], `node "${node.slug}": ${problem}`);
+    }
     nodes.push(node);
   });
 
@@ -487,6 +496,7 @@ export function validatePipeline(text: string, options: ParseOptions = {}): Pars
     if (!options.firstDuplicateEdgeWins && edges.length === rawEdges.length) {
       validateParallel(c, nodes, edges, registry);
     }
+    validateEngineSteps(c, nodes, edges, registry);
   }
 
   if (c.issues.length > 0) return failure(c);
@@ -884,6 +894,34 @@ function validateGraph(c: Collector, nodes: NodeSpec[], edges: EdgeSpec[], regis
         `node "${node.slug}" is unreachable from the first node "${entry.slug}"`,
       );
     }
+  }
+}
+
+/**
+ * A step with `engine` runs as the run's one session at a time; a fork would run two at once, which
+ * is not built yet, so a pipeline with an engine step has no fork and no join.
+ */
+function validateEngineSteps(
+  c: Collector,
+  nodes: NodeSpec[],
+  edges: EdgeSpec[],
+  registry: Registry,
+) {
+  const engines = nodes.filter((n) => beginsAsSession(registry, n));
+  if (engines.length === 0) return;
+  const seen = new Set<string>();
+  const forks = edges.some((e) => {
+    const key = JSON.stringify([e.from, e.when]);
+    if (seen.has(key)) return true;
+    seen.add(key);
+    return false;
+  });
+  if (!forks && !nodes.some((n) => n.join !== undefined)) return;
+  for (const node of engines) {
+    c.add(
+      ["nodes", nodes.indexOf(node), "slug"],
+      `node "${node.slug}": a step with engine cannot be in a pipeline with a fork or a join yet`,
+    );
   }
 }
 

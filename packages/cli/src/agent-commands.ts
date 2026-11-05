@@ -10,6 +10,7 @@ import {
 import {
   foldSessionName,
   isSessionName,
+  type RedactRule,
   SessionError,
   type SessionListEntry,
 } from "@kodel-ai/pipeline-core";
@@ -99,6 +100,29 @@ const shorten = (text: string, width = 48): string => {
   return chars.length > width ? `${chars.slice(0, width - 1).join("")}…` : flat;
 };
 
+/**
+ * The local session adapter as the CLI builds it: the holder is this program (`session-holder`), and the
+ * base is the state base of the environment. One place, for `kodel agent` and for engine steps.
+ */
+export function pipesAdapter(options: {
+  root: string;
+  environment?: Record<string, string | undefined>;
+  launcher: { exec: string; args: string[] };
+  rules?: RedactRule[];
+  bootTimeoutMs?: number;
+}): PipesSessionAdapter {
+  const { launcher } = options;
+  return new PipesSessionAdapter({
+    base: resolveBase(options.environment),
+    root: options.root,
+    ...(options.environment === undefined ? {} : { baseEnv: options.environment }),
+    holder: { exec: launcher.exec, args: [...launcher.args, "session-holder", "holder"] },
+    intermediate: { exec: launcher.exec, args: [...launcher.args, "session-holder"] },
+    ...(options.rules === undefined ? {} : { rules: options.rules }),
+    ...(options.bootTimeoutMs === undefined ? {} : { bootTimeoutMs: options.bootTimeoutMs }),
+  });
+}
+
 export function registerAgentCommands(
   program: Command,
   withPlural: (c: Command) => Command,
@@ -106,13 +130,7 @@ export function registerAgentCommands(
 ): void {
   const launcher = ctx.launcher ?? { exec: process.execPath, args: [process.argv[1] ?? "kodel"] };
   const adapter = async (): Promise<PipesSessionAdapter> =>
-    new PipesSessionAdapter({
-      base: resolveBase(ctx.environment),
-      root: await ctx.root(),
-      baseEnv: ctx.environment,
-      holder: { exec: launcher.exec, args: [...launcher.args, "session-holder", "holder"] },
-      intermediate: { exec: launcher.exec, args: [...launcher.args, "session-holder"] },
-    });
+    pipesAdapter({ root: await ctx.root(), environment: ctx.environment, launcher });
 
   // Before anything else, also before the check for a person: the answer on Windows is the same for everyone.
   const platform = (): void => {

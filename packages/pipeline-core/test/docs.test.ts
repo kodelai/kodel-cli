@@ -358,11 +358,12 @@ describe("the generated reference", () => {
       expect(text, field).toContain(field);
       expect(reference, field).toContain(field);
     }
-    // the reference lists fields as table cells; the model is not one of them, and the check can fail
+    // the reference lists fields as table cells; `model` is one of them only for a step with engine (T-42)
     const hasField = (table: string, name: string) =>
       new RegExp("\\|\\s*`" + name + "`\\s*\\|").test(table);
     expect(hasField(reference, "max_attempts")).toBe(true);
-    expect(hasField(reference, "model")).toBe(false);
+    expect(hasField(reference, "model")).toBe(true);
+    expect(text).toContain("only for a step with `engine`");
     expect(hasField(`${reference}\n| \`model\` | string | no | x |`, "model")).toBe(true);
     expect(text).toContain("not a field of the pipeline");
     // it says what the engine has the agent write at a human node, and that the order is asked in `instructions`
