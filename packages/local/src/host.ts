@@ -2669,11 +2669,17 @@ export class LocalRun {
     this.tasks.set(key, { controller, node: effect.node, attempt: effect.attempt });
     // Say who is running it right away: if this process goes, the next session sees at once that
     // the owner is gone and starts the work again, without waiting for the heartbeat to go stale.
-    void heartbeat();
+    const announced = heartbeat();
 
     const job = (async () => {
       try {
         let event: RunEvent;
+        // The work starts once its owner is said and the decisions queued before it (the heartbeats of
+        // the other work this decision issued) are written, so it never starts while this process holds
+        // the run's lock for one of them.
+        await announced;
+        await this.queue.catch(() => undefined);
+        if (controller.signal.aborted) return;
         try {
           event =
             effect.type === "run_command"
