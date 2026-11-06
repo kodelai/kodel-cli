@@ -34,7 +34,8 @@ export interface DecisionRun {
   changesSinceGate(node: string): Promise<ChangeReport>;
   gateResults(node: string): Promise<{ csv: string; count: number } | undefined>;
   decideHuman(node: string, decision: "approved" | "rejected", reason?: string): Promise<Decision>;
-  resume(node?: string): Promise<Decision>;
+  /** `warning`: the session of an engine step whose outcome was unknown could not be judged. */
+  resume(node?: string): Promise<Decision & { warning?: string }>;
 }
 
 /** The decisions at a gate or a pause go after the pipeline change that is waiting, not before it. */
@@ -269,7 +270,7 @@ export async function commitResume(
   run: DecisionRun,
   prepared: PreparedResume,
   options: { recheck?: boolean } = {},
-): Promise<Decision> {
+): Promise<Decision & { warning?: string }> {
   if (options.recheck) {
     const owner = await run.foreignRoot?.().catch(() => undefined);
     if (owner !== undefined) {

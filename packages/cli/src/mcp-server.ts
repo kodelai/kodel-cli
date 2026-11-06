@@ -26,6 +26,8 @@ import { createElicitor, type HumanHost, newDialogState } from "./elicit";
 /** A host that can also stop the work it started (the local host does); it says how much it stopped. */
 export type StoppableHost = PipelineHost & {
   stop?(): number;
+  /** The engine sessions the stopped runs waited for; they run on and a person stops them. */
+  sessionsNote?(): string | undefined;
   /** Wait for what the host still writes about its runs, but no longer than the given milliseconds. */
   settle?(ms: number): Promise<void>;
 };
@@ -140,6 +142,9 @@ export async function stopAndWait(
   settleMs = SHUTDOWN_SETTLE_MS,
 ): Promise<void> {
   const stopped = host.stop?.() ?? 0;
+  // stderr: stdout is the protocol. The sessions run on; the note says how a person ends one.
+  const note = host.sessionsNote?.();
+  if (note !== undefined) process.stderr.write(`kodel: ${note}\n`);
   if (stopped > 0) await new Promise((resolve) => setTimeout(resolve, KILL_GRACE_MS + 300));
   // The patch of a run that just ended is written in the background; leaving now would cut it off.
   // Bounded twice: the host stops waiting at the deadline, and a host that does not is not waited for.
@@ -183,4 +188,25 @@ export async function serveStdio(
     process.stdin.once("close", resolve);
   });
   await stopAndWait(host);
+}
+
+/** The instructions of a server that serves no tools inside an engine step's session (T-42). */
+export const noToolsInstructions = (reason: string): string =>
+  `Kodel serves no tools here: this agent runs inside an engine step's session (${reason}), and the step's own work is reported by the engine, not through a second Kodel client.`;
+
+/**
+ * Serve over stdio with no tools at all: an agent started by an engine step must not become a second
+ * Kodel client of the person, but its MCP client still gets a server that answers and then says why.
+ */
+export async function serveNoTools(version: string, reason: string): Promise<void> {
+  const server = new McpServer(
+    { name: "kodel", version },
+    { instructions: noToolsInstructions(reason) },
+  );
+  await server.connect(new StdioServerTransport());
+  await new Promise<void>((resolve) => {
+    server.server.onclose = resolve;
+    process.stdin.once("end", resolve);
+    process.stdin.once("close", resolve);
+  });
 }

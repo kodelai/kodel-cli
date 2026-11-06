@@ -4,6 +4,7 @@
  * The built-in kinds below are registered the same way a plugin kind would be.
  */
 import { z } from "zod";
+import type { EngineLaunchRequest } from "./engine-launch";
 
 /** The part of a parsed check the handlers need to know about. */
 export interface CheckInfo {
@@ -50,6 +51,11 @@ export function labelsOf(registry: Registry, node: NodeInfo): Labels | undefined
 export type Begin =
   | { needs: "agent"; prompt: string }
   | { needs: "engine"; command: string; expect: { exit: number } }
+  /**
+   * The work is done by a process the engine starts as a session (an agent node with `engine:`). The
+   * core only says so; which program runs, with what, is the host's (`EngineResolver`).
+   */
+  | { needs: "session"; spec: EngineLaunchRequest }
   | {
       needs: "human";
       prompt: string;
@@ -76,6 +82,23 @@ export interface NodeHandler {
   instruction?(params: Record<string, unknown>): string | undefined;
   /** The columns of the report this node takes through `pipeline_report_result`, when it takes one. */
   resultsSpec?(params: Record<string, unknown>): Record<string, unknown> | undefined;
+  /**
+   * Rules across the node's own fields and its checks that a field schema cannot say; one message per
+   * problem. Run on new text and on kept copies alike, so a rule here may only refuse a field that no
+   * kept copy can hold yet.
+   */
+  validateNode?(node: NodeInfo): string[];
+}
+
+/** Whether a node's work runs as a session the engine starts (`Begin` `needs: "session"`). */
+export function beginsAsSession(registry: Registry, node: NodeInfo): boolean {
+  const handler = registry.node(node.kind);
+  if (!handler) return false;
+  try {
+    return handler.begin(node.params ?? {}, (text) => text).needs === "session";
+  } catch {
+    return false;
+  }
 }
 
 export type Baseline = "run" | "node" | "attempt";
@@ -126,6 +149,8 @@ export class Registry {
 }
 
 const nonEmpty = z.string().min(1);
+/** The name of an engine profile (`engines:` of the project config, `engine:` of a node). */
+export const ENGINE_PROFILE_NAME = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const positiveInt = z.number().int().positive();
 const expect = z.object({ exit: z.number().int() }).strict();
 
@@ -165,6 +190,16 @@ const agentNode: NodeHandler = {
       .refine((all) => new Set(all).size === all.length, "an outcome is listed twice")
       .optional()
       .describe("Other labels the step may finish with; each needs an edge `when` it."),
+    engine: z
+      .string()
+      .regex(ENGINE_PROFILE_NAME, "an engine is a profile name: lowercase letters, digits, - and _")
+      .optional()
+      .describe(
+        "A profile of `engines:` in the project config: the engine runs the step itself as a process of that program, not the agent.",
+      ),
+    model: nonEmpty
+      .optional()
+      .describe("The model the engine's program is asked to use; only with `engine`."),
   },
   allowsChecks: true,
   requiresRoutes: false,
@@ -173,8 +208,39 @@ const agentNode: NodeHandler = {
     success: ["passed", ...agentOutcomes(node.params)],
     failure: node.checks.map((c) => c.on_fail),
   }),
-  begin: (params, render) => ({ needs: "agent", prompt: render(String(params.prompt)) }),
+  begin: (params, render) =>
+    typeof params.engine === "string"
+      ? {
+          needs: "session",
+          spec: {
+            profile: params.engine,
+            prompt: render(String(params.prompt)),
+            ...(typeof params.model === "string" ? { model: params.model } : {}),
+          },
+        }
+      : { needs: "agent", prompt: render(String(params.prompt)) },
   instruction: (params) => (params.fresh_context === true ? FRESH_CONTEXT_INSTRUCTION : undefined),
+  validateNode: (node) => {
+    const params = node.params ?? {};
+    const problems: string[] = [];
+    if (params.model !== undefined && params.engine === undefined) {
+      problems.push("model is only for a step with engine (the engine's program is told it)");
+    }
+    if (params.engine === undefined) return problems;
+    // An engine step gets a fresh process by itself; what follows needs a host agent, or is not built
+    // for engine steps yet.
+    if (params.fresh_context !== undefined) {
+      problems.push("fresh_context is not for a step with engine: its process starts fresh anyway");
+    }
+    if (params.outcomes !== undefined) {
+      problems.push("outcomes are not supported on a step with engine yet");
+    }
+    if (node.join !== undefined) problems.push("a join cannot be a step with engine yet");
+    if (node.checks.some((c) => c.kind === "result")) {
+      problems.push("a result check is not supported on a step with engine yet");
+    }
+    return problems;
+  },
 };
 
 const commandNode: NodeHandler = {

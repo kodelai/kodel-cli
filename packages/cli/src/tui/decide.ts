@@ -141,7 +141,7 @@ export function createDecisionTools(
           ok: true,
           message:
             request.decision === "resume"
-              ? `Resumed at «${node}».`
+              ? `Resumed at «${node}».${"warning" in done && typeof done.warning === "string" ? ` ${plain(done.warning)}` : ""}`
               : `${request.decision === "approve" ? "Approved" : "Rejected"} «${node}».`,
         };
       } catch (error) {

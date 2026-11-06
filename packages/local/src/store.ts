@@ -182,6 +182,27 @@ const SERVED_REF = /^served\/[a-z0-9][a-z0-9-]{0,62}-\d{1,6}-\d{1,6}\.json$/;
 const isMissing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
 
 /**
+ * A kept copy whose hash matched but that names a field or a kind this kodel does not know was
+ * written by a newer one (an `engine:` step read by a build before engine steps, say): "upgrade
+ * kodel", never "was modified" (AGENTS.md, rule 3). `undefined` for any other error.
+ */
+export function newerKeptCopy(error: unknown, runId: string): KodelError | undefined {
+  if (!(error instanceof KodelError) || error.code !== "PIPELINE_INVALID") return undefined;
+  const unknown = (error.issues ?? [])
+    .map((issue) => (issue as { message?: unknown }).message)
+    .find(
+      (message): message is string =>
+        typeof message === "string" &&
+        /^field "[^"]+" is not allowed|unknown (node|check) kind/.test(message),
+    );
+  if (unknown === undefined) return undefined;
+  return new KodelError(
+    "UNSUPPORTED_FORMAT",
+    `the pipeline of run ${runId} was written by a newer kodel (${unknown}); upgrade kodel`,
+  );
+}
+
+/**
  * A lock file that another process is creating, reading or deleting right now. POSIX says EEXIST
  * (or the file is gone); Windows answers EPERM, EACCES or EBUSY for a file that is open or waiting
  * to be deleted, which is the same situation and must be retried, not raised.
@@ -565,6 +586,22 @@ export class FileStore {
     hash: string,
     text: string,
     options: { introducing?: boolean } = {},
+  ): Promise<PipelineSpec> {
+    try {
+      return await this.parseKeptAs(runId, hash, text, options);
+    } catch (error) {
+      // Only a copy that was kept: new text being introduced meets today's rules, and a field this
+      // kodel does not know in it is the text's fault, not a newer kodel's.
+      if (options.introducing === true) throw error;
+      throw newerKeptCopy(error, runId) ?? error;
+    }
+  }
+
+  private async parseKeptAs(
+    runId: string,
+    hash: string,
+    text: string,
+    options: { introducing?: boolean },
   ): Promise<PipelineSpec> {
     const formats = await this.snapshotFormats(runId, hash);
     if (formats === undefined) {

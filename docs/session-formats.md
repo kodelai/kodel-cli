@@ -25,6 +25,10 @@ history: `decode` ignores unknown optional fields of a known `v`, `encode` refus
 The word "session" also names `sessions.jsonl` in a run's storage (the index of coding-agent hook sessions). That is a
 different thing and is not touched here.
 
+**Engine steps** (`docs/engines.md`) start host sessions named `ke-<run id>-<visit id>-<attempt>` (`origin: "host"`,
+`timeoutMs` always set). The host never removes them, so `ke-` records accumulate until a person runs `kodel agent rm`
+(follow-up "Free finished `ke-` records"). The record format does not change.
+
 Golden fixtures: `fixtures/session-formats/v1/` (`scripts/take-session-fixtures.mjs`).
 
 **Refutation.** The record format is wrong if a reader of the same `v` must change to read a record a later compatible build

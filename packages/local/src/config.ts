@@ -27,6 +27,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { parse } from "yaml";
 import { z } from "zod";
+import { type EngineProfile, enginesSchema } from "./engines";
 import { MAX_PATCH_KB } from "./patch-text";
 import { CONFIG_FILE } from "./project-locate";
 import {
@@ -114,6 +115,11 @@ export interface ProjectConfig {
   storage: StorageMode;
   /** The stable name of the project's folder in `home` mode; it is committed, so a move keeps the history. */
   project_id?: string;
+  /**
+   * The programs that run steps with `engine:` (T-42), by profile name. The person's block: the agent
+   * never edits it. Empty when the config has none.
+   */
+  engines: Record<string, EngineProfile>;
 }
 
 export { DEFAULT_AGENTS };
@@ -276,6 +282,7 @@ const configSchema = z
       .optional(),
     storage: z.enum(STORAGE_MODES as [StorageMode, ...StorageMode[]]).optional(),
     project_id: z.string().optional(),
+    engines: enginesSchema.optional(),
   })
   .strict();
 
@@ -322,6 +329,7 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
         },
         agents: { ...DEFAULT_AGENTS },
         storage: "project",
+        engines: {},
       };
     }
     throw error;
@@ -424,6 +432,7 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
     },
     storage: parsed.data.storage ?? "project",
     ...(parsed.data.project_id === undefined ? {} : { project_id: parsed.data.project_id }),
+    engines: parsed.data.engines ?? {},
   };
 }
 

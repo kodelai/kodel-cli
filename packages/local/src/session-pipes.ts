@@ -87,6 +87,11 @@ export interface PipesAdapterOptions {
   baseEnv?: Record<string, string | undefined>;
   /** Project redaction rules; one with a function cannot reach the holder and ends the session `rules_unknown`. */
   rules?: RedactRule[];
+  /**
+   * Tests only: called right after the session folder is published, before the holder is started. A hook
+   * that throws stands for a process that dies there (nothing is rolled back). Inert when absent.
+   */
+  testHooks?: { afterPublish?(id: string): void };
 }
 
 /** The command a person typed, for `ls`: a shell command, or the argv joined (already redacted in the record). */
@@ -213,6 +218,7 @@ export class PipesSessionAdapter implements SessionAdapter {
       rollback();
       throw new SessionError("STATE_UNWRITABLE", (error as Error).message);
     }
+    this.opts.testHooks?.afterPublish?.(id);
 
     const rules = this.opts.rules ?? [];
     const wire: WireRule[] = rules

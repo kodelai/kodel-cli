@@ -79,6 +79,7 @@ const STATE_TABLE = {
   agentLog: "kept",
   usage: "kept",
   toolCalls: "kept",
+  engineSession: "refused",
 } satisfies Record<keyof RunState, Disposition>;
 
 const NODE_TABLE = {
@@ -197,6 +198,7 @@ export const V2_ONLY_EVENTS = [
   "step_claimed",
   "step_claim_conflict",
   "agent_session_named",
+  "engine_session_started",
 ];
 /**
  * The journal field a fork adds to existing events (with `branch`, which the events of format 1 use

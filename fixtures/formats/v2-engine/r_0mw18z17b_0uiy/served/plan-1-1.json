@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "node": "plan",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "835814bccf99a8b1e98c8b557e5b30be64850287254cf41937c98246fe244b28",
+  "answer": {
+    "slug": "plan",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "Plan Add a readiness check."
+  }
+}

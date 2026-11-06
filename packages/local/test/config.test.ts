@@ -63,6 +63,7 @@ describe("the project config", () => {
       },
       agents: { subagents: "auto", max_parallel: 8, claim_ttl_s: 900 },
       storage: "project",
+      engines: {},
     });
   });
 

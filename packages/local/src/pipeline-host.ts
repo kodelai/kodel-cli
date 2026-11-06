@@ -49,6 +49,7 @@ import { AgentLogTickers, type Timers } from "./agent-log-ticker";
 import { loadConfig, type ProjectConfig, type WorktreeConfig } from "./config";
 import { GitSnapshotter, git } from "./git";
 import {
+  engineStepsRefusal,
   type HostOptions,
   hashSource,
   hashSpec,
@@ -398,6 +399,9 @@ export class LocalPipelineHost implements PipelineHost {
       }
       throw error;
     }
+    const engineRefusal = this.engineRefusal(spec);
+    if (engineRefusal)
+      return { ok: false, code: engineRefusal.code, message: engineRefusal.message };
     const problem = proposalNameProblem(spec.name);
     if (problem !== undefined) return refuse("INVALID_ARGUMENTS", problem);
     if (input.name !== undefined && input.name !== spec.name) {
@@ -535,6 +539,9 @@ export class LocalPipelineHost implements PipelineHost {
       };
     }
     if (view.refused !== undefined) return { ok: false, message: view.refused };
+    // Before anything is written: a pipeline with an engine step this kodel cannot run is not put in place.
+    const engineRefusal = view.spec === undefined ? undefined : this.engineRefusal(view.spec);
+    if (engineRefusal) return { ok: false, message: engineRefusal.message };
     await mkdir(this.dir, { recursive: true });
     if (view.record.kind === "new") {
       // Linked into place, so a file that appeared since the check is never replaced.
@@ -571,6 +578,16 @@ export class LocalPipelineHost implements PipelineHost {
     const path = relative(this.options.root, join(this.dir, file));
     if (path === "" || path.startsWith("..") || isAbsolute(path)) return undefined;
     return path.split(sep).join("/");
+  }
+
+  /** Why a pipeline with an engine step cannot be proposed or put in place by this kodel. */
+  private engineRefusal(spec: PipelineSpec): KodelError | undefined {
+    return engineStepsRefusal(spec, {
+      engine: this.options.engine ?? {},
+      rules: this.options.rules ?? [],
+      platform: this.options.platform ?? process.platform,
+      offReason: this.options.engineStepsOffReason,
+    });
   }
 
   private hostFor(spec: PipelineSpec, source: string | undefined, file?: string): LocalHost {
@@ -764,6 +781,14 @@ export class LocalPipelineHost implements PipelineHost {
       ...(prepared.restarting ? { restarted: true as const } : {}),
       ...(began.note === undefined ? {} : { warning: began.note }),
     };
+  }
+
+  /** The engine sessions the runs of this process waited for, to name when the server leaves. */
+  sessionsNote(): string | undefined {
+    const notes = [...this.runs.values()]
+      .map((run) => run.sessionsNote())
+      .filter((note): note is string => note !== undefined);
+    return notes.length === 0 ? undefined : notes.join("; ");
   }
 
   /**

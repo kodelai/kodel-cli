@@ -1,0 +1,17 @@
+name: engine-unknown
+description: an agent step, an engine step whose first outcome is unknown, a gate
+nodes:
+  - slug: plan
+    kind: agent
+    prompt: Plan {{task}}.
+  - slug: review
+    kind: agent
+    engine: quick
+    prompt: Review the plan for {{task.slug}}.
+  - slug: approve
+    kind: human
+    prompt: Approve the review?
+edges:
+  - { from: plan, to: review }
+  - { from: review, to: approve }
+  - { from: approve, to: review, when: rejected }

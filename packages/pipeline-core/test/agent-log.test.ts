@@ -567,6 +567,11 @@ describe("t41 a consumer that has to know every event", () => {
     cancel: true,
     changes_recorded: true,
     task_note: true,
+    engine_start_pending: true,
+    engine_session_started: true,
+    engine_session_joined: true,
+    work_unknown: true,
+    engine_start_abandoned: true,
   } satisfies Record<RunEvent["type"], true>;
 
   test("t41_the_event_that_names_a_session_is_in_the_table_of_the_consumer", () => {
