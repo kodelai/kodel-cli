@@ -2311,6 +2311,15 @@ export class LocalRun {
         }
       }
     }
+    // Say who runs each piece of work before any of it starts, under this decision's lock: if this
+    // process goes, the next one sees at once that the owner is gone and starts the work again, and no
+    // heartbeat of this decision takes the lock after a command has started.
+    for (const effect of work) {
+      await this.decideAndWrite(
+        { type: "heartbeat", node: effect.node, attempt: effect.attempt, owner: this.host.ownerId },
+        false,
+      ).catch(() => undefined);
+    }
     for (const effect of work) this.spawn(effect);
     for (const effect of sessions) this.spawnSession(effect);
   }
@@ -2669,17 +2678,12 @@ export class LocalRun {
     this.tasks.set(key, { controller, node: effect.node, attempt: effect.attempt });
     // Say who is running it right away: if this process goes, the next session sees at once that
     // the owner is gone and starts the work again, without waiting for the heartbeat to go stale.
-    const announced = heartbeat();
+    // The owner was said already, under the lock of the decision that issued the work (`dispatchAll`):
+    // no heartbeat is applied now, so the work never starts while this process holds the lock for one.
 
     const job = (async () => {
       try {
         let event: RunEvent;
-        // The work starts once its owner is said and the decisions queued before it (the heartbeats of
-        // the other work this decision issued) are written, so it never starts while this process holds
-        // the run's lock for one of them.
-        await announced;
-        await this.queue.catch(() => undefined);
-        if (controller.signal.aborted) return;
         try {
           event =
             effect.type === "run_command"
@@ -2868,11 +2872,15 @@ export class LocalRun {
    * it counts tasks of the whole run, so it is only meant for a wait without `node`.
    */
   async settle(
-    parked: () => number = () => 0,
+    parked?: () => number,
     deadline = Number.POSITIVE_INFINITY,
     node?: string,
     scope: WaitScope = "chain",
   ): Promise<void> {
+    // A task parks itself without ending (a test's hanging command), so the count of parked tasks can
+    // grow while nothing ends: with a count given, the wait looks again now and then.
+    const polled = parked !== undefined;
+    const parkedNow = parked ?? (() => 0);
     // With a node, only the jobs that are the caller's (`ownWork`): the node's own, or the chain its
     // branch leads into, but never a sibling's command that may run for an hour. The jobs that record
     // the end of the run are everyone's: a decision that ended the run waits for its patch, or a
@@ -2900,10 +2908,10 @@ export class LocalRun {
     for (;;) {
       await queued();
       let jobs = await mine();
-      if (jobs.length <= parked()) {
+      if (jobs.length <= parkedNow()) {
         await queued();
         jobs = await mine();
-        if (jobs.length <= parked()) return;
+        if (jobs.length <= parkedNow()) return;
       }
       const left = deadline - Date.now();
       if (left <= 0) return;
@@ -2911,7 +2919,8 @@ export class LocalRun {
       // goes on until the work is done.
       let timer: ReturnType<typeof setTimeout> | undefined;
       const wake = new Promise<void>((resolve) => {
-        timer = Number.isFinite(left) ? setTimeout(resolve, left) : undefined;
+        const wait = polled ? Math.min(left, 25) : left;
+        timer = Number.isFinite(wait) ? setTimeout(resolve, wait) : undefined;
       });
       try {
         await Promise.race([...jobs, wake]);
@@ -2943,7 +2952,7 @@ export class LocalRun {
   async waitForRest(ms: number, node?: string, scope: WaitScope = "chain"): Promise<void> {
     if (ms <= 0) return;
     const deadline = Date.now() + ms;
-    await this.settle(() => 0, deadline, node, scope);
+    await this.settle(undefined, deadline, node, scope);
     // What is left is work another process owns. It is watched in the state on disk, and looked at
     // with a tick now and then, so work that has gone silent or lost its owner is started again
     // during the wait instead of after it.
@@ -2954,7 +2963,7 @@ export class LocalRun {
       // out of the wait, and lost when the process that waits exits right after.
       if (++rounds % 4 === 0) await this.tick(node, scope).catch(() => undefined);
       // a tick may have started work in this process
-      await this.settle(() => 0, deadline, node, scope);
+      await this.settle(undefined, deadline, node, scope);
     }
   }
 
