@@ -196,11 +196,11 @@ nodes:
       Keep changes within the plan. Add or update tests for the changed behavior.
       Follow the conventions in AGENTS.md (English only, no `any`, Biome style).
 
-      After this step the engine itself runs the steps `verify` (typecheck and lint), `test` (the full
-      suite) and `build`. Do not run the full test suite, lint or build yourself, and do not let a
-      subagent do it: run only the tests of the files you touched, and typecheck. If you hand work to
-      a subagent, put this rule into its brief. If `test` fails, the feedback names the failing tests:
-      rerun only those files.
+      After this step the engine itself runs the steps `verify` (typecheck and lint), then `review`
+      (an independent look at the change), then `test` (the full suite) and `build`. Do not run the
+      full test suite, lint or build yourself, and do not let a subagent do it: run only the tests of
+      the files you touched, and typecheck. If you hand work to a subagent, put this rule into its
+      brief. If `test` fails, the feedback names the failing tests: rerun only those files.
 
       If you were sent back because of conflicts with main (the feedback lists the conflicting files,
       from the sync step or from the pull request): commit your work on the run's branch
@@ -218,18 +218,8 @@ nodes:
     expected_duration: 20
     timeout: 300
 
-  - slug: test
-    kind: command
-    command: "bun test"
-    expected_duration: 360
-    timeout: 900
-
-  - slug: build
-    kind: command
-    command: "bun run build && bun run check:artifact"
-    expected_duration: 30
-    timeout: 300
-
+  # Before the slow `test`: review sends the run back to impl in more than half of the attempts, and
+  # every such return would make the full suite run again for nothing.
   - slug: review
     kind: agent
     fresh_context: true     # an independent look: not by the one who wrote the change
@@ -244,6 +234,18 @@ nodes:
           description: text
         fail_when: { severity: [blocker, critical, major] }
         on_fail: blocking_findings
+
+  - slug: test
+    kind: command
+    command: "bun test"
+    expected_duration: 360
+    timeout: 900
+
+  - slug: build
+    kind: command
+    command: "bun run build && bun run check:artifact"
+    expected_duration: 30
+    timeout: 300
 
   # Would this work merge into the latest main? Asked on a temporary commit of the working tree
   # (tracked, new and changed files, not ignored ones), so nothing in the worktree is touched.
@@ -340,14 +342,14 @@ edges:
   - { from: plan-approval,  to: impl,         when: approved }
   - { from: plan-approval,  to: plan,         when: rejected }
   - { from: impl,           to: verify }
-  - { from: verify,         to: test }
+  - { from: verify,         to: review }
   - { from: verify,         to: impl,         when: failed }
+  - { from: review,         to: test }
+  - { from: review,         to: impl,         when: blocking_findings }
   - { from: test,           to: build }
   - { from: test,           to: impl,         when: failed }
-  - { from: build,          to: review }
+  - { from: build,          to: sync }
   - { from: build,          to: impl,         when: failed }
-  - { from: review,         to: sync }
-  - { from: review,         to: impl,         when: blocking_findings }
   - { from: sync,           to: final-approval }
   - { from: sync,           to: impl,         when: failed }
   - { from: final-approval, to: publish,      when: approved }
