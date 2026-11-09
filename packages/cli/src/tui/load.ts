@@ -25,6 +25,7 @@ import {
   type StepLine,
   type StepState,
 } from "./session";
+import { decisionOf } from "./worker-resume";
 
 /** The part of a run the screens read; `LocalRun` fits it. */
 export interface RunHandle {
@@ -152,11 +153,14 @@ async function buildSession(
   }
   const journal = await run.journal().catch(() => [] as JournalRecord[]);
   const agentSession = agentSessionOf(journal);
+  const decided = decisionOf(journal);
   const full = {
     ...base,
     steps: stepLines(state),
     log: logLines(journal, now),
     ...(agentSession === undefined ? {} : { agentSession }),
+    ...(decided.lastWait === undefined ? {} : { lastWait: decided.lastWait }),
+    ...(decided.decision === undefined ? {} : { decision: decided.decision, moved: decided.moved }),
   };
   const ended =
     state.status === "completed" || state.status === "failed" || state.status === "canceled";

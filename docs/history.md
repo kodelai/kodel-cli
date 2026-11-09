@@ -286,7 +286,7 @@ is `{ value, source }`, and a part that cannot be observed is left out, never gu
 
 | source | meaning |
 | --- | --- |
-| `observed` | the transport says it (the MCP handshake: the client's name and version) |
+| `observed` | the transport says it (the MCP handshake: the client's name and version), or a kodel command that names itself (`kodel-tui` for a run started with `s` in the TUI) |
 | `observed-env` | the environment of the server (`CLAUDE_CODE_SESSION_ID`): the session that was current when the server started. A server lives as long as its agent process, so after `/clear` it still names the old session |
 | `observed-hook` | the newest session the hooks registered in the session index (`.kodel/sessions.jsonl`, or its place under `~/.kodel` with `storage: home`) for the run's directories; used when the environment has none |
 | `derived` | read out of the session's own log (the model of its last answer, the name of the session) |

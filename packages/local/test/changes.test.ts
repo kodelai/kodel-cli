@@ -136,6 +136,26 @@ describe("a pipeline file edited under a run in the repository root", () => {
     expect(await offered()).toBe(true);
   });
 
+  test("task_9pns_host_option_agent_hints_overrides_the_config", async () => {
+    // A server that serves a background agent passes `agentHints: { wait: false }`: the config's
+    // `wait: true` (the default here) and a config that cannot be read both lose to it.
+    const forced = new LocalPipelineHost({
+      root: dir,
+      heartbeatMs: 0,
+      agentHints: { wait: false },
+    });
+    const run = await startRun(forced);
+    await run.completeStep("write", 1);
+    await run.waitForRest(5_000);
+    const offered = async () => JSON.stringify(await run.nextStep()).includes("kodel wait");
+    expect(await offered()).toBe(false);
+    await writeFile(join(dir, ".kodel", "config.yaml"), "agent_hints: [\n");
+    expect(await offered()).toBe(false);
+    // The same run through a host without the option reads the config as before.
+    const plain = (await host().open(run.runId)) as LocalRun;
+    expect(JSON.stringify(await plain.nextStep())).toContain(`kodel wait ${run.runId}`);
+  });
+
   test("t40_bad_agents_block_keeps_wait_false", async () => {
     const run = await startRun();
     await run.completeStep("write", 1);

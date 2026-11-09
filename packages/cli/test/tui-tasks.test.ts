@@ -595,20 +595,8 @@ describe("a task is not a run", () => {
     expect(() => screen(update(broken, "3"))).not.toThrow();
   });
 
-  test("task_g4jy_backlog_has_no_start_key", () => {
-    const base = waiting();
-    for (let code = 33; code < 127; code += 1) {
-      const key = String.fromCharCode(code);
-      if (key === "t") continue;
-      const next = update(takeEffects(base)[0], key);
-      for (const effect of next.effects) expect(effect.type).toBe("load_task");
-    }
-    for (const focus of ["list", "card"] as const) {
-      const hint = lines({ ...base, focus }, WIDE).at(-1) ?? "";
-      expect(hint.toLowerCase()).not.toContain("start");
-      expect(hint).toContain("t tasks");
-    }
-  });
+  // `s` starts a task in a background agent (TASK-9PNS): `task_9pns_backlog_offers_s` in
+  // tui-worker.test.ts replaced `task_g4jy_backlog_has_no_start_key` and walks the other keys.
 });
 
 describe("the mouse over the Backlog", () => {
@@ -969,13 +957,13 @@ describe("when the tasks are read", () => {
     // The first read is at the start.
     refresh.start(0);
     expect(lists.length).toBe(1);
-    // While it is out, neither the timer nor the screen starts another.
+    // While it is out, the timer starts no other.
     refresh.tick(TASKS_EVERY_MS * 5);
-    refresh.openScreen(TASKS_EVERY_MS * 5);
     expect(lists.length).toBe(1);
     lists[0]?.resolve({ status: "off" });
     await flush();
     expect(answers).toEqual([{ status: "off" }]);
+    expect(lists.length).toBe(1);
     // After it, the timer waits the interval; the screen does not.
     refresh.tick(TASKS_EVERY_MS - 1);
     expect(lists.length).toBe(1);
@@ -994,6 +982,55 @@ describe("when the tasks are read", () => {
     older?.resolve({ status: "failed", message: "older" });
     await flush();
     expect(slots).toEqual([["T-A", { status: "failed", message: "newer" }]]);
+  });
+
+  test("task_9pns_a_list_read_asked_for_while_one_is_out_is_made_once_after_it", async () => {
+    const lists: ReturnType<typeof later<TasksLoad>>[] = [];
+    const answers: TasksLoad[] = [];
+    const cards: string[] = [];
+    const refresh = createTasksRefresh({
+      load: () => {
+        const d = later<TasksLoad>();
+        lists.push(d);
+        return d.promise;
+      },
+      loadCard: async () => ({ status: "loading" }),
+      onLoad: (l) => answers.push(l),
+      onCard: (k) => cards.push(k),
+      shownKey: () => "T-A",
+    });
+    refresh.start(0);
+    // The screen asks twice while the read is out (a task was created, the screen was opened): one read is
+    // kept for after it, not two, and none goes out meanwhile.
+    refresh.openScreen(5);
+    refresh.openScreen(6);
+    expect(lists.length).toBe(1);
+    expect(answers).toEqual([]);
+    lists[0]?.resolve({ status: "off" });
+    await flush();
+    expect(lists.length).toBe(2);
+    // The first answer is shown (it was the newest when it came), and the kept read is out at once.
+    expect(answers).toEqual([{ status: "off" }]);
+    // The card of the shown task is read after each list, the kept read as well.
+    expect(cards).toEqual(["T-A"]);
+    // Nothing was asked while the kept read is out: nothing follows it, and its answer, the newest, is kept.
+    lists[1]?.resolve({ status: "error", message: "second" });
+    await flush();
+    expect(lists.length).toBe(2);
+    expect(answers).toEqual([{ status: "off" }, { status: "error", message: "second" }]);
+    expect(cards).toEqual(["T-A", "T-A"]);
+    // The kept read counts as the latest request's: the timer waits the interval from there.
+    refresh.tick(6 + TASKS_EVERY_MS - 1);
+    expect(lists.length).toBe(2);
+    refresh.tick(6 + TASKS_EVERY_MS);
+    expect(lists.length).toBe(3);
+    // The timer itself keeps no read: a read older than the interval is made at the next tick anyway.
+    refresh.tick(6 + TASKS_EVERY_MS * 3);
+    lists[2]?.resolve({ status: "off" });
+    await flush();
+    expect(lists.length).toBe(3);
+    refresh.tick(6 + TASKS_EVERY_MS * 3 + 1);
+    expect(lists.length).toBe(4);
   });
 
   test("task_g4jy_tasks_read_is_detached_from_runs", async () => {

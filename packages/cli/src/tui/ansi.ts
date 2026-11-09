@@ -13,8 +13,9 @@ export const blue = wrap("34");
 export const magenta = wrap("35");
 export const cyan = wrap("36");
 
+/** Splits a text at its style sequences: the odd parts of the split are the sequences. */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching the escape character is the point
-const SEQUENCE = /(\u001b\[[0-9;]*m)/;
+export const SEQUENCE = /(\u001b\[[0-9;]*m)/;
 
 // What can act on a terminal: an operating-system command (title, clipboard), a control string, a
 // control sequence, any other escape, and the control characters themselves.

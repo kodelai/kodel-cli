@@ -1,5 +1,6 @@
 /** What the screens know about a run: the engine's state boiled down to what a person looks at. */
 import type { ExecutorSource } from "@kodel-ai/pipeline-core";
+import type { DecisionMark, WaitMark } from "./worker-resume";
 
 /** `unreadable`: nothing can be decided about it, so it does not wait for anyone. */
 export type Status = "waiting" | "running" | "failed" | "done" | "canceled" | "unreadable";
@@ -99,6 +100,13 @@ export interface Session {
   besides?: { kind: "gate" | "pause"; node: string; command: string }[];
   /** Why a failed run failed. */
   reason?: string;
+  /**
+   * The last wait a person had to decide, the decision after it and whether an agent moved since,
+   * as the journal has them (`worker-resume.ts`): what the card of a run with a background agent reads.
+   */
+  lastWait?: WaitMark;
+  decision?: DecisionMark;
+  moved?: boolean;
   steps: StepLine[];
   log: string[];
 }

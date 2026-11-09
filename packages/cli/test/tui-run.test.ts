@@ -56,7 +56,8 @@ describe("tui loop", () => {
     await wait(80);
     const card = t.since();
     expect(card).toContain("Report");
-    expect(card).toContain("Look at the diff and try the change.");
+    // The Report tab opens on the agent's answer; the question is further down the card.
+    expect(card).toContain("THE AGENT'S ANSWER");
 
     t.type("q");
     expect(await done).toBe(0);

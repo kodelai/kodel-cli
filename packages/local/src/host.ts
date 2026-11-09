@@ -189,6 +189,12 @@ export interface HostOptions {
    * when it is here, so they never name one the server does not offer.
    */
   agentDecisions?: { gate?: boolean; pipelineChange?: boolean };
+  /**
+   * The hints the waiting answers carry, over the `agent_hints` block of the config: a server that
+   * serves an agent whose turn must end at a wait (`kodel mcp --no-wait-hint`) passes `wait: false`
+   * whatever the project says; what is not set here is read from the config at each answer.
+   */
+  agentHints?: { wait?: boolean };
   rules?: RedactRule[];
   engine?: EngineOptions;
   clock?: () => number;
@@ -1111,12 +1117,16 @@ export class LocalRun {
   private async hints(): Promise<{ wait: boolean; agents: AgentsConfig }> {
     const { options } = this.host;
     const storeRoot = options.storeRoot ?? `${options.root}/.kodel`;
+    const forced = options.agentHints?.wait;
     try {
       const config = await loadConfig(storeRoot);
-      return { wait: config.agent_hints.wait, agents: config.agents };
+      return { wait: forced ?? config.agent_hints.wait, agents: config.agents };
     } catch {
       // Only what failed falls back: a valid `agent_hints` block is kept beside a bad `agents` value.
-      return { wait: (await loadAgentHints(storeRoot)).wait, agents: { ...DEFAULT_AGENTS } };
+      return {
+        wait: forced ?? (await loadAgentHints(storeRoot)).wait,
+        agents: { ...DEFAULT_AGENTS },
+      };
     }
   }
 
