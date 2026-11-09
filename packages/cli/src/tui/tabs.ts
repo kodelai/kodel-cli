@@ -1,4 +1,5 @@
 /** The card of a run waiting at a human step: the band on top, the tabs, and what each tab shows, as lines of text. */
+import { DIGEST_LINES } from "../claude-stream";
 import {
   bold,
   cyan,
@@ -54,7 +55,12 @@ export interface TabState {
  * going on has nothing to read as a report and nothing to comment on, so it has three.
  */
 export function visibleTabs(d: GateDetail): number[] {
-  return d.kind === "running" ? [STEPS, CODE, LOG] : [REPORT, CODE, STEPS, COMMENTS, LOG];
+  return tabsOf(d.kind);
+}
+
+/** The same set, for a card that is not read yet: its kind is known from the list row. */
+export function tabsOf(kind: GateDetail["kind"]): number[] {
+  return kind === "running" ? [STEPS, CODE, LOG] : [REPORT, CODE, STEPS, COMMENTS, LOG];
 }
 
 /** The tabs that are a list of things to select. */
@@ -79,6 +85,17 @@ export interface Context {
   runId: string;
   /** The instructions written for the agent are shown. */
   instructions: boolean;
+  /** The background agent of the run, when the TUI started one: its name and the digest of its stream. */
+  worker?: WorkerLog;
+  /** What the keys do at this gate, as the Report tab says it (`a Approve · r Reject`, or the command). */
+  decide?: string;
+}
+
+/** The part of a run's background agent the tabs read (`worker-launcher.ts`): its record's name and the digest. */
+export interface WorkerLog {
+  name: string;
+  resumes: number;
+  lines: string[];
 }
 
 export interface Content {
@@ -226,17 +243,6 @@ export function headerBand(
   now: number,
   compact = false,
 ): string[] {
-  const inner = Math.max(10, width - 4);
-  const line = (content: string) => `${dim("│")} ${fit(content, inner)} ${dim("│")}`;
-  const agent = s.agentSession;
-  // Below 22 rows there is no room for a line of its own: the session stands where the id and pipeline did.
-  const right = dim(
-    compact && agent
-      ? sessionLine(agent, Math.max(16, Math.floor(inner / 2)))
-      : `${s.id} · ${s.pipeline}`,
-  );
-  const left = `${glyph} ${bold(fit(s.title, Math.max(8, inner - visibleLength(right) - 3)).trimEnd())}`;
-  const gap = Math.max(1, inner - visibleLength(left) - visibleLength(right));
   const m = d.metrics;
   const bar = (done: number, total: number) => {
     const cells = 8;
@@ -280,13 +286,72 @@ export function headerBand(
   ];
   const where =
     d.kind === "running"
-      ? `${bold(cyan(`running · ${d.node}`))} ${dim(`· ${d.position} · for ${formatAge(now - s.since)}`)}${
-          s.activity === "quiet" ? yellow(`  quiet ${formatAge(s.quietMs ?? 0)}`) : ""
-        }`
+      ? whereRunning(s, d.node, d.position, now)
       : `${bold(yellow(`${d.position} · ${d.node}`))} ${dim(`· waiting ${formatAge(now - s.since)}`)}`;
+  return band(s, width, glyph, where, [...chips, ...warnings], compact);
+}
+
+function whereRunning(s: Session, node: string, position: string, now: number): string {
+  return `${bold(cyan(`running · ${node}`))} ${dim(`· ${position} · for ${formatAge(now - s.since)}`)}${
+    s.activity === "quiet" ? yellow(`  quiet ${formatAge(s.quietMs ?? 0)}`) : ""
+  }`;
+}
+
+/**
+ * The band of a card that is not read yet, in the same lines as `headerBand`: what the list row knows
+ * (name, id, pipeline, session, the step, how long), and a placeholder for every figure the card brings.
+ * The placeholders are about as wide as the usual figures, so the numbers flow over the same lines and
+ * the tabs below do not move when the card lands.
+ */
+export function skeletonBand(
+  s: Session,
+  kind: GateDetail["kind"],
+  node: string | undefined,
+  width: number,
+  glyph: string,
+  now: number,
+  compact = false,
+): string[] {
+  const gap = dim("…");
+  const at = node === undefined ? gap : node;
+  const where =
+    kind === "running"
+      ? whereRunning(s, at, `step ${gap}`, now)
+      : `${bold(yellow(`gate ${gap} · ${at}`))} ${dim(`· waiting ${formatAge(now - s.since)}`)}`;
+  const faint = (text: string) => chip(text, dim(text));
+  const chips = [
+    faint("⏱ … work · … waiting"),
+    faint(`${"▯".repeat(8)} … steps`),
+    faint("…/… checks"),
+    faint("± … files · … lines"),
+    faint("⛁ … tokens"),
+  ];
+  return band(s, width, glyph, where, chips, compact);
+}
+
+/** The frame of the band: the name line, the session, where the run stands, and the numbers flowed below. */
+function band(
+  s: Session,
+  width: number,
+  glyph: string,
+  where: string,
+  chips: { text: string; plain: number }[],
+  compact: boolean,
+): string[] {
+  const inner = Math.max(10, width - 4);
+  const line = (content: string) => `${dim("│")} ${fit(content, inner)} ${dim("│")}`;
+  const agent = s.agentSession;
+  // Below 22 rows there is no room for a line of its own: the session stands where the id and pipeline did.
+  const right = dim(
+    compact && agent
+      ? sessionLine(agent, Math.max(16, Math.floor(inner / 2)))
+      : `${s.id} · ${s.pipeline}`,
+  );
+  const left = `${glyph} ${bold(fit(s.title, Math.max(8, inner - visibleLength(right) - 3)).trimEnd())}`;
+  const gap = Math.max(1, inner - visibleLength(left) - visibleLength(right));
   if (compact) {
     // Little room: no frame, and the numbers on one line, cut where they stop fitting.
-    const all = flow([...chips, ...warnings], "  ", inner)[0] ?? "";
+    const all = flow(chips, "  ", inner)[0] ?? "";
     return [fit(`${left}${" ".repeat(gap)}${right}`, width), fit(where, width), fit(all, width)];
   }
   return [
@@ -294,7 +359,7 @@ export function headerBand(
     line(`${left}${" ".repeat(gap)}${right}`),
     ...(agent ? [line(dim(sessionLine(agent, inner)))] : []),
     line(where),
-    ...flow([...chips, ...warnings], "  ", inner).map(line),
+    ...flow(chips, "  ", inner).map(line),
     dim(`╰${"─".repeat(width - 2)}╯`),
   ];
 }
@@ -354,6 +419,27 @@ export function tabStrip(d: GateDetail, active: number, width: number, focused: 
   );
 }
 
+/** The tab row of a card that is not read yet: the names in their places, a placeholder for each count. */
+export function skeletonStrip(
+  kind: GateDetail["kind"],
+  active: number,
+  width: number,
+  focused: boolean,
+) {
+  const tabs = tabsOf(kind);
+  return strip(
+    tabs.map((id) => {
+      const name = TABS[id] ?? "";
+      return id === REPORT
+        ? { text: name, styled: name }
+        : { text: `${name} …`, styled: `${name} ${dim("…")}` };
+    }),
+    Math.max(0, tabs.indexOf(active)),
+    width,
+    focused,
+  );
+}
+
 function subStrip(active: number, width: number, focused: boolean) {
   return strip(
     SUBTABS.map((name) => ({ text: name, styled: name })),
@@ -365,37 +451,87 @@ function subStrip(active: number, width: number, focused: boolean) {
 
 // ── what each tab shows ─────────────────────────────────────────────────────
 
+/** How much of the agent's answer the Report tab shows before it points at the log. */
+const ANSWER_LINES = 60;
+const ANSWER_CHARS = 6000;
+/** How many changed files the Report tab lists before it points at the Code tab. */
+const CHANGED_ROWS = 12;
+
+/** The agent's last answer and where it comes from: its own log, a step's summary, or the digest of its stream. */
+function answerOf(d: GateDetail, ctx: Context): { text: string; where: string } | undefined {
+  if (d.report !== undefined) {
+    const where =
+      d.report.from === "log"
+        ? `written ${formatAge(ctx.now - d.report.ts)} ago`
+        : `from step «${d.report.step ?? "?"}»`;
+    return { text: d.report.text, where };
+  }
+  // The digest keeps the agent's texts as `> …` lines; the last one is what it said before it exited.
+  const said = ctx.worker?.lines.findLast((l) => l.startsWith("> "));
+  if (said === undefined) return undefined;
+  return { text: said.slice(2), where: `its last words · kodel agent logs ${ctx.worker?.name}` };
+}
+
+/**
+ * What a person reads at a gate, in the order they decide: the agent's answer, what changed, then the
+ * question and the keys. The agent's log (its tool calls) is not here: it is under Log, and above the
+ * tabs only while the run is going on.
+ */
 function report(d: GateDetail, ctx: Context): Content {
   const { width } = ctx;
-  // The question the pipeline asks, and straight after it what the agent said.
   const out: string[] = [];
+  const answer = answerOf(d, ctx);
+  if (answer !== undefined) {
+    out.push(dim(`THE AGENT'S ANSWER · ${answer.where}`));
+    const text =
+      answer.text.length > ANSWER_CHARS ? `${answer.text.slice(0, ANSWER_CHARS)}…` : answer.text;
+    out.push(
+      ...capLines(prose(text, width), ANSWER_LINES, (left) =>
+        dim(`… ${left} more line${left === 1 ? "" : "s"}: see Log`),
+      ),
+    );
+    out.push("");
+  }
+  out.push(...changedFiles(d, width), "");
+  out.push(dim("YOUR DECISION"));
   for (const [i, l] of wrapText(d.prompt, Math.max(10, width - 2)).entries()) {
     out.push(i === 0 ? `${cyan("❯")} ${bold(l)}` : `  ${bold(l)}`);
   }
   // What the pipeline's author wrote for the agent to turn into its message; the person needs it
   // only when they want to see what the agent was told.
   if (ctx.instructions && d.instructions) {
-    out.push("", dim("INSTRUCTIONS THE AGENT WAS GIVEN FOR ITS MESSAGE"));
+    out.push(dim("INSTRUCTIONS THE AGENT WAS GIVEN FOR ITS MESSAGE"));
     for (const l of wrapText(d.instructions, width)) out.push(dim(l));
+    out.push("");
   }
-  out.push("");
-  if (d.report === undefined) {
-    out.push(dim("THE AGENT'S REPORT"));
-    out.push(
-      ...wrapText(
-        "Not found. The agent's own log can be read for Claude Code only, and no step left a summary.",
-        width,
-      ).map((l) => dim(l)),
-    );
-    return { lines: out.map((l) => fit(l, width)) };
-  }
-  const where =
-    d.report.from === "log"
-      ? `written ${formatAge(ctx.now - d.report.ts)} ago`
-      : `from step «${d.report.step ?? "?"}»`;
-  out.push(dim(`THE AGENT'S REPORT · ${where}`));
-  out.push(...prose(d.report.text, width));
+  if (ctx.decide !== undefined) out.push(ctx.decide);
   return { lines: out.map((l) => fit(l, width)) };
+}
+
+/** The files the run changed, with their line counts, as the Code tab counts them; the first few here. */
+function changedFiles(d: GateDetail, width: number): string[] {
+  const c = d.changes;
+  if (c.kind === "none") return [dim("CHANGED FILES"), "No files changed."];
+  if (c.kind === "no_repo") return [dim("CHANGED FILES"), dim("This is not a git repository.")];
+  if (c.kind === "unavailable") {
+    return [
+      dim("CHANGED FILES"),
+      ...wrapText(`Cannot tell what changed: ${c.reason}`, width).map(yellow),
+    ];
+  }
+  const out = [
+    dim(
+      `CHANGED FILES · ${c.totalFiles} file${c.totalFiles === 1 ? "" : "s"} · ${c.totalLines} lines`,
+    ),
+  ];
+  for (const [file, lines] of c.files.slice(0, CHANGED_ROWS)) {
+    out.push(`  ${fit(tailFit(file, width - 10), width - 10)}${String(lines).padStart(6)}`);
+  }
+  if (c.files.length > CHANGED_ROWS) {
+    out.push(dim(`  … ${c.files.length - CHANGED_ROWS} more under Code`));
+  }
+  out.push(dim("  The Code tab opens each diff."));
+  return out;
 }
 
 function commentCount(d: GateDetail, path: string): number {
@@ -725,8 +861,53 @@ function agentView(entries: LogEntry[], width: number): string[] {
 const NO_AGENT_LOG =
   "The agent's own log can be read for Claude Code only. These are the pipeline's events.";
 
+/**
+ * What the agent said and did, as one list of lines: its own log when it can be read, else the digest of
+ * the background agent's stream. The Log tab shows the whole of it; the block above the tabs of a run
+ * that is going on shows its tail, so both read the same.
+ */
+export function activityLines(
+  d: GateDetail | undefined,
+  worker: WorkerLog | undefined,
+  width: number,
+): string[] | undefined {
+  if (d?.agentLog) return agentView(d.agentLog, width);
+  if (worker !== undefined && worker.lines.length > 0) {
+    return worker.lines.map((l) => fit(`  ${l}`, width));
+  }
+  return undefined;
+}
+
+/** The tail of `activityLines` under the agent's name, with the command for the whole log. */
+export function activityBlock(
+  d: GateDetail | undefined,
+  worker: WorkerLog,
+  width: number,
+): string[] {
+  const session = worker.resumes > 0 ? ` (session ${worker.resumes + 1})` : "";
+  return [
+    dim(`AGENT · ${worker.name}${session}`),
+    ...(activityLines(d, worker, width) ?? []).slice(-DIGEST_LINES),
+    dim(`  $ kodel agent logs ${worker.name}`),
+  ].map((l) => fit(l, width));
+}
+
 function logTab(d: GateDetail, ctx: Context): Content {
-  if (d.agentLog) return { lines: agentView(d.agentLog, ctx.width) };
+  const lines = activityLines(d, ctx.worker, ctx.width);
+  if (d.agentLog && lines) return { lines };
+  if (lines && ctx.worker) {
+    return {
+      lines: [
+        fit(
+          dim(`From the background agent's stream · kodel agent logs ${ctx.worker.name}`),
+          ctx.width,
+        ),
+        ...lines,
+        "",
+        ...d.journal.map((l) => fit(dim(l), ctx.width)),
+      ],
+    };
+  }
   return {
     lines: [
       ...wrapText(NO_AGENT_LOG, ctx.width).map((l) => fit(dim(l), ctx.width)),

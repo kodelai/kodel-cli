@@ -123,12 +123,12 @@ describe("tui sessions list", () => {
 
   test("wide terminal shows list and card together, narrow shows one at a time", () => {
     const m = demo();
-    expect(screen(m, 120)).toContain("JOURNAL");
+    expect(screen(m, 120)).toContain("Ready to decide");
     const list = screen(m, 70);
     expect(list).toContain("WAITING FOR YOU");
-    expect(list).not.toContain("JOURNAL");
+    expect(list).not.toContain("Ready to decide");
     const card = screen(update(m, "enter"), 70);
-    expect(card).toContain("JOURNAL");
+    expect(card).toContain("Ready to decide");
     expect(card).not.toContain("WAITING FOR YOU");
   });
 
@@ -418,16 +418,31 @@ describe("tui card of a run waiting for approval", () => {
     expect(at("Log 12")).toBeGreaterThan(at("Comments"));
   });
 
-  test("it opens on the question, and straight after it the agent's report, whole", () => {
+  test("task_9pns_it_opens_on_the_agents_answer_then_the_changes_then_the_decision", () => {
     const out = text(press(withCard(), SIZE, "enter"));
+    expect(out).toContain("THE AGENT'S ANSWER · written 20m ago");
+    expect(out).toContain("CHANGED FILES · 5 files · 379 lines");
+    expect(out).toContain("YOUR DECISION");
     expect(out).toContain("❯ Look at the diff and try the change.");
+    expect(out).toContain("a Approve · r Reject");
     expect(out).not.toContain("ASKED");
-    expect(out).toContain("THE AGENT'S REPORT · written 20m ago");
-    expect(out.indexOf("THE AGENT'S REPORT")).toBeGreaterThan(out.indexOf("❯"));
+    // In the order a person decides: what the agent said, what changed, what is asked and the keys.
+    const answer = out.indexOf("THE AGENT'S ANSWER");
+    const changes = out.indexOf("CHANGED FILES");
+    const decision = out.indexOf("YOUR DECISION");
+    expect(answer).toBeGreaterThan(-1);
+    expect(changes).toBeGreaterThan(answer);
+    expect(decision).toBeGreaterThan(changes);
+    expect(out.indexOf("❯")).toBeGreaterThan(decision);
+    expect(out.indexOf("a Approve · r Reject")).toBeGreaterThan(out.indexOf("❯"));
     const lines = plain(render(press(withCard(), SIZE, "enter"), SIZE));
     const at = lines.findIndex((l) => l.includes("❯"));
     expect(lines[at + 1]).toContain("with what is wrong.".slice(0, 4)); // the question wraps
-    expect(lines.slice(at, at + 5).some((l) => l.includes("THE AGENT'S REPORT"))).toBe(true);
+    // The files come with their line counts, as the Code tab counts them.
+    expect(out).toMatch(/packages\/cli\/src\/format\.ts\s+61/);
+    // No log of tool calls on a run that waits: that is under Log.
+    expect(out).not.toContain("AGENT ·");
+    expect(out).not.toContain("kodel agent logs");
     expect(out).toContain("Done: `kodel status` prints one short line per run");
     expect(out).toContain("- `packages/cli/src/format.ts`: a new `shortLine(run, max)`");
     expect(out).toContain("Not done: the plan asked for a test");
@@ -451,11 +466,16 @@ describe("tui card of a run waiting for approval", () => {
     const tabs = lines.findIndex((l) => l.includes("Report") && l.includes("Comments"));
     expect(tabs).toBeGreaterThan(0);
     expect(lines[tabs + 1]).toMatch(/─{40,}/);
-    expect(lines[tabs + 2]).toContain("❯");
+    expect(lines[tabs + 2]).toContain("THE AGENT'S ANSWER");
   });
 
   test("the instructions the pipeline gives the agent for its message are not the person's business, unless asked for", () => {
-    const d = { ...detail(), instructions: "The message must contain the path of the worktree." };
+    const d: GateDetail = {
+      ...detail(),
+      instructions: "The message must contain the path of the worktree.",
+      // A short answer, so the decision block is on the screen without scrolling.
+      report: { text: "Done.", ts: NOW, from: "log" },
+    };
     const footer = (m: ReturnType<typeof withCard>) => plain(render(m, SIZE)).at(-1) ?? "";
     let m = press(withCard(d), SIZE, "enter");
     expect(text(m)).not.toContain("path of the worktree");
@@ -463,13 +483,19 @@ describe("tui card of a run waiting for approval", () => {
     m = press(m, SIZE, "i");
     expect(text(m)).toContain("INSTRUCTIONS THE AGENT WAS GIVEN FOR ITS MESSAGE");
     expect(text(m)).toContain("path of the worktree");
+    // A blank line keeps the block apart from the keys of the decision under it.
+    const card = plain(render(m, SIZE)).map((l) => l.split("┃")[1]?.trim() ?? "");
+    const at = card.findIndex((l) => l.includes("path of the worktree"));
+    expect(at).toBeGreaterThan(0);
+    expect(card[at + 1]).toBe("");
+    expect(card[at + 2]).toBe("a Approve · r Reject");
     expect(text(press(m, SIZE, "i"))).not.toContain("path of the worktree");
     // nothing to show, nothing to toggle
     expect(footer(press(withCard(), SIZE, "enter"))).not.toContain("i instructions");
     expect(press(press(withCard(), SIZE, "enter"), SIZE, "i").instructions).toBe(false);
   });
 
-  test("a report that is only a step's summary says which step it is from, and no report says so", () => {
+  test("task_9pns_an_answer_from_a_steps_summary_says_so_and_no_answer_has_no_heading", () => {
     const d = detail();
     const fromJournal = text(
       press(
@@ -478,13 +504,36 @@ describe("tui card of a run waiting for approval", () => {
         "enter",
       ),
     );
-    expect(fromJournal).toContain("THE AGENT'S REPORT · from step «review»");
+    expect(fromJournal).toContain("THE AGENT'S ANSWER · from step «review»");
     expect(fromJournal).not.toContain("only the summary");
     expect(fromJournal).not.toContain("not checked");
     expect(fromJournal).toContain("I did it.");
-    const none = text(press(withCard({ ...d, report: undefined }), SIZE, "enter"));
-    expect(none).toContain("THE AGENT'S REPORT");
-    expect(none).toContain("Not found.");
+    // No answer anywhere: no empty heading, the tab opens on what changed.
+    const none = plain(render(press(withCard({ ...d, report: undefined }), SIZE, "enter"), SIZE));
+    const joined = none.join("\n");
+    expect(joined).not.toContain("THE AGENT'S ANSWER");
+    expect(joined).not.toContain("Not found.");
+    expect(joined).toContain("CHANGED FILES · 5 files · 379 lines");
+    expect(joined).toContain("YOUR DECISION");
+    const tabs = none.findIndex((l) => l.includes("Report") && l.includes("Comments"));
+    expect(none[tabs + 2]).toContain("CHANGED FILES");
+  });
+
+  test("task_9pns_a_long_answer_is_cut_and_points_at_the_log", () => {
+    const long = Array.from({ length: 80 }, (_, i) => `Line ${i} of the report.`).join("\n");
+    const tall = { cols: 120, rows: 120 };
+    const m = press(
+      withCard({ ...detail(), report: { text: long, ts: Date.now(), from: "log" } }),
+      tall,
+      "enter",
+    );
+    const out = text(m, tall);
+    expect(out).toContain("Line 59 of the report.");
+    expect(out).not.toContain("Line 60 of the report.");
+    expect(out).toContain("… 20 more lines: see Log");
+    // What changed and the decision are still there after it.
+    expect(out).toContain("CHANGED FILES");
+    expect(out).toContain("a Approve · r Reject");
   });
 
   test("a long report scrolls", () => {
@@ -892,7 +941,73 @@ describe("tui card of a run waiting for approval", () => {
     const out = text(m);
     expect(out).toContain("Reading the details…");
     expect(out).toContain("Step «review» waits for your decision");
-    expect(out).not.toContain("╭");
+  });
+
+  test("task_9pns_first_frame_of_a_gate_has_the_band_and_the_tabs_where_the_card_puts_them", () => {
+    const first = { ...demo(), selected: gate().id };
+    const rowOf = (lines: string[], has: (l: string) => boolean) => lines.findIndex(has);
+    // (the list row shows the session's name, so the title is the card's alone; in the 16-row window
+    // the session stands where the id and pipeline do)
+    const isTitle = (l: string) => l.includes("◐ capture-usage-cost");
+    const isTabs = (l: string) =>
+      l.includes("Report") && l.includes("Comments") && l.includes("Log");
+    for (const size of [SIZE, SMALL]) {
+      const before = plain(render(first, size));
+      const after = plain(render(withCard(), size));
+      const out = before.join("\n");
+      // the band and the tab row are there, and what the list knows is filled in
+      expect(out).toContain("gate … · review · waiting 21m");
+      expect(out).toContain("session «usage and");
+      expect(out).toMatch(/Report\]?\s+Code …\s+Steps …\s+Comments …\s+Log …/);
+      expect(out).toContain("Reading the details…");
+      // the decision block as before, in the body
+      expect(out).toContain("Step «review» waits for your decision");
+      expect(out).toContain("Ready to decide");
+      // (in the 16-row window the key line of the box is below the fold, as before)
+      if (size === SIZE) expect(out).toContain("a approve");
+      // no figure that only the card knows
+      for (const figure of ["2 of 2", "final-approval", "1h32", "8/9", "6/6", "379", "412k"]) {
+        expect(out).not.toContain(figure);
+      }
+      // the same rows as the card once it is read
+      expect(rowOf(before, isTitle)).toBeGreaterThan(0);
+      expect(rowOf(before, isTitle)).toBe(rowOf(after, isTitle));
+      expect(rowOf(before, isTabs)).toBe(rowOf(after, isTabs));
+      expect(rowOf(before, (l) => l.includes("gate … · review"))).toBe(
+        rowOf(after, (l) => l.includes("gate 2 of 2 · final-approval")),
+      );
+      expect(before.length).toBe(after.length);
+    }
+    expect(text(first)).toContain("╭");
+    expect(text(first, SMALL)).not.toContain("╭");
+  });
+
+  test("task_9pns_keys_before_the_card_is_read_move_the_mark_and_keep_working", () => {
+    const first = { ...demo(), selected: gate().id };
+    // Enter gives the card the focus; Right moves the mark along the tabs, every tab says the same.
+    const onCode = press(first, SIZE, "enter", "right");
+    expect([onCode.focus, onCode.tab]).toEqual(["card", 1]);
+    // (with the focus on the list the mark is drawn as brackets, which the stripped text keeps)
+    const marked = (m: typeof first) => text({ ...m, focus: "list" });
+    expect(marked(onCode)).toContain("[Code …]");
+    expect(text(onCode)).toContain("Reading the details…");
+    expect(press(onCode, SIZE, "right", "right", "right", "right").tab).toBe(4);
+    // Left of the first tab is the list, as on the card that is read.
+    expect(press(onCode, SIZE, "left", "left").focus).toBe("list");
+    // The mark stays where it was put once the card lands.
+    expect(marked(withDetail(onCode, detailKey(gate()), detail()))).toContain("[Code 5]");
+    // Tab still goes to the next screen; a and r, up and down, do what they did.
+    expect(press(first, SIZE, "enter", "tab").section).toBe(1);
+    expect(press(first, SIZE, "a").confirm).toBe("a");
+    expect(press(first, SIZE, "enter", "r").confirm).toBe("r");
+    expect(() =>
+      press(first, SIZE, "enter", "down", "down", "up", "pagedown", "enter"),
+    ).not.toThrow();
+    // A click on a tab of the row works before the card is read.
+    const lines = plain(render({ ...first, mouse: true }, SIZE));
+    const y = lines.findIndex((l) => l.includes("Report") && l.includes("Comments")) + 1;
+    const x = (lines[y - 1] ?? "").indexOf("Code") + 2;
+    expect(hitTest({ ...first, mouse: true }, SIZE, x, y)).toEqual({ kind: "tab", index: 1 });
   });
 
   test("with little room the band shrinks to three lines and there is no frame", () => {
@@ -1225,10 +1340,36 @@ describe("tui card of a run that is going on", () => {
     expect(press(both, "enter", "left").focus).toBe("list");
   });
 
-  test("until the card is read it shows what there is, and says it is reading", () => {
-    const out = text({ ...demo(), selected: going().id });
+  test("task_9pns_first_frame_of_a_running_run_has_the_band_and_the_tabs_where_the_card_puts_them", () => {
+    const first = { ...demo(), selected: going().id };
+    const before = plain(render(first, SIZE));
+    const after = plain(render(withCard(), SIZE));
+    const out = before.join("\n");
     expect(out).toContain("Reading the details…");
-    expect(out).not.toContain("╭");
+    expect(out).toContain("running · checks · step … · for 9m");
+    expect(out).toMatch(/Steps …\]?\s+Code …\s+Log …/);
+    for (const figure of [
+      "3 of 4",
+      "9m work",
+      "2/3",
+      "2/2",
+      "73 lines",
+      "61k",
+      "entries into steps",
+    ]) {
+      expect(out).not.toContain(figure);
+    }
+    const isTitle = (l: string) =>
+      l.includes("fix-wait-timeout") && l.includes("r_1kd9q22vb · dev");
+    const isTabs = (l: string) => l.includes("Steps") && l.includes("Code") && l.includes("Log");
+    expect(before.findIndex(isTitle)).toBeGreaterThan(0);
+    expect(before.findIndex(isTitle)).toBe(after.findIndex(isTitle));
+    expect(before.findIndex(isTabs)).toBe(after.findIndex(isTabs));
+    // Right moves the mark among the three tabs this kind of card has; the mark stays once it lands.
+    const onCode = { ...press(first, "enter", "right"), focus: "list" as const };
+    expect(onCode.tab).toBe(1);
+    expect(strip(onCode)).toContain("[Code …]");
+    expect(strip(withDetail(onCode, detailKey(going()), detail()))).toContain("[Code 3]");
   });
 
   test("every line fits the width, in every tab, wide, zoomed and narrow", () => {

@@ -525,6 +525,7 @@ describe("the writer behind c", () => {
         calls.push(input);
         return { ok: true };
       },
+      create: async (): Promise<Answer> => ({ ok: true, task: { key: "T-NEW" } }) as Answer,
     };
     const handle = await openTasksForTui("/nowhere", async () => ({ service }));
     if (handle.status !== "on") throw new Error("not on");
@@ -538,6 +539,7 @@ describe("the writer behind c", () => {
     const service = {
       ...pagedSource(SEVEN),
       update: async (): Promise<Answer> => ({ ok: false, message: "the task is closed" }) as Answer,
+      create: async (): Promise<Answer> => ({ ok: false, message: "no" }) as Answer,
     };
     const handle = await openTasksForTui("/nowhere", async () => ({ service }));
     if (handle.status !== "on") throw new Error("not on");
@@ -1302,16 +1304,21 @@ describe("what the fifth review found", () => {
     expect(update(early, "y").notice).toBe("");
   });
 
-  test("task_g4jy_y_inside_the_pause_says_to_wait_and_a_capital_y_saves_after_it", () => {
+  test("task_g4jy_y_inside_the_pause_says_to_wait_and_saves_after_it_a_capital_y_edits", () => {
     const asked = lone(typed("x"), "\r");
     const at = asked.taskInput?.confirmAt ?? 0;
-    const early = applyInput({ ...asked, now: at + 100 }, "Y", WIDE);
+    const early = applyInput({ ...asked, now: at + 100 }, "y", WIDE);
     expect(write(early)).toEqual([]);
     expect(early.taskInput?.confirmAt).toBeDefined();
     expect(lines(early).at(-1)).toContain("Wait a moment, then press y.");
-    expect(write(applyInput({ ...asked, now: at + 400 }, "Y", WIDE))).toHaveLength(1);
+    expect(write(applyInput({ ...asked, now: at + 400 }, "y", WIDE))).toHaveLength(1);
     // Not alone in its chunk: it is not the key.
-    expect(write(applyInput({ ...asked, now: at + 400 }, "Yy", WIDE))).toEqual([]);
+    expect(write(applyInput({ ...asked, now: at + 400 }, "yy", WIDE))).toEqual([]);
+    // Only a lowercase `y` saves, as the line says: `Y` goes back to the text like any other key.
+    const capital = applyInput({ ...asked, now: at + 400 }, "Y", WIDE);
+    expect(write(capital)).toEqual([]);
+    expect(capital.taskInput?.confirmAt).toBeUndefined();
+    expect(capital.taskInput?.text).toBe("x");
   });
 
   test("task_g4jy_enter_as_crlf_or_cr_nul_is_one_enter_and_confirms", () => {

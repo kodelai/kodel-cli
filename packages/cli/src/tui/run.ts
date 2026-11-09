@@ -1,5 +1,6 @@
 /** The terminal loop: alternate screen, raw keys, redraw on a key, a resize, a frame or new data. */
 import { plain } from "../plain";
+import { WORKER_REFRESH_MS, type WorkerLauncher, type WorkerStatus } from "../worker-launcher";
 import { neutralize } from "./ansi";
 import type { DecisionRequest, WorkHandle } from "./decide";
 import {
@@ -24,8 +25,8 @@ import type {
 } from "./session";
 import type { StatsData } from "./stats-load";
 import { diffKey } from "./tabs";
-import { type CardSlot, messageOf, type TasksLoad } from "./tasks-load";
-import { createTasksRefresh } from "./tasks-refresh";
+import { type CardSlot, messageOf, type NewTaskInput, type TasksLoad } from "./tasks-load";
+import { createRefresh, createTasksRefresh } from "./tasks-refresh";
 import {
   cleanComment,
   detailKey,
@@ -46,12 +47,33 @@ import {
   withDecided,
   withDetail,
   withDiff,
+  withProgress,
+  withResumed,
+  withStarted,
+  withStartReady,
+  withStartRefused,
   withStats,
   withTask,
+  withTaskCreated,
   withTasks,
+  withWorkers,
+  withWorkersUnknown,
 } from "./view";
 
 const FRAME_MS = 100;
+
+/** What `prepareStart` answers: the pipelines to offer, or why `s` does nothing. */
+export type StartCheck = { ok: true; pipelines: string[] } | { ok: false; message: string };
+
+/** What `startTask` and `resumeWorker` answer: the notice, and the run that got an agent. */
+export interface StartResult {
+  ok: boolean;
+  message: string;
+  runId?: string;
+}
+
+/** A read of the worker records: the statuses by run id, or a read that failed. */
+export type WorkerRead = { ok: true; statuses: Map<string, WorkerStatus> } | { ok: false };
 const REFRESH_MS = 2000;
 /** How often the card of a run that is going on is read again. */
 const DETAIL_REFRESH_MS = 4000;
@@ -82,8 +104,22 @@ export interface TuiOptions {
   loadTasks?: () => Promise<TasksLoad>;
   /** Reads one task, with its body and comments, for its card. */
   loadTask?: (key: string) => Promise<CardSlot>;
-  /** Adds a comment to a task. A person's act, typed with `c`: it is the only write the task screens make. */
+  /** Adds a comment to a task. A person's act, typed with `c`: one of the two writes the task screens make. */
   addTaskComment?: (key: string, text: string) => Promise<void>;
+  /** Creates a task from the form opened with `n`. A person's act, never an agent's: the other write of the task screens. */
+  createTask?: (input: NewTaskInput) => Promise<{ key: string }>;
+  /** `s` on a task: the preflight and the pipelines that load; nothing is made. */
+  prepareStart?: (key: string) => Promise<StartCheck>;
+  /** The person confirmed a start: a run for the task, then a background agent for the run. A person's act, never an agent's. */
+  startTask?: (key: string, pipeline: string) => Promise<StartResult>;
+  /** The person confirmed a resume: the agent of the run goes on after their decision at journal line `seq`. */
+  resumeWorker?: (runId: string, seq: number, sessionId?: string) => Promise<StartResult>;
+  /** Reads the records and the digest of the background agents; on a timer of its own, never on Windows. */
+  workers?: Pick<WorkerLauncher, "statuses" | "progress">;
+  /** How often the records are read (milliseconds); tests make it short. */
+  workerRefreshMs?: number;
+  /** The platform, for the one check that skips the worker reads (`win32`); tests set it. */
+  platform?: string;
 }
 
 /**
@@ -111,7 +147,8 @@ export function applyEvents(
   now?: number,
 ): Model {
   let model = now === undefined ? start : { ...start, now };
-  const typing = start.input !== null || start.taskInput !== null;
+  const opened = (m: Model) => m.input !== null || m.taskInput !== null || m.taskForm !== null;
+  const typing = opened(start);
   // Enter and `y` on a comment count only as the whole of their chunk: a line break that arrives with other
   // text is a paste or a burst, not a person pressing the key.
   const alone = events.length === 1;
@@ -127,7 +164,7 @@ export function applyEvents(
         ? update(model, event.name, size, alone)
         : mouseUpdate(model, size, event);
     if (model.quit) break;
-    const open = model.input !== null || model.taskInput !== null;
+    const open = opened(model);
     if (typing && !open) break;
     if (!typing && open) break;
     // A decision moves on only by what comes back, or by a key that has seen what is on the screen:
@@ -196,6 +233,38 @@ export async function runTui(
             draw();
           },
           shownKey: () => shownTask(model),
+        })
+      : undefined;
+
+  // The background agents are read apart from the runs too: each read is a child process of this one,
+  // and a slow one must not hold up the list. The offer of a resume is worked out from each read and
+  // the state of the TUI's own decision work, and only written into the model: a key starts it.
+  const workers = options.workers;
+  const workersRefresh =
+    workers && (options.platform ?? process.platform) !== "win32"
+      ? createRefresh<WorkerRead, boolean>({
+          load: async () => ({
+            ok: true,
+            statuses: await workers.statuses(model.sessions.map((s) => s.id)),
+          }),
+          loadCard: async (runId) => {
+            model = withProgress(model, runId, await workers.progress(runId));
+            return true;
+          },
+          onLoad: (read) => {
+            model = read.ok
+              ? withWorkers(model, read.statuses, options.work?.pending() ?? false)
+              : withWorkersUnknown(model);
+            draw();
+          },
+          onCard: () => draw(),
+          shownKey: () => {
+            if (model.pick.kind !== "run") return undefined;
+            return model.workers[model.selected] === undefined ? undefined : model.selected;
+          },
+          failed: () => ({ ok: false }),
+          cardFailed: () => false,
+          everyMs: options.workerRefreshMs ?? WORKER_REFRESH_MS,
         })
       : undefined;
 
@@ -290,6 +359,120 @@ export async function runTui(
           model = { ...model, notice: `Could not add the comment: ${messageOf(error)}` };
         })
         .finally(draw);
+      return;
+    }
+    if (effect.type === "create_task") {
+      const create = options.createTask;
+      if (!create) {
+        model = withTaskCreated(model, effect.seq, {
+          ok: false,
+          message: "Could not create the task: tasks cannot be created here.",
+        });
+        return;
+      }
+      // Leaving the screen waits for it, as for the work of a decision: a create cut off by the exit could
+      // leave the tracker half-written, and its answer would never be told.
+      const pending = create(effect.input)
+        .then(
+          ({ key }) => ({ ok: true, key, message: `Created ${key}: ${effect.input.title}` }),
+          (error: unknown) => ({
+            ok: false,
+            message: `Could not create the task: ${messageOf(error)}`,
+          }),
+        )
+        .then((outcome) => {
+          model = withTaskCreated(model, effect.seq, outcome);
+          if (closed || leaving) told.push(outcome.message);
+          // The Backlog and the Tasks screen show the new task as soon as the list is read again.
+          if (outcome.ok) tasksRefresh?.openScreen(Date.now());
+        })
+        .finally(() => {
+          creating.delete(pending);
+          draw();
+        });
+      creating.add(pending);
+      return;
+    }
+    if (effect.type === "prepare_start") {
+      const prepare = options.prepareStart;
+      if (!prepare) {
+        model = withStartRefused(
+          model,
+          effect.seq,
+          effect.key,
+          "Could not start: starting is not available here.",
+        );
+        return;
+      }
+      prepare(effect.key)
+        .then((check) => {
+          model = check.ok
+            ? withStartReady(model, effect.seq, effect.key, check.pipelines)
+            : withStartRefused(model, effect.seq, effect.key, check.message);
+        })
+        .catch((error: unknown) => {
+          model = withStartRefused(
+            model,
+            effect.seq,
+            effect.key,
+            `Could not start ${effect.key}: ${messageOf(error)}`,
+          );
+        })
+        .finally(draw);
+      return;
+    }
+    if (effect.type === "start_task") {
+      const start = options.startTask;
+      if (!start) {
+        model = withStarted(model, effect.key, {
+          ok: false,
+          message: "Could not start: starting is not available here.",
+        });
+        return;
+      }
+      start(effect.key, effect.pipeline)
+        .then(
+          (outcome) => outcome,
+          (error: unknown): StartResult => ({
+            ok: false,
+            message: `Could not start ${effect.key}: ${messageOf(error)}`,
+          }),
+        )
+        .then((outcome) => {
+          model = withStarted(model, effect.key, outcome);
+          // The new run is read at once, and so are the records: the row says `agent starting` until then.
+          return reload();
+        })
+        .finally(() => {
+          workersRefresh?.openScreen(Date.now());
+          draw();
+        });
+      return;
+    }
+    if (effect.type === "resume_worker") {
+      const resume = options.resumeWorker;
+      if (!resume) {
+        model = withResumed(model, effect.runId, {
+          ok: false,
+          message: `run ${effect.runId} was not resumed: resuming is not available here.`,
+        });
+        return;
+      }
+      resume(effect.runId, effect.seq, model.workers[effect.runId]?.sessionId)
+        .then(
+          (outcome) => outcome,
+          (error: unknown): StartResult => ({
+            ok: false,
+            message: `run ${effect.runId} was not resumed: ${messageOf(error)}`,
+          }),
+        )
+        .then((outcome) => {
+          model = withResumed(model, effect.runId, outcome);
+        })
+        .finally(() => {
+          workersRefresh?.openScreen(Date.now());
+          draw();
+        });
       return;
     }
     if (effect.type === "check_decision") {
@@ -388,6 +571,11 @@ export async function runTui(
   };
   // Set when the screen is given back: an answer that comes later (a tasks read, a write) must not draw on the shell.
   let closed = false;
+  // The creates of tasks that are out, and what the ones that answered while the screen was being left (or
+  // after) have to say: a frame drawn right before the exit is not read, so it is said on the shell instead.
+  const creating = new Set<Promise<void>>();
+  const told: string[] = [];
+  let leaving = false;
   const draw = () => {
     if (closed) return;
     if (model.mouse !== mouseSent) {
@@ -436,6 +624,7 @@ export async function runTui(
       const late = reader.flush(Date.now());
       if (late.length > 0) handle(late);
       tasksRefresh?.tick(Date.now());
+      workersRefresh?.tick(Date.now());
       model = tick(model, Date.now());
       if (isAnimated(model)) draw();
     }, FRAME_MS);
@@ -474,16 +663,16 @@ export async function runTui(
         resolve(0);
       }
     };
-    // Leaving while a decision's work goes on: the screen stays for it, and a second request to leave
-    // stops it (the step is then started again by whoever asks next).
-    let leaving = false;
+    // Leaving while a decision's work goes on, or while a task is being created: the screen stays for it,
+    // and a second request to leave stops the work (the step is then started again by whoever asks next)
+    // and leaves the create to the tracker: its answer comes to no screen, so the notice says so.
     let stopRequested: () => void = () => undefined;
     const stopped = new Promise<void>((resolve) => {
       stopRequested = resolve;
     });
     const leave = async () => {
-      const work = options.work;
-      if (!work?.pending()) {
+      const work = options.work?.pending() ? options.work : undefined;
+      if (work === undefined && creating.size === 0) {
         finish();
         return;
       }
@@ -493,18 +682,21 @@ export async function runTui(
         quit: false,
         flow: null,
         notice:
-          "Finishing the work of the run (it may grow while waiting). q again stops it; the step is then started again by the next caller.",
+          work === undefined
+            ? "Finishing creating the task… q again to leave now (the task may then not be created, and you will not be told)."
+            : `Finishing the work of the run (it may grow while waiting)${creating.size > 0 ? " and the task being created" : ""}. q again stops it; the step is then started again by the next caller${creating.size > 0 ? ", and whether the task was created is not told" : ""}.`,
       };
       draw();
       const outcome = await Promise.race([
-        work.wait().then(
-          () => "done" as const,
+        Promise.allSettled([...(work === undefined ? [] : [work.wait()]), ...creating]).then(
           () => "done" as const,
         ),
         stopped.then(() => "stop" as const),
       ]);
-      if (outcome === "stop") await work.stop().catch(() => undefined);
+      if (outcome === "stop" && work !== undefined) await work.stop().catch(() => undefined);
       finish();
+      // The screen is back to the shell: what a create answered while the person waited is said there.
+      for (const line of told) stdout.write(`${line}\n`);
     };
     const handle = (events: InputEvent[]) => {
       if (finished) return;
@@ -526,6 +718,10 @@ export async function runTui(
       }
       flush();
       ensureDetail(model.selected !== before);
+      // The digest is read for the selected run only: a new selection with a worker is read at once.
+      if (model.selected !== before && model.pick.kind === "run" && model.workers[model.selected]) {
+        workersRefresh?.readCard(model.selected);
+      }
       draw();
     };
     // The end of a chunk that may start a paste marker (a lone ESC) is held back; if nothing continues it, it
@@ -548,6 +744,7 @@ export async function runTui(
     stdin.on("data", onData);
     stdout.on("resize", onResize);
     tasksRefresh?.start(Date.now());
+    workersRefresh?.start(Date.now());
     ensureDetail();
     draw();
   });

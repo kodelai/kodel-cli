@@ -80,8 +80,22 @@ export interface TasksSource {
  */
 export type TaskCommenter = (key: string, text: string) => Promise<void>;
 
+/** What the form of a new task sends: the fields `TaskService.create` takes from a person here. */
+export interface NewTaskInput {
+  title: string;
+  body?: string;
+  priority?: string;
+  parent?: string;
+}
+
+/**
+ * The other write of the TUI: a task a person filled in with `n`. It calls only `create` and answers the key
+ * the tracker gave; the task starts in the tracker's first status (`todo`), as any task made with `task_create`.
+ */
+export type TaskCreator = (input: NewTaskInput) => Promise<{ key: string }>;
+
 export type TasksHandle =
-  | { status: "on"; source: TasksSource; comment?: TaskCommenter }
+  | { status: "on"; source: TasksSource; comment?: TaskCommenter; create?: TaskCreator }
   | { status: "off" }
   | { status: "error"; message: string };
 
@@ -150,6 +164,12 @@ function parseCard(raw: unknown, subtasks: unknown): TaskCardData | undefined {
 export function failure(answer: Answer, what: string): Error {
   const fields: Record<string, unknown> = answer;
   return new Error(typeof fields.message === "string" ? fields.message : what);
+}
+
+/** The key of the task a `create` answered, or nothing when the answer does not carry one. */
+export function createdKey(answer: Answer): string | undefined {
+  const fields: Record<string, unknown> = answer;
+  return isObject(fields.task) ? text(fields.task.key) : undefined;
 }
 
 interface Page {

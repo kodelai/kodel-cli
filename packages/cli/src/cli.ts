@@ -5,6 +5,7 @@
  * type them; the deny rules in the agent's settings are a second line, not the only one.
  */
 
+import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import {
@@ -16,6 +17,7 @@ import {
   loadConfig,
   openTaskService,
   type ProjectRoot,
+  resolveBase,
   resolveStoragePlace,
   type StoragePlace,
 } from "@kodel-ai/local";
@@ -40,7 +42,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { Command, CommanderError } from "commander";
 import pkg from "../package.json" with { type: "json" };
-import { registerAgentCommands } from "./agent-commands";
+import { pipesAdapter, registerAgentCommands } from "./agent-commands";
 import { BUILD } from "./build-info";
 import { describePendingChange } from "./decide-text";
 import { engineHostOptions } from "./engine-steps";
@@ -393,7 +395,15 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
   program
     .command("mcp")
     .description("Serve the pipeline tools to a coding agent over stdio")
-    .action(async () => {
+    .option(
+      "--no-decisions",
+      "serve no decision tool and show no dialog, whatever the project config says (a background agent's server)",
+    )
+    .option(
+      "--no-wait-hint",
+      "never offer the agent `kodel wait`: its turn ends at a wait (a background agent's server)",
+    )
+    .action(async (opts: { decisions: boolean; waitHint: boolean }) => {
       // T-42: inside the process group of a live host session's child (an engine step), this server
       // would be a second Kodel client of the person, so it serves nothing. A group that cannot be
       // read fails open.
@@ -433,10 +443,11 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       // The instructions are sent once, when the agent connects: a change of this setting applies
       // when the server is started again. A config that cannot be read leaves the default, except
       // for a valid `agent_hints` block: a bad value elsewhere must not undo `wait: false`.
-      const waitHint = (await loadAgentHints(resolved.dataDir)).wait;
-      const settings = await loadConfig(resolved.dataDir)
+      const waitHint =
+        opts.waitHint === false ? false : (await loadAgentHints(resolved.dataDir)).wait;
+      const noDecisions = opts.decisions === false;
+      const fromConfig = await loadConfig(resolved.dataDir)
         .then((config) => ({
-          waitHint,
           dialog: config.decisions.dialog,
           agentDecisions: {
             gate: config.decisions.agent.gate,
@@ -444,10 +455,19 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           },
         }))
         .catch(() => ({
-          waitHint,
           dialog: false,
           agentDecisions: { gate: false, pipelineChange: false },
         }));
+      // `--no-decisions` serves a background agent: whatever the project lets an agent decide, this
+      // server decides nothing and asks nobody; the one line says so where the person can read it.
+      const settings = noDecisions
+        ? { waitHint, dialog: false, agentDecisions: { gate: false, pipelineChange: false } }
+        : { waitHint, ...fromConfig };
+      if (noDecisions) {
+        env.err(
+          "kodel: --no-decisions: this server serves no decision tool and shows no dialog; a decisions.agent allowance of the project does not apply to it\n",
+        );
+      }
       const dialogTimeoutMs = dialogTimeoutFrom(env.environment);
       // The place the config names when the server starts. A config that names a place that cannot
       // be used (`home` without an id, a bad base) does not take the server down: the tools say why.
@@ -473,6 +493,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         ...(storage === undefined ? {} : { storage, watchStorage: () => resolvePlace(true) }),
         ...(storageError === undefined ? {} : { storageError }),
         agentDecisions: settings.agentDecisions,
+        ...(opts.waitHint === false ? { agentHints: { wait: false } } : {}),
         build: BUILD,
         // This process serves the agent: it copies the agent's log into the runs while they go.
         agentLogTimer: true,
@@ -784,10 +805,50 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const { createStatsLoader } = await import("./tui/stats-load");
       const { createDecisionTools, decisionOptions } = await import("./tui/decide");
       const { openTasksForTui, tuiTaskOptions } = await import("./tui/tasks-open");
+      const { createWorkerOptions } = await import("./tui/worker-start");
+      const { createSessionWorkerLauncher, execChild, findOnPath } = await import(
+        "./worker-launcher-session"
+      );
+      const { buildTaskTools, HISTORY_TOOLS, toolsFor } = await import(
+        "@kodel-ai/pipeline-core/mcp"
+      );
       const h = await host();
-      const tasks = await openTasksForTui(await storeRoot());
+      const { root, dataDir } = await project();
+      const tasks = await openTasksForTui(dataDir);
       const loadStats = createStatsLoader(h, hashSource);
       const tools = createDecisionTools(h, { hardStop: () => stopAndWait(h) });
+      // The background agents (`s`): the records live where `kodel agent` keeps them, and the worker's
+      // own server is this very build. The tools its server serves are what the worker may call.
+      const environment = env.environment ?? process.env;
+      const self = env.sessionLauncher ?? {
+        exec: process.execPath,
+        args: [process.argv[1] ?? "kodel"],
+      };
+      const opened = await openTaskService({ storeRoot: dataDir }).catch(() => undefined);
+      const servedTools = [
+        ...toolsFor({ taskLink: opened?.runLink !== undefined }).map((t) => t.name),
+        ...HISTORY_TOOLS.map((t) => t.name),
+        ...(opened === undefined
+          ? []
+          : buildTaskTools(opened.service.capabilities).map((t) => t.name)),
+      ];
+      const dialog = await loadConfig(dataDir)
+        .then((config) => config.decisions.dialog)
+        .catch(() => false);
+      const launcher = createSessionWorkerLauncher({
+        adapter: pipesAdapter({ root, environment, launcher: self, rules: [] }),
+        self,
+        root,
+        stateBase: resolveBase(environment),
+        environment,
+        rules: [],
+        servedTools,
+        which: (name) => findOnPath(name, environment),
+        exec: execChild,
+        platform: process.platform,
+        clock: Date.now,
+        uuid: () => randomUUID(),
+      });
       await runTui(process.stdin, process.stdout, () => loadSessions(h, Date.now()), "project", {
         mouse: opts.mouse === true,
         ...decisionOptions("project", tools),
@@ -798,6 +859,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           removeComment(h, runId, node, attempt, index),
         loadStats: (pipeline) => loadStats(pipeline),
         ...tuiTaskOptions(tasks),
+        ...createWorkerOptions({ host: h, tasks, launcher, dialog, root, version: pkg.version }),
       });
     });
 

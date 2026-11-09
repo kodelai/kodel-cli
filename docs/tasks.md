@@ -146,8 +146,8 @@ one. While tasks are off every command refuses and says how to turn them on.
 
 ## In the TUI
 
-`kodel tui` shows the tasks too. Nothing there starts a task or changes its status; the one thing a person can
-write is a comment (`c`):
+`kodel tui` shows the tasks too. Nothing there changes a task's status; what a person can write is a comment
+(`c`) and a new task (`n`), and `s` starts a task in a background agent:
 
 - **Tasks** (the third item of the menu): every task of the project in groups TODO, IN PROGRESS and DONE
   (a declined task is done), each row with the key, the title and the priority (the key dim, the priority
@@ -164,7 +164,7 @@ write is a comment (`c`):
   back to the parent. Enter on a run that is in the list of runs jumps to it on the first screen, and Esc there
   returns to the same card. `c` adds a comment to the task on the card (only while the card has the focus, never from a list row): a line at the
   bottom, 500 characters at most (the end of a long text stays in view). **Enter** asks "Save this comment to
-  KEY?", with the end of the text; **`y`** (or `Y`) saves, any other key goes back to the text, Esc cancels.
+  KEY?", with the end of the text; **`y`** (lowercase only) saves, any other key goes back to the text, Esc cancels.
   Enter (also as `\r\n`) and `y` count only when each one is a key of its own (not part of a pasted text) and
   some time (0.4 s) after the line opened and after the question appeared (pressed too early, the line says to
   wait). A terminal that marks pasted text (bracketed paste) never has its paste read as keys; without that
@@ -174,6 +174,93 @@ write is a comment (`c`):
   comment is being typed, the comment is cancelled. Comments only grow, so there is no key to delete one.
 - With tasks off (`tasks.enabled` is not true) both say so in one line, and the config is read when the TUI
   starts, so start it again after turning tasks on.
+- **`n` creates a task.** From a Backlog row (or the first screen of a project with no runs) and from the Tasks
+  screen, `n` opens a form in a window in the middle of the screen: **Title** (required, 200 characters at
+  most), **Body** (4000 at most; Enter is a line break there), **Priority** (`←` `→` or Space cycle the
+  tracker's default, `high`, `normal`, `low`) and **Parent** (the key of a parent task, optional). Tab or `↓`
+  moves to the next field, Shift-Tab or `↑` to the one before. There is no status field: `task_create` has
+  none either, a new task starts in the tracker's first status (`todo`). **Enter** (outside the body) asks
+  "Create this task?"; **`y`** (lowercase only) creates it through the same task service as `task_create`, the window closes and
+  the bottom line names the key (`Created KEY: title`), and the Backlog and the Tasks screen are read again at
+  once so the task shows up. An empty title is refused with `A task needs a title.`; a refusal of the tracker
+  keeps the fields for a retry. Esc closes the window at any point, even while the task is being created (a
+  tracker may take long): the creation is not taken back, its answer is then only reported on the bottom line
+  (and the lists are read again on a success); while it is being created the fields are read-only. `q` (from
+  the form or after Esc) does not cut the creation off: the screen stays with `Finishing creating the task… q
+  again to leave now (the task may then not be created, and you will not be told)`, leaves when the tracker
+  answers and says the answer on the shell; a second `q` (or Ctrl-C) leaves at once, the creation is left to
+  the tracker and its answer is not told. A new `n` meanwhile opens a fresh form, whose
+  own Enter and `y` create another task. Enter
+  and `y` count only as keys of their own, 0.4 s after the form opened and after the question appeared, as for
+  a comment; a pasted text goes into the field that has the cursor (one line in the title and the parent, with
+  its line breaks in the body) and never answers the question. The text is sent as typed but for control
+  characters, and the service validates and redacts it again. `--demo` has no `n`.
+- **`s` starts a task in a background agent.** On a Backlog row, or on the card of a task in state `todo` or
+  `progress` that has no run going, `s` opens a window in the middle of the screen with the task's key and
+  title: `Start KEY in a background agent (pipeline dev)?` with the keys on their own line, `y start · Esc or
+  any other key cancels`; with several pipelines the window lists them numbered (`1` to `9`, nine at most, and
+  how many more are not offered, then the task's name on one line) and `1-N choose a pipeline · Esc or any
+  other key cancels`, where N counts only the rows the window draws (the bottom line says the same). `y` (or
+  the digit) counts only as a key of its own, 0.4 s after the question appeared,
+  never inside a paste; the buttons of the window (`[y Start]`, `[Esc Cancel]`) do the same with the mouse.
+  Nothing is answered that is not on the screen: on a terminal too short for the whole list a digit whose row
+  is not drawn is refused (`Pipeline 7 is not visible: make the terminal taller`) and the window stays, and
+  `y` counts only when the whole question is in view (the resume window too). The question is cancelled when the card
+  moves to another task. It starts the task's run (the task text is the title, a blank line and the body; the task goes
+  to `progress`) and a detached `claude -p` session named `kw-<run id>`, in the run's working directory, that
+  drives the run through its own `kodel mcp --no-decisions --no-wait-hint`: a server that serves no decision
+  tool and shows no dialog, whatever the project config allows an agent, and never offers `kodel wait`. The
+  agent runs with `--permission-mode dontAsk`, an allowlist (the kodel tools its server serves, `Read`, `Write`,
+  `Edit`, `Glob`, `Grep`, `Bash`, `Agent`) and a deny list (the two decision tools; `Bash` patterns for `gate`,
+  `ack`, `seal`, `resume`, `migrate`, `wait r_*`, `pipeline changes apply|discard|restore`, `pipeline proposals
+  apply|discard` and `agent stop|rm|exec|forget-name` in the three spellings of the binary; `Edit`/`Write` of
+  `.kodel/runs`, `.kodel/pipelines`, `.kodel/tasks`, `.kodel/config.yaml`, `.kodel/proposals`, `.mcp.json` and
+  `.claude/settings*.json`, relative and absolute, and of the state base). Both lists live in
+  `packages/cli/src/claude-worker.ts`. A substring pattern can refuse an innocent command that names `kodel`
+  and a verb (`grep gate_decided` after a `cd` into a worktree), as the repository's own settings do. The
+  agent acts with **your** git and GitHub identity (`git commit -s` in your name, `gh` with your credentials)
+  and under your `~/.claude/settings.json` (its model, hooks and permissions); `KODEL_STATE_DIR` of the TUI
+  reaches only its server. The run's row says `agent starting`, then the record's state. **While the run is
+  going on** the card shows, under the agent's state, an `AGENT · kw-<run>` block: the last lines of what the
+  agent says and does, drawn exactly as the Log tab draws them (the agent's own log when it can be read, else
+  a plain-text digest of its `stream-json`), and the command for the whole log, `kodel agent logs kw-<run>`; on
+  the Log tab itself the block is not repeated. **At a human gate** that block is gone: the Report tab opens
+  with **the agent's answer** (its last text, from its log, a step's summary or the digest's last words; left
+  out when there is none), then **the changed files** with their line counts (the Code tab opens each diff),
+  then **your decision**: the gate's question and the keys in words (`a Approve · r Reject`, or the command
+  when the gate is decided with one). `kodel agent stop kw-<run>` ends the agent. `s` refuses, with the reason, on Windows, when `decisions.dialog` is on,
+  when `claude` is not on PATH or not signed in, when the tracker cannot attach runs, when a project redaction
+  rule cannot be given to the agent and when no pipeline loads; `--demo` has no `s`.
+- **At a gate the agent exits; `s` resumes it after your decision.** With no `kodel wait` the agent writes what
+  you have to decide and ends its turn, so `claude -p` exits 0: the row reads `agent waiting for you`. Decide
+  as usual (the TUI, `kodel gate|resume|pipeline changes`, a dialog of your own client): the card then reads
+  `agent exited at your decision · s resumes`, and **nothing starts by itself**. The TUI cannot know whether
+  you told another agent to continue the run (that agent leaves no journal line until its first call, and the
+  lines it leaves are bookkeeping the engine skips in several cases), so the resume is your `s` then `y`: `s`
+  opens the same kind of window, `Resume the agent of r_… after your gate "node" approved (time)?` with `y resume
+  · Esc or any other key cancels` on its own line and, when the journal shows one, the line `an agent was served
+  a step since your decision` (true whenever shown, silent otherwise). `y` starts the same conversation again with `claude -p --resume <session id>` as the
+  record `kw-<run>-d<seq>`, `seq` the journal line of the decision: one record per decision, so two TUIs or a
+  second `s`+`y` make one resume and the other is told `already resumed`. The row reads `agent resuming`, then
+  `agent running (session N)`. Not offered, and the card says why: an agent that still runs, was stopped
+  (`kodel agent stop`), timed out or is lost; an exit that was not at a wait (a crash: `agent exited (1), not at
+  a gate`; any agent continues the run with `pipeline_next_step` and the run id); a run that is over or waits
+  again; a decision an agent made for you (`decisions.agent`: it goes on itself); a record of that decision that
+  already exists, even one that died at boot (`kw-<run>-d<seq> ended`); no known session id; the TUI's own
+  decision work still running its step. `kodel agent rm` of a resume record frees its name, so the same decision
+  is offered once more and `s`+`y` makes the record again; `kodel agent stop` alone ends the offer. A failed
+  resume is one notice; the offer stays and `s`+`y` is the retry. A resume re-sends the conversation: on a
+  subscription it counts against the plan's usage, with an API key it is the cache-miss tokens of the whole
+  context; three gates of `dev.yaml` are three `s`+`y`.
+- **Limits.** No stop key (use `kodel agent stop`); POSIX only; a crashed agent leaves an open run that any
+  agent continues with `pipeline_next_step`; a `pipeline_start` with the same `task_key` and other words makes a
+  second run on the task; an uncommitted pipeline file refuses `s` (commit it, or start the run from an agent);
+  two TUIs pressing `s` on one task within a second can make two runs, as two agents can today; the agent's
+  stdout log on disk is redacted on the raw `stream-json` bytes, where a secret may be JSON-escaped, so `kodel
+  agent logs` may show one the digest (which redacts the decoded text) does not; a resumed session whose `init`
+  names another session id is marked `· session id changed` and the card keeps the launcher's id; widths are
+  counted per code point (no grapheme clustering), so a terminal that draws an emoji sequence (a family, a skin
+  tone, a variation selector) narrower or wider can offset a button's hit-box by a few columns; the keys always work.
 
 ## Keys, subtasks, runs, comments
 
