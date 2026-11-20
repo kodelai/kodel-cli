@@ -76,7 +76,7 @@ export const USAGE_BUDGET_MS = 10_000;
 export const STEP_END_LOG_WAIT_MS = 2_000;
 const STEP_END_LOG_POLL_MS = 100;
 /** How many subagent logs are looked at for the call of a step a worker handed in; the rest are not read. */
-const WORKER_LOGS_CAP = 32;
+const WORKER_LOGS_CAP = 64;
 /**
  * What is kept in memory, bounded per run so that one busy run cannot make another (or its own main session) forget:
  * a run keeps the memos of its candidate sessions (the one of the environment and the newest of the hook index, 21 at
@@ -328,6 +328,23 @@ interface PassContext {
   result: UsageResult;
 }
 
+/** The `cap` logs written last, newest first; a log that cannot be looked at counts as the oldest. */
+async function newestFirst(paths: readonly string[], cap: number): Promise<string[]> {
+  const stamped = await Promise.all(
+    paths.map(async (path) => ({
+      path,
+      at: await stat(path).then(
+        (info) => info.mtimeMs,
+        () => 0,
+      ),
+    })),
+  );
+  return stamped
+    .sort((a, b) => b.at - a.at || a.path.localeCompare(b.path))
+    .slice(0, cap)
+    .map((entry) => entry.path);
+}
+
 /** Counts usage from the agent's log into the runs of one host. One per process, like the copy of the log. */
 export class UsageWriter {
   private readonly now: () => number;
@@ -455,7 +472,8 @@ export class UsageWriter {
         const logs: string[] = [];
         for (const main of mains) logs.push(...(await subagentLogs(main.path, main.session)));
         const found: string[] = [];
-        for (const log of logs.slice(0, WORKER_LOGS_CAP)) {
+        // The newest logs: a worker started for this step is among the last the session wrote.
+        for (const log of await newestFirst(logs, WORKER_LOGS_CAP)) {
           if (await hasStepCall(log, run.runId, step.node, step.attempt)) found.push(log);
         }
         // Two logs holding the same call (a replay after a resume) say nothing sure.

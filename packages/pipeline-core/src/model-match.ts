@@ -88,6 +88,8 @@ export function modelMarks(input: ModelMarkInput): ModelMark[] {
   const hostModel = new Map<string, string>();
   // What the hand-in of a step a worker did says its worker's log showed; its presence marks the step a worker's.
   const workerModels = new Map<string, string[]>();
+  // Steps a worker took: a claim names them even when no hand-in could say what its log showed.
+  const claimed = new Set<string>();
   let hadWorkers = false;
   const order: { node: string; attempt: number }[] = [];
   for (const record of journal) {
@@ -95,6 +97,7 @@ export function modelMarks(input: ModelMarkInput): ModelMark[] {
     const attempt = typeof record.attempt === "number" ? record.attempt : undefined;
     if (record.event === "step_claimed") hadWorkers = true;
     if (node === undefined || attempt === undefined) continue;
+    if (record.event === "step_claimed") claimed.add(key(node, attempt));
     if (record.event === "node_entered" && requested.has(key(node, attempt))) {
       if (!order.some((o) => o.node === node && o.attempt === attempt))
         order.push({ node, attempt });
@@ -125,7 +128,8 @@ export function modelMarks(input: ModelMarkInput): ModelMark[] {
     });
     if (state.v === 1) return not("unsupported");
     // A step a worker did is judged by its worker's own log, never by the pooled use of the session.
-    const worker = workerModels.get(key(node, attempt));
+    const worker =
+      workerModels.get(key(node, attempt)) ?? (claimed.has(key(node, attempt)) ? [] : undefined);
     if (worker !== undefined) {
       const own = { ...base, seen: worker };
       if (worker.length === 0)

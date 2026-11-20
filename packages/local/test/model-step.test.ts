@@ -533,6 +533,21 @@ describe("t43 a fork worked by workers", () => {
     expect(await markOf(f.run, "b")).toMatchObject({ seen: [OPUS], result: "match" });
   });
 
+  test("t43_worker_log_among_many_helper_logs_is_still_found", async () => {
+    // more subagent logs than the cap, the worker's the newest: it is found, not skipped by its file name
+    const f = await openFork();
+    const { utimes } = await import("node:fs/promises");
+    for (let i = 0; i < 70; i += 1) {
+      const old = await workerLog(f.path, `agent-h${String(i).padStart(3, "0")}`, f.runId, [
+        { node: "zzz", model: SONNET },
+      ]);
+      await utimes(old, new Date(2020, 0, 1), new Date(2020, 0, 1));
+    }
+    await workerLog(f.path, "agent-zworker", f.runId, [{ node: "a", model: SONNET }]);
+    await handIn(f, "a", f.tokenA);
+    expect(await markOf(f.run, "a")).toMatchObject({ result: "match", by: "worker" });
+  });
+
   test("t43_worker_log_over_the_size_bound_is_not_observed", async () => {
     const f = await openFork();
     const path = await workerLog(f.path, "agent-wa", f.runId, [{ node: "a", model: SONNET }]);
