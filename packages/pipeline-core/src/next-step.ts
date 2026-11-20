@@ -7,7 +7,13 @@
 import { KodelError } from "./errors";
 import type { PipelineSpec } from "./pipeline";
 import type { AcceptEffect, NodeDiff } from "./pipeline-diff";
-import { defaultRegistry, labelsOf, type Registry } from "./registry";
+import {
+  defaultRegistry,
+  type InstructionMode,
+  labelsOf,
+  type Registry,
+  requestedModelOf,
+} from "./registry";
 import { renderContextOf, renderTemplate } from "./render";
 import {
   DEFAULT_CLAIM_TTL_S,
@@ -300,6 +306,22 @@ const parallelRules = (waitHint: boolean) =>
     waitHint ? " and never starts `kodel wait`" : ""
   }. When your workers are back, call pipeline_next_step yourself: it hands out what is open ` +
   "then, and what waits for a person is told to you, not to the workers.";
+
+/**
+ * The models the workers of the handed steps are to be started on, one entry per step that asks for one;
+ * nothing when none does. The step list carries the same wording for each step, but the answer's own
+ * instruction is the first step's, so a model of a later step is said here too.
+ */
+function workerModels(spec: PipelineSpec, registry: Registry, handed: Visit[]): string {
+  const asked = handed.flatMap((visit) => {
+    const node = spec.nodes.find((n) => n.slug === visit.node);
+    const model = node === undefined ? undefined : requestedModelOf(registry, node);
+    return model === undefined ? [] : [`\`${visit.node}\` on \`${model}\``];
+  });
+  return asked.length === 0
+    ? ""
+    : ` Start the workers of these steps on these models: ${asked.join(", ")}.`;
+}
 
 /**
  * The rules of working several open steps one by one. When the project leaves the mode to the agent
@@ -620,8 +642,13 @@ function baseStep(
   }
 
   const open = state.active.filter((v) => v.phase === "agent");
-  const stepOf = (visit: Visit): AgentStep => {
-    const out = agentStep(spec, state, registry, render, visit);
+  // Who reads the step's instruction: a worker in every answer it is given (a take, a renewal, its own
+  // step back after a failed check), the coordinator in a fork worked in parallel, else the agent itself.
+  const stepOf = (
+    visit: Visit,
+    mode: InstructionMode = options.worker === true ? "worker" : "single",
+  ): AgentStep => {
+    const out = agentStep(spec, state, registry, render, visit, mode);
     if (options.workdir !== undefined) out.workdir = options.workdir;
     const claim = liveClaim(state.nodes[visit.node], now);
     if (claim !== undefined) out.taken_by = claim.by;
@@ -696,14 +723,17 @@ function baseStep(
     }
     const handed = free.slice(0, maxParallel - held);
     const first = handed[0] as Visit;
-    const out = stepOf(first);
+    const parallelFork =
+      visible.length > 1 && options.agents?.mode === "parallel" && options.worker !== true;
+    const stepMode: InstructionMode | undefined = parallelFork ? "coordinator" : undefined;
+    const out = stepOf(first, stepMode);
     if (visible.length > 1) {
       const mode = options.agents?.mode ?? "sequential";
       const rules =
         mode === "parallel"
-          ? parallelRules(waitHint)
+          ? parallelRules(waitHint) + workerModels(spec, registry, handed)
           : sequentialRules(options.agents?.undeclared === true);
-      const steps = [...handed, ...taken].map(stepOf);
+      const steps = [...handed, ...taken].map((v) => stepOf(v, stepMode));
       const queued = free.length - handed.length;
       return {
         node: {
@@ -806,6 +836,7 @@ function agentStep(
   registry: Registry,
   render: (text: string) => string,
   visit: Visit,
+  mode: InstructionMode,
 ): AgentStep {
   const spec_ = spec.nodes.find((n) => n.slug === visit.node);
   if (!spec_) throw new Error(`unknown node ${visit.node}`);
@@ -854,7 +885,7 @@ function agentStep(
             : `The previous attempt failed (${failure.source}): ${failure.reason}${checkOf(failure)}`;
   }
   if (resultSpec) out.result_spec = resultSpec;
-  const how = handler?.instruction?.(spec_.params);
+  const how = handler?.instruction?.(spec_.params, { mode });
   if (how) out.execution = { instruction: how };
   const others = labelsOf(registry, spec_)?.success.slice(1) ?? [];
   if (others.length > 0) out.outcomes = others;

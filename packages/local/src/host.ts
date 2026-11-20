@@ -48,6 +48,7 @@ import {
   foldSessionName,
   type HistoryConfig,
   hasEngineSteps,
+  hasModelSteps,
   inOwnBranch,
   isRunEnd,
   isSessionVisit,
@@ -1508,6 +1509,14 @@ export class LocalRun {
     accepting = false,
   ): KodelError | undefined {
     const registry = this.host.engine.registry ?? defaultRegistry();
+    // A step that asks for a model needs no host support, only a format that can keep it: the kept copy
+    // of such a pipeline is one the engine that wrote a format-1 run refuses.
+    if (
+      hasModelSteps(spec, registry) &&
+      !capabilitiesOf(state.v).pipelineFeatures.includes("model")
+    ) {
+      return cannotHoldError(state.v, "a pipeline with a step that asks for a model", this.runId);
+    }
     if (hasEngineSteps(spec, registry)) {
       const refusal = this.host.engineRefusal(spec);
       if (refusal) return refusal;

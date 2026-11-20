@@ -37,6 +37,7 @@ import {
   beginsAsSession,
   defaultRegistry,
   labelsOf,
+  requestedModelOf,
   RESTART_FAILED,
   type Registry,
 } from "./registry";
@@ -103,6 +104,17 @@ export function hasEngineSteps(
   registry: Registry = defaultRegistry(),
 ): boolean {
   return spec.nodes.some((node) => beginsAsSession(registry, node));
+}
+
+/**
+ * Whether a pipeline has a step that asks for a model without an engine (a subagent, or a worker, on that
+ * model). Not an engine step: it needs nothing of the engine-steps switch, only a format that can keep it.
+ */
+export function hasModelSteps(
+  spec: PipelineSpec,
+  registry: Registry = defaultRegistry(),
+): boolean {
+  return spec.nodes.some((node) => requestedModelOf(registry, node) !== undefined);
 }
 
 /** Whether an active visit is the work of an engine step: by its phase and its node, never by a record. */
@@ -2768,6 +2780,9 @@ class Machine {
       !this.caps.pipelineFeatures.includes("engine")
     ) {
       throw cannotHoldError(this.s.v, "a pipeline with a step with engine", this.s.runId);
+    }
+    if (hasModelSteps(this.spec, this.registry) && !this.caps.pipelineFeatures.includes("model")) {
+      throw cannotHoldError(this.s.v, "a pipeline with a step that asks for a model", this.s.runId);
     }
     // An unknown outcome waits for a person's resume, which looks the session up first; a change
     // would enter the step again past it.

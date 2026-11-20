@@ -143,6 +143,27 @@ describe("a run of format 1 goes on in format 1", () => {
     expect(await snapshot(runDir(PAUSED))).toEqual(before);
   });
 
+  test("t43_v1_refuses_a_model_step_before_anything_is_written", async () => {
+    await copyFixture(PAUSED);
+    const run = await hostFor().open(PAUSED);
+    expect(run).toBeDefined();
+    const MODELED = "name: modeled\nnodes:\n  - { slug: a, kind: agent, prompt: a, model: sonnet }\n";
+    const before = await snapshot(runDir(PAUSED));
+    const proposed = await run?.proposeChange({ yaml: MODELED, summary: "ask for a model" });
+    expect(proposed?.ok).toBe(false);
+    if (proposed && !proposed.ok) {
+      expect(proposed.code).toBe("UNSUPPORTED_FORMAT_FEATURE");
+      expect(proposed.message).toContain("run-state format 1");
+      expect(proposed.message).toContain("asks for a model");
+      expect(proposed.message).toContain("kodel migrate");
+    }
+    const accepted = await run?.acceptChange({ source: "file", text: MODELED });
+    expect(accepted?.ok).toBe(false);
+    if (accepted && !accepted.ok) expect(accepted.error.code).toBe("UNSUPPORTED_FORMAT_FEATURE");
+    // not one byte of the run changed, and no copy of the refused pipeline was kept
+    expect(await snapshot(runDir(PAUSED))).toEqual(before);
+  });
+
   test("t41_v1_paused_run_resumes_and_stays_format_1", async () => {
     await copyFixture(PAUSED);
     const run = await hostFor().open(PAUSED);

@@ -5,6 +5,7 @@
  */
 import { z } from "zod";
 import type { EngineLaunchRequest } from "./engine-launch";
+import { MODEL_ID } from "./usage-record";
 
 /** The part of a parsed check the handlers need to know about. */
 export interface CheckInfo {
@@ -65,6 +66,13 @@ export type Begin =
       results?: Record<string, unknown>;
     };
 
+/** Who reads the instruction of a step: see `NodeHandler.instruction`. */
+export type InstructionMode = "single" | "coordinator" | "worker";
+
+export interface InstructionContext {
+  mode: InstructionMode;
+}
+
 export interface NodeHandler {
   kind: string;
   /** Kind-specific fields (the common fields and `checks` are added by the parser). */
@@ -78,8 +86,18 @@ export interface NodeHandler {
   labels(node: NodeInfo): Labels;
   /** How the node starts: who does the work and with what instructions. */
   begin(params: Record<string, unknown>, render: (text: string) => string): Begin;
-  /** Extra guidance on *how* the agent does this node (not what), shown with the step. */
-  instruction?(params: Record<string, unknown>): string | undefined;
+  /**
+   * Extra guidance on *how* the agent does this node (not what), shown with the step. `ctx.mode` says who
+   * reads it: the agent that works the step itself (`single`, the default), the agent that starts a
+   * fork's workers (`coordinator`), or a worker that holds the step (`worker`).
+   */
+  instruction?(params: Record<string, unknown>, ctx?: InstructionContext): string | undefined;
+  /**
+   * The model the agent that drives the run is asked to run this step on (a subagent, or a fork's
+   * worker), or undefined when the node asks for none. Never set for a step run by an engine: there
+   * the model is the program's, and no host agent runs the step.
+   */
+  requestedModel?(params: Record<string, unknown>): string | undefined;
   /** The columns of the report this node takes through `pipeline_report_result`, when it takes one. */
   resultsSpec?(params: Record<string, unknown>): Record<string, unknown> | undefined;
   /**
@@ -99,6 +117,11 @@ export function beginsAsSession(registry: Registry, node: NodeInfo): boolean {
   } catch {
     return false;
   }
+}
+
+/** The model a node asks the agent that drives the run to run its step on, if any. */
+export function requestedModelOf(registry: Registry, node: NodeInfo): string | undefined {
+  return registry.node(node.kind)?.requestedModel?.(node.params ?? {});
 }
 
 export type Baseline = "run" | "node" | "attempt";
@@ -163,6 +186,30 @@ export const FRESH_CONTEXT_INSTRUCTION =
   "step's prompt and the repository, not your earlier reasoning, so it is an independent look. " +
   "Take what it finds as it is and send that; do not change it to agree with your own work.";
 
+/**
+ * What a model asked of a step without an engine must look like: a model id (the pattern of the usage
+ * records, so the report can compare it) with at least one letter.
+ */
+export const isModelName = (value: string): boolean =>
+  MODEL_ID.test(value) && /[A-Za-z]/.test(value);
+
+const MODEL_SINGLE_INSTRUCTION = (model: string) =>
+  `Do this step on the model \`${model}\`: give it to a subagent started on that model (in Claude ` +
+  "Code the Agent tool's `model`; use the family name, such as `sonnet`), and send what it found " +
+  "as it is. If you cannot choose the model of a subagent, say so in your summary.";
+
+const MODEL_COORDINATOR_INSTRUCTION = (model: string) =>
+  `Start the worker for this step on the model \`${model}\`. The worker itself runs on that model; ` +
+  "it does not start a subagent.";
+
+const MODEL_WORKER_INSTRUCTION = (model: string) =>
+  `You run on the model \`${model}\` for this step. If you are not on \`${model}\`, say so in your ` +
+  "summary. Do not start a subagent for this step.";
+
+/** The model a step asks for when no engine runs it. */
+const modelWithoutEngine = (params: Record<string, unknown>): string | undefined =>
+  typeof params.model === "string" && params.engine === undefined ? params.model : undefined;
+
 /** A label an agent may finish a step with, besides `passed`. */
 const outcomeLabel = z
   .string()
@@ -199,7 +246,9 @@ const agentNode: NodeHandler = {
       ),
     model: nonEmpty
       .optional()
-      .describe("The model the engine's program is asked to use; only with `engine`."),
+      .describe(
+        "With `engine`: the model the engine's program is asked to use. Without it: the model the agent that drives the run is asked to run this step on, in a subagent (or, in a fork worked in parallel, in a worker started on it); a model id such as `sonnet` or `claude-sonnet-5-5`.",
+      ),
   },
   allowsChecks: true,
   requiresRoutes: false,
@@ -219,12 +268,27 @@ const agentNode: NodeHandler = {
           },
         }
       : { needs: "agent", prompt: render(String(params.prompt)) },
-  instruction: (params) => (params.fresh_context === true ? FRESH_CONTEXT_INSTRUCTION : undefined),
+  requestedModel: modelWithoutEngine,
+  instruction: (params, ctx) => {
+    const fresh = params.fresh_context === true ? FRESH_CONTEXT_INSTRUCTION : undefined;
+    const model = modelWithoutEngine(params);
+    if (model === undefined) return fresh;
+    // A worker is a fresh subagent already, and the coordinator starts it: the fresh-context sentence
+    // is left out of both.
+    if (ctx?.mode === "worker") return MODEL_WORKER_INSTRUCTION(model);
+    if (ctx?.mode === "coordinator") return MODEL_COORDINATOR_INSTRUCTION(model);
+    return fresh === undefined
+      ? MODEL_SINGLE_INSTRUCTION(model)
+      : `${fresh}\n\n${MODEL_SINGLE_INSTRUCTION(model)}`;
+  },
   validateNode: (node) => {
     const params = node.params ?? {};
     const problems: string[] = [];
-    if (params.model !== undefined && params.engine === undefined) {
-      problems.push("model is only for a step with engine (the engine's program is told it)");
+    const asked = modelWithoutEngine(params);
+    if (asked !== undefined && !isModelName(asked)) {
+      problems.push(
+        "model must look like a model id: letters, digits, . _ : [ ] and -, at least one letter, at most 128 characters",
+      );
     }
     if (params.engine === undefined) return problems;
     // An engine step gets a fresh process by itself; what follows needs a host agent, or is not built

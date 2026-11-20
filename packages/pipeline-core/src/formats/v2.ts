@@ -16,7 +16,7 @@ export const V2_CAPABILITIES: FormatCapabilities = {
   keepsDeclaredAfterFailedCheck: true,
   firstDuplicateEdgeWins: false,
   sessionNames: true,
-  pipelineFeatures: ["join", "engine"],
+  pipelineFeatures: ["join", "engine", "model"],
 };
 
 const isObject = (value: unknown): value is Record<string, unknown> =>

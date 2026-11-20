@@ -9,7 +9,7 @@ import type { JournalRecord, RunState } from "../run";
 import type { RecordVersion } from "../version";
 
 /** What a pipeline file can use that a format's own parser reads. */
-export type PipelineFeature = "join" | "engine";
+export type PipelineFeature = "join" | "engine" | "model";
 
 /**
  * What a format can hold and which behaviours it keeps. The engine asks these, never the number.
