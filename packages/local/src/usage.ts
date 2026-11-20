@@ -77,7 +77,7 @@ export const STEP_END_LOG_WAIT_MS = 2_000;
 const STEP_END_LOG_POLL_MS = 100;
 /** How many subagent logs are looked at for the call of a step a worker handed in; the rest are not read. */
 const WORKER_LOGS_CAP = 64;
-/** The most the search for a worker's call reads in all, over every look of one hand-in. */
+/** The most one look of the search for a worker's call reads; logs that have not grown are not read again. */
 const WORKER_SCAN_BUDGET_BYTES = 8 * 1024 * 1024;
 /** What one look at a log reads at most (the tail `hasStepCall` looks at). */
 const WORKER_LOOK_BYTES = 256 * 1024;
@@ -473,14 +473,15 @@ export class UsageWriter {
       }
       const until = this.now() + this.stepWaitMs;
       const scanned = new Map<string, number>();
-      let spent = 0;
       for (let looks = 0; ; looks += 1) {
+        let spent = 0;
         const logs: string[] = [];
         for (const main of mains) logs.push(...(await subagentLogs(main.path, main.session)));
         const found: string[] = [];
         // The newest logs: a worker started for this step is among the last the session wrote.
         for (const { path: log, size } of await newestFirst(logs, WORKER_LOGS_CAP)) {
-          // A log that held no call and has not grown since is not read again; all the looks together stay under a bound.
+          // A log that held no call and has not grown since is not read again, so the looks together read each log's tail
+          // about once; a look itself stays under a bound, and a log that grew is never starved by earlier looks.
           if (scanned.get(log) === size) continue;
           if (spent + Math.min(size, WORKER_LOOK_BYTES) > WORKER_SCAN_BUDGET_BYTES) continue;
           spent += Math.min(size, WORKER_LOOK_BYTES);
