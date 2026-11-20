@@ -77,6 +77,10 @@ export const STEP_END_LOG_WAIT_MS = 2_000;
 const STEP_END_LOG_POLL_MS = 100;
 /** How many subagent logs are looked at for the call of a step a worker handed in; the rest are not read. */
 const WORKER_LOGS_CAP = 64;
+/** The most the search for a worker's call reads in all, over every look of one hand-in. */
+const WORKER_SCAN_BUDGET_BYTES = 8 * 1024 * 1024;
+/** What one look at a log reads at most (the tail `hasStepCall` looks at). */
+const WORKER_LOOK_BYTES = 256 * 1024;
 /**
  * What is kept in memory, bounded per run so that one busy run cannot make another (or its own main session) forget:
  * a run keeps the memos of its candidate sessions (the one of the environment and the newest of the hook index, 21 at
@@ -328,21 +332,21 @@ interface PassContext {
   result: UsageResult;
 }
 
-/** The `cap` logs written last, newest first; a log that cannot be looked at counts as the oldest. */
-async function newestFirst(paths: readonly string[], cap: number): Promise<string[]> {
+/** The `cap` logs written last, newest first, with their sizes; a log that cannot be looked at counts as the oldest. */
+async function newestFirst(
+  paths: readonly string[],
+  cap: number,
+): Promise<{ path: string; size: number }[]> {
   const stamped = await Promise.all(
-    paths.map(async (path) => ({
-      path,
-      at: await stat(path).then(
-        (info) => info.mtimeMs,
-        () => 0,
-      ),
-    })),
+    paths.map(async (path) => {
+      const info = await stat(path).catch(() => undefined);
+      return { path, at: info?.mtimeMs ?? 0, size: info?.size ?? 0 };
+    }),
   );
   return stamped
-    .sort((a, b) => b.at - a.at || a.path.localeCompare(b.path))
+    .sort((x, y) => y.at - x.at || x.path.localeCompare(y.path))
     .slice(0, cap)
-    .map((entry) => entry.path);
+    .map(({ path, size }) => ({ path, size }));
 }
 
 /** Counts usage from the agent's log into the runs of one host. One per process, like the copy of the log. */
@@ -468,13 +472,20 @@ export class UsageWriter {
         mains.push({ path: candidate.path, session: candidate.session });
       }
       const until = this.now() + this.stepWaitMs;
+      const scanned = new Map<string, number>();
+      let spent = 0;
       for (let looks = 0; ; looks += 1) {
         const logs: string[] = [];
         for (const main of mains) logs.push(...(await subagentLogs(main.path, main.session)));
         const found: string[] = [];
         // The newest logs: a worker started for this step is among the last the session wrote.
-        for (const log of await newestFirst(logs, WORKER_LOGS_CAP)) {
+        for (const { path: log, size } of await newestFirst(logs, WORKER_LOGS_CAP)) {
+          // A log that held no call and has not grown since is not read again; all the looks together stay under a bound.
+          if (scanned.get(log) === size) continue;
+          if (spent + Math.min(size, WORKER_LOOK_BYTES) > WORKER_SCAN_BUDGET_BYTES) continue;
+          spent += Math.min(size, WORKER_LOOK_BYTES);
           if (await hasStepCall(log, run.runId, step.node, step.attempt)) found.push(log);
+          else scanned.set(log, size);
         }
         // Two logs holding the same call (a replay after a resume) say nothing sure.
         if (found.length > 1) return [];
