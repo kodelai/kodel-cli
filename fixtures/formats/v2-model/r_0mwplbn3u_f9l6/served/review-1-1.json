@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "node": "review",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "1ec7531b907d5c6b6cc3a2cb3ac40d6a000300bd88e862734d2ac6270ab8c509",
+  "answer": {
+    "slug": "review",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "review",
+    "execution": {
+      "instruction": "You run on the model `sonnet` for this step. If you are not on `sonnet`, say so in your summary. Do not start a subagent for this step."
+    }
+  }
+}

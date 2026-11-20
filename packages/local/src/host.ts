@@ -3491,6 +3491,13 @@ export class LocalRun {
         await this.apply({ type: "tool_calls_failed", reason }).catch(() => undefined);
       }
     }
+    // A step a worker handed in (it carries a claim token): the models of the worker's own log for this step, so
+    // that a fork's branches are not told apart by the pooled use of the session (T-43). Outside the lock, with
+    // a wait of its own; nothing is read when usage is off.
+    const workerModels =
+      claimToken === undefined
+        ? undefined
+        : await this.host.usage.workerModels(run, { node, attempt }).catch(() => undefined);
     const executor = await this.executorNow(caller);
     // HEAD of the run's own directory: the root may be somewhere else entirely.
     const head = await this.cwd()
@@ -3518,6 +3525,7 @@ export class LocalRun {
         ...(outcome === undefined ? {} : { outcome }),
         // Only the hash travels: the token itself is the worker's and is written nowhere.
         ...(claimToken === undefined ? {} : { claimToken: hashSource(claimToken) }),
+        ...(workerModels === undefined ? {} : { workerModels }),
         ...(executor === undefined ? {} : executor),
         ...(recorded.changes === undefined ? {} : { changes: recorded.changes }),
         ...(recorded.changesError === undefined ? {} : { changesError: recorded.changesError }),

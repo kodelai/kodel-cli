@@ -1,0 +1,12 @@
+name: fork
+description: a fork whose two steps ask for a model
+nodes:
+  - { slug: plan, kind: agent, prompt: plan }
+  - { slug: review, kind: agent, prompt: review, model: sonnet }
+  - { slug: build, kind: agent, prompt: build, model: opus }
+  - { slug: merge, kind: agent, prompt: merge, join: all }
+edges:
+  - { from: plan, to: review }
+  - { from: plan, to: build }
+  - { from: review, to: merge }
+  - { from: build, to: merge }

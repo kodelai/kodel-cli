@@ -5,7 +5,7 @@
  * what the person and the agent said before it, and what an earlier run did in the same session, stay out.
  * The search looks at lines, not at events, so it works whatever the capture mode and stores nothing.
  */
-import { open } from "node:fs/promises";
+import { open, readFile, stat } from "node:fs/promises";
 import { toTs } from "@kodel-ai/pipeline-core";
 import { streamRawLines } from "../jsonl";
 
@@ -143,5 +143,56 @@ export async function hasStepCall(
     return false;
   } finally {
     await handle?.close().catch(() => undefined);
+  }
+}
+
+/** How much of a worker's log is read whole for the models of one step; a log over it is not read. */
+export const WORKER_LOG_MAX_BYTES = 4 * 1024 * 1024;
+
+/**
+ * The models of the responses in a worker's log from its previous `pipeline_complete_step` call (or the start of the
+ * log) up to the call that hands in `node` at `attempt` of the run `runId`, as the log names them, sorted and without
+ * repeats: so a worker kept for a later step, or for a retry, does not mix what it did before, and what it wrote after
+ * the call (its closing report) is not counted. `undefined` when the log holds no such call, or is too large to read.
+ * Never throws: any trouble reads as "not there".
+ */
+export async function workerStepModels(
+  path: string,
+  runId: string,
+  node: string,
+  attempt: number,
+  maxBytes = WORKER_LOG_MAX_BYTES,
+): Promise<string[] | undefined> {
+  try {
+    if ((await stat(path)).size > maxBytes) return undefined;
+    let segment = new Set<string>();
+    for (const text of (await readFile(path, "utf8")).split("\n")) {
+      if (text.trim() === "") continue;
+      let entry: unknown;
+      try {
+        entry = JSON.parse(text);
+      } catch {
+        continue;
+      }
+      if (!isObject(entry) || !isObject(entry["message"])) continue;
+      const message = entry["message"];
+      const model = message["model"];
+      // The response that makes a call belongs to the stretch the call ends.
+      if (typeof model === "string" && model !== "<synthetic>") segment.add(model);
+      const content = message["content"];
+      if (!Array.isArray(content)) continue;
+      for (const block of content) {
+        if (!isObject(block) || block["type"] !== "tool_use") continue;
+        const name = block["name"];
+        const input = block["input"];
+        if (typeof name !== "string" || !STEP_TOOL.test(name) || !isObject(input)) continue;
+        if (input["run_id"] !== runId) continue;
+        if (input["node_slug"] === node && input["attempt"] === attempt) return [...segment].sort();
+        segment = new Set();
+      }
+    }
+    return undefined;
+  } catch {
+    return undefined;
   }
 }

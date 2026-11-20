@@ -33,7 +33,7 @@ const segments = (id: string): string[] =>
     .filter((part) => part !== "");
 
 /** Who the model that matched belonged to, as far as the record says. */
-export type ModelBy = "host" | "subagent";
+export type ModelBy = "host" | "subagent" | "worker";
 
 /** Why a step's models were not judged. */
 export const MODEL_NOT_OBSERVED = [
@@ -86,6 +86,8 @@ export function modelMarks(input: ModelMarkInput): ModelMark[] {
   const usage = state.usage;
   // The model of the agent's own session at the hand-in of the attempt, as the journal kept it.
   const hostModel = new Map<string, string>();
+  // What the hand-in of a step a worker did says its worker's log showed; its presence marks the step a worker's.
+  const workerModels = new Map<string, string[]>();
   let hadWorkers = false;
   const order: { node: string; attempt: number }[] = [];
   for (const record of journal) {
@@ -100,6 +102,13 @@ export function modelMarks(input: ModelMarkInput): ModelMark[] {
     if (record.event === "agent_completed") {
       const model = (record.executor as { model?: { value?: unknown } } | undefined)?.model?.value;
       if (typeof model === "string") hostModel.set(key(node, attempt), model);
+      if (Array.isArray(record.worker_models)) {
+        hadWorkers = true;
+        workerModels.set(
+          key(node, attempt),
+          record.worker_models.filter((m): m is string => typeof m === "string"),
+        );
+      }
     }
   }
   const failed = usage?.failed ?? [];
@@ -114,7 +123,22 @@ export function modelMarks(input: ModelMarkInput): ModelMark[] {
       result: "not_observed",
       reason,
     });
-    if (state.v === 1 || failed.includes("agent_unsupported")) return not("unsupported");
+    if (state.v === 1) return not("unsupported");
+    // A step a worker did is judged by its worker's own log, never by the pooled use of the session.
+    const worker = workerModels.get(key(node, attempt));
+    if (worker !== undefined) {
+      const own = { ...base, seen: worker };
+      if (worker.length === 0)
+        return { ...own, result: "not_observed", reason: "worker_not_found" };
+      if (worker.some((model) => modelMatches(asked, model))) {
+        return { ...own, result: "match", by: "worker" };
+      }
+      if (worker.includes(OTHER_MODEL)) {
+        return { ...own, result: "not_observed", reason: "unknown_id" };
+      }
+      return { ...own, result: "mismatch" };
+    }
+    if (failed.includes("agent_unsupported")) return not("unsupported");
     if (hadWorkers) return not("workers_in_run");
     if (!clean || seen.length === 0) return not("usage_missing");
     const matched = seen.filter((model) => modelMatches(asked, model));

@@ -18,11 +18,35 @@ import {
   tokensOf,
 } from "@kodel-ai/pipeline-core";
 import { ClaudeLogBuilder } from "../../testkit/src";
-import { AgentLogWriter, FileStore, LocalPipelineHost, type LocalRun, UsageWriter } from "../src";
+import {
+  type AgentLogRun,
+  AgentLogWriter,
+  FileStore,
+  LocalPipelineHost,
+  type LocalRun,
+  UsageWriter,
+} from "../src";
 
 const SESSION = "66666666-6666-4666-8666-666666666666";
 const SONNET = "claude-sonnet-5-5";
 const OPUS = "claude-opus-4-8";
+
+/** A fork: plan, then a and b at once, then a join; each says the model it asks for, or none. */
+const forkPipeline = (a: string, b: string, merge = "") =>
+  [
+    "name: two",
+    "nodes:",
+    "  - { slug: plan, kind: agent, prompt: plan }",
+    `  - { slug: a, kind: agent, prompt: do a${asked(a)} }`,
+    `  - { slug: b, kind: agent, prompt: do b${asked(b)} }`,
+    `  - { slug: merge, kind: agent, prompt: merge, join: all${asked(merge)} }`,
+    "edges:",
+    "  - { from: plan, to: a }",
+    "  - { from: plan, to: b }",
+    "  - { from: a, to: merge }",
+    "  - { from: b, to: merge }",
+    "",
+  ].join("\n");
 
 const asked = (model: string) => (model === "" ? "" : `, model: ${model}`);
 
@@ -94,7 +118,7 @@ async function rig(options: Options = {}) {
   });
   const started = await host.start({ pipeline: "two", task: options.task ?? "t", restart: false });
   const run = started.run as LocalRun;
-  return { host, run, runId: run.runId, store };
+  return { host, run, runId: run.runId, store, writer };
 }
 
 /**
@@ -327,5 +351,261 @@ describe("t43 the mark in the report", () => {
     // the report is still made; the models of the attempts under the damaged copy are not guessed
     expect(report?.models?.no_snapshot).toBe(true);
     expect(report?.models?.marks.find((m) => m.node === "a")).toBeUndefined();
+  });
+});
+
+// ── a fork worked by workers ────────────────────────────────────────────────
+
+/**
+ * A worker's log (a subagent of the session): its answers on `model`, then the call that hands its step in,
+ * then, when `closing` is given, the report it writes after the call, on that model.
+ */
+async function workerLog(
+  sessionPath: string,
+  id: string,
+  runId: string,
+  steps: { node: string; attempt?: number; model: string; closing?: string }[],
+  options: { start?: string } = {},
+): Promise<string> {
+  const child = new ClaudeLogBuilder({
+    sessionId: id,
+    cwd: dir,
+    start: options.start ?? "2026-10-21T10:00:30.000Z",
+  });
+  child.user("take your step");
+  let n = 0;
+  for (const step of steps) {
+    n += 1;
+    // one line for the response that makes the call, on the worker's model
+    child.call(
+      `${id}-w${n}`,
+      {
+        id: `${id}-tu${n}`,
+        name: "mcp__kodel__pipeline_complete_step",
+        input: { run_id: runId, node_slug: step.node, attempt: step.attempt ?? 1 },
+      },
+      { input: 30, output: 7, model: step.model },
+    );
+    if (step.closing !== undefined) {
+      child.say(`${id}-c${n}`, "my report", { input: 5, output: 2, model: step.closing });
+    }
+  }
+  const path = join(dirname(sessionPath), SESSION, "subagents", `${id}.jsonl`);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, child.text());
+  return path;
+}
+
+/** The run at the point where a and b are open, the host session on `host`. */
+async function openFork(options: Options & { host?: string } = {}) {
+  const host = options.host ?? OPUS;
+  const r = await rig({ text: forkPipeline("sonnet", "opus"), ...options });
+  const path = await sessionLog(r.runId, [{ id: "msg_1", model: host }]).install(claude);
+  await r.run.completeStep("plan", 1);
+  const tokenA = "token-for-a";
+  const tokenB = "token-for-b";
+  const takenA = await r.run.takeStep({ node: "a", token: tokenA });
+  const takenB = await r.run.takeStep({ node: "b", token: tokenB });
+  expect(takenA.status).toBe("claimed");
+  expect(takenB.status).toBe("claimed");
+  return { ...r, path, tokenA, tokenB };
+}
+
+const handIn = (f: Awaited<ReturnType<typeof openFork>>, node: string, token: string) =>
+  f.run.completeStep(node, 1, "done", undefined, undefined, token);
+
+describe("t43 a fork worked by workers", () => {
+  test("t43_fork_two_workers_two_models_each_judged_by_its_own_log_a_first", async () => {
+    const f = await openFork();
+    await workerLog(f.path, "agent-wa", f.runId, [{ node: "a", model: SONNET }]);
+    await workerLog(f.path, "agent-wb", f.runId, [{ node: "b", model: OPUS }]);
+    await handIn(f, "a", f.tokenA);
+    await handIn(f, "b", f.tokenB);
+    expect(await markOf(f.run, "a")).toMatchObject({
+      requested: "sonnet",
+      seen: [SONNET],
+      result: "match",
+      by: "worker",
+    });
+    expect(await markOf(f.run, "b")).toMatchObject({
+      requested: "opus",
+      seen: [OPUS],
+      result: "match",
+      by: "worker",
+    });
+  });
+
+  test("t43_fork_two_workers_two_models_each_judged_by_its_own_log_b_first", async () => {
+    const f = await openFork();
+    await workerLog(f.path, "agent-wa", f.runId, [{ node: "a", model: SONNET }]);
+    await workerLog(f.path, "agent-wb", f.runId, [{ node: "b", model: OPUS }]);
+    await handIn(f, "b", f.tokenB);
+    await handIn(f, "a", f.tokenA);
+    expect((await markOf(f.run, "a")).result).toBe("match");
+    expect((await markOf(f.run, "b")).result).toBe("match");
+  });
+
+  test("t43_pooled_models_are_mixed_but_the_marks_are_not", async () => {
+    const f = await openFork({ host: OPUS });
+    await workerLog(f.path, "agent-wa", f.runId, [{ node: "a", model: SONNET }]);
+    await workerLog(f.path, "agent-wb", f.runId, [{ node: "b", model: SONNET }]);
+    await handIn(f, "a", f.tokenA);
+    await handIn(f, "b", f.tokenB);
+    // the pool credits what the session and every worker wrote to the step handed in, so a's use holds the
+    // models of both workers; b was on sonnet, not on the opus it asked for, and says so
+    const usage = (await f.run.state()).usage;
+    expect(Object.keys(usage?.attempts["a:1"]?.models ?? {})).toContain(SONNET);
+    expect(await markOf(f.run, "a")).toMatchObject({ result: "match", by: "worker" });
+    expect(await markOf(f.run, "b")).toMatchObject({ result: "mismatch", seen: [SONNET] });
+  });
+
+  test("t43_worker_on_another_model_is_mismatch", async () => {
+    const f = await openFork();
+    await workerLog(f.path, "agent-wa", f.runId, [{ node: "a", model: OPUS }]);
+    await workerLog(f.path, "agent-wb", f.runId, [{ node: "b", model: OPUS }]);
+    await handIn(f, "a", f.tokenA);
+    await handIn(f, "b", f.tokenB);
+    expect(await markOf(f.run, "a")).toMatchObject({ result: "mismatch", seen: [OPUS] });
+  });
+
+  test("t43_worker_log_not_found_is_not_observed", async () => {
+    const f = await openFork();
+    // no worker log holds the call for a
+    await workerLog(f.path, "agent-wb", f.runId, [{ node: "b", model: OPUS }]);
+    await handIn(f, "a", f.tokenA);
+    expect(await markOf(f.run, "a")).toMatchObject({
+      result: "not_observed",
+      reason: "worker_not_found",
+      seen: [],
+    });
+  });
+
+  test("t43_worker_call_found_in_two_logs_is_not_observed", async () => {
+    const f = await openFork();
+    await workerLog(f.path, "agent-wa", f.runId, [{ node: "a", model: SONNET }]);
+    await workerLog(f.path, "agent-wa2", f.runId, [{ node: "a", model: SONNET }]);
+    await handIn(f, "a", f.tokenA);
+    expect(await markOf(f.run, "a")).toMatchObject({
+      result: "not_observed",
+      reason: "worker_not_found",
+    });
+  });
+
+  test("t43_coordinator_with_a_token_is_not_observed", async () => {
+    // the call is in the main log, which is never searched: an agent that takes a step itself is no worker
+    const f = await openFork();
+    const main = sessionLog(f.runId, [{ id: "msg_1", model: SONNET }]);
+    main.call(
+      "msg_1",
+      {
+        id: "tu_main",
+        name: "mcp__kodel__pipeline_complete_step",
+        input: { run_id: f.runId, node_slug: "a", attempt: 1 },
+      },
+      { model: SONNET },
+    );
+    await writeFile(f.path, main.text());
+    await handIn(f, "a", f.tokenA);
+    expect(await markOf(f.run, "a")).toMatchObject({
+      result: "not_observed",
+      reason: "worker_not_found",
+    });
+  });
+
+  test("t43_worker_closing_report_after_the_call_is_not_counted", async () => {
+    const f = await openFork();
+    await workerLog(f.path, "agent-wa", f.runId, [{ node: "a", model: SONNET, closing: OPUS }]);
+    await workerLog(f.path, "agent-wb", f.runId, [{ node: "b", model: OPUS }]);
+    await handIn(f, "a", f.tokenA);
+    expect(await markOf(f.run, "a")).toMatchObject({ result: "match", seen: [SONNET] });
+  });
+
+  test("t43_worker_with_several_steps_in_one_log_keeps_the_stretches_apart", async () => {
+    // the same worker took b after a, on another model: each step is judged by its own stretch of the log
+    const f = await openFork();
+    await workerLog(f.path, "agent-wab", f.runId, [
+      { node: "a", model: SONNET },
+      { node: "b", model: OPUS },
+    ]);
+    await handIn(f, "a", f.tokenA);
+    await handIn(f, "b", f.tokenB);
+    expect(await markOf(f.run, "a")).toMatchObject({ seen: [SONNET], result: "match" });
+    expect(await markOf(f.run, "b")).toMatchObject({ seen: [OPUS], result: "match" });
+  });
+
+  test("t43_worker_log_over_the_size_bound_is_not_observed", async () => {
+    const f = await openFork();
+    const path = await workerLog(f.path, "agent-wa", f.runId, [{ node: "a", model: SONNET }]);
+    const { appendFile } = await import("node:fs/promises");
+    // larger than the bound the log is read up to: pad with lines the reader skips
+    const junk = `${JSON.stringify({ type: "system", note: "x".repeat(1000) })}\n`;
+    await appendFile(path, junk.repeat(4200));
+    await handIn(f, "a", f.tokenA);
+    expect(await markOf(f.run, "a")).toMatchObject({
+      result: "not_observed",
+      reason: "worker_not_found",
+    });
+  });
+
+  test("t43_worker_log_with_an_other_id_is_not_observed", async () => {
+    const f = await openFork();
+    await workerLog(f.path, "agent-wa", f.runId, [{ node: "a", model: "weird model!" }]);
+    await handIn(f, "a", f.tokenA);
+    expect(await markOf(f.run, "a")).toMatchObject({
+      result: "not_observed",
+      reason: "unknown_id",
+      seen: ["other"],
+    });
+  });
+
+  test("t43_step_not_done_by_a_worker_in_a_run_with_workers_is_not_observed", async () => {
+    // the join is done by the coordinator after the workers: the pooled use holds their closing responses
+    const f = await openFork({ text: forkPipeline("sonnet", "opus", "sonnet") });
+    await workerLog(f.path, "agent-wa", f.runId, [{ node: "a", model: SONNET, closing: SONNET }]);
+    await workerLog(f.path, "agent-wb", f.runId, [{ node: "b", model: OPUS }]);
+    await handIn(f, "a", f.tokenA);
+    await handIn(f, "b", f.tokenB);
+    await f.run.completeStep("merge", 1);
+    expect(await markOf(f.run, "merge")).toMatchObject({
+      result: "not_observed",
+      reason: "workers_in_run",
+    });
+  });
+
+  test("t43_worker_step_with_usage_off_writes_no_worker_models", async () => {
+    const f = await openFork({ usage: false });
+    await workerLog(f.path, "agent-wa", f.runId, [{ node: "a", model: SONNET }]);
+    await handIn(f, "a", f.tokenA);
+    const journal = await f.store.readJournal(f.runId);
+    const done = journal.find((r) => r.event === "agent_completed" && r.node === "a");
+    expect(done?.worker_models).toBeUndefined();
+  });
+
+  test("t43_worker_models_are_in_the_journal_folded_sorted_and_unique", async () => {
+    const f = await openFork();
+    await workerLog(f.path, "agent-wa", f.runId, [
+      { node: "a", model: OPUS, closing: OPUS },
+      { node: "a", attempt: 1, model: SONNET },
+    ]);
+    await handIn(f, "a", f.tokenA);
+    const journal = await f.store.readJournal(f.runId);
+    const done = journal.find((r) => r.event === "agent_completed" && r.node === "a");
+    expect(done?.worker_models).toEqual([OPUS]);
+  });
+
+  test("t43_cost_and_tokens_and_passes_unchanged_by_the_worker_scan", async () => {
+    // the scan only reads: it writes no event and changes no count, however often it is asked
+    const f = await openFork();
+    await workerLog(f.path, "agent-wa", f.runId, [{ node: "a", model: SONNET }]);
+    const run = (f.run as unknown as { agentLogRun(): AgentLogRun }).agentLogRun();
+    const before = {
+      journal: JSON.stringify(await f.store.readJournal(f.runId)),
+      usage: JSON.stringify((await f.run.state()).usage),
+    };
+    expect(await f.writer.workerModels(run, { node: "a", attempt: 1 })).toEqual([SONNET]);
+    expect(await f.writer.workerModels(run, { node: "a", attempt: 1 })).toEqual([SONNET]);
+    expect(await f.writer.workerModels(run, { node: "b", attempt: 1 })).toEqual([]);
+    expect(JSON.stringify(await f.store.readJournal(f.runId))).toBe(before.journal);
+    expect(JSON.stringify((await f.run.state()).usage)).toBe(before.usage);
   });
 });

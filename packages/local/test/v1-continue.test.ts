@@ -147,7 +147,8 @@ describe("a run of format 1 goes on in format 1", () => {
     await copyFixture(PAUSED);
     const run = await hostFor().open(PAUSED);
     expect(run).toBeDefined();
-    const MODELED = "name: modeled\nnodes:\n  - { slug: a, kind: agent, prompt: a, model: sonnet }\n";
+    const MODELED =
+      "name: modeled\nnodes:\n  - { slug: a, kind: agent, prompt: a, model: sonnet }\n";
     const before = await snapshot(runDir(PAUSED));
     const proposed = await run?.proposeChange({ yaml: MODELED, summary: "ask for a model" });
     expect(proposed?.ok).toBe(false);

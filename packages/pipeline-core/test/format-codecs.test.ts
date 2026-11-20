@@ -826,3 +826,56 @@ describe("t42 the format-2 runs with an engine step", () => {
     expect(all.some((r) => r.event === "run_resumed" && typeof r.session === "string")).toBe(true);
   });
 });
+
+describe("t43 the format-2 run with steps that ask for a model", () => {
+  test("t43_worker_models_round_trip_in_the_v2_codec", () => {
+    const [run] = fixtureRuns("v2-model");
+    expect(run).toBeDefined();
+    if (run === undefined) return;
+    const state = readRunState(run.state, run.id);
+    expect(state.v).toBe(2);
+    expect(canonical(encodeRunState(state))).toBe(canonical(JSON.parse(run.state)));
+    const journal = run.journal.map((line) => decodeJournalRecord(JSON.parse(line)));
+    for (const [i, record] of journal.entries()) {
+      expect(canonical(encodeJournalRecord(record))).toBe(
+        canonical(JSON.parse(run.journal[i] as string)),
+      );
+    }
+    const done = journal.filter(
+      (r) => r.event === "agent_completed" && Array.isArray(r.worker_models),
+    );
+    expect(done.map((r) => [r.node, r.worker_models])).toEqual([
+      ["review", ["claude-sonnet-5-5"]],
+      ["build", ["claude-opus-4-8"]],
+    ]);
+  });
+
+  test("t43_stripping_worker_models_changes_no_decision", () => {
+    // the field only feeds the report: the run's state and what the machine decided are the same without it
+    const [run] = fixtureRuns("v2-model");
+    if (run === undefined) throw new Error("no fixture run");
+    const stripped = run.journal
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .map(({ worker_models: _dropped, ...rest }) => rest)
+      .map((record) => decodeJournalRecord(record));
+    const full = run.journal.map((line) => decodeJournalRecord(JSON.parse(line)));
+    expect(stripped.map((r) => r.event)).toEqual(full.map((r) => r.event));
+    const state = readRunState(run.state, run.id);
+    const withField = summarizeRun(state, full);
+    const without = summarizeRun(state, stripped);
+    expect(without.status).toBe(withField.status);
+    expect(without.nodes.map((n) => [n.node, n.attempts.map((a) => a.outcome)])).toEqual(
+      withField.nodes.map((n) => [n.node, n.attempts.map((a) => a.outcome)]),
+    );
+  });
+
+  test("t43_format_1_refuses_the_state_a_model_step_run_would_need", () => {
+    // the field is on a journal event of format 2; a format-1 run has no worker and no usage to carry it
+    const [run] = fixtureRuns("v2-model");
+    if (run === undefined) throw new Error("no fixture run");
+    const state = readRunState(run.state, run.id);
+    expect(refusal(() => encodeRunState({ ...state, v: 1 } as RunState)).code).toBe(
+      "UNSUPPORTED_FORMAT_FEATURE",
+    );
+  });
+});
