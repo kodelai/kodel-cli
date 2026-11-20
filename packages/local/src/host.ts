@@ -1185,6 +1185,20 @@ export class LocalRun {
   }
 
   /** The pipeline the run is on now. */
+  /** Whether the step in the pipeline in force asks for a model: only such a step's worker log is looked for. */
+  private async asksForModel(slug: string): Promise<boolean> {
+    try {
+      const spec = await this.currentSpec();
+      const found = spec.nodes.find((n) => n.slug === slug);
+      return (
+        found !== undefined &&
+        requestedModelOf(this.host.engine.registry ?? defaultRegistry(), found) !== undefined
+      );
+    } catch {
+      return false;
+    }
+  }
+
   async currentSpec(state?: RunState): Promise<PipelineSpec> {
     return this.specFor((state ?? (await this.state())).specHash);
   }
@@ -3495,7 +3509,7 @@ export class LocalRun {
     // that a fork's branches are not told apart by the pooled use of the session (T-43). Outside the lock, with
     // a wait of its own; nothing is read when usage is off.
     const workerModels =
-      claimToken === undefined
+      claimToken === undefined || !(await this.asksForModel(node))
         ? undefined
         : await this.host.usage.workerModels(run, { node, attempt }).catch(() => undefined);
     const executor = await this.executorNow(caller);
