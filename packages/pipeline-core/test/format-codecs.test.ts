@@ -869,8 +869,8 @@ describe("t43 the format-2 run with steps that ask for a model", () => {
     );
   });
 
-  test("t43_format_1_refuses_the_state_a_model_step_run_would_need", () => {
-    // the field is on a journal event of format 2; a format-1 run has no worker and no usage to carry it
+  test("t43_format_1_cannot_hold_the_fork_run_that_carries_worker_models", () => {
+    // the field comes with claims, which format 1 cannot hold; the refusal of a model step itself is pinned in the local tests
     const [run] = fixtureRuns("v2-model");
     if (run === undefined) throw new Error("no fixture run");
     const state = readRunState(run.state, run.id);

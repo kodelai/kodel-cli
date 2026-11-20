@@ -221,7 +221,7 @@ const NOT_OBSERVED_TEXT: Record<string, string> = {
   unknown_id: "a model id the report cannot read was among those seen",
   unsupported: "this run or this client keeps no log that is read",
   workers_in_run: "the run had workers; use cannot be told apart by step",
-  worker_not_found: "the worker's log was not found",
+  worker_not_found: "the worker's log was not found or could not be read",
 };
 
 /**

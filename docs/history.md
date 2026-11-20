@@ -583,8 +583,9 @@ It is **information**, like usage and cost: it changes no route, no check and no
 
 **Two sources, and only two.** The model asked for is `declared`: it is read from the pipeline kept with the run, the version
 in force when the attempt began (a pipeline changed in the middle of a run changes what a later attempt asked for; nothing about it is
-stored in the journal). The models seen are `derived`: the models of the agent's session and subagent logs that the usage count
-already reads, per attempt. The task text also named `observed-hook`; it is **not used**, because the hook payloads Kodel receives carry no
+stored in the journal). The models seen are `derived`: for a step done by the agent's own session (or a subagent of it), the models of
+the session and subagent logs that the usage count already reads, per attempt; for a step a **worker** of a fork did, the models of that
+worker's own log (below). The task text also named `observed-hook`; it is **not used**, because the hook payloads Kodel receives carry no
 model of a subagent. It can be added as a source when a host sends one.
 
 **The match rule.** Both names are lower-cased, a trailing `[...]` of an id is dropped, and both are split at `-` and `:`. The requested
@@ -602,7 +603,17 @@ seen, none matched and none was an id the report cannot read), or `not observed`
 | `usage_missing` | usage is off, was not captured, the attempt has no record or an empty one, or the run's usage record is not clean: any entry in its failure list (it names no attempt, so one entry downgrades every such step of the run) or a log not read to its end |
 | `unknown_id` | an id that did not fit the pattern of a model id was among those seen, and none matched |
 | `unsupported` | a run of run-state format 1 (it keeps no usage), or a client whose log is not read |
-| `workers_in_run` | the run had workers (a fork worked in parallel): the pooled use of the session cannot be told apart by step |
+| `workers_in_run` | the run had workers (a fork worked in parallel) and this step was not done by one: the pooled use of the session cannot be told apart by step |
+| `worker_not_found` | a worker took this step (the journal has its claim), and its own log could not be found or read: not found among the newest subagent logs, found in two logs, too large, or no usage to read it with |
+
+**A step done by a worker.** A step is a worker's when the journal has a claim for it (`step_claimed`). When it is handed in with its
+claim token, the engine looks, among the newest subagent logs of the session (at most 64, newest first), for the one that holds the
+worker's own call of `pipeline_complete_step` for this run, node and attempt, waits for it a little (at most the wait the usage count
+already uses), and reads the models of the responses that worker wrote for the step, up to that call. They are stored on the
+`agent_completed` record as `worker_models` (sorted, each folded to `other` when it is not a model id, at most a few). The mark of a
+worker's step is judged by those models only, never by the pooled use of the session, so two workers on different models are each
+judged by their own; `match` then says `by worker`. If no such log is found, or two hold the same call, the mark is `worker_not_found`.
+The field is read by the report only: removing it changes no decision of the run.
 
 **What the mark cannot tell.** `match` does not prove that a subagent did the step: the host's own model is among the models seen
 (the host makes the calls of the pipeline), and a helper subagent that the agent starts on its own (Explore) is counted too. It also
