@@ -4,6 +4,7 @@
  * the three texts, the format gate. What the report makes of it is in `model-mark.test.ts`.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   capabilitiesOf,
   decide,
@@ -16,9 +17,9 @@ import {
   nextStep,
   type PipelineSpec,
   parsePipeline,
-  requestedModelOf,
   type RunEvent,
   type RunState,
+  requestedModelOf,
   validatePipeline,
 } from "../src";
 
@@ -159,7 +160,11 @@ describe("t43 the field", () => {
 });
 
 describe("t43 the three texts", () => {
-  const params = (extra: Record<string, unknown> = {}) => ({ prompt: "x", model: "sonnet", ...extra });
+  const params = (extra: Record<string, unknown> = {}) => ({
+    prompt: "x",
+    model: "sonnet",
+    ...extra,
+  });
 
   test("t43_instruction_single_step", () => {
     const text = agentHandler().instruction?.(params(), { mode: "single" });
@@ -206,16 +211,23 @@ describe("t43 the three texts", () => {
 describe("t43 a fork", () => {
   test("t43_coordinator_text_has_a_line_per_model_step", () => {
     const state = openFork(fork(", model: sonnet", ", model: opus"));
-    const node = nodeOf(nextStep(fork(", model: sonnet", ", model: opus"), state, 2_000, undefined, PARALLEL));
+    const node = nodeOf(
+      nextStep(fork(", model: sonnet", ", model: opus"), state, 2_000, undefined, PARALLEL),
+    );
     expect(node.execution?.instruction).toContain(
       "Start the workers of these steps on these models: `a` on `sonnet`, `b` on `opus`.",
     );
     // the steps listed carry the coordinator wording, never the single-step sentence
     const steps = node.steps ?? [];
     expect(steps.map((s) => s.slug)).toEqual(["a", "b"]);
-    expect(steps[0]?.execution?.instruction).toContain("Start the worker for this step on the model `sonnet`");
-    expect(steps[1]?.execution?.instruction).toContain("Start the worker for this step on the model `opus`");
-    for (const step of steps) expect(step.execution?.instruction).not.toContain("give it to a subagent");
+    expect(steps[0]?.execution?.instruction).toContain(
+      "Start the worker for this step on the model `sonnet`",
+    );
+    expect(steps[1]?.execution?.instruction).toContain(
+      "Start the worker for this step on the model `opus`",
+    );
+    for (const step of steps)
+      expect(step.execution?.instruction).not.toContain("give it to a subagent");
   });
 
   test("t43_coordinator_text_when_only_the_second_step_has_a_model", () => {
@@ -250,7 +262,9 @@ describe("t43 a fork", () => {
     // a take, and a renewal of it: the worker asks for its step by name
     const state = openFork(spec);
     for (const nodeSlug of ["a", "a"]) {
-      const taken = nodeOf(nextStep(spec, state, 2_000, undefined, { ...PARALLEL, nodeSlug, worker: true }));
+      const taken = nodeOf(
+        nextStep(spec, state, 2_000, undefined, { ...PARALLEL, nodeSlug, worker: true }),
+      );
       expect(taken.execution?.instruction).toContain("You run on the model `sonnet`");
       expect(taken.execution?.instruction).not.toContain("give it to a subagent");
     }
@@ -339,5 +353,24 @@ describe("t43 the format", () => {
     // the control: an engine step is refused by the same options
     const engine = parsePipeline(one("    engine: rev"));
     expect(decide(engine, undefined, START, 1).ok).toBe(false);
+  });
+});
+
+describe("t43 the docs", () => {
+  const read = (path: string) =>
+    readFileSync(new URL(`../../../${path}`, import.meta.url), "utf8").replace(/\s+/g, " ");
+
+  test("t43_docs_say_observed_hook_not_used", () => {
+    const text = read("docs/history.md");
+    expect(text).toContain("`observed-hook`; it is **not used**");
+    expect(text).toContain("`declared`");
+    expect(text).toContain("`derived`");
+  });
+
+  test("t43_docs_no_longer_say_model_needs_engine", () => {
+    for (const path of ["docs/engines.md", "packages/pipeline-core/agent-docs/pipeline-spec.md"]) {
+      expect(read(path), path).not.toContain("`model` without `engine`;");
+      expect(read(path), path).not.toContain("allowed only with `engine`");
+    }
   });
 });

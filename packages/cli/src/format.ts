@@ -216,6 +216,37 @@ export function usageLines(report: RunReport["usage"], plain: (text: string) => 
   return lines;
 }
 
+const NOT_OBSERVED_TEXT: Record<string, string> = {
+  usage_missing: "no clean record of use for this attempt",
+  unknown_id: "a model id the report cannot read was among those seen",
+  unsupported: "this run or this client keeps no log that is read",
+  workers_in_run: "the run had workers; use cannot be told apart by step",
+  worker_not_found: "the worker's log was not found",
+};
+
+/**
+ * The steps that asked for a model: what was asked for (`declared`, from the pipeline) against the models the logs
+ * show (`derived`). Information only; it changes no route, check or gate.
+ */
+export function modelLines(report: RunReport["models"], plain: (text: string) => string): string[] {
+  if (report === undefined) return [];
+  const lines = ["models asked for (information only):"];
+  for (const mark of report.marks) {
+    const seen = mark.seen.length > 0 ? mark.seen.map(plain).join(", ") : "none";
+    const verdict =
+      mark.result === "not_observed"
+        ? `not observed (${NOT_OBSERVED_TEXT[mark.reason ?? ""] ?? plain(mark.reason ?? "")})`
+        : `${mark.result}${mark.by === undefined ? "" : `, by ${mark.by}`}`;
+    lines.push(
+      `  ${plain(mark.node)} #${mark.attempt}: model ${plain(mark.requested)} requested, seen ${seen} (${verdict})`,
+    );
+  }
+  if (report.no_snapshot) {
+    lines.push("  a kept copy of the pipeline could not be read: some steps are not listed");
+  }
+  return lines;
+}
+
 /** The tools of an attempt as `Bash 6, Edit 4`, the most called first; the rest is counted together. */
 function toolList(byTool: Record<string, number>, plain: (text: string) => string): string {
   const sorted = Object.entries(byTool).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
@@ -476,6 +507,7 @@ export function formatReport(
       : "prompts: not_collected",
     agentLogLine(report.agent_log),
     ...usageLines(report.usage, plain),
+    ...modelLines(report.models, plain),
     ...toolCallsLines(report.tool_calls, plain),
   );
   const failures = report.nodes.flatMap((node) =>

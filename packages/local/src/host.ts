@@ -58,6 +58,7 @@ import {
   liveClaim,
   measurePatch,
   mergeReports,
+  modelMarks,
   type NextStep,
   type NextStepOptions,
   type NextStepRequest,
@@ -79,6 +80,7 @@ import {
   redactText,
   renderContextOf,
   renderDeep,
+  requestedModelOf,
   resolveMode,
   rowsToCsv,
   runSlug,
@@ -3240,7 +3242,12 @@ export class LocalRun {
   /** Where the time went and what was redone, from the run's own state and journal. */
   async report(): Promise<RunReport> {
     const journal = await this.host.store.readJournal(this.runId);
-    const report = await this.withFindings(summarizeRun(await this.state(), journal));
+    const state = await this.state();
+    const report = await this.withModelMarks(
+      await this.withFindings(summarizeRun(state, journal)),
+      state,
+      journal,
+    );
     // A run that did not record changes has no patch to measure, whatever file may be lying there.
     const started = journal.find((r) => r.event === "run_started");
     const changesOff =
@@ -3253,6 +3260,51 @@ export class LocalRun {
     };
     const where = await this.locationForDisplay();
     return where ? { ...sized, workdir: where.path } : sized;
+  }
+
+  /**
+   * For each attempt of a step that asked for a model: the model asked for, read from the pipeline kept with the
+   * run that was in force when the attempt began (a change of the pipeline in the middle of a run changes what a
+   * later attempt asked for), against the models the usage record shows. A kept copy that cannot be read is said
+   * once; the attempts it covers are not guessed.
+   */
+  private async withModelMarks(
+    report: RunReport,
+    state: RunState,
+    journal: readonly JournalRecord[],
+  ): Promise<RunReport> {
+    const registry = this.host.engine.registry ?? defaultRegistry();
+    const hashOf = new Map<string, string>();
+    let hash: string | undefined;
+    for (const record of journal) {
+      if (record.event === "run_started" && typeof record.spec === "string") hash = record.spec;
+      else if (record.event === "pipeline_accepted" && typeof record.to === "string")
+        hash = record.to;
+      else if (
+        record.event === "node_entered" &&
+        hash !== undefined &&
+        typeof record.node === "string" &&
+        typeof record.attempt === "number"
+      ) {
+        hashOf.set(`${record.node}:${record.attempt}`, hash);
+      }
+    }
+    const specs = new Map<string, PipelineSpec | undefined>();
+    for (const wanted of new Set(hashOf.values())) {
+      specs.set(wanted, await this.specFor(wanted).catch(() => undefined));
+    }
+    const requested = new Map<string, string>();
+    for (const [attempt, wanted] of hashOf) {
+      const node = specs
+        .get(wanted)
+        ?.nodes.find((n) => n.slug === attempt.slice(0, attempt.lastIndexOf(":")));
+      const model = node === undefined ? undefined : requestedModelOf(registry, node);
+      if (model !== undefined) requested.set(attempt, model);
+    }
+    const marks = modelMarks({ state, journal, requested });
+    const unreadable = [...specs.values()].some((spec) => spec === undefined);
+    if (marks.length === 0 && !unreadable) return report;
+    return { ...report, models: { marks, ...(unreadable ? { no_snapshot: true as const } : {}) } };
   }
 
   /** The findings of each attempt's reports counted by severity; the journal only knows how many rows. */

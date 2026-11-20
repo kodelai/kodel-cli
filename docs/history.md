@@ -568,6 +568,51 @@ a changed row), but a change of several prices at once while an old mention rema
 over a model's own `long_context_tokens` (200 000 unless the table says otherwise, 100 000 for `claude-haiku-5-5`) is flagged, and
 the higher price of such requests is not modelled.
 
+## Requested and observed model (`model` without `engine`, T-43)
+
+A node `model: sonnet` with no `engine` asks the agent that drives the run to give the step to a subagent on that model
+(in a fork worked in parallel, to start the step's worker on it). `kodel report` then says, per attempt of such a step, what
+was asked for and what the logs show, in one line:
+
+```
+models asked for (information only):
+  review #1: model sonnet requested, seen claude-opus-4-8, claude-sonnet-5-5 (match, by subagent)
+```
+
+It is **information**, like usage and cost: it changes no route, no check and no gate. A person decides what a mismatch is worth.
+
+**Two sources, and only two.** The model asked for is `declared`: it is read from the pipeline kept with the run, the version
+in force when the attempt began (a pipeline changed in the middle of a run changes what a later attempt asked for; nothing about it is
+stored in the journal). The models seen are `derived`: the models of the agent's session and subagent logs that the usage count
+already reads, per attempt. The task text also named `observed-hook`; it is **not used**, because the hook payloads Kodel receives carry no
+model of a subagent. It can be added as a source when a host sends one.
+
+**The match rule.** Both names are lower-cased, a trailing `[...]` of an id is dropped, and both are split at `-` and `:`. The requested
+name must contain a letter. It matches when its segments are a contiguous run of the id's segments: `sonnet` matches
+`claude-sonnet-5-5`; `claude-sonnet-5` matches it too (a version prefix) and does not match `claude-sonnet-4-6`; a bare `claude` matches
+every Claude id. The Agent tool of Claude Code takes a family name (`sonnet`, `opus`, `haiku`), so that is what to write; a full id can
+be written to be strict, and can end as "cannot choose" and a `mismatch`.
+
+**The result.** `match` (with `by host` when the host session's own model at that attempt matched, else `by subagent`; with
+`history.executor` off the host's model is unknown and the label is left out), `mismatch` (the record is clean, at least one model was
+seen, none matched and none was an id the report cannot read), or `not observed` with a reason:
+
+| reason | when |
+| --- | --- |
+| `usage_missing` | usage is off, was not captured, the attempt has no record or an empty one, or the run's usage record is not clean: any entry in its failure list (it names no attempt, so one entry downgrades every such step of the run) or a log not read to its end |
+| `unknown_id` | an id that did not fit the pattern of a model id was among those seen, and none matched |
+| `unsupported` | a run of run-state format 1 (it keeps no usage), or a client whose log is not read |
+| `workers_in_run` | the run had workers (a fork worked in parallel): the pooled use of the session cannot be told apart by step |
+
+**What the mark cannot tell.** `match` does not prove that a subagent did the step: the host's own model is among the models seen
+(the host makes the calls of the pipeline), and a helper subagent that the agent starts on its own (Explore) is counted too. It also
+reads the models of the attempt's window in the agent's log, and the log cannot tell branches apart (see "Which attempt" above).
+A hostile agent can write the files it is read from; the mark guards against mistakes. A server-backed run reads no log of the agent's
+and shows `not observed (unsupported)`. A full id in the pipeline can never be honoured when the host can only choose a family.
+
+The line is in `kodel report` only. The MCP history tools and the TUI show nothing of it; if they do later, the text will say it is
+`unverified`.
+
 ## Tool calls (`tool_calls_recorded`)
 
 Each run records what its agent called: every tool call and every tool result, per attempt of an agent node, with the name,
