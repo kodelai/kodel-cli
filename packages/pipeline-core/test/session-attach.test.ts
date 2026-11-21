@@ -613,11 +613,17 @@ describe("replay without terminal queries", () => {
         // Small first: a quadratic pattern fails here in seconds, and is not given the megabyte to chew on.
         const small = timed(() => path(make(64 * KIB)));
         expect(small, `${name}, 64 KiB`).toBeLessThan(1_000);
-        // Eight times the bytes may take eight times as long; a quadratic pattern takes sixty-four times.
-        const large = timed(() => path(make(512 * KIB)));
-        expect(large, `${name}, 512 KiB after ${small} ms for 64 KiB`).toBeLessThan(
-          24 * Math.max(small, 10),
-        );
+        // Eight times the bytes may take eight times as long; a quadratic pattern takes sixty-four times and
+        // minutes at this size. A shared runner is noisy and a small time is a weak base, so the base has a floor
+        // and a slow run gets one more try: only a pattern that is slow every time fails.
+        const bound = 24 * Math.max(small, 50);
+        let large = timed(() => path(make(512 * KIB)));
+        if (large >= bound)
+          large = Math.min(
+            large,
+            timed(() => path(make(512 * KIB))),
+          );
+        expect(large, `${name}, 512 KiB after ${small} ms for 64 KiB`).toBeLessThan(bound);
       }
     }, 120_000);
   }
