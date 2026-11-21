@@ -3,7 +3,7 @@
  * given has no way to write. What the tracker answers is not trusted: a row that is not what it should
  * be is dropped and counted, and a failure becomes a state, never a throw into the screen.
  */
-import { readState, type TaskState } from "@kodel-ai/pipeline-core";
+import { needsApproval, readState, type TaskState } from "@kodel-ai/pipeline-core";
 import { plain } from "../plain";
 
 /** How many tasks the Backlog block shows. A constant for now. */
@@ -21,6 +21,8 @@ export interface TaskRow {
   priority?: string;
   parent?: string;
   runCount: number;
+  /** An agent made or changed the task and no person approved it since (`kodel task approve`). */
+  waitsForApproval?: boolean;
 }
 
 export interface TaskComment {
@@ -37,6 +39,7 @@ export interface TaskCardData {
   status: string;
   priority?: string;
   parent?: string;
+  waitsForApproval?: boolean;
   runs: string[];
   body?: string;
   comments: TaskComment[];
@@ -120,7 +123,22 @@ export function parseRow(raw: unknown): TaskRow | undefined {
     ...(priority === undefined ? {} : { priority }),
     ...(parent === undefined ? {} : { parent }),
     runCount: typeof raw.run_count === "number" ? raw.run_count : 0,
+    ...(raw.needs_approval === true ? { waitsForApproval: true } : {}),
   };
+}
+
+/** A full task carries the marks, not the summary's flag: the card works it out the same way. */
+function cardWaits(raw: Record<string, unknown>): boolean {
+  if (raw.needs_approval === true) return true;
+  const at = (value: unknown): string | undefined =>
+    typeof value === "string" ? value : undefined;
+  const marks: Parameters<typeof needsApproval>[0] = { created_at: at(raw.created_at) ?? "" };
+  if (raw.created_by === "agent") marks.created_by = "agent";
+  const edited = at(raw.agent_edited_at);
+  if (edited !== undefined) marks.agent_edited_at = edited;
+  const approved = at(raw.approved_at);
+  if (approved !== undefined) marks.approved_at = approved;
+  return needsApproval(marks);
 }
 
 function parseCard(raw: unknown, subtasks: unknown): TaskCardData | undefined {
@@ -152,6 +170,7 @@ function parseCard(raw: unknown, subtasks: unknown): TaskCardData | undefined {
     status: row.status,
     ...(row.priority === undefined ? {} : { priority: row.priority }),
     ...(row.parent === undefined ? {} : { parent: row.parent }),
+    ...(cardWaits(raw) ? { waitsForApproval: true } : {}),
     runs: Array.isArray(raw.runs)
       ? raw.runs.filter((r): r is string => typeof r === "string" && r !== "")
       : [],

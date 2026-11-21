@@ -1,0 +1,15 @@
+v: 1
+id: BBBB
+key: TASK-BBBB
+title: Show the build number in the status line
+body: The status line names the version but not the build, so two local builds
+  look the same.
+priority: low
+status: progress
+comments:
+  - at: 2026-10-14T09:01:01.000Z
+    text: seen while testing the TUI
+runs:
+  - r_0mvimyn54_tc9o
+created_at: 2026-10-14T09:01:01.000Z
+updated_at: 2026-10-14T09:02:02.000Z

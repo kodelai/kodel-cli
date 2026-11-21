@@ -10,7 +10,7 @@ import { DIGEST_LINES, digest } from "../src/claude-stream";
 import { bold, dim, RESET, stripAnsi, visibleLength } from "../src/tui/ansi";
 import type { WorkHandle } from "../src/tui/decide";
 import { createInputReader } from "../src/tui/input";
-import type { Loaded } from "../src/tui/load";
+import { type Loaded, loadSessions } from "../src/tui/load";
 import { boxOf, hardWrap } from "../src/tui/modal";
 import { applyEvents, applyInput, runTui, type TuiOptions } from "../src/tui/run";
 import type { GateDetail, LogEntry, Session } from "../src/tui/session";
@@ -2564,5 +2564,172 @@ describe("task_9pns the Report tab of a run waiting at a human gate", () => {
     // A run that waits shows no such block, even with the same worker.
     const waiting = withCard(gate(), detail(), ["→ pipeline_next_step"]);
     expect(show(waiting).join("\n")).not.toContain("AGENT · kw-r_1");
+  });
+});
+
+// ── kodel serve (TASK-G8KM, T-43) ───────────────────────────────────────────
+
+const SERVE_RECORD = {
+  v: 1,
+  pid: 4242,
+  started: NOW - 3_600_000,
+  cycle_at: NOW - 2_000,
+  state: "active" as const,
+  root: "/proj",
+  state_base: "/home/u/.kodel",
+  build: "0.1.0+dev",
+};
+
+describe("t43 the TUI with kodel serve", () => {
+  const exited = () =>
+    worker("r_1", { state: "exited", label: "exited (0)", exitCode: 0, since: NOW - 20_000 });
+
+  test("t43_tui_leaves_the_resume_to_serve", () => {
+    const m = withWorkers(model([decidedSession()]), statuses(["r_1", exited()]), false, {
+      kind: "active",
+      pid: 4242,
+      since: NOW - 3_600_000,
+    });
+    expect(m.offers.r_1?.offer).toBeUndefined();
+    expect(screen(m)).toContain("agent exited at your decision · kodel serve resumes it");
+    expect(screen(m)).not.toContain("s resumes");
+    expect(lines(m)[0]).toContain("serve on (pid 4242)");
+    expect(footer(m)).not.toContain("s resume");
+    const s = update(m, "s");
+    expect(effects(s)).toEqual([]);
+    // An idle daemon, or none: today's offer, and nothing new in the header.
+    const off = withWorkers(m, statuses(["r_1", exited()]), false, { kind: "off" });
+    expect(off.offers.r_1?.offer?.seq).toBe(DECIDED.seq);
+    expect(screen(off)).toContain("agent exited at your decision · s resumes");
+    expect(lines(off)[0]).not.toContain("serve");
+    // A read without the daemon's state keeps the last one.
+    const kept = withWorkers(m, statuses(["r_1", exited()]), false);
+    expect(kept.offers.r_1?.offer).toBeUndefined();
+  });
+
+  test("t43_tui_keeps_a_moved_offer_when_serve_is_on", () => {
+    const moved = session("r_1", "running", { lastWait: WAIT, decision: DECIDED, moved: true });
+    const m = withWorkers(model([moved]), statuses(["r_1", exited()]), false, {
+      kind: "active",
+      pid: 4242,
+      since: NOW - 3_600_000,
+    });
+    // The daemon does not resume a run an agent moved on: the screen keeps its own offer.
+    expect(m.offers.r_1?.offer?.seq).toBe(DECIDED.seq);
+    expect(m.offers.r_1?.offer?.moved).toBe(true);
+    expect(screen(m, WIDER)).toContain("s resumes · an agent was served a step since");
+    expect(screen(m, WIDER)).not.toContain("kodel serve resumes it");
+  });
+
+  test("t43_tui_keeps_the_offer_of_another_checkouts_run", async () => {
+    // The daemon serves its own checkout only: a run another checkout made keeps the offer here.
+    const foreign = { ...decidedSession(), foreignRoot: "/elsewhere" };
+    const m = withWorkers(model([foreign]), statuses(["r_1", exited()]), false, {
+      kind: "active",
+      pid: 4242,
+      since: NOW - 3_600_000,
+    });
+    expect(m.offers.r_1?.offer?.seq).toBe(DECIDED.seq);
+    expect(screen(m)).toContain("agent exited at your decision · s resumes");
+    expect(screen(m)).not.toContain("kodel serve resumes it");
+    // The reader marks such a run from the host's answer.
+    const loaded = await loadSessions(
+      {
+        runSummaries: async () => [
+          {
+            meta: { runId: "r_2", pipeline: "one", task: "t", createdAt: NOW, root: "/elsewhere" },
+            state: undefined,
+          },
+          { meta: { runId: "r_3", pipeline: "one", task: "t", createdAt: NOW }, state: undefined },
+        ],
+        open: async () => undefined,
+        pipelineProposals: async () => [],
+        foreignRootOf: (meta) => (meta.runId === "r_2" ? meta.root : undefined),
+      },
+      NOW,
+    );
+    expect(loaded.sessions.map((x) => x.foreignRoot)).toEqual(["/elsewhere", undefined]);
+  });
+
+  test("t43_tui_gone_line_advises_only_an_open_run", () => {
+    const gone = { worker: "kw-r_1", id: "a_000000001_fake", reason: "killed", at: NOW };
+    const killed = worker("r_1", { state: "killed", label: "killed" });
+    const open = withWorkers(
+      model([session("r_1", "running", { workerGone: gone })]),
+      statuses(["r_1", killed]),
+      false,
+    );
+    expect(screen(open, WIDER)).toContain("any agent continues the run");
+    expect(screen(open, WIDER)).not.toContain("by its timeout");
+    const done = withWorkers(
+      model([session("r_1", "done", { workerGone: gone })]),
+      statuses(["r_1", killed]),
+      false,
+    );
+    expect(screen(done, WIDER)).toContain(`agent kw-r_1 killed at`);
+    expect(screen(done, WIDER)).not.toContain("any agent continues the run");
+  });
+
+  test("t43_tui_offers_again_when_serve_is_silent", () => {
+    const m = withWorkers(model([decidedSession()]), statuses(["r_1", exited()]), false, {
+      kind: "silent",
+      pid: 4242,
+      since: NOW - 180_000,
+    });
+    expect(m.offers.r_1?.offer?.seq).toBe(DECIDED.seq);
+    expect(screen(m)).toContain("agent exited at your decision · s resumes");
+    const header = lines(m, WIDER)[0] ?? "";
+    expect(header).toContain("serve silent since");
+    expect(header).toContain("(pid 4242): s resumes");
+  });
+
+  test("t43_tui_reads_serve_with_the_worker_records", async () => {
+    const launcher = new FakeLauncher();
+    launcher.statusMap.set("r_1", exited());
+    let kind: "active" | "silent" = "active";
+    const reads: number[] = [];
+    const { t, quit } = loop([decidedSession()], launcher, {
+      serve: async () => {
+        reads.push(Date.now());
+        return kind === "active"
+          ? { kind: "active", record: SERVE_RECORD }
+          : { kind: "silent", record: { ...SERVE_RECORD, cycle_at: NOW - 200_000 } };
+      },
+    });
+    await wait(150);
+    expect(reads.length).toBeGreaterThan(0);
+    expect(t.last()).toContain("serve on (pid 4242)");
+    expect(t.last()).toContain("kodel serve resumes it");
+    expect(launcher.resumes).toEqual([]);
+    kind = "silent";
+    await wait(150);
+    expect(t.last()).toContain("serve silent since");
+    expect(t.last()).toContain("s resumes");
+    await quit();
+  });
+
+  test("t43_tui_shows_a_dead_worker", () => {
+    const gone = {
+      worker: "kw-r_1",
+      id: "a_000000001_fake",
+      reason: "lost",
+      at: new Date(2026, 10, 6, 10, 2).getTime(),
+    };
+    const lost = worker("r_1", { state: "lost", label: "lost (holder gone)" });
+    const m = withWorkers(
+      model([session("r_1", "running", { workerGone: gone })]),
+      statuses(["r_1", lost]),
+      false,
+    );
+    expect(screen(m, WIDER)).toContain(
+      "agent kw-r_1 lost at 10:02 (its holder is gone); any agent continues the run with pipeline_next_step",
+    );
+    // A note about an older record says nothing about the latest one.
+    const newer = withWorkers(
+      model([session("r_1", "running", { workerGone: gone })]),
+      statuses(["r_1", worker("r_1", { id: "a_000000002_fake" })]),
+      false,
+    );
+    expect(screen(newer, WIDER)).not.toContain("lost at");
   });
 });

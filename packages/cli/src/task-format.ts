@@ -3,14 +3,15 @@
  * agent or from a tracker goes through `plain` (the caller's), which takes out what could mislead a
  * person reading a terminal.
  */
-import type {
-  FieldInfo,
-  SubtaskRef,
-  Task,
-  TaskAdapterCapabilities,
-  TaskProblem,
-  TaskSummary,
-  ToolFailure,
+import {
+  type FieldInfo,
+  needsApproval,
+  type SubtaskRef,
+  type Task,
+  type TaskAdapterCapabilities,
+  type TaskProblem,
+  type TaskSummary,
+  type ToolFailure,
 } from "@kodel-ai/pipeline-core";
 import { formatTable } from "./table";
 
@@ -42,6 +43,7 @@ export function formatTaskTable(tasks: TaskSummary[], plain: Plain, withHeader: 
   const out: string[] = withHeader ? [lines[0] ?? ""] : [];
   tasks.forEach((t, i) => {
     out.push(lines[i + offset] ?? "");
+    if (t.needs_approval === true) out.push("    waits for approval");
     if (t.comment !== undefined) out.push(`    "${plain(t.comment)}"`);
   });
   return out;
@@ -61,6 +63,17 @@ export function formatTask(task: Task, subtasks: SubtaskRef[], plain: Plain): st
   if (task.id !== undefined) lines.push(`  id: ${plain(task.id)}`);
   if (task.parent !== undefined) lines.push(`  parent: ${plain(task.parent)}`);
   if (task.url !== undefined) lines.push(`  url: ${plain(task.url)}`);
+  if (task.created_by === "agent") {
+    const run = task.created_in_run === undefined ? "" : ` in run ${plain(task.created_in_run)}`;
+    lines.push(`  created by: an agent${run}`);
+  }
+  if (task.agent_edited_at !== undefined) {
+    lines.push(`  changed by an agent: ${plain(task.agent_edited_at)}`);
+  }
+  if (task.approved_at !== undefined) lines.push(`  approved: ${plain(task.approved_at)}`);
+  if (needsApproval(task)) {
+    lines.push(`  waits for approval: kodel task approve ${plain(task.key)}`);
+  }
   lines.push(`  created: ${plain(task.created_at)}   updated: ${plain(task.updated_at)}`);
   if (task.runs.length > 0) lines.push(`  runs: ${task.runs.map(plain).join(", ")}`);
   for (const [name, value] of Object.entries(task.fields ?? {})) {

@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "node": "write",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "14b3c75dec393e1ab9d5c0d38196432215e6ffbc05b85b79ae529442a6d415ae",
+  "answer": {
+    "slug": "write",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "Do Add a health check."
+  }
+}

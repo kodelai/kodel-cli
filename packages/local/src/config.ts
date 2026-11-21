@@ -25,6 +25,7 @@ import {
   TASK_ON_RUN_MODES,
   type TaskOnRunMode,
 } from "@kodel-ai/pipeline-core";
+import type { ServeRules } from "@kodel-ai/pipeline-core/serve";
 import { parse } from "yaml";
 import { z } from "zod";
 import { type EngineProfile, enginesSchema } from "./engines";
@@ -120,9 +121,21 @@ export interface ProjectConfig {
    * never edits it. Empty when the config has none.
    */
   engines: Record<string, EngineProfile>;
+  /**
+   * What `kodel serve` may do (TASK-G8KM, T-43): the person's block, off by default. Without `start`
+   * the daemon starts nothing and only resumes and watches.
+   */
+  serve: ServeRules;
 }
 
 export { DEFAULT_AGENTS };
+
+export const DEFAULT_SERVE: ServeRules = {
+  enabled: false,
+  max_workers: 1,
+  max_runs: 1,
+  stalled_after_s: 1800,
+};
 
 export const DEFAULT_WORKTREE: WorktreeConfig = { mode: "auto", dir: DEFAULT_WORKTREE_DIR };
 export const DEFAULT_PIPELINE: PipelineConfig = { uncommitted: "ask" };
@@ -228,6 +241,55 @@ const agentHintsSchema = z
   })
   .strict();
 
+const names = z.array(z.string().min(1).max(64)).max(64);
+
+// Strict at every level: a misspelled key of a rule must not widen what the daemon starts.
+export const serveSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    max_workers: z.number().int().min(1).max(64).optional(),
+    max_runs: z.number().int().min(1).max(64).optional(),
+    stalled_after_s: z.number().int().min(0).max(86_400).optional(),
+    start: z
+      .object({
+        pipeline: z.string().min(1),
+        match: z
+          .object({
+            status: names.optional(),
+            priority: names.optional(),
+            parent: z.string().min(1).max(64).optional(),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+/** The `serve` block with its defaults. */
+export function serveRulesOf(given: z.infer<typeof serveSchema> | undefined): ServeRules {
+  const start = given?.start;
+  return {
+    enabled: given?.enabled ?? DEFAULT_SERVE.enabled,
+    max_workers: given?.max_workers ?? DEFAULT_SERVE.max_workers,
+    max_runs: given?.max_runs ?? DEFAULT_SERVE.max_runs,
+    stalled_after_s: given?.stalled_after_s ?? DEFAULT_SERVE.stalled_after_s,
+    ...(start === undefined
+      ? {}
+      : {
+          start: {
+            pipeline: start.pipeline,
+            match: {
+              ...(start.match?.status === undefined ? {} : { status: start.match.status }),
+              ...(start.match?.priority === undefined ? {} : { priority: start.match.priority }),
+              ...(start.match?.parent === undefined ? {} : { parent: start.match.parent }),
+            },
+          },
+        }),
+  };
+}
+
 const configSchema = z
   .object({
     version: z.union([z.number(), z.string()]).optional(),
@@ -283,6 +345,7 @@ const configSchema = z
     storage: z.enum(STORAGE_MODES as [StorageMode, ...StorageMode[]]).optional(),
     project_id: z.string().optional(),
     engines: enginesSchema.optional(),
+    serve: serveSchema.optional(),
   })
   .strict();
 
@@ -330,6 +393,7 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
         agents: { ...DEFAULT_AGENTS },
         storage: "project",
         engines: {},
+        serve: serveRulesOf(undefined),
       };
     }
     throw error;
@@ -433,6 +497,7 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
     storage: parsed.data.storage ?? "project",
     ...(parsed.data.project_id === undefined ? {} : { project_id: parsed.data.project_id }),
     engines: parsed.data.engines ?? {},
+    serve: serveRulesOf(parsed.data.serve),
   };
 }
 

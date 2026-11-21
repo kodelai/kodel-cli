@@ -123,7 +123,7 @@ If two runs are tied to one task, the task is closed when the first of them comp
 ## What you do: `kodel task`
 
 The same service the tools use, so you and the agent get the same rules. Tasks carry no trust decision,
-so unlike `gate` these commands need no terminal.
+so unlike `gate` these commands need no terminal, except `kodel task approve` (below).
 
 ```bash
 kodel task add "Fix the off-by-one in report durations" --priority high --body "seen in report.ts"
@@ -143,6 +143,39 @@ kodel task doctor                     # is the adapter set up and reachable
 escaped there too). A long list prints `more: kodel task list ... --cursor ...` with the same filters.
 `--field name=value` always sends text; an adapter turns it into a number or a flag for a field that is
 one. While tasks are off every command refuses and says how to turn them on.
+
+## Tasks an agent made or changed: `kodel task approve`
+
+`kodel serve` (`docs/serve.md`) starts tasks on its own, so a task an agent wrote must not start work
+before you have read it. Kodel marks such tasks:
+
+- `task_create` marks the task as an agent's (`created_by: agent`, and `created_in_run` when the agent
+  passed the run);
+- a `task_update` that changes the title, body, status, priority or parent (also by `clear`) sets
+  `agent_edited_at`; a comment, a run or a field does not, and neither does what the engine itself does to
+  the task of a run;
+- `kodel task add` and `kodel task set` without a terminal, or from a command the engine runs
+  (`KODEL_ENGINE`), mark the task the same way: only a person at a terminal makes a task that needs no
+  approval.
+
+A marked task **waits for an approval** until an approval is later than the last agent edit (equal times
+wait). `kodel task show`, `list` and the TUI say `waits for approval`, and `kodel serve` does not start it.
+Approve it with:
+
+```bash
+kodel task approve KDL-7K3Q
+```
+
+It is a person's command: it needs a terminal, shows the task, asks, and refuses when the task changed
+while you were reading it (`<KEY> changed while you were reading; look again`). It sets `approved_at`.
+An agent edit after that makes the task wait again. The agent is told that a task it creates or changes is
+not started until you approve it, so it tells you; it never runs the command itself. A task without a mark
+(every task from before this change too) counts as yours.
+
+The mark is set by the writer, so it holds against an agent that uses the task tools, not against one that
+edits `.kodel/tasks/*.yaml` with a shell, an MCP server of an older build, or task files that arrive by
+`git pull`: those make tasks without a mark. A tracker that cannot keep the mark (its capability
+`provenance` is not `true`) has nothing started by `kodel serve`.
 
 ## In the TUI
 
@@ -299,7 +332,14 @@ runs:
   - r_0mvimyn54_tc9o
 created_at: 2026-10-22T09:14:03.000Z
 updated_at: 2026-10-23T10:02:41.000Z
+created_by: agent           # only on a task an agent made
+created_in_run: r_0mvimyn54_tc9o   # the run the agent made it in, when it said
+agent_edited_at: 2026-10-23T10:02:41.000Z   # the last edit by an agent of the title, body, status, priority or parent
+approved_at: 2026-10-23T11:00:00.000Z       # the last `kodel task approve`
 ```
+
+- The last four keys are optional and are the mark (see above); a file without them is a person's task. An
+  older Kodel keeps them as they are when it writes the file. Golden files: `fixtures/task-formats/v1/`.
 
 - `declined` counts as `done` for `state`; the status name and the comment tell them apart.
 - Two branches can in theory draw the same key (about 0.05% for two branches of 20 new tasks each); git

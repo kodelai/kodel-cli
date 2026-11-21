@@ -155,7 +155,8 @@ const STATUS_WIDTH = 11;
 function rowText(row: TaskRow, width: number, child: boolean): string {
   const lead = child ? dim("└ ") : "";
   const titleWidth = Math.max(4, width - 1 - (child ? 2 : 0) - KEY_WIDTH - 1 - PRIORITY_WIDTH - 1);
-  return ` ${lead}${dim(fit(row.key, KEY_WIDTH))} ${fit(row.title, titleWidth)} ${priorityStyle(row.priority, fit(row.priority ?? "", PRIORITY_WIDTH))}`;
+  const title = row.waitsForApproval ? `[waits for approval] ${row.title}` : row.title;
+  return ` ${lead}${dim(fit(row.key, KEY_WIDTH))} ${fit(title, titleWidth)} ${priorityStyle(row.priority, fit(row.priority ?? "", PRIORITY_WIDTH))}`;
 }
 
 function styledRow(
@@ -339,7 +340,7 @@ export interface CardInput {
 }
 
 function headLines(
-  c: Pick<TaskCardData, "key" | "title" | "state" | "status" | "priority">,
+  c: Pick<TaskCardData, "key" | "title" | "state" | "status" | "priority" | "waitsForApproval">,
   width: number,
 ): string[] {
   const out = wrapText(c.title, Math.max(10, width - 2)).map((l) => bold(l));
@@ -350,6 +351,9 @@ function headLines(
       width,
     ),
   );
+  if (c.waitsForApproval) {
+    out.push(fit(yellow("waits for approval: kodel task approve ") + c.key, width));
+  }
   return out;
 }
 

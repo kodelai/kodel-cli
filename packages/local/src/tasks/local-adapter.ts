@@ -17,6 +17,7 @@ import {
   type Comment,
   KodelError,
   type NewTask,
+  needsApproval,
   type StatusInfo,
   type SubtaskRef,
   TASK_CONTRACT,
@@ -95,6 +96,7 @@ const CAPABILITIES: TaskAdapterCapabilities = {
   fields: false,
   priority: true,
   types: false,
+  provenance: true,
 };
 
 const optionsSchema = z
@@ -140,6 +142,10 @@ const recordSchema = z
     runs: z.array(z.string()).optional(),
     created_at: z.string(),
     updated_at: z.string(),
+    created_by: z.literal("agent").optional(),
+    created_in_run: z.string().optional(),
+    agent_edited_at: z.string().optional(),
+    approved_at: z.string().optional(),
   })
   // Keys a later minor of the format adds are kept when a task is rewritten.
   .passthrough();
@@ -158,6 +164,10 @@ const FIELD_ORDER = [
   "runs",
   "created_at",
   "updated_at",
+  "created_by",
+  "created_in_run",
+  "agent_edited_at",
+  "approved_at",
 ];
 
 /** The file as a person reads it: the usual fields in a fixed order, anything extra after them. */
@@ -439,6 +449,11 @@ export class LocalTaskAdapter implements TaskAdapter {
       task.comments = comments;
     }
     if (parent !== undefined) task.parent = parent;
+    if (record.created_by !== undefined) task.created_by = record.created_by;
+    if (record.created_in_run !== undefined) task.created_in_run = clip(record.created_in_run, 40);
+    if (record.agent_edited_at !== undefined)
+      task.agent_edited_at = clip(record.agent_edited_at, 40);
+    if (record.approved_at !== undefined) task.approved_at = clip(record.approved_at, 40);
     return task;
   }
 
@@ -457,6 +472,8 @@ export class LocalTaskAdapter implements TaskAdapter {
     if (last) s.comment = clip(last.text, TASK_LIMITS.comment);
     const parent = loaded.parentOf.get(record.key);
     if (parent !== undefined) s.parent = parent;
+    if (needsApproval(record)) s.needs_approval = true;
+    if (record.created_in_run !== undefined) s.created_in_run = clip(record.created_in_run, 40);
     const kids = loaded.children.get(record.key) ?? [];
     if (kids.length > 0) {
       s.subtasks = {
@@ -544,6 +561,10 @@ export class LocalTaskAdapter implements TaskAdapter {
       if (input.comment !== undefined) record.comments = [{ at, text: input.comment }];
       if (parentKey !== undefined) record.parent = parentKey;
       if (input.run !== undefined) record.runs = [input.run];
+      if (input.created_by === "agent") {
+        record.created_by = "agent";
+        if (input.run !== undefined) record.created_in_run = input.run;
+      }
       try {
         // `wx`: a key somebody took meanwhile is never overwritten.
         await writeFile(this.file(key), serialize(record), { flag: "wx" });
@@ -711,6 +732,7 @@ export class LocalTaskAdapter implements TaskAdapter {
     if (patch.type !== undefined) throw this.unsupported("task types");
     if (patch.fields !== undefined) throw this.unsupported("fields");
     const record: Rec = { ...read.record };
+    const before = { ...read.record };
     const wasDone = stateOf(record.status) === "done";
 
     if (patch.status !== undefined) record.status = this.checkStatus(patch.status);
@@ -749,9 +771,39 @@ export class LocalTaskAdapter implements TaskAdapter {
       else throw this.unsupported("fields");
     }
     record.updated_at = at;
+    if (
+      patch.by_agent === true &&
+      (record.title !== before.title ||
+        record.body !== before.body ||
+        record.status !== before.status ||
+        record.priority !== before.priority ||
+        record.parent !== before.parent)
+    ) {
+      // Never before an approval: an edit in the same instant as an approval must still wait.
+      const approved = record.approved_at;
+      record.agent_edited_at =
+        approved !== undefined && Date.parse(approved) > Date.parse(at) ? approved : at;
+    }
+    await this.writeRecord(key, record);
 
-    // Through a temp file: a reader never sees half of a task. The name does not match FILE, so a
-    // listing ignores it.
+    const out: { task: Task; open_subtasks?: number } = {
+      task: this.toTask(record, record.parent),
+    };
+    if (!wasDone && stateOf(record.status) === "done") {
+      loaded = await this.load();
+      const open = (loaded.children.get(key) ?? []).filter(
+        (k) => stateOf(k.status) !== "done",
+      ).length;
+      if (open > 0) out.open_subtasks = open;
+    }
+    return out;
+  }
+
+  /**
+   * Through a temp file: a reader never sees half of a task. The name does not match FILE, so a
+   * listing ignores it.
+   */
+  private async writeRecord(key: string, record: Rec): Promise<void> {
     const text = serialize(record);
     // A task that outgrew what is read back would silently turn into a problem: refuse the change.
     if (Buffer.byteLength(text) > MAX_FILE_BYTES) {
@@ -767,18 +819,43 @@ export class LocalTaskAdapter implements TaskAdapter {
       await unlink(temp).catch(() => undefined);
       throw error;
     }
+  }
 
-    const out: { task: Task; open_subtasks?: number } = {
-      task: this.toTask(record, record.parent),
-    };
-    if (!wasDone && stateOf(record.status) === "done") {
-      loaded = await this.load();
-      const open = (loaded.children.get(key) ?? []).filter(
-        (k) => stateOf(k.status) !== "done",
-      ).length;
-      if (open > 0) out.open_subtasks = open;
-    }
-    return out;
+  async approve(input: string, seen: string, _o?: CallOptions): Promise<Task | undefined> {
+    const key = await this.resolveKey(input);
+    if (key === undefined) return undefined;
+    if (
+      !(await lstat(this.file(key)).then(
+        () => true,
+        () => false,
+      ))
+    )
+      return undefined;
+    return this.withLock(key, async () => {
+      const read = await this.readFileRecord(key);
+      if (!read) return undefined;
+      if ("problem" in read) {
+        throw new KodelError("TASK_ADAPTER_FAILED", `${key}.yaml ${read.problem}`);
+      }
+      if (read.record.updated_at !== seen) {
+        throw new KodelError(
+          "TASK_TRANSITION_REFUSED",
+          `${key} changed while you were reading; look again`,
+        );
+      }
+      const record: Rec = { ...read.record };
+      // Strictly later than the last agent edit, also when the clock has not moved since.
+      const last = Math.max(
+        Date.parse(record.created_at) || 0,
+        Date.parse(record.agent_edited_at ?? "") || 0,
+      );
+      const at = new Date(Math.max(this.options.clock(), last + 1)).toISOString();
+      record.approved_at = at;
+      record.updated_at = at;
+      await this.writeRecord(key, record);
+      const loaded = await this.load();
+      return this.toTask(record, loaded.parentOf.get(key));
+    });
   }
 
   async verify(_o?: CallOptions): Promise<TaskProblem[]> {

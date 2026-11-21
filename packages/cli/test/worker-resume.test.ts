@@ -8,6 +8,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { JournalRecord } from "@kodel-ai/pipeline-core";
+import { type RunDecision, resumeVerdict } from "@kodel-ai/pipeline-core/serve";
 import type { Session } from "../src/tui/session";
 import {
   type DecisionInfo,
@@ -15,7 +16,7 @@ import {
   type ResumeOffer,
   resumeOffer,
 } from "../src/tui/worker-resume";
-import type { WorkerStatus } from "../src/worker-launcher";
+import type { WorkerDecision, WorkerStatus } from "../src/worker-launcher";
 
 const FIXTURES = join(import.meta.dir, "fixtures", "journals");
 const V1 = join(import.meta.dir, "../../../fixtures/formats/v1/r_0mviewgvl_i1ig/journal.jsonl");
@@ -361,5 +362,72 @@ describe("task_9pns the resume offer", () => {
       line: "",
       why: "no agent of the TUI on this run",
     });
+  });
+});
+
+describe("t43 the TUI and kodel serve share one rule", () => {
+  test("t43_run_decision_is_worker_decision", () => {
+    // both ways assignable: one type under two names
+    const a: RunDecision = { seq: 1, ts: 1, kind: "gate", node: "g", outcome: "approved" };
+    const b: WorkerDecision = a;
+    const c: RunDecision = b;
+    expect(c).toBe(a);
+  });
+
+  test("t43_resume_verdict_is_the_tui_rule", () => {
+    // Over every case the card knows, `s resumes` is offered exactly when the core rule says resume
+    // (the TUI does not refuse a run an agent moved in: it warns).
+    const info = decisionOf(GATE);
+    const movedInfo = decisionOf([
+      ...GATE,
+      ...build([{ event: "step_served" }]).map((r) => ({ ...r, seq: 5, ts: 6_000 })),
+    ]);
+    const statuses: Session["status"][] = [
+      "running",
+      "waiting",
+      "done",
+      "failed",
+      "canceled",
+      "unreadable",
+    ];
+    const workers: (WorkerStatus | undefined)[] = [
+      undefined,
+      worker(),
+      worker({ state: "running" }),
+      worker({ state: "starting" }),
+      worker({ state: "lost" }),
+      worker({ state: "killed" }),
+      worker({ state: "unknown" }),
+      worker({ resumed: [4] }),
+      worker({ sessionId: undefined }),
+      worker({ since: 3_000 }),
+      worker({ started: 10_000 }),
+    ];
+    let offers = 0;
+    for (const marks of [info, movedInfo, decisionOf(build([{ event: "run_started" }]))]) {
+      for (const status of statuses) {
+        for (const w of workers) {
+          const s = session(marks, status);
+          const offered = resumeOffer(s, w, false).offer !== undefined;
+          const view = {
+            runId: RUN,
+            status:
+              status === "done"
+                ? ("completed" as const)
+                : status === "failed" || status === "unreadable"
+                  ? ("failed" as const)
+                  : status === "canceled"
+                    ? ("canceled" as const)
+                    : ("running" as const),
+            waitsForPerson: status === "waiting",
+            marks,
+          };
+          const verdict = resumeVerdict(view, w, { refuseMoved: false });
+          expect(offered).toBe(verdict.kind === "resume");
+          if (offered) offers += 1;
+        }
+      }
+    }
+    expect(offers).toBeGreaterThan(0);
   });
 });

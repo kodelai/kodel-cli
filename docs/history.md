@@ -333,6 +333,22 @@ default).
   back than the last 512 KB, and then there is no name. No log, no name. After `/clear` or `/resume` the server still
   names the session it started in (`observed-env`), so it is that session's name that is recorded.
 
+## A worker that is gone (`worker_note`)
+
+`kodel serve` (`docs/serve.md`) journals `worker_note` when a background worker of a run is gone: `what` (`gone`),
+`worker` (the record's name, `kw-<run id>` or `kw-<run id>-d<seq>` for a resume), `id` (the record's id; absent when
+no record was made), `reason` (`lost`: the holder is gone; `killed`: killed; `exited`: outside a wait;
+`not_started`: the launch failed and made no record), `exit_code` (when the worker exited) and `at` (when it was seen
+gone). One note per record id; a worker a person stopped is not noted.
+
+- **It is a fact, not a decision.** It changes no state and no route, carries no free text, and no MCP tool writes
+  it: only the daemon does, through the host, which refuses a name that is not one of the run's workers. Any agent
+  can continue the run with `pipeline_next_step`.
+- **Where it shows.** `kodel status <run>` and the TUI card (`agent kw-r_… lost at 10:02 (its holder is gone); any
+  agent continues the run with pipeline_next_step`), and `kodel report` (`workers_gone`). It is not a sign of life:
+  the readers that date a wait leave it out.
+- **Only format 2.** A run of format 1 has no place for it and is not changed (`docs/run-formats.md`).
+
 ## What the agent was shown (`served/`)
 
 With `history.prompts` on (the default), the run keeps the text the agent was handed at each step, so it can be

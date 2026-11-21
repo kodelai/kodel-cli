@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   checkResolvedKey,
   KodelError,
+  needsApproval,
   OPEN_STATES,
   readState,
   TASK_CONTRACT,
@@ -179,5 +180,70 @@ describe("the registry of task adapters", () => {
     registry.register("a", () => adapterOf("b"));
     const error = await failed(registry.create("a", ctx));
     expect(error.code).toBe("CONFIG_INVALID");
+  });
+});
+
+describe("tasks an agent made or changed (T-43)", () => {
+  const T0 = "2026-03-01T10:00:00.000Z";
+  const T1 = "2026-03-01T10:05:00.000Z";
+  const T2 = "2026-03-01T10:10:00.000Z";
+
+  test("t43_needs_approval_table", () => {
+    const table: [string, Parameters<typeof needsApproval>[0], boolean][] = [
+      ["a person's task (no marks)", { created_at: T0 }, false],
+      ["a person's task approved anyway", { created_at: T0, approved_at: T1 }, false],
+      ["made by an agent", { created_at: T0, created_by: "agent" }, true],
+      [
+        "made by an agent, approved later",
+        { created_at: T0, created_by: "agent", approved_at: T1 },
+        false,
+      ],
+      [
+        "made by an agent, approved at the same time",
+        { created_at: T0, created_by: "agent", approved_at: T0 },
+        true,
+      ],
+      [
+        "made by an agent, approved before it was made",
+        { created_at: T1, created_by: "agent", approved_at: T0 },
+        true,
+      ],
+      ["a person's task an agent changed", { created_at: T0, agent_edited_at: T1 }, true],
+      [
+        "a person's task an agent changed, approved later",
+        { created_at: T0, agent_edited_at: T1, approved_at: T2 },
+        false,
+      ],
+      [
+        "an approved task an agent changed after",
+        { created_at: T0, created_by: "agent", approved_at: T1, agent_edited_at: T2 },
+        true,
+      ],
+      [
+        "an agent's edit at the same time as the approval",
+        { created_at: T0, agent_edited_at: T1, approved_at: T1 },
+        true,
+      ],
+      [
+        "an approval that cannot be read",
+        { created_at: T0, created_by: "agent", approved_at: "yesterday" },
+        true,
+      ],
+      [
+        "an edit time that cannot be read",
+        { created_at: T0, agent_edited_at: "soon", approved_at: T2 },
+        true,
+      ],
+    ];
+    for (const [name, task, waits] of table) expect(needsApproval(task), name).toBe(waits);
+  });
+
+  test("the marks are not something a patch or a new task can carry as text", () => {
+    expect(refused(() => validatePatch({ by_agent: true })).message).toContain("nothing to change");
+    expect(() => validatePatch({ title: "x", by_agent: true })).not.toThrow();
+    expect(
+      refused(() => validateNewTask({ title: "x", created_by: "person" as unknown as "agent" }))
+        .code,
+    ).toBe("INVALID_TASK");
   });
 });

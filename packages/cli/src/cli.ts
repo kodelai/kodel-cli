@@ -5,7 +5,6 @@
  * type them; the deny rules in the agent's settings are a second line, not the only one.
  */
 
-import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import {
@@ -17,9 +16,12 @@ import {
   loadConfig,
   openTaskService,
   type ProjectRoot,
+  readServeStatus,
   resolveBase,
   resolveStoragePlace,
+  SERVE_EXIT_REFUSED,
   type StoragePlace,
+  servePlace,
 } from "@kodel-ai/local";
 import { MAX_PAYLOAD_BYTES, runHook } from "@kodel-ai/local/hooks";
 import {
@@ -27,6 +29,7 @@ import {
   deadBranchNote,
   KodelError,
   type NewTask,
+  needsApproval,
   RECORD_VERSION,
   type RunState,
   type RunTaskLink,
@@ -42,7 +45,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { Command, CommanderError } from "commander";
 import pkg from "../package.json" with { type: "json" };
-import { pipesAdapter, registerAgentCommands } from "./agent-commands";
+import { registerAgentCommands } from "./agent-commands";
 import { BUILD } from "./build-info";
 import { describePendingChange } from "./decide-text";
 import { engineHostOptions } from "./engine-steps";
@@ -80,6 +83,7 @@ import {
   formatTask,
   formatTaskTable,
 } from "./task-format";
+import { workerGoneLine } from "./worker-launcher";
 
 export interface CliEnv {
   cwd: string;
@@ -104,6 +108,10 @@ export interface CliEnv {
   onWatching?(): void;
   /** For `agent`: how to start the holder processes (a test points it at the source entry). */
   sessionLauncher?: { exec: string; args: string[] };
+  /** The platform (`process.platform` if none); `serve` refuses on `win32`. Tests set it. */
+  platform?: string;
+  /** For `serve`: ends the daemon when aborted, in place of the signals of the process (tests). */
+  serveSignal?: AbortSignal;
 }
 
 /** A problem to report to the user without a stack trace. */
@@ -305,6 +313,19 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     });
   };
   const storeRoot = async () => (await project()).dataDir;
+
+  /** The one launcher of background workers, for `tui` and `serve` alike (`worker-factory.ts`). */
+  const openWorkerLauncher = async () => {
+    const { root, dataDir } = await project();
+    const { openWorkerLauncher: open } = await import("./worker-factory");
+    return open({
+      root,
+      dataDir,
+      environment: env.environment ?? process.env,
+      self: env.sessionLauncher ?? { exec: process.execPath, args: [process.argv[1] ?? "kodel"] },
+      ...(env.platform === undefined ? {} : { platform: env.platform }),
+    });
+  };
 
   async function openRun(host_: LocalPipelineHost, runId: string) {
     const run = await host_.open(runId);
@@ -718,12 +739,18 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const pending = await pendingLine(run);
       if (pending) env.out(`pipeline:  ${pending}\n`);
       // A decision the agent made on the person's instruction is not one the person made: say so here.
-      for (const made of (await run.report().catch(() => undefined))?.agent_decisions ?? []) {
+      const report = await run.report().catch(() => undefined);
+      for (const made of report?.agent_decisions ?? []) {
         const what =
           made.what === "gate"
             ? `gate ${plain(made.node ?? "?")} ${plain(made.decision ?? "")}`
             : "change of the pipeline accepted";
         env.out(`by agent:  ${what} (told: "${plain(made.instruction).slice(0, 120)}")\n`);
+      }
+      // A background worker that `kodel serve` saw gone (`worker_note`): the run waits for any agent.
+      for (const gone of report?.workers_gone ?? []) {
+        const open = state.status === "running" || state.status === "paused";
+        env.out(`worker:    ${workerGoneLine(gone, plain, open)}\n`);
       }
       // Read-only: looking at a run must not restart its work or write anything. A state that
       // cannot be read as a step (it names a node that is not there) is said to be unreadable
@@ -806,49 +833,18 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const { createDecisionTools, decisionOptions } = await import("./tui/decide");
       const { openTasksForTui, tuiTaskOptions } = await import("./tui/tasks-open");
       const { createWorkerOptions } = await import("./tui/worker-start");
-      const { createSessionWorkerLauncher, execChild, findOnPath } = await import(
-        "./worker-launcher-session"
-      );
-      const { buildTaskTools, HISTORY_TOOLS, toolsFor } = await import(
-        "@kodel-ai/pipeline-core/mcp"
-      );
       const h = await host();
       const { root, dataDir } = await project();
       const tasks = await openTasksForTui(dataDir);
       const loadStats = createStatsLoader(h, hashSource);
       const tools = createDecisionTools(h, { hardStop: () => stopAndWait(h) });
       // The background agents (`s`): the records live where `kodel agent` keeps them, and the worker's
-      // own server is this very build. The tools its server serves are what the worker may call.
-      const environment = env.environment ?? process.env;
-      const self = env.sessionLauncher ?? {
-        exec: process.execPath,
-        args: [process.argv[1] ?? "kodel"],
-      };
-      const opened = await openTaskService({ storeRoot: dataDir }).catch(() => undefined);
-      const servedTools = [
-        ...toolsFor({ taskLink: opened?.runLink !== undefined }).map((t) => t.name),
-        ...HISTORY_TOOLS.map((t) => t.name),
-        ...(opened === undefined
-          ? []
-          : buildTaskTools(opened.service.capabilities).map((t) => t.name)),
-      ];
+      // own server is this very build.
+      const launcher = await openWorkerLauncher();
       const dialog = await loadConfig(dataDir)
         .then((config) => config.decisions.dialog)
         .catch(() => false);
-      const launcher = createSessionWorkerLauncher({
-        adapter: pipesAdapter({ root, environment, launcher: self, rules: [] }),
-        self,
-        root,
-        stateBase: resolveBase(environment),
-        environment,
-        rules: [],
-        servedTools,
-        which: (name) => findOnPath(name, environment),
-        exec: execChild,
-        platform: process.platform,
-        clock: Date.now,
-        uuid: () => randomUUID(),
-      });
+      const place = servePlace({ base: resolveBase(env.environment ?? process.env), root });
       await runTui(process.stdin, process.stdout, () => loadSessions(h, Date.now()), "project", {
         mouse: opts.mouse === true,
         ...decisionOptions("project", tools),
@@ -860,6 +856,78 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         loadStats: (pipeline) => loadStats(pipeline),
         ...tuiTaskOptions(tasks),
         ...createWorkerOptions({ host: h, tasks, launcher, dialog, root, version: pkg.version }),
+        serve: () => readServeStatus(place, Date.now()),
+      });
+    });
+
+  program
+    .command("serve")
+    .description(
+      "Start each matching task in a background agent and resume it after your decisions, as the serve block of the config says; runs until stopped (--status only reads)",
+    )
+    .option(
+      "--status",
+      "say whether kodel serve runs here and what its next cycle would do; changes nothing",
+    )
+    .action(async (opts: { status?: boolean }) => {
+      const environment = env.environment ?? process.env;
+      if (opts.status) {
+        const { root, dataDir } = await project();
+        const { printServeStatus } = await import("./serve-command");
+        await printServeStatus({
+          root,
+          dataDir,
+          host: await host(),
+          launcher: await openWorkerLauncher(),
+          place: servePlace({ base: resolveBase(environment), root }),
+          version: pkg.version,
+          out: env.out,
+          ...(env.platform === undefined ? {} : { platform: env.platform }),
+        });
+        return;
+      }
+      const refuse = (message: string) => {
+        env.err(`kodel: ${plain(message)}\n`);
+        exitCode = SERVE_EXIT_REFUSED;
+      };
+      if ((env.platform ?? process.platform) === "win32") {
+        return refuse(
+          "PLATFORM_UNSUPPORTED: agents are not supported on Windows yet; kodel serve starts no workers",
+        );
+      }
+      // A worker has `KODEL_ENGINE` in its environment: it cannot start a daemon of its own.
+      if (environment.KODEL_ENGINE !== undefined) {
+        return refuse(
+          "kodel serve is for a person or a service manager; it will not run from a command the engine runs (KODEL_ENGINE is set)",
+        );
+      }
+      let located: ProjectRoot;
+      try {
+        located = await project();
+      } catch (error) {
+        // Outside a project: a restart by a service manager would not fix it.
+        return refuse(error instanceof Error ? error.message : String(error));
+      }
+      const { root, dataDir } = located;
+      let place: ReturnType<typeof servePlace>;
+      try {
+        place = servePlace({ base: resolveBase(environment), root });
+      } catch (error) {
+        // A state base that cannot be placed (a relative KODEL_STATE_DIR) is not fixed by a restart either.
+        return refuse(error instanceof Error ? error.message : String(error));
+      }
+      const { runServe } = await import("./serve-command");
+      exitCode = await runServe({
+        root,
+        dataDir,
+        host: await host(),
+        openLauncher: openWorkerLauncher,
+        place,
+        version: pkg.version,
+        build: `${BUILD.version}+${BUILD.commit}`,
+        out: env.out,
+        err: env.err,
+        ...(env.serveSignal === undefined ? {} : { signal: env.serveSignal }),
       });
     });
 
@@ -1462,7 +1530,15 @@ Examples:
 
   // ── tasks ───────────────────────────────────────────────────────────────────
   // The same service the MCP tools use, so a person and an agent get the same rules. Tasks carry no
-  // trust decision, so (unlike `gate`) nothing here needs a terminal.
+  // trust decision, so (unlike `gate`) nothing here needs a terminal, except `task approve`.
+
+  /**
+   * A task made or changed from a script or a command the engine runs counts as an agent's: only a
+   * person at a terminal makes a task `kodel serve` may start without `kodel task approve`.
+   */
+  function byPerson(): boolean {
+    return env.interactive && env.environment?.KODEL_ENGINE === undefined;
+  }
 
   async function tasksService(): Promise<TaskService> {
     let opened: Awaited<ReturnType<typeof openTaskService>>;
@@ -1540,6 +1616,7 @@ Examples:
       if (typeof opts.parent === "string") input.parent = opts.parent;
       const fields = fieldsOf(opts.field as string[] | undefined);
       if (fields) input.fields = fields;
+      if (!byPerson()) input.created_by = "agent";
       const made = answered(await service.create(input)).task as Task;
       env.out(`created ${plain(made.key)}: ${plain(made.title)}\n`);
     });
@@ -1647,12 +1724,33 @@ Examples:
       if (Array.isArray(opts.clear)) patch.clear = opts.clear;
       const fields = fieldsOf(opts.field as string[] | undefined);
       if (fields) patch.fields = fields;
+      if (!byPerson()) patch.by_agent = true;
       const answer = answered(await service.update({ key, ...patch }));
       const changed = answer.task as Task;
       env.out(`updated ${plain(changed.key)}: ${plain(changed.status)}\n`);
       if (typeof answer.open_subtasks === "number") {
         env.out(`note: ${answer.open_subtasks} subtask(s) are still open\n`);
       }
+    });
+
+  task
+    .command("approve <key>")
+    .description(
+      "Approve a task an agent made or changed, so that kodel serve may start it (a person's command)",
+    )
+    .action(async (key: string) => {
+      requireHuman();
+      const service = await tasksService();
+      const read = answered(await service.get({ key }));
+      const shown = read.task as Task;
+      env.out(formatTask(shown, read.subtasks as SubtaskRef[], plain));
+      if (!needsApproval(shown)) {
+        env.out(`${plain(shown.key)} does not wait for an approval\n`);
+        return;
+      }
+      await mustConfirm(`Approve ${plain(shown.key)} as shown, so that kodel serve may start it?`);
+      const answer = answered(await service.approve({ key: shown.key, seen: shown.updated_at }));
+      env.out(`approved ${plain((answer.task as Task).key)}\n`);
     });
 
   task

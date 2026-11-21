@@ -6,7 +6,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./hooks": "./src/hooks-index.ts",
-    "./mcp": "./src/mcp/index.ts"
+    "./mcp": "./src/mcp/index.ts",
+    "./serve": "./src/serve/index.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",

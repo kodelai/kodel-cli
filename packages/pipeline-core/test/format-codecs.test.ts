@@ -76,7 +76,7 @@ function refusal(fn: () => unknown): KodelError {
 }
 
 describe("t41 the codecs read and write the golden runs unchanged", () => {
-  for (const format of ["v1", "v1-open", "v2"]) {
+  for (const format of ["v1", "v1-open", "v2", "v2-worker"]) {
     test(`t41_${format.replace("-", "_")}_round_trip_on_real_fixtures`, () => {
       const runs = fixtureRuns(format);
       expect(runs.length).toBeGreaterThan(0);
@@ -824,5 +824,154 @@ describe("t42 the format-2 runs with an engine step", () => {
     const all = runs.flatMap((run) => run.journal.map((line) => JSON.parse(line)));
     expect(all.some((r) => r.event === "node_finished" && r.source === "session")).toBe(true);
     expect(all.some((r) => r.event === "run_resumed" && typeof r.session === "string")).toBe(true);
+  });
+});
+
+describe("t43 the note that a worker is gone", () => {
+  const NOW = 50_000;
+  const v2Start = (): RunState => {
+    const started = decide(AGENT_THEN_COMMAND, undefined, start(), 0);
+    if (!started.ok) throw started.error;
+    expect(started.state.v).toBe(2);
+    return started.state;
+  };
+  const note = (over: Record<string, unknown> = {}): RunEvent =>
+    ({
+      type: "worker_note",
+      what: "gone",
+      worker: "kw-r_0mwplcrq9_pavk",
+      id: "a_0mwplcrq9_0001",
+      reason: "lost",
+      exit_code: 1,
+      at: NOW - 10,
+      ...over,
+    }) as RunEvent;
+
+  test("t43_worker_note_shape_is_journaled_with_no_state_change", () => {
+    const state = v2Start();
+    const before = JSON.stringify(encodeRunState(state));
+    const result = decide(AGENT_THEN_COMMAND, state, note(), NOW);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.noop).not.toBe(true);
+    expect(result.journal).toHaveLength(1);
+    expect(result.journal[0]).toMatchObject({
+      v: 2,
+      event: "worker_note",
+      what: "gone",
+      worker: "kw-r_0mwplcrq9_pavk",
+      id: "a_0mwplcrq9_0001",
+      reason: "lost",
+      exit_code: 1,
+      at: NOW - 10,
+    });
+    // only the sequence number moves: no field of the model changes
+    const after = JSON.parse(JSON.stringify(encodeRunState(result.state))) as {
+      seq: number;
+    };
+    const was = JSON.parse(before) as { seq: number };
+    expect(after.seq).toBe(was.seq + 1);
+    expect({ ...after, seq: was.seq }).toEqual(was);
+    // the record is stored as it is and the report lists it
+    const record = result.journal[0] as JournalRecord;
+    expect(encodeJournalRecord(record)).toEqual(record);
+    expect(summarizeRun(result.state, result.journal).workers_gone).toEqual([
+      {
+        at: NOW - 10,
+        worker: "kw-r_0mwplcrq9_pavk",
+        id: "a_0mwplcrq9_0001",
+        reason: "lost",
+        exit_code: 1,
+      },
+    ]);
+    expect(summarizeRun(state, []).workers_gone).toBeUndefined();
+  });
+
+  test("t43_worker_note_shape_minimal_note_is_journaled", () => {
+    const result = decide(
+      AGENT_THEN_COMMAND,
+      v2Start(),
+      { type: "worker_note", what: "gone", worker: "kw-x", reason: "not_started" },
+      NOW,
+    );
+    expect(result.ok && result.journal.length).toBe(1);
+  });
+
+  const noOps: [string, Record<string, unknown>][] = [
+    ["name_over_the_bound", { worker: "k".repeat(65) }],
+    ["name_with_other_characters", { worker: "kw-r/../x" }],
+    ["empty_name", { worker: "" }],
+    ["id_over_the_bound", { id: "a".repeat(65) }],
+    ["id_with_other_characters", { id: "a b" }],
+    ["reason_outside_the_four", { reason: "stopped" }],
+    ["what_is_not_gone", { what: "started" }],
+    ["exit_code_not_an_integer", { exit_code: 1.5 }],
+    ["at_after_the_record", { at: NOW + 1 }],
+  ];
+  for (const [name, over] of noOps) {
+    test(`t43_worker_note_shape_${name}`, () => {
+      const state = v2Start();
+      const before = JSON.stringify(encodeRunState(state));
+      const result = decide(AGENT_THEN_COMMAND, state, note(over), NOW);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.noop).toBe(true);
+      expect(result.journal).toEqual([]);
+      expect(JSON.stringify(encodeRunState(result.state))).toBe(before);
+    });
+  }
+
+  test("t43_worker_note_shape_ended_run", () => {
+    const canceled = decide(AGENT_THEN_COMMAND, v2Start(), { type: "cancel" }, 10);
+    if (!canceled.ok) throw canceled.error;
+    const result = decide(AGENT_THEN_COMMAND, canceled.state, note(), NOW);
+    expect(result.ok && result.noop).toBe(true);
+    expect(result.ok && result.journal).toEqual([]);
+  });
+
+  test("t43_v2_worker_fixture_holds_the_notes_and_reports_them", () => {
+    // The golden runs of `fixtures/formats/v2-worker/` (a real daemon, a scripted launcher): one run whose
+    // worker's holder was lost and that another agent then finished, one left open after a launch that
+    // threw before it made a record.
+    const runs = fixtureRuns("v2-worker");
+    expect(runs.map((r) => r.id).sort()).toEqual(["r_0mwq65e84_mwmp", "r_0mwq65epm_wgg7"]);
+    const reasons: Record<string, string[]> = {};
+    for (const run of runs) {
+      const state = readRunState(run.state, run.id);
+      expect(state.v).toBe(2);
+      const journal = run.journal.map((line) => decodeJournalRecord(JSON.parse(line)));
+      const gone = summarizeRun(state, journal).workers_gone ?? [];
+      expect(gone.map((g) => g.worker)).toEqual([`kw-${run.id}`]);
+      reasons[run.id] = gone.map((g) => g.reason);
+      // the note changes no decision: without it the run reports the same, apart from the list
+      const without = journal.filter((r) => r.event !== "worker_note");
+      const { workers_gone: _gone, ...rest } = summarizeRun(state, journal);
+      expect(canonical(summarizeRun(state, without))).toBe(canonical(rest));
+      // format 1 has no place for it and says so before anything is written
+      const note = journal.find((r) => r.event === "worker_note") as JournalRecord;
+      expect(refusal(() => encodeJournalRecord({ ...note, v: 1 })).code).toBe(
+        "UNSUPPORTED_FORMAT_FEATURE",
+      );
+    }
+    expect(reasons).toEqual({ r_0mwq65e84_mwmp: ["lost"], r_0mwq65epm_wgg7: ["not_started"] });
+  });
+
+  test("t43_worker_note_format_1_is_untouched", () => {
+    expect(V2_ONLY_EVENTS).toContain("worker_note");
+    expect(V1_EVENTS).not.toContain("worker_note");
+    expect(capabilitiesOf(1).workerNotes).toBe(false);
+    expect(capabilitiesOf(2).workerNotes).toBe(true);
+    const state = v1Start(AGENT_THEN_COMMAND);
+    expect(state.v).toBe(1);
+    const before = JSON.stringify(encodeRunState(state));
+    const result = decide(AGENT_THEN_COMMAND, state, note(), NOW);
+    // not a refusal from the codec, which would offer an upgrade nobody asked for
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.noop).toBe(true);
+    expect(result.journal).toEqual([]);
+    expect(JSON.stringify(encodeRunState(result.state))).toBe(before);
+    const record = { v: 1, seq: 3, ts: 3, event: "worker_note", what: "gone" } as JournalRecord;
+    expect(refusal(() => encodeJournalRecord(record)).code).toBe("UNSUPPORTED_FORMAT_FEATURE");
   });
 });

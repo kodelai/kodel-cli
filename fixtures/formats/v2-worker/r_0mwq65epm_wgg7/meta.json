@@ -1,0 +1,11 @@
+{
+  "v": 2,
+  "runId": "r_0mwq65epm_wgg7",
+  "pipeline": "gated",
+  "task": "Add a readiness check",
+  "slug": "add-a-readiness-check",
+  "specHash": "c2d10172115bc039",
+  "createdAt": 1795251095482,
+  "workdir": "/kodel-fixture/workdir/r_0mwq65epm_wgg7",
+  "branch": "kodel/r_0mwq65epm_wgg7"
+}

@@ -407,6 +407,26 @@ export class TaskService {
     return done.task;
   }
 
+  /**
+   * A person's approval of a task an agent made or changed (`kodel task approve`); no tool calls
+   * it. `seen` is the `updated_at` the person was shown: a task changed since is refused.
+   */
+  approve(input: { key: string; seen: string }): Promise<ToolResult> {
+    return this.guarded(async () => {
+      const approve = this.adapter.approve;
+      if (this.adapter.capabilities.provenance !== true || approve === undefined) {
+        throw this.unsupported("approving tasks");
+      }
+      if (typeof input.seen !== "string" || input.seen.length === 0 || input.seen.length > 40) {
+        throw new KodelError("INVALID_TASK", "seen must be the updated_at the task was shown with");
+      }
+      const key = await this.resolve("key", input.key);
+      const task = await this.call((o) => approve.call(this.adapter, key, input.seen, o));
+      if (!task) throw new KodelError("TASK_NOT_FOUND", `there is no task "${redactText(key)}"`);
+      return ok({ task });
+    });
+  }
+
   /** For `kodel task doctor`: what the adapter finds wrong with its setup. */
   verify(): Promise<ToolResult> {
     return this.guarded(async () => {

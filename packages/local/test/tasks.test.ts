@@ -476,6 +476,7 @@ describe("the list", () => {
       fields: false,
       priority: true,
       types: false,
+      provenance: true,
     });
   });
 

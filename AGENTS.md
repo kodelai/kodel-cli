@@ -27,7 +27,8 @@ This repository adds these rules:
 - Do not edit `.mcp.json` or `.claude/settings*.json` (the person decides how the server starts and what
   the agent may do). The same goes for the `decisions` block of the project config: it says what the
   agent may decide for the person (`docs/decisions.md`), so only the person changes it. So do the `storage`
-  and `project_id` keys, which say where the history is kept (`docs/history.md`).
+  and `project_id` keys, which say where the history is kept (`docs/history.md`), and the `serve` block, which
+  says what `kodel serve` starts on its own (`docs/serve.md`).
 - Do not edit the files in `.kodel/pipelines/` while a run is going. To change the pipeline of a run, ask
   the person whether to change it now, and then use `pipeline_propose_change`; the run stops at the end of
   its current step until the person accepts the change. A pipeline file edited by hand is noticed all the
@@ -36,8 +37,11 @@ This repository adds these rules:
   write into `.kodel/pipelines/` yourself. The proposal waits in `.kodel/proposals/` (with `storage: home`, in the
   project's folder under `~/.kodel`; do not edit it) until the person accepts it.
 - Do not run `gate`, `ack`, `seal`, `resume`, `migrate`, `pipeline changes apply|discard|restore`,
-  `pipeline proposals apply|discard` or `agent stop|rm|exec|forget-name`: they refuse to run without a terminal and
-  ask for a confirmation, so trying them only fails. `agent ls` and `agent logs` only read and are yours.
+  `pipeline proposals apply|discard`, `task approve` or `agent stop|rm|exec|forget-name`: they refuse to run without
+  a terminal and ask for a confirmation, so trying them only fails. `agent ls` and `agent logs` only read and are yours.
+- Do not run `kodel serve` (it refuses under `KODEL_ENGINE`, but not in your own shell): the person starts it. A
+  task you create or change with the `task_*` tools is not started by it until the person runs
+  `kodel task approve <key>`: tell them so.
 - `kodel wait <run>` is yours: it only watches and prints one line when the person has decided, so start it
   in the background (Claude Code: the Bash tool with `run_in_background`) when an answer offers it (a
   `waiting` answer, or a `node` or `running` answer whose text names it because a decision waits besides),
@@ -70,7 +74,9 @@ Humans: `bun packages/cli/src/main.ts status` lists runs, `report` shows where t
 until a run stops waiting for a person (see above); the same
 binary has `gate`, `resume`, `ack`, `seal`, `migrate` (takes a run to the newest stored format, one way), and `pipeline changes` (`show`, `apply`, `discard`, `history`,
 `restore`) for a change of the pipeline of a run that is going, and `pipeline proposals` (`show`, `apply`,
-`discard`) for a pipeline the agent proposed outside a run. With `decisions: { dialog: true }` in the project
+`discard`) for a pipeline the agent proposed outside a run, and `serve`, a daemon that starts matching tasks in
+background workers and resumes them after a decision, by the `serve` block of the project config
+(`docs/serve.md`; off by default). With `decisions: { dialog: true }` in the project
 config (off by default), a client that can show a form (MCP elicitation) is also asked there at a gate, a
 pause, a change of the pipeline of a run and a state changed outside kodel, and the person's answer in that
 dialog is the same decision as the command; the commands stay the way to decide when the dialog is off, the
@@ -99,7 +105,7 @@ Bun workspace (TypeScript, ESM). Runtime target: Node >= 22.19; Bun is the devel
 
 - `packages/pipeline-core` (`@kodel-ai/pipeline-core`): pure engine (pipeline spec, result checks, run state machine, routing, redaction, error codes, format versions), the `PipelineService` and the adapter interfaces. It also holds the task adapter contract (`tasks.ts`) and the `TaskService`; the `task_*` tools (`mcp/task-tools.ts`) exist only when the config turns tasks on. No file system, process, network or clock access. The subpath `@kodel-ai/pipeline-core/mcp` holds the MCP tool definitions bound to the service (it depends on the MCP SDK; the main entry does not import it). Transport-free: the CLI adds stdio, the server adds HTTP and auth.
 - `packages/local` (`@kodel-ai/local`): local adapters (file state store, process executor, git snapshots, system clock, the `local` task adapter that keeps one YAML file per task in `.kodel/tasks/`).
-- `packages/cli` (`kodel`): the CLI, built to a single JS file (`dist/kodel.js`), including human-only commands (`gate`, `resume`, `ack`, `seal`, `migrate`, `pipeline changes apply|discard|restore`, `pipeline proposals apply|discard`, `agent stop|rm|exec|forget-name`).
+- `packages/cli` (`kodel`): the CLI, built to a single JS file (`dist/kodel.js`), including human-only commands (`gate`, `resume`, `ack`, `seal`, `migrate`, `pipeline changes apply|discard|restore`, `pipeline proposals apply|discard`, `task approve`, `agent stop|rm|exec|forget-name`).
 - `packages/testkit` (`@kodel-ai/testkit`, private): scripted and adversarial fake agents, fixture helpers.
 - `adapters/`: per-agent pieces (MCP config writers, deny rules, driver prompts). `skills/`: agent-facing skills.
 - `tests/e2e`, `tests/agents`: end-to-end and real-agent scenarios. `fixtures/formats/`: golden fixtures per format version.
@@ -182,6 +188,11 @@ this family ignores unknown optional fields of a known `v`, because builds of di
 after the format is declared frozen every new field bumps `v`. Session errors are `SessionError` with
 `SESSION_ERROR_CODES`, outside the MCP error contract. The `t41_*` tests do not cover this family; its own tests do
 (`docs/session-formats.md`).
+
+The **record of `kodel serve`** (`<state base>/serve/<uid>/<checkout key>.json`) is machine-local state of the same
+kind: it follows rules 1-5 like the session records, with a `v` on the record, one codec in
+`pipeline-core/src/serve/record.ts` and fixtures in `fixtures/serve-formats/`; its `decode` ignores unknown optional
+fields of a known `v` and refuses a newer `v` with "upgrade kodel" (`docs/serve.md`).
 
 Decision T-41 (a run keeps its format; `kodel migrate` is the person's way up) is refuted if a user
 outside this repository reports a run of a supported format refused, orphaned or changed by an update.

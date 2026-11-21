@@ -96,9 +96,15 @@ only a person decides.
 | `kodel report [run]` | Where the time went and what was redone in a run. |
 | `kodel pipeline changes ...` | Review a change to the pipeline of a run that is going. |
 | `kodel pipeline proposals ...` | Review a pipeline the agent proposed outside a run. |
+| `kodel serve [--status]` | Start matching tasks in background agents and resume them after your decisions, as the `serve` block of the config says (`docs/serve.md`). |
+| `kodel task approve <key>` | Let `kodel serve` start a task an agent made or changed. |
 | `kodel feedback [text]` | Send a bug report, an idea or a note to the Kodel developers. |
 
 Run `kodel <command> --help` for the options.
+
+`kodel serve` is a daemon you can run for a checkout: it starts the tasks your rules match in background
+agents and resumes them after you decide, and decides nothing itself. It is off until you turn it on in the
+project config ([docs/serve.md](https://github.com/kodelai/kodel-cli/blob/main/docs/serve.md)).
 
 ## How it is built
 

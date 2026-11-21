@@ -65,6 +65,7 @@ import {
   type PipelineProposalRecord,
   placeProblem,
   type RunMeta,
+  type StoreOptions,
 } from "./store";
 import { openTaskService } from "./tasks";
 import { outsideSpans } from "./usage";
@@ -94,6 +95,8 @@ export interface LocalPipelineHostOptions extends HostOptions {
    * process that serves the MCP tools asks for it. Timers can be given, for tests; the system's by default.
    */
   agentLogTimer?: boolean | Timers;
+  /** How `worker-start.lock` tells its holder and how long it waits; for tests. */
+  workerStartLock?: Pick<StoreOptions, "isSame" | "identity" | "workerStartWaitMs" | "sleep">;
 }
 
 /** The methods of the host that read or write the history; see `guardEntryPoints`. */
@@ -169,6 +172,8 @@ export interface RunSummary {
   meta: RunMeta;
   state: RunState | undefined;
   unreadable?: { code: string; message: string; format?: number };
+  /** The caller asked not to read this run's state (`runSummaries({ skip })`); `state` is absent. */
+  skipped?: true;
 }
 
 /** A proposed pipeline as the person who accepts it needs to see it. */
@@ -208,6 +213,7 @@ export class LocalPipelineHost implements PipelineHost {
       root: this.storeRoot,
       ...(options.storage ? { place: options.storage } : {}),
       ...(options.rules ? { rules: options.rules } : {}),
+      ...options.workerStartLock,
     });
     this.guardEntryPoints();
     this.agentLog =
@@ -812,6 +818,19 @@ export class LocalPipelineHost implements PipelineHost {
     await Promise.all([...this.runs.values()].map((run) => run.settleEndJobs(deadline)));
   }
 
+  /**
+   * Run `fn` holding `worker-start.lock` in the lock root (TASK-G8KM, T-43): what a starter of
+   * background workers holds from its check that a task is not started to the end of the launch.
+   * Taken before `start.lock`, which `start` takes inside. `STATE_LOCKED` after 15 s of waiting.
+   */
+  withWorkerStartLock<T>(fn: () => Promise<T>): Promise<T> {
+    return this.assertPlace(false)
+      .then(() => this.store.withWorkerStartLock(fn))
+      .catch((error: unknown) => {
+        throw placeProblem(error, this.options.storage);
+      });
+  }
+
   /** Whether a start for this task would pick up a run that exists, instead of making one. */
   private async runExists(name: string, input: { task: string; restart: boolean }) {
     const task = normalizeTask(input.task, this.options.rules ?? []);
@@ -827,13 +846,15 @@ export class LocalPipelineHost implements PipelineHost {
   /**
    * Every run on disk, oldest first, with its state when it can be read, and otherwise why not: a
    * run of another run-state format says which format, so a list can show it as that and not as
-   * something broken.
+   * something broken. A run that `skip` names is listed with `skipped` and its state is not read: a
+   * caller that polls (`kodel serve`) keeps what it knows of an ended run and does not decode it again.
    */
-  async runSummaries(): Promise<RunSummary[]> {
+  async runSummaries(options: { skip?: (runId: string) => boolean } = {}): Promise<RunSummary[]> {
     await this.assertPlace(false);
     const metas = await this.store.listRuns();
     return Promise.all(
       metas.map(async (meta): Promise<RunSummary> => {
+        if (options.skip?.(meta.runId) === true) return { meta, state: undefined, skipped: true };
         try {
           return { meta, state: await this.store.readState(meta.runId) };
         } catch (error) {

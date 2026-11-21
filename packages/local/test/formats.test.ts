@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -65,6 +66,14 @@ const V2_ENGINE_FINISHED = "r_0mw18z041_oscj";
 const V2_ENGINE_OPEN = "r_0mw18z17b_0uiy";
 const V2_ENGINE_UNKNOWN = "r_0mw18z1td_qe4s";
 const V2_ENGINE_RUNS = [V2_ENGINE_FINISHED, V2_ENGINE_OPEN, V2_ENGINE_UNKNOWN];
+/**
+ * The format-2 runs with a `worker_note` (T-43, `fixtures/formats/v2-worker/`), started by a real
+ * `kodel serve` daemon with a scripted launcher: one whose worker's holder was lost (another agent then
+ * finished it), one left open after a launch that threw before it made a record (`not_started`).
+ */
+const V2_WORKER_LOST = "r_0mwq65e84_mwmp";
+const V2_WORKER_OPEN = "r_0mwq65epm_wgg7";
+const V2_WORKER_RUNS = [V2_WORKER_LOST, V2_WORKER_OPEN];
 /** The format-2 run that stands in for "a finished run of this engine" in the tests of how a run that is read behaves. */
 const V2_RUN = DEV_RUNS[1] as string;
 
@@ -159,11 +168,12 @@ const refusal = (promise: Promise<unknown>) =>
 
 describe("the golden runs of the stored formats", () => {
   test("formats_fixtures_have_a_known_set_of_formats_and_runs", async () => {
-    expect(await formatDirs()).toEqual(["v1", "v1-open", "v2", "v2-engine"]);
+    expect(await formatDirs()).toEqual(["v1", "v1-open", "v2", "v2-engine", "v2-worker"]);
     expect(await runIds("v1")).toEqual([...V1_RUNS].sort());
     expect(await runIds("v1-open")).toEqual([...V1_OPEN_RUNS].sort());
     expect(await runIds("v2")).toEqual([...V2_RUNS].sort());
     expect(await runIds("v2-engine")).toEqual([...V2_ENGINE_RUNS].sort());
+    expect(await runIds("v2-worker")).toEqual([...V2_WORKER_RUNS].sort());
   });
 
   test("formats_a_fixture_file_that_was_edited_fails_the_hash_list", async () => {
@@ -228,7 +238,9 @@ async function checkFormats(from: string): Promise<{ opened: number }> {
       expect(run).toBeDefined();
       const status = (await run?.state())?.status;
       expect(
-        format === "v1-open" || id === V2_ENGINE_OPEN ? ["running", "paused"] : ["completed"],
+        format === "v1-open" || id === V2_ENGINE_OPEN || id === V2_WORKER_OPEN
+          ? ["running", "paused"]
+          : ["completed"],
       ).toContain(String(status));
       expect((await store.readJournal(id)).length).toBeGreaterThan(0);
       expect((await run?.report())?.runId).toBe(id);
@@ -247,7 +259,11 @@ describe("every stored format against the current engine", () => {
   test("t41_formats_loop_opens_every_run_of_every_format", async () => {
     const { opened } = await checkFormats(FORMATS);
     expect(opened).toBe(
-      V1_RUNS.length + V1_OPEN_RUNS.length + V2_RUNS.length + V2_ENGINE_RUNS.length,
+      V1_RUNS.length +
+        V1_OPEN_RUNS.length +
+        V2_RUNS.length +
+        V2_ENGINE_RUNS.length +
+        V2_WORKER_RUNS.length,
     );
   });
 
@@ -259,8 +275,69 @@ describe("every stored format against the current engine", () => {
     await rm(join(copy, "v2"), { recursive: true, force: true });
     await mkdir(join(copy, "v2"), { recursive: true });
     expect(await checkFormats(copy)).toEqual({
-      opened: V1_RUNS.length + V1_OPEN_RUNS.length + V2_ENGINE_RUNS.length,
+      opened: V1_RUNS.length + V1_OPEN_RUNS.length + V2_ENGINE_RUNS.length + V2_WORKER_RUNS.length,
     });
+  });
+
+  test("t43_v2_worker_fixtures_open_and_report_the_gone_worker", async () => {
+    await copyRuns("v2-worker");
+    const before = await hashTree(runsDir());
+    const host = hostFor();
+    const lost = await host.open(V2_WORKER_LOST);
+    expect((await lost?.state())?.status).toBe("completed");
+    expect((await lost?.report())?.workers_gone).toEqual([
+      {
+        at: expect.any(Number),
+        worker: `kw-${V2_WORKER_LOST}`,
+        id: "a_000000001_test",
+        reason: "lost",
+      },
+    ]);
+    const open = await host.open(V2_WORKER_OPEN);
+    expect((await open?.state())?.status).toBe("running");
+    expect((await open?.report())?.workers_gone).toEqual([
+      { at: expect.any(Number), worker: `kw-${V2_WORKER_OPEN}`, reason: "not_started" },
+    ]);
+    // reading changed nothing on disk
+    expect(await hashTree(runsDir())).toEqual(before);
+  });
+
+  test("t43_v2_worker_open_run_goes_on_in_format_2", async () => {
+    // The open run (no agent was started for it) is continued by any agent; its workdir, a placeholder
+    // in the fixture, is made real.
+    await mkdir(root, { recursive: true });
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
+    git("init", "-q");
+    git("config", "user.email", "t@example.com");
+    git("config", "user.name", "T");
+    git("commit", "-q", "--allow-empty", "-m", "initial");
+    await copyRuns("v2-worker", V2_WORKER_OPEN);
+    await writeState(V2_WORKER_OPEN, { ...(await readState(V2_WORKER_OPEN)), workdir: root });
+    const metaPath = join(runsDir(), V2_WORKER_OPEN, "meta.json");
+    const meta = JSON.parse(await readFile(metaPath, "utf8")) as Record<string, unknown>;
+    await writeFile(metaPath, `${JSON.stringify({ ...meta, workdir: root }, null, 2)}\n`);
+    const run = await hostFor().open(V2_WORKER_OPEN);
+    if (!run) throw new Error("the open run does not open");
+    const next = await run.nextStep({ serve: {} });
+    expect("node" in next && next.node.slug).toBe("write");
+    const done = await run.completeStep("write", 1, "done");
+    expect(done.ok).toBe(true);
+    // a later worker's death is noted once, in format 2
+    const worker = `kw-${V2_WORKER_OPEN}-d1`;
+    expect(
+      await run.noteWorker({ worker, id: "a_000000002_test", reason: "exited", exit_code: 1 }),
+    ).toEqual({ written: true });
+    expect(
+      await run.noteWorker({ worker, id: "a_000000002_test", reason: "exited", exit_code: 1 }),
+    ).toEqual({ written: false });
+    const journal = await storeFor().readJournal(V2_WORKER_OPEN);
+    expect(journal.every((r) => r.v === RECORD_VERSION)).toBe(true);
+    expect(journal.filter((r) => r.event === "worker_note").map((r) => r.reason)).toEqual([
+      "not_started",
+      "exited",
+    ]);
+    expect(journal.map((r) => r.event)).toContain("gate_waiting");
+    expect((await run.state()).v).toBe(RECORD_VERSION);
   });
 
   test("t40_v2_fixtures_open", async () => {

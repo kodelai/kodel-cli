@@ -122,6 +122,35 @@ without engine steps, so such a run writes the same bytes as before. No publishe
 
 Golden fixture: `fixtures/formats/v2-engine/`, a real run with an engine step.
 
+## Worker notes (TASK-G8KM, T-43)
+
+`kodel serve` (`docs/serve.md`) journals the event `worker_note` when a background worker of a run is gone
+(`what: gone`, `worker`, `id?`, `reason`: `lost`, `killed`, `exited` or `not_started`, `exit_code?`, `at?`; see
+`docs/history.md`). It decides no step, the state has no new field, and nothing is rewritten:
+
+- A run of format 2 gets the event from now on, a run that was going when kodel was updated too. Records
+  already written are not rewritten. Format 2 is amended in place, with no new version (rule 5): an engine of
+  format 2 that does not know the event reads it, writes it back and decides as if it were absent, and an
+  older engine that writes the run back drops nothing, since the journal is only appended to.
+- A run of format 1 is unchanged. Format 1 has no place for the event (`workerNotes` is false for it): the note
+  is a quiet no-op, not a refusal, so nothing offers `kodel migrate` for it, and the daemon logs the death
+  instead.
+- An older kodel that works on the same run ignores the event. It counts it as a sign of life, so its TUI may
+  date the wait of a run by it.
+
+Golden fixture: `fixtures/formats/v2-worker/`, two runs with a note. The engine, the host
+(`LocalPipelineHost`) and the daemon (`createServeDaemon`) that wrote them were real; the launcher was the
+`ScriptedLauncher` of `@kodel-ai/testkit`, so no agent process ran (`fixtures/formats/README.md`).
+
+## The `serve` block
+
+The project config gains a `serve` block (`docs/serve.md`); the config `version` is not bumped. A kodel from
+before this change refuses the whole config while the block is there (`unknown key: serve`, "upgrade kodel or
+remove the key"), so in a project that uses it an older kodel cannot start at all. An MCP server that was
+already running when kodel was updated does not read the config again and does not mark the tasks its agent
+makes (`docs/tasks.md`): restart the agents' sessions after the update. The four task keys the mark adds are
+optional and kept by an older kodel as they are.
+
 ## When the formats change again
 
 A change of a stored format ships a codec for the previous one, a real fixture and the tests, and

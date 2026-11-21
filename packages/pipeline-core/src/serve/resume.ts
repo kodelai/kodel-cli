@@ -1,0 +1,253 @@
+/**
+ * When a background worker of a run is resumed after the person's decision (TASK-9PNS, Decision 1c;
+ * TASK-G8KM, T-43). Pure: the journal, the run and the worker's latest record in, a verdict out. The
+ * TUI words the verdict on the card and offers `s resumes`; `kodel serve` acts on it. Nothing here
+ * starts anything: the name of the record (`kw-<run>-d<seq>`) is what makes a resume happen once.
+ *
+ * The journal only advises. `step_served` and its kin are bookkeeping the engine skips silently
+ * (prompts off, the cap on served events, a repeated answer, a command step after a gate), so no
+ * line can prove that the person's own agent is not continuing the run; `moved` is true whenever it
+ * is set and claims nothing when absent.
+ */
+import type { JournalRecord, RunStatus } from "../run";
+import type { SessionState } from "../session";
+
+/** A decision the person made, as the journal records it: what a resume prompt and a question name. */
+export interface RunDecision {
+  /** The journal line of the decision; the resume record is named after it. */
+  seq: number;
+  ts: number;
+  kind: "gate" | "pause" | "pipeline_change";
+  node: string;
+  outcome: "approved" | "rejected" | "resumed" | "accepted" | "dropped";
+  reason?: string;
+}
+
+/** The last wait of a run that a person has to decide: a gate, a pause or a change of the pipeline. */
+export interface WaitMark {
+  seq: number;
+  ts: number;
+  kind: RunDecision["kind"];
+  node: string;
+}
+
+/** A decision as the journal records it, and whether an agent made it for the person. */
+export interface DecisionMark extends RunDecision {
+  byAgent: boolean;
+}
+
+export interface DecisionInfo {
+  /** The wait the decision answered: dated by its own record, or, for a hand-edited pipeline accepted, by the last sign of life before it. */
+  lastWait?: WaitMark;
+  decision?: DecisionMark;
+  /** An agent was served, claimed or completed a step after the decision. */
+  moved: boolean;
+}
+
+/**
+ * Journal events that say nothing about the run's agent being alive: display data the host writes
+ * on its own. A reader that dates a wait by the last sign of life leaves them out.
+ */
+export const NOT_A_SIGN_OF_LIFE: readonly string[] = ["agent_session_named", "worker_note"];
+
+const WAIT_EVENTS: Record<string, RunDecision["kind"]> = {
+  gate_waiting: "gate",
+  run_paused: "pause",
+  pipeline_change_proposed: "pipeline_change",
+};
+
+const MOVED_EVENTS = ["step_served", "step_claimed", "agent_completed"];
+
+const text = (value: unknown): string | undefined =>
+  typeof value === "string" && value !== "" ? value : undefined;
+
+/** The slugs a `pipeline_accepted` names, as one word for the question. */
+function changedNodes(record: JournalRecord): string {
+  const nodes = Array.isArray(record.nodes) ? record.nodes : [];
+  const slugs = nodes
+    .map((n) =>
+      typeof n === "object" && n !== null ? text((n as Record<string, unknown>).slug) : undefined,
+    )
+    .filter((s): s is string => s !== undefined);
+  if (slugs.length === 0) return "pipeline";
+  return slugs.length > 3 ? `${slugs.slice(0, 3).join(", ")}, …` : slugs.join(", ");
+}
+
+/** The decision a record is, if it is one. */
+function decisionRecord(record: JournalRecord): DecisionMark | undefined {
+  const byAgent = record.decided_by === "agent";
+  const base = { seq: record.seq, ts: record.ts, byAgent };
+  switch (record.event) {
+    case "gate_decided": {
+      const outcome = record.decision === "approved" ? "approved" : "rejected";
+      const reason = text(record.reason);
+      return {
+        ...base,
+        kind: "gate",
+        node: text(record.node) ?? "?",
+        outcome,
+        ...(reason === undefined ? {} : { reason }),
+      };
+    }
+    case "run_resumed":
+      return { ...base, kind: "pause", node: text(record.node) ?? "?", outcome: "resumed" };
+    case "pipeline_accepted":
+      return { ...base, kind: "pipeline_change", node: changedNodes(record), outcome: "accepted" };
+    case "pipeline_change_proposed": {
+      if (record.withdrawn !== true) return undefined;
+      const reason = text(record.summary);
+      return {
+        ...base,
+        kind: "pipeline_change",
+        node: "pipeline",
+        outcome: "dropped",
+        ...(reason === undefined ? {} : { reason }),
+      };
+    }
+    default:
+      return undefined;
+  }
+}
+
+/** What the journal says about the last decision of a run and the wait it answered. */
+export function decisionOf(journal: readonly JournalRecord[]): DecisionInfo {
+  let decision: DecisionMark | undefined;
+  let decisionRecordIndex = -1;
+  let previousDecisionSeq = -1;
+  for (const [i, record] of journal.entries()) {
+    const found = decisionRecord(record);
+    if (found === undefined) continue;
+    previousDecisionSeq = decision?.seq ?? -1;
+    decision = found;
+    decisionRecordIndex = i;
+  }
+  // The last wait of the run, whoever answered it: a wait after the decision is the run waiting again
+  // (the resumed worker exits at it), a wait before an older decision belongs to that one and is stale.
+  let lastWait: WaitMark | undefined;
+  for (const record of journal) {
+    if (record.seq <= previousDecisionSeq) continue;
+    const kind = WAIT_EVENTS[record.event];
+    if (kind === undefined) continue;
+    if (record.event === "pipeline_change_proposed" && record.withdrawn === true) continue;
+    lastWait = { seq: record.seq, ts: record.ts, kind, node: text(record.node) ?? "pipeline" };
+  }
+  if (decision === undefined)
+    return { ...(lastWait === undefined ? {} : { lastWait }), moved: false };
+  const accepted = journal[decisionRecordIndex];
+  if (
+    lastWait === undefined &&
+    accepted !== undefined &&
+    accepted.event === "pipeline_accepted" &&
+    accepted.source === "file"
+  ) {
+    // A pipeline file edited by hand has no wait line of its own: only the apply writes. Its wait is
+    // dated as the card dates it, by the last sign of life before it.
+    const before = journal
+      .slice(0, decisionRecordIndex)
+      .findLast((r) => !NOT_A_SIGN_OF_LIFE.includes(r.event));
+    if (before !== undefined) {
+      lastWait = { seq: before.seq, ts: before.ts, kind: "pipeline_change", node: decision.node };
+    }
+  }
+  const moved = journal.some((r) => r.seq > decision.seq && MOVED_EVENTS.includes(r.event));
+  return { ...(lastWait === undefined ? {} : { lastWait }), decision, moved };
+}
+
+/** What a resume needs to know of a worker: its latest session record, as `kodel agent ls` reads it. */
+export interface ServeWorkerView {
+  /** The latest record: the `-d<seq>` one with the highest seq, else `kw-<run>`. */
+  id: string;
+  name: string;
+  /** `unknown`: the record cannot be read. */
+  state: SessionState | "unknown";
+  /** The words of `kodel agent ls` for the state. */
+  label: string;
+  /** When the latest record's session started (milliseconds). */
+  started: number;
+  /** When it reached its state (milliseconds), when known. */
+  since?: number;
+  exitCode?: number;
+  /** The id of the agent's own conversation, when the records name it. */
+  sessionId?: string;
+  /** The decisions that have a record, in any state. */
+  resumed: number[];
+  /** How many `-d` records the run has. */
+  resumes: number;
+  /** The decision the latest record resumed after; absent for `kw-<run>`. */
+  decisionSeq?: number;
+  /** The last time the session printed anything (milliseconds), when the record says. */
+  lastOutputAt?: number;
+  /** A person stopped it (`kodel agent stop`): it is not a worker that died. */
+  stopped?: boolean;
+}
+
+/** What a resume needs to know of a run. */
+export interface ResumeRunView {
+  runId: string;
+  status: RunStatus;
+  /** The run waits for a person now (a gate, a pause, a change of the pipeline). */
+  waitsForPerson: boolean;
+  marks?: DecisionInfo;
+}
+
+export type ResumeNo =
+  | "no_worker"
+  | "unknown"
+  | "active"
+  | "dead"
+  | "over"
+  | "not_at_wait"
+  | "wait_before_start"
+  | "waiting_person"
+  | "undecided"
+  | "agent_decided"
+  | "already_resumed"
+  | "no_session_id"
+  | "moved";
+
+export type ResumeVerdict =
+  | { kind: "resume"; seq: number; decision: DecisionMark }
+  | { kind: "no"; why: ResumeNo };
+
+const no = (why: ResumeNo): ResumeVerdict => ({ kind: "no", why });
+
+/** Whether the latest session exited at the wait: the wait began during it, and it ended at or after the wait. */
+function exitedAtWait(worker: ServeWorkerView, wait: WaitMark): boolean {
+  return wait.ts >= worker.started && (worker.since === undefined || worker.since >= wait.ts);
+}
+
+/**
+ * The rule. A worker is resumed when the run is going, the latest record `exited` at the last wait,
+ * the person decided after that wait, no record of that decision exists in any state and a session
+ * id is known. With `refuseMoved` an agent that was served a step since the decision also stops it;
+ * the TUI passes `false` and words that case itself.
+ */
+export function resumeVerdict(
+  run: ResumeRunView,
+  worker: ServeWorkerView | undefined,
+  opts: { refuseMoved: boolean },
+): ResumeVerdict {
+  if (worker === undefined) return no("no_worker");
+  if (worker.state === "unknown") return no("unknown");
+  if (worker.state === "starting" || worker.state === "running") return no("active");
+  if (worker.state === "killed" || worker.state === "lost") return no("dead");
+  if (run.status !== "running" && run.status !== "paused") return no("over");
+  const lastWait = run.marks?.lastWait;
+  const decision = run.marks?.decision;
+  // A wait that left no wait line in the journal (a pipeline file edited by hand) is still a wait:
+  // the worker stopped there, it did not die before one.
+  if (lastWait === undefined) return no(run.waitsForPerson ? "waiting_person" : "not_at_wait");
+  if (!exitedAtWait(worker, lastWait)) {
+    if (lastWait.ts < worker.started && run.status === "running" && !run.waitsForPerson) {
+      return no("wait_before_start");
+    }
+    return no("not_at_wait");
+  }
+  if (run.waitsForPerson) return no("waiting_person");
+  if (decision === undefined || decision.seq <= lastWait.seq) return no("undecided");
+  if (decision.byAgent) return no("agent_decided");
+  if (worker.resumed.includes(decision.seq)) return no("already_resumed");
+  if (worker.sessionId === undefined) return no("no_session_id");
+  if (opts.refuseMoved && run.marks?.moved === true) return no("moved");
+  return { kind: "resume", seq: decision.seq, decision };
+}

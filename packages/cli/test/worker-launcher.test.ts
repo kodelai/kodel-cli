@@ -334,6 +334,7 @@ describe("task_9pns the claude profile", () => {
         "pipeline changes restore",
         "pipeline proposals apply",
         "pipeline proposals discard",
+        "task approve",
         ...AGENT_HUMAN_COMMANDS,
       ]) {
         expect(denied).toContain(`Bash(${spelling} ${verb}*)`);
@@ -388,6 +389,7 @@ describe("task_9pns the claude profile", () => {
       "bun packages/cli/src/main.ts agent ls --json",
       "bun packages/cli/src/main.ts agent logs kw-r_0abc",
       "bun packages/cli/src/main.ts status",
+      "bun packages/cli/src/main.ts task list",
     ]) {
       expect(refused(command)).toBe(false);
     }
@@ -401,6 +403,7 @@ describe("task_9pns the claude profile", () => {
       "kodel migrate r_0abc",
       "kodel pipeline changes apply r_0abc",
       "kodel pipeline proposals discard x",
+      "kodel task approve TASK-1",
       "kodel agent stop kw-r_0abc",
       "kodel agent rm kw-r_0abc",
       "kodel agent exec --name x sleep 1",
@@ -1095,4 +1098,74 @@ describe("task_9pns the real adapter", () => {
     },
     90_000,
   );
+});
+
+// ── kodel serve (TASK-G8KM, T-43) ───────────────────────────────────────────
+
+describe("t43 the launcher for kodel serve", () => {
+  test("t43_worker_status_carries_last_output_at", async () => {
+    const adapter = new ScriptedSessionAdapter();
+    const launcher = createSessionWorkerLauncher(deps(adapter));
+    await launcher.start({ runId: RUN, workdir: ROOT, title: "t" });
+    const first = adapter.only(`kw-${RUN}`);
+    // The record has no last output: the status has none either.
+    expect((await launcher.statuses([RUN])).get(RUN)?.lastOutputAt).toBeUndefined();
+    expect("lastOutputAt" in ((await launcher.statuses([RUN])).get(RUN) ?? {})).toBe(false);
+    adapter.finish(first.id, { state: "running", lastOutputAt: 7_000 }, "", true);
+    expect((await launcher.statuses([RUN])).get(RUN)?.lastOutputAt).toBe(7_000);
+    // A person's stop is told apart from a worker that died, and the daemon's port keeps both.
+    adapter.finish(first.id, { state: "killed", reason: "stopped", lastOutputAt: 8_000 });
+    const stopped = (await launcher.statuses([RUN])).get(RUN);
+    expect(stopped).toMatchObject({ state: "killed", stopped: true, lastOutputAt: 8_000 });
+    const { serveLauncherOf } = await import("../src/worker-factory");
+    const view = (await serveLauncherOf(launcher).statuses([RUN])).get(RUN);
+    expect(view).toMatchObject({ state: "killed", stopped: true, lastOutputAt: 8_000 });
+    adapter.finish(first.id, { state: "killed", reason: "timeout" });
+    const timedOut = (await serveLauncherOf(launcher).statuses([RUN])).get(RUN);
+    expect(timedOut?.stopped).toBeUndefined();
+    expect(timedOut?.lastOutputAt).toBeUndefined();
+  });
+
+  test("t43_tui_start_takes_the_start_lock", async () => {
+    const key = await seedTask();
+    const launcher = new FakeLauncher();
+    const short = () =>
+      new LocalPipelineHost({
+        root: dir,
+        heartbeatMs: 0,
+        environment: {},
+        workerStartLock: { workerStartWaitMs: 150 },
+      });
+    const opts = await options(short(), launcher);
+    // Another process (another store here) holds the lock: the TUI waits, then says so and starts nothing.
+    let release: () => void = () => undefined;
+    const held = host().withWorkerStartLock(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(await opts.startTask?.(key, "one")).toEqual({
+      ok: false,
+      message: `Could not start ${key}: another start is in progress, try again.`,
+    });
+    expect(launcher.starts).toEqual([]);
+    expect(await short().runSummaries()).toEqual([]);
+    release();
+    await held;
+    // The TUI holds it from the check to the end of the launch.
+    let launched: () => void = () => undefined;
+    launcher.hold = new Promise<void>((resolve) => {
+      launched = resolve;
+    });
+    const starting = opts.startTask?.(key, "one");
+    while (launcher.starts.length === 0) await new Promise((resolve) => setTimeout(resolve, 10));
+    await expect(short().withWorkerStartLock(async () => "in")).rejects.toMatchObject({
+      code: "STATE_LOCKED",
+    });
+    launched();
+    expect((await starting)?.ok).toBe(true);
+    expect(await short().withWorkerStartLock(async () => "in")).toBe("in");
+  });
 });

@@ -10,6 +10,7 @@ import {
   isTaskState,
   KodelError,
   type NewTask,
+  needsApproval,
   TASK_CONTRACT,
   TASK_LIMITS,
   type Task,
@@ -23,6 +24,8 @@ export interface ContractSubject {
   adapter: TaskAdapter;
   /** What every `create` needs besides a title (an adapter whose tracker demands a field). */
   newTask?: Partial<NewTask>;
+  /** Makes the adapter's clock stand still from now on; a subject without it skips the cases that need it. */
+  stopClock?: () => void;
   dispose?: () => Promise<void> | void;
 }
 
@@ -549,6 +552,76 @@ export function taskAdapterContract(
       "a longer list gives neither next nor truncated",
     );
   });
+
+  add(
+    "provenance: an agent's task waits for an approval, a stale approval is refused, an agent's edit waits again",
+    async ({ adapter }, { create }) => {
+      const approve = adapter.approve;
+      if (adapter.capabilities.provenance !== true) return;
+      assert(approve !== undefined, "capabilities.provenance is on but there is no approve");
+      const call = (key: string, seen: string) => approve.call(adapter, key, seen, o());
+
+      const persons = await create("A person's task");
+      assert(!needsApproval(persons), "a task made without a mark waits for an approval");
+      const noted = await adapter.update(persons.key, { comment: "a note", by_agent: true }, o());
+      assert(noted && !needsApproval(noted.task), "an agent's comment made the task wait");
+
+      const made = await create("An agent's task", { created_by: "agent", run: RUN_A });
+      assert(made.created_by === "agent", "created_by is not kept");
+      assert(made.created_in_run === RUN_A, "created_in_run is not kept");
+      assert(needsApproval(made), "an agent's task does not wait for an approval");
+      const listed = (await listAll(adapter)).tasks.find((t) => t.key === made.key);
+      assert(listed?.needs_approval === true, "the summary does not say it waits");
+
+      const moved = await adapter.update(made.key, { title: "Changed meanwhile" }, o());
+      assert(moved, "task vanished");
+      const stale = await rejection(call(made.key, made.updated_at), "a stale approval");
+      assert(stale.code === "TASK_TRANSITION_REFUSED", `a stale approval is ${stale.code}`);
+      assert(stale.message.includes("look again"), "a stale approval does not say look again");
+
+      const approved = await call(made.key, moved.task.updated_at);
+      assert(approved && !needsApproval(approved), "an approved task still waits");
+
+      const edited = await adapter.update(made.key, { title: "Rewritten", by_agent: true }, o());
+      assert(edited && needsApproval(edited.task), "an agent's edit after approval does not wait");
+    },
+  );
+
+  add(
+    "provenance: an approval at the same instant as the last agent edit still clears the wait",
+    async ({ adapter, stopClock }, { create }) => {
+      const approve = adapter.approve;
+      if (adapter.capabilities.provenance !== true || stopClock === undefined) return;
+      assert(approve !== undefined, "capabilities.provenance is on but there is no approve");
+      const made = await create("An agent's task", { created_by: "agent", run: RUN_A });
+      stopClock();
+      const edited = await adapter.update(made.key, { title: "Rewritten", by_agent: true }, o());
+      assert(edited && needsApproval(edited.task), "an agent's edit does not wait");
+      const approved = await approve.call(adapter, made.key, edited.task.updated_at, o());
+      assert(
+        approved && !needsApproval(approved),
+        "an approval in the same millisecond as the agent's edit still waits",
+      );
+    },
+  );
+
+  add(
+    "provenance: an agent's edit at the same instant as the approval waits again",
+    async ({ adapter, stopClock }, { create }) => {
+      const approve = adapter.approve;
+      if (adapter.capabilities.provenance !== true || stopClock === undefined) return;
+      assert(approve !== undefined, "capabilities.provenance is on but there is no approve");
+      const made = await create("An agent's task", { created_by: "agent", run: RUN_A });
+      stopClock();
+      const approved = await approve.call(adapter, made.key, made.updated_at, o());
+      assert(approved && !needsApproval(approved), "an approved task still waits");
+      const edited = await adapter.update(made.key, { title: "Rewritten", by_agent: true }, o());
+      assert(
+        edited && needsApproval(edited.task),
+        "an agent's edit in the millisecond of the approval does not wait",
+      );
+    },
+  );
 
   return cases;
 }
