@@ -48,6 +48,7 @@ import {
   foldSessionName,
   type HistoryConfig,
   hasEngineSteps,
+  hasModelSteps,
   inOwnBranch,
   isRunEnd,
   isSessionVisit,
@@ -57,6 +58,7 @@ import {
   liveClaim,
   measurePatch,
   mergeReports,
+  modelMarks,
   type NextStep,
   type NextStepOptions,
   type NextStepRequest,
@@ -78,6 +80,7 @@ import {
   redactText,
   renderContextOf,
   renderDeep,
+  requestedModelOf,
   resolveMode,
   rowsToCsv,
   runSlug,
@@ -1191,6 +1194,20 @@ export class LocalRun {
     return spec;
   }
 
+  /** Whether the step in the pipeline in force asks for a model: only such a step's worker log is looked for. */
+  private async asksForModel(slug: string): Promise<boolean> {
+    try {
+      const spec = await this.currentSpec();
+      const found = spec.nodes.find((n) => n.slug === slug);
+      return (
+        found !== undefined &&
+        requestedModelOf(this.host.engine.registry ?? defaultRegistry(), found) !== undefined
+      );
+    } catch {
+      return false;
+    }
+  }
+
   /** The pipeline the run is on now. */
   async currentSpec(state?: RunState): Promise<PipelineSpec> {
     return this.specFor((state ?? (await this.state())).specHash);
@@ -1518,6 +1535,14 @@ export class LocalRun {
     accepting = false,
   ): KodelError | undefined {
     const registry = this.host.engine.registry ?? defaultRegistry();
+    // A step that asks for a model needs no host support, only a format that can keep it: the kept copy
+    // of such a pipeline is one the engine that wrote a format-1 run refuses.
+    if (
+      hasModelSteps(spec, registry) &&
+      !capabilitiesOf(state.v).pipelineFeatures.includes("model")
+    ) {
+      return cannotHoldError(state.v, "a pipeline with a step that asks for a model", this.runId);
+    }
     if (hasEngineSteps(spec, registry)) {
       const refusal = this.host.engineRefusal(spec);
       if (refusal) return refusal;
@@ -3241,7 +3266,12 @@ export class LocalRun {
   /** Where the time went and what was redone, from the run's own state and journal. */
   async report(): Promise<RunReport> {
     const journal = await this.host.store.readJournal(this.runId);
-    const report = await this.withFindings(summarizeRun(await this.state(), journal));
+    const state = await this.state();
+    const report = await this.withModelMarks(
+      await this.withFindings(summarizeRun(state, journal)),
+      state,
+      journal,
+    );
     // A run that did not record changes has no patch to measure, whatever file may be lying there.
     const started = journal.find((r) => r.event === "run_started");
     const changesOff =
@@ -3254,6 +3284,51 @@ export class LocalRun {
     };
     const where = await this.locationForDisplay();
     return where ? { ...sized, workdir: where.path } : sized;
+  }
+
+  /**
+   * For each attempt of a step that asked for a model: the model asked for, read from the pipeline kept with the
+   * run that was in force when the attempt began (a change of the pipeline in the middle of a run changes what a
+   * later attempt asked for), against the models the usage record shows. A kept copy that cannot be read is said
+   * once; the attempts it covers are not guessed.
+   */
+  private async withModelMarks(
+    report: RunReport,
+    state: RunState,
+    journal: readonly JournalRecord[],
+  ): Promise<RunReport> {
+    const registry = this.host.engine.registry ?? defaultRegistry();
+    const hashOf = new Map<string, string>();
+    let hash: string | undefined;
+    for (const record of journal) {
+      if (record.event === "run_started" && typeof record.spec === "string") hash = record.spec;
+      else if (record.event === "pipeline_accepted" && typeof record.to === "string")
+        hash = record.to;
+      else if (
+        record.event === "node_entered" &&
+        hash !== undefined &&
+        typeof record.node === "string" &&
+        typeof record.attempt === "number"
+      ) {
+        hashOf.set(`${record.node}:${record.attempt}`, hash);
+      }
+    }
+    const specs = new Map<string, PipelineSpec | undefined>();
+    for (const wanted of new Set(hashOf.values())) {
+      specs.set(wanted, await this.specFor(wanted).catch(() => undefined));
+    }
+    const requested = new Map<string, string>();
+    for (const [attempt, wanted] of hashOf) {
+      const node = specs
+        .get(wanted)
+        ?.nodes.find((n) => n.slug === attempt.slice(0, attempt.lastIndexOf(":")));
+      const model = node === undefined ? undefined : requestedModelOf(registry, node);
+      if (model !== undefined) requested.set(attempt, model);
+    }
+    const marks = modelMarks({ state, journal, requested });
+    const unreadable = [...specs.values()].some((spec) => spec === undefined);
+    if (marks.length === 0 && !unreadable) return report;
+    return { ...report, models: { marks, ...(unreadable ? { no_snapshot: true as const } : {}) } };
   }
 
   /** The findings of each attempt's reports counted by severity; the journal only knows how many rows. */
@@ -3440,6 +3515,13 @@ export class LocalRun {
         await this.apply({ type: "tool_calls_failed", reason }).catch(() => undefined);
       }
     }
+    // A step a worker handed in (it carries a claim token): the models of the worker's own log for this step, so
+    // that a fork's branches are not told apart by the pooled use of the session (T-43). Outside the lock, with
+    // a wait of its own; nothing is read when usage is off.
+    const workerModels =
+      claimToken === undefined || !(await this.asksForModel(node))
+        ? undefined
+        : await this.host.usage.workerModels(run, { node, attempt }).catch(() => undefined);
     const executor = await this.executorNow(caller);
     // HEAD of the run's own directory: the root may be somewhere else entirely.
     const head = await this.cwd()
@@ -3467,6 +3549,7 @@ export class LocalRun {
         ...(outcome === undefined ? {} : { outcome }),
         // Only the hash travels: the token itself is the worker's and is written nowhere.
         ...(claimToken === undefined ? {} : { claimToken: hashSource(claimToken) }),
+        ...(workerModels === undefined ? {} : { workerModels }),
         ...(executor === undefined ? {} : executor),
         ...(recorded.changes === undefined ? {} : { changes: recorded.changes }),
         ...(recorded.changesError === undefined ? {} : { changesError: recorded.changesError }),

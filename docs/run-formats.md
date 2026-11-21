@@ -122,6 +122,24 @@ without engine steps, so such a run writes the same bytes as before. No publishe
 
 Golden fixture: `fixtures/formats/v2-engine/`, a real run with an engine step.
 
+## A step that asks for a model (T-43)
+
+A node `model:` without `engine` asks the agent that drives the run to give the step to a subagent on that
+model (a worker, in a fork worked in parallel). It is a field of the pipeline file and stores nothing by
+itself: the model asked for is read from the pipeline kept with the run (`specs/<hash>.yaml`) when the
+report is built.
+
+- A run of format 1 refuses a pipeline that has such a step, in a proposal, an accepted change and a run's
+  own change (`UNSUPPORTED_FORMAT_FEATURE`, and the answer offers `kodel migrate`), the way it refuses an
+  engine step: the kept copy would be a pipeline the engine that wrote the run cannot read. It is the
+  pipeline feature `model` of format 2.
+- A run in flight is unaffected: no pipeline written before can hold the field without `engine`.
+- An older kodel, including the published beta, refuses such a pipeline as one it cannot parse; a dev build
+  from before this change says "was modified" for a run whose kept pipeline has the field.
+- For a step that a fork's worker did, a later change adds one optional field to the journal event
+  `agent_completed` (`worker_models`, see `docs/history.md`, "Requested and observed model"); that change
+  is made in place in format 2 too.
+
 ## When the formats change again
 
 A change of a stored format ships a codec for the previous one, a real fixture and the tests, and

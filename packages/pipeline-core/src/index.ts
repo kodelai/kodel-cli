@@ -15,6 +15,7 @@ export * from "./history-config";
 export * from "./history-view";
 export * from "./hook-normalizers";
 export * from "./hooks";
+export * from "./model-match";
 export * from "./new-pipeline";
 export * from "./next-step";
 export * from "./pipeline";

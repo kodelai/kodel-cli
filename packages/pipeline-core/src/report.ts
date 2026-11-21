@@ -2,6 +2,7 @@
  * A summary of one run, read from its journal and state: where the time went, how many attempts
  * each node took, what failed and why. Pure, so a host (a CLI, a server) only has to print it.
  */
+import type { ModelMarksReport } from "./model-match";
 import type { JournalRecord, RunState } from "./run";
 import { runSlug } from "./slug";
 import type { TaskSize } from "./task-size";
@@ -251,6 +252,11 @@ export interface RunReport {
   usage: UsageReport;
   /** What the agent called, per attempt, from the agent's own log (information only, `unverified`). */
   tool_calls?: ToolCallsReport;
+  /**
+   * Added by a host that can read the run's kept pipelines: for each attempt of a step that asked for a model,
+   * the model asked for and the models the logs show (information only; it decides nothing).
+   */
+  models?: ModelMarksReport;
 }
 
 const seconds = (from: number, to: number) => Math.max(0, Math.round((to - from) / 100) / 10);

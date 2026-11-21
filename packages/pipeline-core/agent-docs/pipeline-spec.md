@@ -28,15 +28,25 @@ between them. The engine runs the first node, decides itself whether it is done,
 - To write a literal `{{` in a text field, write `\{{`.
 - `version` is the file format. Leave it as `1`.
 
-## Engine steps: `engine` and `model`
+## Engine steps: `engine`, and `model` with or without it
 
 An agent node with `engine: <profile>` is not given to you: the engine runs the program of that profile
-itself and reads its result. `model` tells that program which model to use and is allowed only with
-`engine`. The profile is a block of `engines:` in the project config, which only the person writes; never
-add or change it. This build may refuse every engine step ("this kodel does not run engine steps").
+itself and reads its result. With `engine`, `model` tells that program which model to use. The profile is
+a block of `engines:` in the project config, which only the person writes; never add or change it. This
+build may refuse every engine step ("this kodel does not run engine steps").
 
-Refused: `model` without `engine`; `fresh_context`, `outcomes`, a `result` check or `join` on an engine
-step; an engine step in a pipeline with any fork or join; an engine step on Windows.
+Refused: `fresh_context`, `outcomes`, a `result` check or `join` on an engine step; an engine step in a
+pipeline with any fork or join; an engine step on Windows.
+
+## A step on a given model: `model` without `engine`
+
+`model: sonnet` on an agent node with no `engine` asks you to run that step on that model: give it to a
+subagent started on the model (in Claude Code the Agent tool's `model`; the family name such as `sonnet`
+is what the tool takes), or, when the project works a fork's steps in parallel, start that step's worker
+on the model. `kodel report` then shows the model asked for and the models seen in the agent's logs, and
+says `match`, `mismatch` or `not observed`; it decides nothing. The value is a model id (letters, digits,
+`.`, `_`, `:`, `[`, `]`, `-`, at least one letter, at most 128 characters). A run written in run-state
+format 1 refuses a pipeline with such a step (`kodel migrate` is the way up).
 
 ## Forks: steps that run at the same time
 

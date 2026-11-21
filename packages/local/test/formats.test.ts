@@ -65,6 +65,11 @@ const V2_ENGINE_FINISHED = "r_0mw18z041_oscj";
 const V2_ENGINE_OPEN = "r_0mw18z17b_0uiy";
 const V2_ENGINE_UNKNOWN = "r_0mw18z1td_qe4s";
 const V2_ENGINE_RUNS = [V2_ENGINE_FINISHED, V2_ENGINE_OPEN, V2_ENGINE_UNKNOWN];
+/**
+ * The format-2 run with steps that ask for a model, worked by two workers of a fork (T-43,
+ * `scripts/take-v2-model-fixture.mjs`): the hand-in of each worker carries `worker_models`.
+ */
+const V2_MODEL_RUN = "r_0mwplbn3u_f9l6";
 /** The format-2 run that stands in for "a finished run of this engine" in the tests of how a run that is read behaves. */
 const V2_RUN = DEV_RUNS[1] as string;
 
@@ -159,11 +164,12 @@ const refusal = (promise: Promise<unknown>) =>
 
 describe("the golden runs of the stored formats", () => {
   test("formats_fixtures_have_a_known_set_of_formats_and_runs", async () => {
-    expect(await formatDirs()).toEqual(["v1", "v1-open", "v2", "v2-engine"]);
+    expect(await formatDirs()).toEqual(["v1", "v1-open", "v2", "v2-engine", "v2-model"]);
     expect(await runIds("v1")).toEqual([...V1_RUNS].sort());
     expect(await runIds("v1-open")).toEqual([...V1_OPEN_RUNS].sort());
     expect(await runIds("v2")).toEqual([...V2_RUNS].sort());
     expect(await runIds("v2-engine")).toEqual([...V2_ENGINE_RUNS].sort());
+    expect(await runIds("v2-model")).toEqual([V2_MODEL_RUN]);
   });
 
   test("formats_a_fixture_file_that_was_edited_fails_the_hash_list", async () => {
@@ -247,7 +253,7 @@ describe("every stored format against the current engine", () => {
   test("t41_formats_loop_opens_every_run_of_every_format", async () => {
     const { opened } = await checkFormats(FORMATS);
     expect(opened).toBe(
-      V1_RUNS.length + V1_OPEN_RUNS.length + V2_RUNS.length + V2_ENGINE_RUNS.length,
+      V1_RUNS.length + V1_OPEN_RUNS.length + V2_RUNS.length + V2_ENGINE_RUNS.length + 1,
     );
   });
 
@@ -259,7 +265,7 @@ describe("every stored format against the current engine", () => {
     await rm(join(copy, "v2"), { recursive: true, force: true });
     await mkdir(join(copy, "v2"), { recursive: true });
     expect(await checkFormats(copy)).toEqual({
-      opened: V1_RUNS.length + V1_OPEN_RUNS.length + V2_ENGINE_RUNS.length,
+      opened: V1_RUNS.length + V1_OPEN_RUNS.length + V2_ENGINE_RUNS.length + 1,
     });
   });
 

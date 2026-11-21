@@ -39,6 +39,7 @@ import {
   labelsOf,
   RESTART_FAILED,
   type Registry,
+  requestedModelOf,
 } from "./registry";
 import { renderContextOf, renderDeep, renderTemplate } from "./render";
 import { runSlug } from "./slug";
@@ -59,6 +60,8 @@ import {
 } from "./tool-calls-record";
 import {
   addDelta,
+  foldModelId,
+  MAX_MODELS_PER_RECORD,
   MAX_USAGE_ATTEMPTS,
   MAX_USAGE_EVENTS,
   newTotals,
@@ -103,6 +106,23 @@ export function hasEngineSteps(
   registry: Registry = defaultRegistry(),
 ): boolean {
   return spec.nodes.some((node) => beginsAsSession(registry, node));
+}
+
+/**
+ * The models a worker's log showed, as the journal keeps them: each folded to `other` when it does not look
+ * like a model id, no repeats, sorted, at most as many as one usage record holds. The state is not redacted.
+ */
+export function cleanWorkerModels(models: readonly unknown[]): string[] {
+  const folded = models.filter((m): m is string => typeof m === "string").map(foldModelId);
+  return [...new Set(folded)].sort().slice(0, MAX_MODELS_PER_RECORD);
+}
+
+/**
+ * Whether a pipeline has a step that asks for a model without an engine (a subagent, or a worker, on that
+ * model). Not an engine step: it needs nothing of the engine-steps switch, only a format that can keep it.
+ */
+export function hasModelSteps(spec: PipelineSpec, registry: Registry = defaultRegistry()): boolean {
+  return spec.nodes.some((node) => requestedModelOf(registry, node) !== undefined);
 }
 
 /** Whether an active visit is the work of an engine step: by its phase and its node, never by a record. */
@@ -583,6 +603,12 @@ export type RunEvent =
       tree?: string;
       /** A limit of the patch the host knows of (another branch wrote to the same tree meanwhile). */
       changesNote?: string;
+      /**
+       * Only for a step a worker handed in (with a claim token) whose node asks for a model, when usage is recorded:
+       * the models of the worker's own log for this step (T-43), or an empty list when that log was not found. The
+       * report also knows a worker's step from its claim, so the field is absent for a step that asks for no model.
+       */
+      workerModels?: string[];
     }
   /** The engine work of a node (its own command) finished. The host judged the exit code. */
   | {
@@ -2075,6 +2101,9 @@ class Machine {
           ...(typeof event.changesNote === "string"
             ? { changes_note: event.changesNote.slice(0, MAX_CHANGES_ERROR) }
             : {}),
+          ...(Array.isArray(event.workerModels)
+            ? { worker_models: cleanWorkerModels(event.workerModels) }
+            : {}),
         });
         this.afterWork(visit);
         return;
@@ -2768,6 +2797,9 @@ class Machine {
       !this.caps.pipelineFeatures.includes("engine")
     ) {
       throw cannotHoldError(this.s.v, "a pipeline with a step with engine", this.s.runId);
+    }
+    if (hasModelSteps(this.spec, this.registry) && !this.caps.pipelineFeatures.includes("model")) {
+      throw cannotHoldError(this.s.v, "a pipeline with a step that asks for a model", this.s.runId);
     }
     // An unknown outcome waits for a person's resume, which looks the session up first; a change
     // would enter the step again past it.
