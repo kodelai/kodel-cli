@@ -13,6 +13,8 @@ written ("this kodel does not run engine steps").
 
 It is turned on in a one-line change once two parts of TASK-KDJS are on main: D-B (a child of an engine
 step is not a second kodel client) and D-C (`engines:` is in the list of keys only the person changes).
+D-B is not scheduled: the person decided not to do it for now (TASK-HN8N), so engine steps stay off until
+it is taken up again.
 Everything below describes what runs once it is on; the code and its tests come with the change that
 adds engine steps (TASK-NNR3), with the flag off.
 

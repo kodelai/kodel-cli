@@ -144,7 +144,7 @@ bun test
 bun run build && node scripts/check-artifact.mjs
 ```
 
-CI runs the same on Linux, macOS and Windows. Sign off your commits (`git commit -s`): the project uses
+CI runs the same on Linux and macOS. Sign off your commits (`git commit -s`): the project uses
 the Developer Certificate of Origin. Open a pull request, never push to `main`. Everything committed,
 including comments and commit messages, is in English. Read [AGENTS.md](https://github.com/kodelai/kodel-cli/blob/main/AGENTS.md) before you start:
 it also says what an AI agent may and may not do in this repository.

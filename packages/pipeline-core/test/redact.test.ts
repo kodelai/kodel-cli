@@ -104,6 +104,52 @@ describe("redactText: stays fast on hostile input", () => {
     }
   });
 
+  const fill = (unit: string, size: number): string =>
+    unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+  const timed = (work: () => void): number => {
+    const began = performance.now();
+    work();
+    return performance.now() - began;
+  };
+  for (const [name, make] of [
+    ["private key headers with no footer", (n: number) => fill("-----BEGIN PRIVATE KEY-----\n", n)],
+    ["first parts of a token in one word", (n: number) => fill("-eyJaaaaaaaa", n)],
+    [
+      "first parts of a token, then a long second part",
+      (n: number) => `${fill("eyJaaaaaaaa-", n / 2)}.${fill("b", n / 2)}`,
+    ],
+  ] as const) {
+    test(`${name} are scanned in linear time`, () => {
+      const small = timed(() => redactText(make(64 * 1024)));
+      const large = timed(() => redactText(make(512 * 1024)));
+      // eight times the text: eight times the time when linear, sixty-four when quadratic
+      expect(large, `${small} ms for 64 KiB`).toBeLessThan(24 * Math.max(small, 10));
+    }, 120_000);
+  }
+
+  test("the rules that were made linear find what they found before", () => {
+    const key = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----";
+    const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N";
+    expect(redactText(`a ${key} b ${key} c`)).toBe(
+      "a [REDACTED:private-key] b [REDACTED:private-key] c",
+    );
+    // a header with no footer after it stays, and so does what follows it
+    const open = `x ${key} y -----BEGIN PRIVATE KEY-----\nabc -----BEGIN PRIVATE KEY-----\n`;
+    expect(redactText(open)).toBe(
+      "x [REDACTED:private-key] y -----BEGIN PRIVATE KEY-----\nabc -----BEGIN PRIVATE KEY-----\n",
+    );
+    // a header, a second header, one footer: all of it is one key
+    expect(redactText(`-----BEGIN PRIVATE KEY-----\nab\n${key}!`)).toBe("[REDACTED:private-key]!");
+    expect(redactText(`t=${jwt} u`)).toBe("t=[REDACTED:jwt] u");
+    expect(redactText(`x-${jwt}`)).toBe("x-[REDACTED:jwt]");
+    // a first part alone is no token; one that begins inside a word that is none is still found
+    expect(redactText("eyJhbGciOiJIUzI1NiJ9 and eyJhbGciOiJIUzI1NiJ9.short.x")).toBe(
+      "eyJhbGciOiJIUzI1NiJ9 and eyJhbGciOiJIUzI1NiJ9.short.x",
+    );
+    expect(redactText(`eyJab-${jwt}`)).toBe("[REDACTED:jwt]");
+    expect(redactText(`eyJabcdefgh.x ${jwt}`)).toBe("eyJabcdefgh.x [REDACTED:jwt]");
+  });
+
   test("a secret after a long name is still found", () => {
     expect(redactText(`${"x".repeat(50)}_password=hunter22abc`)).toContain("[REDACTED:assignment]");
   });

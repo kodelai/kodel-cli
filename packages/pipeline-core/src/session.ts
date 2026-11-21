@@ -6,6 +6,9 @@
  * Session errors have their own code set, outside the MCP `ERROR_CODES` (which stay pinned).
  */
 
+import type { AttachStream } from "./session-frames";
+import { isTerminalSize } from "./session-frames";
+
 export const SESSION_FORMAT_VERSION = 1;
 
 export const SESSION_ERROR_CODES = [
@@ -23,6 +26,7 @@ export const SESSION_ERROR_CODES = [
   "NOT_RUNNING",
   "STILL_RUNNING",
   "UNSUPPORTED",
+  "NOT_ATTACHABLE",
 ] as const;
 export type SessionErrorCode = (typeof SESSION_ERROR_CODES)[number];
 
@@ -66,6 +70,8 @@ export interface SessionSpec {
   timeoutMs?: number;
   name?: string;
   mode?: SessionMode;
+  /** The first size of the terminal of a `pty` session. Never stored: the size is the attached terminal's. */
+  size?: { cols: number; rows: number };
   lifetime?: SessionLifetime;
   origin?: SessionOrigin;
   parent?: string;
@@ -108,6 +114,10 @@ export const validateSpec = (spec: SessionSpec): string | undefined => {
   if (spec.parent !== undefined && !isSessionId(spec.parent)) return "parent is not a session id";
   if (spec.mode !== undefined && spec.mode !== "pipes" && spec.mode !== "pty")
     return "mode is not valid";
+  if (spec.size !== undefined) {
+    if (spec.mode !== "pty") return "size needs mode pty";
+    if (!isTerminalSize(spec.size)) return "size is not valid";
+  }
   if (
     spec.lifetime !== undefined &&
     spec.lifetime !== "detached" &&
@@ -237,20 +247,79 @@ export const planSend = (text: string, bracketedPaste: boolean, submit = "\r"): 
   return { paste: bracketedPaste ? `${PASTE_START}${safe}${PASTE_END}` : safe, submit };
 };
 
-/** Follows the program's own DEC mode 2004 switches in its output; the last one wins. */
+const DEC_SWITCH_START = "\u001b[?";
+const isModeChar = (char: string | undefined): boolean =>
+  char !== undefined && ((char >= "0" && char <= "9") || char === ";");
+
+/**
+ * Follows the program's own DEC mode 2004 switches in its output; the last one wins. A switch may set several
+ * modes at once (`ESC[?1049;2004h`).
+ */
 export const trackBracketedPaste = (output: string, current: boolean): boolean => {
-  const on = output.lastIndexOf("\u001b[?2004h");
-  const off = output.lastIndexOf("\u001b[?2004l");
-  if (on < 0 && off < 0) return current;
-  return on > off;
+  let on = current;
+  let lastSwitch = -1;
+  for (
+    let at = output.indexOf(DEC_SWITCH_START);
+    at >= 0;
+    at = output.indexOf(DEC_SWITCH_START, at + 1)
+  ) {
+    let end = at + DEC_SWITCH_START.length;
+    while (isModeChar(output[end])) end++;
+    const final = output[end];
+    if (final !== "h" && final !== "l") continue;
+    const modes = output.slice(at + DEC_SWITCH_START.length, end).split(";");
+    if (modes.includes("2004")) {
+      on = final === "h";
+      lastSwitch = at;
+    }
+  }
+  // A full reset (RIS) after the last switch turns the mode off, as a program that crashed and was `reset` leaves it.
+  if (output.lastIndexOf("\u001bc") > lastSwitch) on = false;
+  return on;
 };
+
+/** The state `trackBracketedPasteChunk` carries from one chunk of output to the next. */
+export interface PasteTrack {
+  on: boolean;
+  carry: string;
+}
+
+/** A switch that names more modes than fit in this is not followed across a chunk border. */
+const PASTE_SWITCH_CARRY = 64;
+
+/** The start of a switch that `text` ends in, to be finished by the next chunk. */
+const openSwitch = (text: string): string => {
+  const at = text.lastIndexOf("\u001b");
+  if (at < 0 || text.length - at > PASTE_SWITCH_CARRY) return "";
+  const tail = text.slice(at);
+  if (DEC_SWITCH_START.startsWith(tail)) return tail;
+  if (!tail.startsWith(DEC_SWITCH_START)) return "";
+  for (let i = DEC_SWITCH_START.length; i < tail.length; i++) {
+    if (!isModeChar(tail[i])) return "";
+  }
+  return tail;
+};
+
+/** `trackBracketedPaste` for output that arrives in chunks: a switch cut in two by a chunk border counts. */
+export const trackBracketedPasteChunk = (
+  chunk: string,
+  previous: PasteTrack = { on: false, carry: "" },
+): PasteTrack => {
+  const text = previous.carry + chunk;
+  return { on: trackBracketedPaste(text, previous.on), carry: openSwitch(text) };
+};
+
+export type Attachable = { ok: true } | { ok: false; reason: string };
 
 export interface SessionCapabilities {
   pty: boolean;
   send: boolean;
   attach: boolean;
   lastOutputAt: boolean;
-  /** `tail` can give stdout and stderr apart (a terminal session cannot: it has one stream). */
+  /**
+   * `tail` can give stdout and stderr apart. It is about the adapter, not a session: a terminal session of an
+   * adapter that says `true` still has one stream and answers `UNSUPPORTED` for one of the two.
+   */
   streams: boolean;
 }
 
@@ -293,4 +362,11 @@ export interface SessionAdapter {
   list(filter?: { name?: string }): Promise<SessionListEntry[]>;
   /** Only with `capabilities().send`. Returns the bytes written; promises nothing about a program that does not read. */
   send?(id: string, text: string, opts?: { submit?: boolean }): Promise<{ bytes: number }>;
+  /**
+   * Only with `capabilities().attach`. A byte stream that speaks the attach frames (`session-frames.ts`) with the
+   * session's holder; `NOT_ATTACHABLE` when the session does not run, has no terminal or cannot be reached.
+   */
+  attach?(id: string): Promise<AttachStream>;
+  /** Whether `attach` would connect now, with the reason when not. Never throws for a session that exists. */
+  attachable?(id: string): Promise<Attachable>;
 }

@@ -71,6 +71,8 @@ export const statusRecordSchema = z
     lastOutputAt: z.number().optional(),
     since: z.number(),
     build: z.string().optional(),
+    /** Where the holder of a terminal session listens. Only in a `running` record, and only a hint. */
+    sock: z.string().optional(),
   })
   .strict();
 
@@ -113,6 +115,8 @@ export const SESSION_RECORD_CAPABILITIES = {
   1: {
     kinds: ["session", "status", "stop", "name"] as RecordKind[],
     pty: true,
+    /** `status.sock`: an optional field a build that does not know it drops without changing any status. */
+    sock: true,
     tombstone: true,
   },
 } as const;

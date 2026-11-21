@@ -1,0 +1,21 @@
+{
+  "v": 1,
+  "state": "running",
+  "by": "holder",
+  "holder": {
+    "pid": 4242,
+    "identity": {
+      "method": "ps-lstart",
+      "value": "MASKED"
+    }
+  },
+  "child": {
+    "pid": 4242,
+    "identity": {
+      "method": "ps-lstart",
+      "value": "MASKED"
+    }
+  },
+  "since": 1700000000000,
+  "sock": "/masked/run/a_000000000_0000-00000000.sock"
+}

@@ -2,6 +2,7 @@
 // print help, and stay within the size budget.
 import { execFileSync, spawnSync } from "node:child_process";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -71,6 +72,56 @@ for (const line of [
   "A checklist for a pipeline that exists",
 ]) {
   if (!built.includes(line)) fail(`the documentation line "${line}" is not in the artifact`);
+}
+
+// The PTY module is native and optional (TASK-HN8N): it must not be inside the bundle or a static import of
+// it, or an install without optional dependencies could not start any command. So the bundle, copied alone
+// into an empty folder, still starts, and says why a terminal session cannot run there.
+const PTY_MODULE = "@lydell/node-pty";
+if (!built.includes(PTY_MODULE))
+  fail(`the artifact never names ${PTY_MODULE}: the loader is missing`);
+const staticPty = new RegExp(
+  `(from\\s*|require\\(\\s*|import\\s*\\(?\\s*)["']${PTY_MODULE}(-[a-z0-9-]+)?(/[^"']*)?["']`,
+);
+if (staticPty.test(built))
+  fail(`the artifact imports ${PTY_MODULE} by name: only the loader may, with a computed name`);
+// Names the module's own JavaScript has (its classes for each system), and nothing of kodel does.
+for (const inside of [
+  "UnixTerminal",
+  "WindowsPtyAgent",
+  "ConoutConnection",
+  "conpty_console_list_agent",
+]) {
+  if (built.includes(inside))
+    fail(`${PTY_MODULE} is bundled into the artifact (found "${inside}")`);
+}
+{
+  const alone = tempDir("kodel-artifact-alone-");
+  const copy = join(alone, "kodel.js");
+  copyFileSync(artifact, copy);
+  // Alone means alone: Node also looks for a package in `NODE_PATH` and in folders of the home directory
+  // (`~/.node_modules`, `~/.node_libraries`), and a machine that has the module there would fail this check.
+  const { NODE_PATH: _nodePath, ...rest } = process.env;
+  const bare = (args) =>
+    spawnSync(process.execPath, [copy, ...args], {
+      cwd: alone,
+      encoding: "utf8",
+      env: { ...rest, HOME: alone, USERPROFILE: alone },
+    });
+  const aloneVersion = bare(["--version"]);
+  if (aloneVersion.status !== 0 || aloneVersion.stdout.trim() !== version)
+    fail(`the bundle alone in an empty folder does not start: ${aloneVersion.stderr}`);
+  if (process.platform !== "win32") {
+    const check = bare(["pty-check", "--spawn"]);
+    let answer;
+    try {
+      answer = JSON.parse(check.stdout);
+    } catch {
+      fail(`pty-check of the bundle alone printed no answer: ${check.stdout}${check.stderr}`);
+    }
+    if (check.status !== 1 || answer.ok !== false || !/not installed/.test(answer.reason ?? ""))
+      fail(`the bundle alone must refuse a terminal session with the reason: ${check.stdout}`);
+  }
 }
 
 // The hook runs on every registered event of an agent, so it is a bundle of its own: small, quiet, always

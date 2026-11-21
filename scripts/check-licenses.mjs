@@ -81,5 +81,51 @@ if (seen.size === 0)
   fail("no installed packages found: the layout of node_modules may have changed");
 if (problems.length > 0) fail(`not allowed:\n  ${problems.join("\n  ")}`);
 
+// The PTY module ships one binary package per platform and an install brings only the one of its machine, so
+// the walk above never sees the others. Each entry of the lockfile must be in this table (name, version and
+// the licence its registry record declares, read when the version was pinned); a new or changed entry fails
+// until somebody has looked at its licence.
+const PTY_VERSION = "1.1.0";
+const PTY_PACKAGES = new Map(
+  [
+    "@lydell/node-pty",
+    "@lydell/node-pty-darwin-arm64",
+    "@lydell/node-pty-darwin-x64",
+    "@lydell/node-pty-linux-arm64",
+    "@lydell/node-pty-linux-x64",
+    "@lydell/node-pty-win32-arm64",
+    "@lydell/node-pty-win32-x64",
+  ].map((name) => [name, { version: PTY_VERSION, license: "MIT" }]),
+);
+
+const lock = readFileSync(join(root, "bun.lock"), "utf8");
+const locked = new Map(
+  [...lock.matchAll(/^\s*"(@lydell\/node-pty[^"]*)": \["\1@([^"]+)"/gm)].map((m) => [m[1], m[2]]),
+);
+const ptyProblems = [];
+for (const [name, version] of locked) {
+  const pinned = PTY_PACKAGES.get(name);
+  if (pinned === undefined)
+    ptyProblems.push(`${name}@${version}: not in the table of checked packages`);
+  else if (pinned.version !== version)
+    ptyProblems.push(`${name}@${version}: the table has ${pinned.version}`);
+}
+for (const [name, pinned] of PTY_PACKAGES) {
+  if (!locked.has(name)) ptyProblems.push(`${name}: in the table but not in bun.lock`);
+  if (!accepted(pinned.license)) ptyProblems.push(`${name}: ${pinned.license} is not allowed`);
+}
+// Where a package of the table is installed, what it declares must be what the table says.
+for (const dir of packageDirs) {
+  const file = join(dir, "package.json");
+  if (!existsSync(file)) continue;
+  const pkg = JSON.parse(readFileSync(file, "utf8"));
+  const pinned = PTY_PACKAGES.get(pkg.name);
+  if (pinned !== undefined && declared(pkg) !== pinned.license)
+    ptyProblems.push(`${pkg.name}@${pkg.version}: declares ${declared(pkg) || "no license"}`);
+}
+if (ptyProblems.length > 0) fail(`the packages of the PTY module:\n  ${ptyProblems.join("\n  ")}`);
+
 const summary = [...counts].sort((a, b) => b[1] - a[1]).map(([name, n]) => `${name}: ${n}`);
-console.log(`license check passed for ${seen.size} packages (${summary.join(", ")})`);
+console.log(
+  `license check passed for ${seen.size} packages (${summary.join(", ")}) and ${locked.size} PTY packages of the lockfile`,
+);

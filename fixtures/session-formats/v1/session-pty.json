@@ -1,0 +1,17 @@
+{
+  "v": 1,
+  "id": "a_000000000_0000",
+  "name": "fixture-pty",
+  "mode": "pty",
+  "spec": {
+    "argv": ["sh", "-c", "read line; exit 0"],
+    "cwd": "/masked/project",
+    "timeoutMs": 120000,
+    "name": "fixture-pty",
+    "mode": "pty",
+    "envNames": []
+  },
+  "started": 1700000000000,
+  "root": "/masked/project",
+  "machine": "MASKED"
+}

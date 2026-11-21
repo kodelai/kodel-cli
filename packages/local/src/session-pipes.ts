@@ -10,11 +10,20 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import {
+  type Attachable,
+  type AttachStream,
+  createFrameDecoder,
   DEFAULT_START_GRACE_MS,
   deriveStatus,
+  encodeHello,
   encodeRecord,
+  encodeSend,
+  FRAME,
   foldSessionName,
   isLocalSessionId,
+  isTerminalState,
+  parseBye,
+  parseSent,
   planSend,
   type RedactRule,
   redactText,
@@ -70,6 +79,14 @@ import {
   type StatusRecord,
   snapshotOf,
 } from "./session-records";
+import {
+  connectSocket,
+  type SocketConnect,
+  type SocketRoots,
+  sessionSocketProblem,
+  socketStream,
+  sweepSessionSockets,
+} from "./session-socket";
 
 export interface PipesAdapterOptions {
   base: string;
@@ -87,6 +104,14 @@ export interface PipesAdapterOptions {
   baseEnv?: Record<string, string | undefined>;
   /** Project redaction rules; one with a function cannot reach the holder and ends the session `rules_unknown`. */
   rules?: RedactRule[];
+  /**
+   * Terminal sessions (`mode: pty`). The adapter runs in the starter and the PTY module loads in the holder,
+   * another process: this is asked before anything is written, and the holder checks again when it loads. Without
+   * it the adapter runs pipes only.
+   */
+  ptyProbe?: () => { ok: true } | { ok: false; reason: string };
+  /** Tests only: the temporary roots of a fallback socket, the connect, and the check of a socket path. */
+  socket?: { roots?: SocketRoots; connect?: SocketConnect; problem?: typeof sessionSocketProblem };
   /**
    * Tests only: called right after the session folder is published, before the holder is started. A hook
    * that throws stands for a process that dies there (nothing is rolled back). Inert when absent.
@@ -117,8 +142,38 @@ export class PipesSessionAdapter implements SessionAdapter {
     this.poll = opts.pollMs ?? 100;
   }
 
+  /** `streams` is about the adapter: its pipes sessions have two; a terminal session has one (`tail` says so). */
   capabilities(): SessionCapabilities {
-    return { pty: false, send: true, attach: false, lastOutputAt: true, streams: true };
+    const pty = this.ptyUsable().ok;
+    return { pty, send: true, attach: pty, lastOutputAt: true, streams: true };
+  }
+
+  private ptyUsable(): { ok: true } | { ok: false; reason: string } {
+    const probe = this.opts.ptyProbe;
+    if (!probe) return { ok: false, reason: "this adapter runs pipes only" };
+    try {
+      return probe();
+    } catch (error) {
+      return { ok: false, reason: (error as Error).message };
+    }
+  }
+
+  /** Never fails the command it follows: a socket that stays is a dead file in a private folder. */
+  private async sweep(id: string, stored?: string): Promise<void> {
+    try {
+      await sweepSessionSockets(this.place, id, {
+        ...(stored !== undefined ? { stored } : {}),
+        ...(this.opts.socket?.roots ? { roots: this.opts.socket.roots } : {}),
+        ...(this.opts.socket?.connect ? { connect: this.opts.socket.connect } : {}),
+      });
+    } catch {
+      // not removed
+    }
+  }
+
+  private storedSock(id: string): string | undefined {
+    const recorded = readStatus(sessionDirOf(this.place, id));
+    return typeof recorded === "string" ? undefined : recorded.sock;
   }
 
   private markerPath(name: string): string {
@@ -131,7 +186,10 @@ export class PipesSessionAdapter implements SessionAdapter {
     }
     const problem = validateSpec(spec);
     if (problem) throw new SessionError("SPEC_INVALID", problem);
-    if (spec.mode === "pty") throw new SessionError("UNSUPPORTED", "this adapter runs pipes only");
+    if (spec.mode === "pty") {
+      const usable = this.ptyUsable();
+      if (!usable.ok) throw new SessionError("UNSUPPORTED", usable.reason);
+    }
     if (spec.lifetime === "with-starter" || spec.parent !== undefined) {
       throw new SessionError("UNSUPPORTED", "lifetime with-starter and parent are not built yet");
     }
@@ -187,18 +245,21 @@ export class PipesSessionAdapter implements SessionAdapter {
     }
 
     let published = false;
-    const rollback = () => {
+    const rollback = async () => {
       if (published) removeDir(dir);
       removeDir(`${dir}.tmp-${process.pid}`);
       if (marker) removeDir(marker);
+      // A holder that was killed, or lost the race, after it bound may have left its socket: no record names it.
+      if (spec.mode === "pty") await this.sweep(id);
     };
 
-    const { env: _env, command, ...safeSpec } = spec;
+    // `env` holds secrets, and the size is the attached terminal's from the first resize on: neither is stored.
+    const { env: _env, size, command, ...safeSpec } = spec;
     const record: SessionRecord = {
       v: SESSION_FORMAT_VERSION,
       id,
       ...(spec.name !== undefined ? { name: foldSessionName(spec.name) } : {}),
-      mode: "pipes",
+      mode: spec.mode ?? "pipes",
       spec: {
         ...safeSpec,
         ...(command !== undefined ? { command: redactText(command, this.opts.rules ?? []) } : {}),
@@ -215,7 +276,7 @@ export class PipesSessionAdapter implements SessionAdapter {
       publishSession(dir, record);
       published = true;
     } catch (error) {
-      rollback();
+      await rollback();
       throw new SessionError("STATE_UNWRITABLE", (error as Error).message);
     }
     this.opts.testHooks?.afterPublish?.(id);
@@ -233,6 +294,18 @@ export class PipesSessionAdapter implements SessionAdapter {
       env: sessionEnv(spec.env, spec.inheritEnv ?? true, this.opts.baseEnv),
       ...(spec.timeoutMs !== undefined ? { timeoutMs: spec.timeoutMs } : {}),
       ...(spec.input ? { input: true } : {}),
+      ...(spec.mode === "pty"
+        ? {
+            mode: "pty" as const,
+            ...(size !== undefined ? { size } : {}),
+            socket: {
+              runDir: this.place.runDir,
+              uid: this.place.uid,
+              checkoutKey: this.place.key,
+              id,
+            },
+          }
+        : {}),
       graceMs: this.graceMs,
       started,
       ...(this.opts.build ? { build: this.opts.build } : {}),
@@ -279,7 +352,7 @@ export class PipesSessionAdapter implements SessionAdapter {
         }
       }
       // The holder said it failed (or lost the race to the tombstone): nothing ran, so name and folder go.
-      rollback();
+      await rollback();
       throw new SessionError("HOLDER_BOOT_FAILED", why);
     }
     return { id, ...(spec.name !== undefined ? { name: foldSessionName(spec.name) } : {}) };
@@ -384,6 +457,15 @@ export class PipesSessionAdapter implements SessionAdapter {
     if (!Number.isInteger(bytes) || bytes <= 0) {
       throw new SessionError("SPEC_INVALID", "bytes must be a positive whole number");
     }
+    if (stream !== "both") {
+      const record = readSession(dir);
+      if (typeof record !== "string" && record.mode === "pty") {
+        throw new SessionError(
+          "UNSUPPORTED",
+          `session ${id} runs in a terminal: it has one stream`,
+        );
+      }
+    }
     const text = readTail(dir, stream);
     const cut = Buffer.from(text).length > bytes;
     return {
@@ -393,6 +475,14 @@ export class PipesSessionAdapter implements SessionAdapter {
   }
 
   async stop(id: string): Promise<SessionStatus> {
+    const stored = this.storedSock(id);
+    const status = await this.stopNow(id);
+    // The holder removes its socket on its way out; one that was killed could not.
+    if (isTerminalState(status.state)) await this.sweep(id, stored);
+    return status;
+  }
+
+  private async stopNow(id: string): Promise<SessionStatus> {
     const dir = sessionDirOf(this.place, id);
     let before = this.settle(id);
     if (this.isForeign(dir)) {
@@ -496,6 +586,9 @@ export class PipesSessionAdapter implements SessionAdapter {
     if (status.state !== "running")
       throw new SessionError("NOT_RUNNING", `session ${id} is ${status.state}`);
     const record = readSession(dir);
+    if (typeof record !== "string" && record.mode === "pty") {
+      return this.sendToTerminal(id, text, opts.submit !== false);
+    }
     if (typeof record === "string" || !record.spec.input) {
       throw new SessionError("UNSUPPORTED", `session ${id} was not started with input`);
     }
@@ -532,7 +625,112 @@ export class PipesSessionAdapter implements SessionAdapter {
     return { bytes: written };
   }
 
+  /**
+   * The holder's side decides how the text is typed (a bracketed paste only while the program has it on, the
+   * submit key as its own write after a pause): it follows the program's output, this process does not.
+   */
+  private async sendToTerminal(
+    id: string,
+    text: string,
+    submit: boolean,
+  ): Promise<{ bytes: number }> {
+    let frame: Uint8Array;
+    try {
+      frame = encodeSend({ text, submit });
+    } catch {
+      throw new SessionError("SPEC_INVALID", "the text is longer than one frame holds");
+    }
+    const reached = await this.reach(id);
+    if (!reached.ok) throw new SessionError("NOT_RUNNING", reached.reason);
+    const stream = reached.stream;
+    return new Promise((resolve, reject) => {
+      const decoder = createFrameDecoder();
+      let over = false;
+      const finish = (result: { bytes: number } | string) => {
+        if (over) return;
+        over = true;
+        clearTimeout(timer);
+        stream.close();
+        if (typeof result === "string") reject(new SessionError("NOT_RUNNING", result));
+        else resolve(result);
+      };
+      const timer = setTimeout(() => finish(`session ${id} did not answer the send`), 10_000);
+      stream.onClose(() => finish(`session ${id} closed the connection`));
+      stream.onData((data) => {
+        const { frames, problem } = decoder.push(data);
+        for (const answer of frames) {
+          if (answer.type === FRAME.SENT) {
+            const sent = parseSent(answer.payload);
+            if (sent) finish(sent);
+          } else if (answer.type === FRAME.BYE) {
+            finish(`session ${id}: ${parseBye(answer.payload)?.text ?? "the holder said bye"}`);
+          }
+        }
+        if (problem) finish(`session ${id} answered with a frame that cannot be read`);
+      });
+      stream.write(encodeHello(undefined));
+      stream.write(frame);
+    });
+  }
+
+  /**
+   * Connects to the holder of a terminal session. The status decides first (a `sock` in a record alone never
+   * means somebody listens), then the path must be this session's in a folder that is trusted, and a connect
+   * that fails is a reason too, never a raw error.
+   */
+  private async reach(
+    id: string,
+  ): Promise<{ ok: true; stream: AttachStream } | { ok: false; reason: string }> {
+    const dir = sessionDirOf(this.place, id);
+    const no = (reason: string) => ({ ok: false as const, reason });
+    const status = this.settle(id);
+    if (this.isForeign(dir)) return no(`session ${id} belongs to another machine`);
+    const record = readSession(dir);
+    if (typeof record === "string") return no(`session ${id} cannot be read`);
+    if (record.mode !== "pty") {
+      return no(`session ${id} runs on pipes: it has no terminal to attach to`);
+    }
+    if (status.state !== "running") return no(`session ${id} is ${status.state}`);
+    const recorded = readStatus(dir);
+    if (typeof recorded === "string" || recorded.sock === undefined) {
+      return no("the record names no socket");
+    }
+    const problem = (this.opts.socket?.problem ?? sessionSocketProblem)(
+      recorded.sock,
+      this.place,
+      id,
+    );
+    if (problem !== undefined) return no(problem);
+    try {
+      const socket = await (this.opts.socket?.connect ?? connectSocket)(recorded.sock);
+      return { ok: true, stream: socketStream(socket) };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? (error as Error).message;
+      return no(`the holder of session ${id} does not listen on its socket (${code})`);
+    }
+  }
+
+  async attachable(id: string): Promise<Attachable> {
+    const reached = await this.reach(id);
+    if (!reached.ok) return reached;
+    reached.stream.close();
+    return { ok: true };
+  }
+
+  async attach(id: string): Promise<AttachStream> {
+    const reached = await this.reach(id);
+    if (!reached.ok) throw new SessionError("NOT_ATTACHABLE", reached.reason);
+    return reached.stream;
+  }
+
   async remove(id: string): Promise<void> {
+    const stored = this.storedSock(id);
+    await this.removeNow(id);
+    // After the folder: a socket is outside it, and a holder that was killed left one no record may name.
+    await this.sweep(id, stored);
+  }
+
+  private async removeNow(id: string): Promise<void> {
     const dir = sessionDirOf(this.place, id);
     if (!existsSync(dir)) return;
     const record = readSession(dir);

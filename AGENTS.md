@@ -36,8 +36,10 @@ This repository adds these rules:
   write into `.kodel/pipelines/` yourself. The proposal waits in `.kodel/proposals/` (with `storage: home`, in the
   project's folder under `~/.kodel`; do not edit it) until the person accepts it.
 - Do not run `gate`, `ack`, `seal`, `resume`, `migrate`, `pipeline changes apply|discard|restore`,
-  `pipeline proposals apply|discard` or `agent stop|rm|exec|forget-name`: they refuse to run without a terminal and
-  ask for a confirmation, so trying them only fails. `agent ls` and `agent logs` only read and are yours.
+  `pipeline proposals apply|discard` or `agent stop|rm|exec|forget-name|attach`: they refuse to run without a
+  terminal, and all but two ask for a confirmation (`agent exec`, which starts a command as an agent, and
+  `agent attach`, which connects a person's terminal to an agent that runs in one of its own, ask for none), so
+  trying them only fails. `agent ls` and `agent logs` only read and are yours.
 - `kodel wait <run>` is yours: it only watches and prints one line when the person has decided, so start it
   in the background (Claude Code: the Bash tool with `run_in_background`) when an answer offers it (a
   `waiting` answer, or a `node` or `running` answer whose text names it because a decision waits besides),
@@ -99,10 +101,10 @@ Bun workspace (TypeScript, ESM). Runtime target: Node >= 22.19; Bun is the devel
 
 - `packages/pipeline-core` (`@kodel-ai/pipeline-core`): pure engine (pipeline spec, result checks, run state machine, routing, redaction, error codes, format versions), the `PipelineService` and the adapter interfaces. It also holds the task adapter contract (`tasks.ts`) and the `TaskService`; the `task_*` tools (`mcp/task-tools.ts`) exist only when the config turns tasks on. No file system, process, network or clock access. The subpath `@kodel-ai/pipeline-core/mcp` holds the MCP tool definitions bound to the service (it depends on the MCP SDK; the main entry does not import it). Transport-free: the CLI adds stdio, the server adds HTTP and auth.
 - `packages/local` (`@kodel-ai/local`): local adapters (file state store, process executor, git snapshots, system clock, the `local` task adapter that keeps one YAML file per task in `.kodel/tasks/`).
-- `packages/cli` (`kodel`): the CLI, built to a single JS file (`dist/kodel.js`), including human-only commands (`gate`, `resume`, `ack`, `seal`, `migrate`, `pipeline changes apply|discard|restore`, `pipeline proposals apply|discard`, `agent stop|rm|exec|forget-name`).
+- `packages/cli` (`kodel`): the CLI, built to a single JS file (`dist/kodel.js`), including human-only commands (`gate`, `resume`, `ack`, `seal`, `migrate`, `pipeline changes apply|discard|restore`, `pipeline proposals apply|discard`, `agent stop|rm|exec|forget-name|attach`). It also holds the client of `agent attach` and the loader of the one native module (`@lydell/node-pty`, an optional dependency, loaded only by the holder of a terminal session).
 - `packages/testkit` (`@kodel-ai/testkit`, private): scripted and adversarial fake agents, fixture helpers.
 - `adapters/`: per-agent pieces (MCP config writers, deny rules, driver prompts). `skills/`: agent-facing skills.
-- `tests/e2e`, `tests/agents`: end-to-end and real-agent scenarios. `fixtures/formats/`: golden fixtures per format version.
+- `tests/e2e`, `tests/agents`: end-to-end and real-agent scenarios. `tests/pty`: terminal sessions against the built artifact on a real PTY; they skip, with a printed reason, where none can be opened (`KODEL_REQUIRE_PTY=1` makes a skip a failure). `fixtures/formats/`: golden fixtures per format version.
 
 The engine is meant to be shared with Kodel Server: the server implements the same adapter interfaces
 (state store on Postgres, runners as executors) and registers its own node and check kinds.
@@ -211,7 +213,9 @@ bun test
 bun run build && node scripts/check-artifact.mjs
 ```
 
-(These are the commands CI runs on Linux, macOS and Windows.)
+(These are the commands CI runs on Linux and macOS. A separate `pty` job on Linux and macOS installs the
+packed CLI and runs the terminal-session checks on a real PTY with `KODEL_REQUIRE_PTY=1`: `bun test` in a sandbox
+or under Bun alone skips them.)
 
 ## Git
 
