@@ -129,19 +129,35 @@ describe("a terminal session on a real PTY", () => {
     "tA_pty_input_bytes_unchanged: a mouse report and keys with the eighth bit reach the program as typed",
     async () => {
       const w = newWorld();
+      // A program that shows every byte as it arrives, in hex, and then `end`: what `od` shows waits for a whole
+      // line, and a byte that was lost or changed on the way is seen at once, with the ones before it.
+      const reader = [
+        "import os, sys",
+        "n = 0",
+        "while n < 16:",
+        "    got = os.read(0, 16)",
+        "    if not got:",
+        "        break",
+        "    for byte in got:",
+        '        sys.stdout.write("%02x " % byte)',
+        "    sys.stdout.flush()",
+        "    n += len(got)",
+        'sys.stdout.write("end\\n")',
+        "sys.stdout.flush()",
+      ].join("\n");
       const { id } = await w
         .adapter()
-        .start(sh(w, "stty raw -echo; echo ready; exec od -An -v -tx1"));
+        .start(sh(w, `stty raw -echo; echo ready; exec python3 -u -c '${reader}'`));
       const client = await attach(w, id);
       await client.sees("ready");
-      // an X10 mouse report at column 200 and row 223, then bytes that are no UTF-8 text: 16 bytes, one line of od
+      // an X10 mouse report at column 200 and row 223, then bytes that are no UTF-8 text: 16 bytes
       const typed = [
         0x1b, 0x5b, 0x4d, 0x20, 0xe8, 0xff, 0xe1, 0x80, 0xc3, 0x28, 0xfe, 0x41, 0x9b, 0x42, 0xa9,
         0x43,
       ];
       client.input(String.fromCharCode(...typed));
-      const line = typed.map((byte) => byte.toString(16).padStart(2, "0")).join("\\s+");
-      await client.sees(new RegExp(line));
+      const line = typed.map((byte) => byte.toString(16).padStart(2, "0")).join(" ");
+      await client.sees(`${line} end`);
     },
   );
 
