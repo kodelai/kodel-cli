@@ -4,11 +4,11 @@
  * summed by whoever reads; nothing is rewritten. The state holds numbers, ids and hashes, never text.
  */
 import { z } from "zod";
+import { MODEL_ID } from "./model-id";
 
 export const USAGE_RECORD_FORMAT = 1;
 
-/** What a model id may look like in a record or a config key: the state is not redacted, so nothing free-form. */
-export const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,127}$/;
+export { MODEL_ID };
 
 /** A model id that does not look like one (or that does not fit the cap) is counted under this name. */
 export const OTHER_MODEL = "other";

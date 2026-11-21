@@ -5,7 +5,7 @@
  */
 import { z } from "zod";
 import type { EngineLaunchRequest } from "./engine-launch";
-import { MODEL_ID } from "./usage-record";
+import { MODEL_ID } from "./model-id";
 
 /** The part of a parsed check the handlers need to know about. */
 export interface CheckInfo {
