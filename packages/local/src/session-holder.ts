@@ -20,6 +20,7 @@ import {
 import { z } from "zod";
 import { killTree } from "./command";
 import { processIdentity } from "./process-table";
+import { type PtyHolderParts, type PtyLoader, runPtyHolder } from "./session-pty";
 import {
   createExclusive,
   readStatus,
@@ -45,6 +46,20 @@ const holderInputSchema = z.object({
   env: z.record(z.string()),
   timeoutMs: z.number().positive().max(MAX_SESSION_TIMEOUT_MS).optional(),
   input: z.boolean().optional(),
+  mode: z.enum(["pipes", "pty"]).optional(),
+  /** The first size of the terminal (`mode: pty`); it is not in any record. */
+  size: z
+    .object({ cols: z.number().int().positive(), rows: z.number().int().positive() })
+    .optional(),
+  /** What the socket of a terminal session is named from; the holder derives the paths itself. */
+  socket: z
+    .object({
+      runDir: z.string().min(1),
+      uid: z.number().int(),
+      checkoutKey: z.string(),
+      id: z.string(),
+    })
+    .optional(),
   graceMs: z.number().nonnegative(),
   started: z.number(),
   build: z.string().optional(),
@@ -106,6 +121,8 @@ export interface HolderDeps {
   /** One line to the starter: `ready` or `HOLDER_BOOT_FAILED:<why>`. */
   boot: (line: string) => void;
   now?: () => number;
+  /** For `mode: pty`: the module loader (without one the session ends `holder_error`), and what a test replaces. */
+  pty?: PtyHolderParts;
 }
 
 const toRules = (wire: WireRule[] | undefined): RedactRule[] =>
@@ -195,6 +212,23 @@ export async function runHolder(deps: HolderDeps): Promise<number> {
   };
   if (input.rulesUnknown) {
     return failBoot("rules_unknown", "a project redaction rule cannot be given to the holder");
+  }
+
+  if (input.mode === "pty") {
+    return runPtyHolder({
+      input,
+      boot,
+      now,
+      first,
+      rules,
+      safe,
+      failBoot,
+      tailBytes: input.tailBytes ?? DEFAULT_TAIL_BYTES,
+      marginBytes: REDACT_MARGIN_BYTES,
+      statusEveryMs: STATUS_MIN_INTERVAL_MS,
+      lastBytes,
+      parts: deps.pty ?? {},
+    });
   }
 
   // The input channel exists before the child does: a failure here means nothing ran, so the starter may roll back.
@@ -387,7 +421,7 @@ export const writeBoot = (dir: string, line: string): void => {
 };
 
 /** Process entry of the holder: the framed input is stdin; the boot report goes to the session folder. */
-export async function holderMain(): Promise<number> {
+export async function holderMain(parts: { loadPty?: PtyLoader } = {}): Promise<number> {
   process.chdir("/");
   const raw = await readInput(process.stdin);
   if (raw === undefined) return 1; // the starter died mid-write: nobody waits for an answer
@@ -399,7 +433,11 @@ export async function holderMain(): Promise<number> {
     return 1;
   }
   const input = parsed.data;
-  return runHolder({ input, boot: (line) => writeBoot(input.dir, line) });
+  return runHolder({
+    input,
+    boot: (line) => writeBoot(input.dir, line),
+    ...(parts.loadPty ? { pty: { load: parts.loadPty } } : {}),
+  });
 }
 
 /** The intermediate process: starts the holder with the same pipe ends and exits at once. */

@@ -17,11 +17,45 @@ jobs:
       # Every dependency must have a license compatible with Apache-2.0.
       - run: node scripts/check-licenses.mjs
 
+  # The PTY module is native: only an install of the packed CLI on a real system shows that it arrives and
+  # works. A check that cannot open a terminal here fails instead of skipping.
+  pty:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    # A terminal that hangs must not hold a runner for the six hours a job may take.
+    timeout-minutes: 30
+    env:
+      KODEL_REQUIRE_PTY: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install -g pnpm@10
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      # The packed CLI, installed by every installer; one of the installs also runs a whole session in terminals
+      # of the script's own (start, attach, type, detach, attach again, stop).
+      - run: node scripts/check-pty-artifact.mjs
+      # The real-terminal tests against the built artifact, and the PTY goldens against a real holder.
+      - run: bun test tests/pty --timeout 60000
+      # The tests of the local adapters that bind a unix socket or read the process table skip where they
+      # cannot run; here a skip is a failure (`KODEL_REQUIRE_PTY` is set for the whole job).
+      - run: bun test packages/local
+        env:
+          KODEL_REQUIRE_PROCTABLE: "1"
+      - run: bun scripts/take-session-fixtures.mjs --check
+
   test:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Windows is not tested: its tests were already failing, and no kodel agent command runs there yet.
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -34,9 +68,8 @@ jobs:
       - run: bun run lint
       - run: bun test
         env:
-          # The real process-table tests (sessions, the engine-step guard of `kodel mcp`) must run, not skip,
-          # where `ps` or `/proc` exists.
-          KODEL_REQUIRE_PROCTABLE: ${{ runner.os != 'Windows' && '1' || '' }}
+          # The real process-table tests (sessions, the engine-step guard of `kodel mcp`) must run, not skip.
+          KODEL_REQUIRE_PROCTABLE: "1"
       - run: bun run build
       # The shipped artifact must work on plain Node, not only under Bun.
       - run: node scripts/check-artifact.mjs

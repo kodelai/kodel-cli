@@ -108,10 +108,14 @@ export interface CliEnv {
   onWatching?(): void;
   /** For `agent`: how to start the holder processes (a test points it at the source entry). */
   sessionLauncher?: { exec: string; args: string[] };
-  /** The platform (`process.platform` if none); `serve` refuses on `win32`. Tests set it. */
+  /** The platform (`process.platform` if none): `serve` refuses on `win32`, and `agent` uses it when a test stands on another one. */
   platform?: string;
   /** For `serve`: ends the daemon when aborted, in place of the signals of the process (tests). */
   serveSignal?: AbortSignal;
+  /** For `agent`: whether a terminal session can be started (a test answers for a machine it is not on). */
+  ptyProbe?: () => { ok: true } | { ok: false; reason: string };
+  /** For `agent`: the size a terminal session starts with (a test has no terminal to ask). */
+  terminalSize?: () => { cols: number; rows: number } | undefined;
 }
 
 /** A problem to report to the user without a stack trace. */
@@ -355,8 +359,10 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
   /**
    * The decisions are a person's: no terminal, no decision. A command the engine runs (a test that
    * the agent wrote, say) is told so in its environment and is refused whatever its terminal is.
-   * An agent that gets itself a pseudo-terminal passes the first check: that is a limit of what a
-   * program run by the same user can tell, and the person's own terminal is what the rest rests on.
+   * This is a guard against mistakes, not a security boundary: it checks that `KODEL_ENGINE` is unset and
+   * that there is a terminal, and a program run by the same user can arrange both. Every descendant of a
+   * terminal session (`agent exec --pty`) has a terminal, so there the mark alone refuses; a program that
+   * unsets it, or an agent that gets itself a pseudo-terminal outside a session, passes.
    */
   function requireHuman(): void {
     if (env.environment?.KODEL_ENGINE !== undefined) {
@@ -1589,6 +1595,9 @@ Examples:
     requireHuman,
     mustConfirm,
     ...(env.sessionLauncher ? { launcher: env.sessionLauncher } : {}),
+    ...(env.ptyProbe ? { ptyProbe: env.ptyProbe } : {}),
+    ...(env.terminalSize ? { terminalSize: env.terminalSize } : {}),
+    ...(env.platform ? { platform: env.platform } : {}),
   });
 
   const task = withPlural(program.command("task")).description(

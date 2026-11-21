@@ -140,6 +140,7 @@ export const START_ERROR_OUTCOME = {
   NOT_RUNNING: "list",
   STILL_RUNNING: "list",
   UNSUPPORTED: "list",
+  NOT_ATTACHABLE: "list",
 } as const satisfies Record<SessionErrorCode, "list" | "unknown">;
 
 export type EngineOutcome =

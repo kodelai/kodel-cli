@@ -7,7 +7,10 @@
 export interface RedactRule {
   name: string;
   pattern: RegExp;
-  /** Replace only part of the match; the default replaces all of it. */
+  /**
+   * Replace only part of the match; the default replaces all of it. A group that took no part in the match is
+   * `undefined`.
+   */
   replace?: (match: string, ...groups: string[]) => string;
 }
 
@@ -29,8 +32,12 @@ export function entropy(text: string): number {
 export const BUILTIN_RULES: RedactRule[] = [
   {
     name: "private-key",
+    // A header with no footer after it takes the rest of the text and is put back as it was: the search ends
+    // there, where it used to read on to the end of the text from every such header (quadratic).
     pattern:
-      /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/g,
+      /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]*?(-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----)|[\s\S]*$)/g,
+    replace: (match, footer: string | undefined) =>
+      footer === undefined ? match : tag("private-key"),
   },
   { name: "aws-key", pattern: /\b(?:AKIA|ASIA|AGPA|AIDA|AROA)[0-9A-Z]{16}\b/g },
   {
@@ -41,7 +48,14 @@ export const BUILTIN_RULES: RedactRule[] = [
   { name: "api-key", pattern: /\bsk-(?:ant-|proj-|live-|test-)?[A-Za-z0-9_-]{20,}\b/g },
   { name: "stripe-key", pattern: /\b[sr]k_(?:live|test)_[0-9A-Za-z]{16,}\b/g },
   { name: "google-key", pattern: /\bAIza[0-9A-Za-z_-]{35}\b/g },
-  { name: "jwt", pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g },
+  {
+    name: "jwt",
+    // A first part that no second and third follow is matched too, and put back as it was: the search goes on
+    // after it. Left unmatched, every `-eyJ` inside one long word read that word to its end again (quadratic);
+    // none of them can be a token when the first is not, the word ends at the same character for all.
+    pattern: /\beyJ[A-Za-z0-9_-]{8,}(\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b)?/g,
+    replace: (match, rest: string | undefined) => (rest === undefined ? match : tag("jwt")),
+  },
   {
     name: "url-password",
     // Every part is bounded: an open-ended scheme made a long run of letters and dashes quadratic.
@@ -84,7 +98,9 @@ export function redactText(text: string, extra: RedactRule[] = []): string {
     out = out.replace(rule.pattern, (...args: unknown[]) => {
       const match = args[0] as string;
       if (rule.replace) {
-        const groups = args.slice(1).filter((a) => typeof a === "string") as string[];
+        // The groups end where the offset (a number) stands; a group that took no part stays `undefined`.
+        const offsetAt = args.findIndex((a, i) => i > 0 && typeof a === "number");
+        const groups = args.slice(1, offsetAt < 0 ? args.length : offsetAt) as string[];
         return rule.replace(match, ...groups);
       }
       return tag(rule.name);

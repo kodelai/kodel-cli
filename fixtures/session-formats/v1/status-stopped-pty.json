@@ -1,0 +1,21 @@
+{
+  "v": 1,
+  "state": "killed",
+  "by": "holder",
+  "holder": {
+    "pid": 4242,
+    "identity": {
+      "method": "ps-lstart",
+      "value": "MASKED"
+    }
+  },
+  "child": {
+    "pid": 4242,
+    "identity": {
+      "method": "ps-lstart",
+      "value": "MASKED"
+    }
+  },
+  "reason": "stopped",
+  "since": 1700000000000
+}

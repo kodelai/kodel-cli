@@ -683,7 +683,10 @@ export class LocalTaskAdapter implements TaskAdapter {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         const held = await lstat(lock).catch(() => undefined);
-        if (!held || Date.now() - held.mtimeMs > LOCK_STALE_MS) {
+        // A lock that is gone by now was released between the two calls: take it again, and never unlink it, for
+        // it may be another writer's by the time the unlink runs (two writers would then hold it at once).
+        if (!held) continue;
+        if (Date.now() - held.mtimeMs > LOCK_STALE_MS) {
           await unlink(lock).catch(() => undefined);
           continue;
         }

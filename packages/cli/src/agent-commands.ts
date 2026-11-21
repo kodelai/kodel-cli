@@ -11,11 +11,20 @@ import {
   foldSessionName,
   isSessionName,
   type RedactRule,
+  type SessionAdapter,
   SessionError,
   type SessionListEntry,
+  type TerminalSize,
 } from "@kodel-ai/pipeline-core";
 import type { Command } from "commander";
+import {
+  type AttachTerminal,
+  processTerminal,
+  runAttachClient,
+  terminalSizeOf,
+} from "./attach-client";
 import { plain } from "./plain";
+import { type PtyProbe, probePty } from "./pty-loader";
 import { formatTable } from "./table";
 
 /** Commands that refuse under `KODEL_ENGINE` (and need a terminal): the set a test walks. */
@@ -24,6 +33,7 @@ export const AGENT_HUMAN_COMMANDS = [
   "agent rm",
   "agent exec",
   "agent forget-name",
+  "agent attach",
 ] as const;
 /** Commands an agent may run: they only read. */
 export const AGENT_READ_COMMANDS = ["agent ls", "agent logs"] as const;
@@ -39,6 +49,14 @@ export interface AgentContext {
   mustConfirm(question: string): Promise<void>;
   /** How to start the holder processes; the CLI's own entry by default. */
   launcher?: { exec: string; args: string[] };
+  /** Whether a terminal session can be started here; the check of the PTY module by default. */
+  ptyProbe?: () => PtyProbe;
+  /** The terminal `attach` connects; this process's own by default. */
+  attachTerminal?: () => AttachTerminal;
+  /** The size a terminal session starts with: that of the terminal this process writes to, by default. */
+  terminalSize?: () => TerminalSize | undefined;
+  /** `process.platform` unless a test says another. */
+  platform?: string;
 }
 
 /** How a reason the adapter records reads to a person; a reason this build does not know is shown as it is, spaced. */
@@ -110,6 +128,7 @@ export function pipesAdapter(options: {
   launcher: { exec: string; args: string[] };
   rules?: RedactRule[];
   bootTimeoutMs?: number;
+  ptyProbe?: () => PtyProbe;
 }): PipesSessionAdapter {
   const { launcher } = options;
   return new PipesSessionAdapter({
@@ -120,7 +139,51 @@ export function pipesAdapter(options: {
     intermediate: { exec: launcher.exec, args: [...launcher.args, "session-holder"] },
     ...(options.rules === undefined ? {} : { rules: options.rules }),
     ...(options.bootTimeoutMs === undefined ? {} : { bootTimeoutMs: options.bootTimeoutMs }),
+    // The starter's side of "can a terminal session run here"; the holder checks again when it loads the module.
+    ptyProbe: options.ptyProbe ?? probePty,
   });
+}
+
+/**
+ * The session a person means by an id or by a name. A name may have been used by several sessions over time:
+ * the one that runs is meant, then the newest.
+ */
+export async function resolveSession(
+  adapter: SessionAdapter,
+  ref: string,
+): Promise<{ id: string; name?: string }> {
+  const all = await adapter.list();
+  const rows = all.filter((row) => row.problem === undefined);
+  const byId = rows.find((row) => row.id === ref);
+  const wanted = isSessionName(ref) ? foldSessionName(ref) : undefined;
+  const named = rows
+    .filter((row) => wanted !== undefined && row.name === wanted)
+    .sort((a, b) => (a.id < b.id ? 1 : -1));
+  const found = byId ?? named.find((row) => row.status.state === "running") ?? named[0];
+  if (!found) {
+    // A session that is there but cannot be judged is not "not found": the reason is the answer.
+    const unread = all.find(
+      (row) =>
+        row.problem !== undefined &&
+        (row.id === ref || (wanted !== undefined && row.name === wanted)),
+    );
+    if (unread?.problem === "NEWER_FORMAT") {
+      throw new SessionError(
+        "NEWER_FORMAT",
+        `agent ${JSON.stringify(ref)} was written by a newer kodel; upgrade kodel`,
+      );
+    }
+    if (unread?.problem !== undefined) {
+      throw new SessionError(
+        "CANNOT_READ",
+        unread.problem === "FOREIGN"
+          ? `agent ${JSON.stringify(ref)} belongs to another machine`
+          : `the records of agent ${JSON.stringify(ref)} cannot be read`,
+      );
+    }
+    throw new SessionError("NOT_FOUND", `no agent ${JSON.stringify(ref)}`);
+  }
+  return { id: found.id, ...(found.name !== undefined ? { name: found.name } : {}) };
 }
 
 export function registerAgentCommands(
@@ -130,11 +193,16 @@ export function registerAgentCommands(
 ): void {
   const launcher = ctx.launcher ?? { exec: process.execPath, args: [process.argv[1] ?? "kodel"] };
   const adapter = async (): Promise<PipesSessionAdapter> =>
-    pipesAdapter({ root: await ctx.root(), environment: ctx.environment, launcher });
+    pipesAdapter({
+      root: await ctx.root(),
+      environment: ctx.environment,
+      launcher,
+      ...(ctx.ptyProbe ? { ptyProbe: ctx.ptyProbe } : {}),
+    });
 
   // Before anything else, also before the check for a person: the answer on Windows is the same for everyone.
   const platform = (): void => {
-    if (process.platform === "win32")
+    if ((ctx.platform ?? process.platform) === "win32")
       ctx.fail("PLATFORM_UNSUPPORTED: agents are not supported on Windows yet");
   };
 
@@ -233,22 +301,47 @@ export function registerAgentCommands(
     .command("exec <command...>", { hidden: true })
     .description("Run a command as an agent (for trying the sessions by hand)")
     .option("--name <name>", "a name to find it again by")
-    .option("--pty", "run it in a terminal of its own (not in this build)")
+    .option("--pty", "run it in a terminal of its own (kodel agent attach connects to it)")
     .allowUnknownOption()
     .action(async (command: string[], opts: { name?: string; pty?: boolean }) => {
       platform();
       ctx.requireHuman();
-      if (opts.pty) ctx.fail("UNSUPPORTED: a terminal session is not in this build");
       if (opts.name !== undefined && !isSessionName(opts.name)) ctx.fail("the name is not valid");
+      const size = opts.pty
+        ? (ctx.terminalSize ?? (() => terminalSizeOf(process.stdout)))()
+        : undefined;
       const started = await guard(async () =>
         (await adapter()).start({
           argv: command,
           cwd: ctx.cwd,
           origin: "cli" as const,
           ...(opts.name !== undefined ? { name: opts.name } : {}),
+          ...(opts.pty ? { mode: "pty" as const, ...(size ? { size } : {}) } : {}),
         }),
       );
       ctx.out(`started ${plain(started.id)}${started.name ? ` (${plain(started.name)})` : ""}\n`);
+      if (opts.pty) {
+        ctx.out(`attach with: kodel agent attach ${plain(started.name ?? started.id)}\n`);
+      }
+    });
+
+  agent
+    .command("attach <name>")
+    .description(
+      "Connect this terminal to an agent that runs in a terminal of its own, by name or id (Ctrl+\\ detaches)",
+    )
+    .action(async (ref: string) => {
+      platform();
+      ctx.requireHuman();
+      const sessions = await adapter();
+      const found = await guard(() => resolveSession(sessions, ref));
+      const stream = await guard(() => sessions.attach(found.id));
+      const result = await runAttachClient({
+        stream,
+        terminal: (ctx.attachTerminal ?? processTerminal)(),
+        name: found.name ?? found.id,
+      });
+      if (result.problem !== undefined) ctx.fail(result.problem);
     });
 
   agent
