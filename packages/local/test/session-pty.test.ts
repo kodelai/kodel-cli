@@ -217,6 +217,27 @@ const start = (
 
 const status = () => readStatus(dir) as Exclude<ReturnType<typeof readStatus>, string>;
 
+/**
+ * Opens files until one of them gets the number `wanted`: a new file takes the lowest free number, which is the one
+ * a test has just closed only when nothing lower is free, and on a busy process something is. The files opened on
+ * the way are the caller's to close (`spares`).
+ */
+const openOnNumber = (
+  dir: string,
+  prefix: string,
+  wanted: number,
+): { fd: number; path: string; spares: number[] } => {
+  const spares: number[] = [];
+  for (let i = 0; i < 512; i++) {
+    const path = join(dir, `${prefix}-${i}`);
+    const fd = openSync(path, "w");
+    if (fd === wanted) return { fd, path, spares };
+    spares.push(fd);
+  }
+  for (const spare of spares) closeSync(spare);
+  throw new Error(`no file got the number ${wanted}`);
+};
+
 describe("pty trait", () => {
   test("tA_pty_signal_number_mapped", async () => {
     expect(signalName(0)).toBeUndefined();
@@ -430,8 +451,9 @@ describe("pty trait", () => {
 
       // The module closes its descriptor, and the next file opened gets the number, before anybody is told.
       closeSync(shared);
-      const strangerPath = join(base, "stranger");
-      const stranger = openSync(strangerPath, "w");
+      const strangerOpened = openOnNumber(base, "stranger", shared);
+      const strangerPath = strangerOpened.path;
+      const stranger = strangerOpened.fd;
       expect(stranger).toBe(shared);
       // the terminal has room again: the owed bytes go to the terminal, through the writer's own descriptor
       const chunk = Buffer.alloc(64 * 1024);
@@ -457,12 +479,14 @@ describe("pty trait", () => {
       for (const close of closers) close();
       await eventually(() => done.length === 4);
       expect(() => fstatSync(own)).toThrow();
-      const reused = openSync(join(base, "reused"), "w");
+      const reusedOpened = openOnNumber(base, "reused", own);
+      const reused = reusedOpened.fd;
       expect(reused).toBe(own);
       child.write(Buffer.from("after-close"), () => done.push("fifth"));
       await eventually(() => done.length === 5);
       await new Promise((r) => setTimeout(r, 80));
-      expect(readFileSync(join(base, "reused"), "utf8")).toBe("");
+      expect(readFileSync(reusedOpened.path, "utf8")).toBe("");
+      for (const spare of reusedOpened.spares) closeSync(spare);
       expect(readFileSync(strangerPath, "utf8")).toBe("");
       let rest = "";
       for (;;) {
@@ -507,14 +531,16 @@ describe("pty trait", () => {
       expect(done).toEqual(["first", "second"]);
       expect(() => fstatSync(own)).toThrow();
       // the number is another file's now: a later write is reported and goes nowhere
-      const reused = openSync(join(base, "reused"), "w");
-      expect(reused).toBe(own);
+      const taken = openOnNumber(base, "reused", own);
+      const reused = taken.fd;
+      const reusedPath = taken.path;
       writer(Buffer.from("after-close"), () => done.push("third"));
       await eventually(() => done.length === 3);
       writer.close();
       expect(() => fstatSync(reused)).not.toThrow();
       await new Promise((r) => setTimeout(r, 80));
-      expect(readFileSync(join(base, "reused"), "utf8")).toBe("");
+      expect(readFileSync(reusedPath, "utf8")).toBe("");
+      for (const spare of taken.spares) closeSync(spare);
       const chunk = Buffer.alloc(64 * 1024);
       let read = 0;
       for (;;) {
