@@ -116,7 +116,10 @@ describe("a snapshot runs no hook of the repository", () => {
     const hook = join(dir, ".git", "hooks", "post-index-change");
     await writeFile(hook, `#!/bin/sh\necho ran >> "${marker}"\n`);
     await chmod(hook, 0o755);
-    // The control: an ordinary git call in the repository runs the hook...
+    // The control: an ordinary git call in the repository runs the hook... (git runs `post-index-change` only when
+    // it writes the index, so the call is given a file that is not in it yet: on a fast or a busy machine an index
+    // that needs no rewriting is left alone, and the hook does not run)
+    await write("control.txt", "control\n");
     git("add", "-A");
     expect(existsSync(marker)).toBe(true);
     await rm(marker);
