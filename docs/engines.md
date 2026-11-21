@@ -50,12 +50,13 @@ A profile name is lowercase letters, digits, `-` and `_`. A variable name may no
   prompt: Implement the plan in docs/plans/{{run.slug}}.md.
 ```
 
-`engine` names the profile; `model` is passed with `model_flag` and is allowed only with `engine`. The
-timeout is the node's, else `defaults.timeout`, else the profile's, else 3600 s.
+`engine` names the profile; with `engine`, `model` is passed with `model_flag`. (A `model` without
+`engine` is another thing: it asks the agent that drives the run to give the step to a subagent on that
+model, and is not an engine step; see `docs/history.md`, "Requested and observed model".) The timeout is
+the node's, else `defaults.timeout`, else the profile's, else 3600 s.
 
 Refused at validation, with a reason:
 
-- `model` without `engine`;
 - `fresh_context` (the process starts fresh anyway);
 - `outcomes`, a `result` check, or `join` on an engine step;
 - an engine step in a pipeline that has any fork or join (not only inside a branch);

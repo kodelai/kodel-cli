@@ -91,7 +91,8 @@ ${extra}${checks}
     };
     // the valid control
     expect(validatePipeline(node("    engine: rev\n    model: m\n")).ok).toBe(true);
-    refused(node("    model: m\n"), "model is only for a step with engine");
+    // `model` without `engine` is a request for a subagent on that model (T-43), no longer refused
+    expect(validatePipeline(node("    model: m\n")).ok).toBe(true);
     refused(node("    engine: rev\n    fresh_context: true\n"), "fresh_context");
     refused(
       `${node("    engine: rev\n    outcomes: [small]\n")}edges:\n  - { from: a, to: a, when: small }\n`,

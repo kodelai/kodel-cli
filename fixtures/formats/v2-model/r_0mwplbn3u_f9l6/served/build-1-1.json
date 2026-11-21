@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "node": "build",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "2785ea5ab1b889afb11de4e72c0492718867b4c73b3526f341bdfe9bad33c4da",
+  "answer": {
+    "slug": "build",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "build",
+    "execution": {
+      "instruction": "You run on the model `opus` for this step. If you are not on `opus`, say so in your summary. Do not start a subagent for this step."
+    }
+  }
+}

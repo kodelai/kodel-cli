@@ -1,0 +1,156 @@
+{
+  "v": 2,
+  "runId": "r_0mwplbn3u_f9l6",
+  "task": "ask for a model",
+  "specHash": "fe1e7c178962abb5",
+  "status": "completed",
+  "startedAt": 1795216114449,
+  "nodes": {
+    "plan": {
+      "slug": "plan",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 1
+    },
+    "review": {
+      "slug": "review",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 2,
+      "fork": {
+        "id": "f1",
+        "branch": "review"
+      }
+    },
+    "build": {
+      "slug": "build",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 3,
+      "fork": {
+        "id": "f1",
+        "branch": "build"
+      }
+    },
+    "merge": {
+      "slug": "merge",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 4,
+      "lastFailures": []
+    }
+  },
+  "active": [],
+  "trail": [
+    "plan",
+    "review",
+    "build",
+    "merge"
+  ],
+  "pauses": [],
+  "nextVisitId": 5,
+  "seq": 23,
+  "slug": "ask-for-a-model",
+  "workdir": "/kodel-fixture/workdir/r_0mwplbn3u_f9l6",
+  "pipelineFile": ".kodel/pipelines/fork.yaml",
+  "history": {
+    "changes": {
+      "enabled": true,
+      "exclude": [],
+      "max_kb": 512
+    },
+    "output": {
+      "enabled": true,
+      "max_kb": 64
+    },
+    "prompts": {
+      "enabled": true
+    },
+    "executor": {
+      "enabled": false
+    },
+    "tool_log": {
+      "enabled": true
+    },
+    "agent_log": {
+      "enabled": false,
+      "mode": "full",
+      "preview_chars": {
+        "user": 4000,
+        "agent": 4000,
+        "tool_input": 4000,
+        "tool_result": 8000
+      },
+      "max_kb": 20480,
+      "interval_s": 10
+    },
+    "usage": {
+      "enabled": true,
+      "prices": {}
+    }
+  },
+  "served": {
+    "review:1": [
+      "97d9923a9894b4bb"
+    ],
+    "build:1": [
+      "fc1fe84e270e6822"
+    ]
+  },
+  "usage": {
+    "sessions": {},
+    "attempts": {},
+    "unattributed": {
+      "models": {},
+      "passes": 0
+    },
+    "events": 0,
+    "failed": [
+      "refused"
+    ],
+    "revisions": []
+  },
+  "forks": {
+    "f1": {
+      "id": "f1",
+      "from": "plan",
+      "label": "passed",
+      "join": "merge",
+      "branches": [
+        "review",
+        "build"
+      ],
+      "arrived": {
+        "review": {
+          "node": "review",
+          "label": "passed",
+          "seq": 15
+        },
+        "build": {
+          "node": "build",
+          "label": "passed",
+          "seq": 18
+        }
+      },
+      "joined": 1
+    }
+  },
+  "claimEvents": {
+    "claimed": 2,
+    "conflicts": 0
+  },
+  "servedEvents": 2,
+  "finishedAt": 1795216115682
+}

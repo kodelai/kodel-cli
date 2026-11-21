@@ -1,0 +1,11 @@
+{
+  "v": 2,
+  "runId": "r_0mwplbn3u_f9l6",
+  "pipeline": "fork",
+  "task": "ask for a model",
+  "slug": "ask-for-a-model",
+  "specHash": "fe1e7c178962abb5",
+  "createdAt": 1795216114362,
+  "workdir": "/kodel-fixture/workdir/r_0mwplbn3u_f9l6",
+  "branch": "kodel/r_0mwplbn3u_f9l6"
+}

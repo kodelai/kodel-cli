@@ -54,7 +54,7 @@ import { SESSION_ENV } from "./executor";
 import { claudeCodeCollector } from "./history/claude-code/collector";
 import { claudeConfigDir, firstTimestamp, subagentLogs } from "./history/claude-code/locate";
 import { AGENT_ID } from "./history/claude-code/normalize";
-import { hasStepCall } from "./history/claude-code/window";
+import { hasStepCall, workerStepModels } from "./history/claude-code/window";
 import {
   proveRunStart,
   type RunStartCache,
@@ -75,6 +75,12 @@ export const USAGE_BUDGET_MS = 10_000;
  */
 export const STEP_END_LOG_WAIT_MS = 2_000;
 const STEP_END_LOG_POLL_MS = 100;
+/** How many subagent logs are looked at for the call of a step a worker handed in; the rest are not read. */
+const WORKER_LOGS_CAP = 64;
+/** The most one look of the search for a worker's call reads; logs that have not grown are not read again. */
+const WORKER_SCAN_BUDGET_BYTES = 8 * 1024 * 1024;
+/** What one look at a log reads at most (the tail `hasStepCall` looks at). */
+const WORKER_LOOK_BYTES = 256 * 1024;
 /**
  * What is kept in memory, bounded per run so that one busy run cannot make another (or its own main session) forget:
  * a run keeps the memos of its candidate sessions (the one of the environment and the newest of the hook index, 21 at
@@ -326,6 +332,23 @@ interface PassContext {
   result: UsageResult;
 }
 
+/** The `cap` logs written last, newest first, with their sizes; a log that cannot be looked at counts as the oldest. */
+async function newestFirst(
+  paths: readonly string[],
+  cap: number,
+): Promise<{ path: string; size: number }[]> {
+  const stamped = await Promise.all(
+    paths.map(async (path) => {
+      const info = await stat(path).catch(() => undefined);
+      return { path, at: info?.mtimeMs ?? 0, size: info?.size ?? 0 };
+    }),
+  );
+  return stamped
+    .sort((x, y) => y.at - x.at || x.path.localeCompare(y.path))
+    .slice(0, cap)
+    .map(({ path, size }) => ({ path, size }));
+}
+
 /** Counts usage from the agent's log into the runs of one host. One per process, like the copy of the log. */
 export class UsageWriter {
   private readonly now: () => number;
@@ -419,6 +442,65 @@ export class UsageWriter {
     own.set(session, found);
     trimmed(own, CHILD_MEMO_CAP);
     return found;
+  }
+
+  /**
+   * The models a worker's own log shows for the step it handed in (T-43), found by the call that hands the step in
+   * (`pipeline_complete_step` with the run's id, the node and the attempt) among the subagent logs of the sessions
+   * that proved the run. The main log is never searched, so an agent that takes a step with a token itself is not a
+   * worker. `undefined` when usage is off (nothing is read); `[]` when the log was not found, was found twice, or is
+   * too large to read: the step is not judged. The wait has its own deadline, apart from the pass's, and is spent
+   * in the worker logs, where the call is. Never throws.
+   */
+  async workerModels(
+    run: AgentLogRun,
+    step: { node: string; attempt: number },
+  ): Promise<string[] | undefined> {
+    try {
+      const state = await run.state();
+      if (state.usage === undefined || state.history?.usage?.enabled !== true) return undefined;
+      const env = this.options.env();
+      const configDir = claudeConfigDir(env);
+      const workdir = await run.workdir();
+      const candidates = await this.finder.candidates(env, configDir, workdir);
+      const mains: { path: string; session: string }[] = [];
+      for (const candidate of candidates) {
+        if (candidate.refused || candidate.path === undefined) continue;
+        const memo = this.mainMemo(run.runId, candidate.session, candidate.path);
+        if (memo.stopped !== undefined) continue;
+        if (!(await proveRunStart(run.runId, memo, this.options.runStarts))) continue;
+        mains.push({ path: candidate.path, session: candidate.session });
+      }
+      const until = this.now() + this.stepWaitMs;
+      const scanned = new Map<string, number>();
+      for (let looks = 0; ; looks += 1) {
+        let spent = 0;
+        const logs: string[] = [];
+        for (const main of mains) logs.push(...(await subagentLogs(main.path, main.session)));
+        const found: string[] = [];
+        // The newest logs: a worker started for this step is among the last the session wrote.
+        for (const { path: log, size } of await newestFirst(logs, WORKER_LOGS_CAP)) {
+          // A log that held no call and has not grown since is not read again, so the looks together read each log's tail
+          // about once; a look itself stays under a bound, and a log that grew is never starved by earlier looks.
+          if (scanned.get(log) === size) continue;
+          if (spent + Math.min(size, WORKER_LOOK_BYTES) > WORKER_SCAN_BUDGET_BYTES) continue;
+          spent += Math.min(size, WORKER_LOOK_BYTES);
+          if (await hasStepCall(log, run.runId, step.node, step.attempt)) found.push(log);
+          else scanned.set(log, size);
+        }
+        // Two logs holding the same call (a replay after a resume) say nothing sure.
+        if (found.length > 1) return [];
+        if (found.length === 1) {
+          return (
+            (await workerStepModels(found[0] as string, run.runId, step.node, step.attempt)) ?? []
+          );
+        }
+        if (this.now() >= until || looks >= this.stepWaitMs / STEP_END_LOG_POLL_MS) return [];
+        await this.sleep(Math.min(STEP_END_LOG_POLL_MS, Math.max(1, until - this.now())));
+      }
+    } catch {
+      return [];
+    }
   }
 
   /**

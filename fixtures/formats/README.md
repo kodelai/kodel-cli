@@ -241,3 +241,17 @@ They were taken with `node scripts/take-format-fixture.mjs v2-worker <run dir> <
 directories, the workdir is the placeholder `/kodel-fixture/workdir/<run id>` and there is no `seal.json`.
 The tests open both (`status`, `report`, whose `workers_gone` lists the note), write them back as they were
 read, and continue the open one in format 2 (a step, the gate, a second note written once).
+
+## `v2-model/`
+
+One run of run-state format 2 with a fork whose two steps ask for a model (T-43: `model` without `engine`), worked by two
+workers. Format 2 was amended in place for it: the journal event `agent_completed` carries an optional `worker_models` (the
+models of the worker's own log for the step it handed in; its presence says the step was a worker's); see
+`docs/run-formats.md` and `docs/history.md` ("Requested and observed model"). It was made by
+`bun scripts/take-v2-model-fixture.mjs`, which drives `LocalPipelineHost` with the usage count on and writes the agent's session
+log and two subagent logs (the workers) with the test kit's `ClaudeLogBuilder`; the script played the agent and the workers. The
+run was taken with `node scripts/take-format-fixture.mjs v2-model <run dir>`.
+
+- `r_0mwplbn3u_f9l6` (finished): `plan`, then `review` (asks for `sonnet`) and `build` (asks for `opus`) at once, each taken with a
+  claim token and handed in by its worker (`worker_models` `claude-sonnet-5-5` and `claude-opus-4-8`), then the join `merge`.
+
