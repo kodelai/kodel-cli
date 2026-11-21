@@ -1,15 +1,25 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { readFileSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { processIdentity } from "@kodel-ai/local";
-import { AGENT_HUMAN_COMMANDS, AGENT_READ_COMMANDS, stateLabel } from "../src/agent-commands";
+import { processIdentity, resolveBase, sessionDirOf, sessionPlace } from "@kodel-ai/local";
+import type { SessionAdapter, SessionListEntry } from "@kodel-ai/pipeline-core";
+import {
+  AGENT_HUMAN_COMMANDS,
+  AGENT_READ_COMMANDS,
+  resolveSession,
+  stateLabel,
+} from "../src/agent-commands";
 import { runCli } from "../src/cli";
 
 // `stop` signals only a process whose identity it can check; a sandbox without the process table skips these, visibly.
 const tableTest = test.skipIf(
   processIdentity(process.pid) === undefined && process.env.KODEL_REQUIRE_PROCTABLE !== "1",
 );
+
+// Sessions do not run on Windows: there every agent command answers `PLATFORM_UNSUPPORTED` first.
+const unixTest = test.skipIf(process.platform === "win32");
 
 const launcher = { exec: process.execPath, args: [join(import.meta.dir, "../src/main.ts")] };
 
@@ -34,6 +44,11 @@ interface Opts {
   interactive: boolean;
   engine?: boolean;
   confirm?: boolean;
+  /** What the PTY check answers; under Bun the real one refuses. */
+  pty?: { ok: true } | { ok: false; reason: string };
+  platform?: string;
+  /** Called when a command asks for the size of the terminal. */
+  size?: () => { cols: number; rows: number } | undefined;
 }
 
 async function cli(opts: Opts, ...args: string[]) {
@@ -52,13 +67,16 @@ async function cli(opts: Opts, ...args: string[]) {
     confirm: async () => opts.confirm ?? true,
     select: async () => [],
     sessionLauncher: launcher,
+    ...(opts.pty ? { ptyProbe: () => opts.pty as NonNullable<Opts["pty"]> } : {}),
+    ...(opts.platform ? { platform: opts.platform } : {}),
+    ...(opts.size ? { terminalSize: opts.size } : {}),
   });
   return { code, out, err };
 }
 
 describe("kodel agent", () => {
   test("tA_agent_ls_is_read_only_and_works_for_an_engine", async () => {
-    const empty = await cli({ interactive: false, engine: true }, "agent", "ls");
+    const empty = await cli({ interactive: false, engine: true, platform: "linux" }, "agent", "ls");
     expect(empty).toMatchObject({ code: 0, out: "no agents\n" });
     expect(AGENT_READ_COMMANDS).toContain("agent ls");
   });
@@ -69,17 +87,44 @@ describe("kodel agent", () => {
       "agent rm": ["agent", "rm", "a_000000000_0000"],
       "agent exec": ["agent", "exec", "--", "true"],
       "agent forget-name": ["agent", "forget-name", "x"],
+      "agent attach": ["agent", "attach", "x"],
+      // not a command of its own: the terminal form of `exec` refuses like the plain one
+      "agent exec --pty": ["agent", "exec", "--pty", "--", "true"],
     };
-    for (const name of AGENT_HUMAN_COMMANDS) {
+    expect(AGENT_HUMAN_COMMANDS).toContain("agent attach");
+    for (const name of [...AGENT_HUMAN_COMMANDS, "agent exec --pty"]) {
       const args = argsFor[name] as string[];
-      const withMark = await cli({ interactive: true, engine: true }, ...args);
+      const withMark = await cli({ interactive: true, engine: true, platform: "linux" }, ...args);
       expect(withMark.code, `${name} under the engine mark`).toBe(1);
       expect(withMark.err).toContain("for a person");
-      const noTerminal = await cli({ interactive: false }, ...args);
+      const noTerminal = await cli({ interactive: false, platform: "linux" }, ...args);
       expect(noTerminal.code, `${name} without a terminal`).toBe(1);
       expect(noTerminal.err).toContain("terminal");
     }
     expect(await readdir(state)).toEqual([]); // nothing was written by a refusal
+  });
+
+  test("tA_agent_human_commands_refuse: on Windows the platform answers before the human check", async () => {
+    for (const args of [
+      ["agent", "attach", "x"],
+      ["agent", "exec", "--pty", "--", "true"],
+    ]) {
+      // an engine without a terminal gets the same answer as a person: the platform, not "for a person"
+      const r = await cli({ interactive: false, engine: true, platform: "win32" }, ...args);
+      expect(r.code).toBe(1);
+      expect(r.err).toContain("PLATFORM_UNSUPPORTED");
+      expect(r.err).not.toContain("for a person");
+    }
+  });
+
+  test("tA_agents_md_lists_attach: the instruction names every human-only agent command", () => {
+    const text = readFileSync(join(import.meta.dir, "../../../AGENTS.md"), "utf8");
+    const rule = /^- Do not run [\s\S]*?(?=^- )/m.exec(text)?.[0] ?? "";
+    const listed = /`agent ([a-z|-]+)`/.exec(rule)?.[1]?.split("|") ?? [];
+    expect(listed.sort()).toEqual(AGENT_HUMAN_COMMANDS.map((c) => c.replace("agent ", "")).sort());
+    // `exec` and `attach` ask for none; the instruction says so by name.
+    expect(rule).toContain("all but two ask for a confirmation");
+    expect(rule).toMatch(/`agent exec`[\s\S]*`agent attach`[\s\S]*ask for none/);
   });
 
   tableTest(
@@ -142,82 +187,227 @@ describe("kodel agent", () => {
     60_000,
   );
 
-  test("tA_forget_name_refuses_while_the_session_exists", async () => {
-    const started = await cli(
-      { interactive: true },
-      "agent",
-      "exec",
-      "--name",
-      "keep",
-      "--",
-      "sleep",
-      "30",
-    );
-    expect(started.code, started.err).toBe(0);
-    const refused = await cli({ interactive: true }, "agent", "forget-name", "keep");
-    expect(refused.code).toBe(1);
-    expect(refused.err).toContain("still exists");
-  }, 30_000);
+  unixTest(
+    "tA_forget_name_refuses_while_the_session_exists",
+    async () => {
+      const started = await cli(
+        { interactive: true },
+        "agent",
+        "exec",
+        "--name",
+        "keep",
+        "--",
+        "sleep",
+        "30",
+      );
+      expect(started.code, started.err).toBe(0);
+      const refused = await cli({ interactive: true }, "agent", "forget-name", "keep");
+      expect(refused.code).toBe(1);
+      expect(refused.err).toContain("still exists");
+    },
+    30_000,
+  );
 
-  test("tA_agent_logs_prints_stdout_and_stderr_apart", async () => {
-    const started = await cli(
-      { interactive: true },
-      "agent",
-      "exec",
-      "--",
-      "sh",
-      "-c",
-      "echo to-out; echo to-err >&2",
-    );
-    const id = /started (a_\S+)/.exec(started.out)?.[1] as string;
-    for (
-      let i = 0;
-      i < 80 && !(await cli({ interactive: false }, "agent", "ls")).out.includes("exited (0)");
-      i++
-    ) {
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    const both = await cli({ interactive: false }, "agent", "logs", id);
-    expect(both.out).toContain("to-out");
-    expect(both.out).toContain("to-err");
-    const out = await cli({ interactive: false }, "agent", "logs", id, "--stdout");
-    expect(out.out).toContain("to-out");
-    expect(out.out).not.toContain("to-err");
-    const err = await cli({ interactive: false }, "agent", "logs", id, "--stderr");
-    expect(err.out).toContain("to-err");
-    expect(err.out).not.toContain("to-out");
-    const bad = await cli({ interactive: false }, "agent", "logs", id, "--stdout", "--stderr");
-    expect(bad.code).toBe(1);
-    expect((await cli({ interactive: false }, "agent", "logs", "a_000000000_0000")).err).toContain(
-      "NOT_FOUND",
-    );
-  }, 30_000);
+  unixTest(
+    "tA_agent_logs_prints_stdout_and_stderr_apart",
+    async () => {
+      const started = await cli(
+        { interactive: true },
+        "agent",
+        "exec",
+        "--",
+        "sh",
+        "-c",
+        "echo to-out; echo to-err >&2",
+      );
+      const id = /started (a_\S+)/.exec(started.out)?.[1] as string;
+      for (
+        let i = 0;
+        i < 80 && !(await cli({ interactive: false }, "agent", "ls")).out.includes("exited (0)");
+        i++
+      ) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      const both = await cli({ interactive: false }, "agent", "logs", id);
+      expect(both.out).toContain("to-out");
+      expect(both.out).toContain("to-err");
+      const out = await cli({ interactive: false }, "agent", "logs", id, "--stdout");
+      expect(out.out).toContain("to-out");
+      expect(out.out).not.toContain("to-err");
+      const err = await cli({ interactive: false }, "agent", "logs", id, "--stderr");
+      expect(err.out).toContain("to-err");
+      expect(err.out).not.toContain("to-out");
+      const bad = await cli({ interactive: false }, "agent", "logs", id, "--stdout", "--stderr");
+      expect(bad.code).toBe(1);
+      expect(
+        (await cli({ interactive: false }, "agent", "logs", "a_000000000_0000")).err,
+      ).toContain("NOT_FOUND");
+    },
+    30_000,
+  );
 
-  test("tA_agent_exec_pty_is_not_in_this_build", async () => {
-    const r = await cli({ interactive: true }, "agent", "exec", "--pty", "--", "true");
-    expect(r.code).toBe(1);
-    expect(r.err).toContain("UNSUPPORTED");
-  });
+  unixTest(
+    "tA_agent_exec_pty_refused_by_probe_names_the_reason",
+    async () => {
+      const refused = await cli(
+        { interactive: true, pty: { ok: false, reason: "the optional package is not installed" } },
+        "agent",
+        "exec",
+        "--pty",
+        "--name",
+        "term",
+        "--",
+        "true",
+      );
+      expect(refused.code).toBe(1);
+      expect(refused.err).toContain("UNSUPPORTED: the optional package is not installed");
+      expect(await readdir(state)).toEqual([]); // no record, and the name is free
+      // the check of this build, as it is: the tests run under Bun, where a terminal session cannot be hosted
+      const own = await cli({ interactive: true }, "agent", "exec", "--pty", "--", "true");
+      expect(own.code).toBe(1);
+      expect(own.err).toContain("UNSUPPORTED");
+      expect(own.err).toContain("Bun");
+      // pipes are not touched by a PTY that cannot run
+      const pipes = await cli(
+        { interactive: true, pty: { ok: false, reason: "no" } },
+        "agent",
+        "exec",
+        "--",
+        "true",
+      );
+      expect(pipes.code, pipes.err).toBe(0);
 
-  test("tA_agent_logs_is_a_read_an_engine_may_run_and_validates_bytes", async () => {
-    const started = await cli({ interactive: true }, "agent", "exec", "--", "echo", "hi");
-    const id = /started (a_\S+)/.exec(started.out)?.[1] as string;
-    for (
-      let i = 0;
-      i < 80 && !(await cli({ interactive: false }, "agent", "ls")).out.includes("exited (0)");
-      i++
-    ) {
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    const asEngine = await cli({ interactive: false, engine: true }, "agent", "logs", id);
-    expect(asEngine).toMatchObject({ code: 0 });
-    expect(asEngine.out).toContain("hi");
-    for (const bad of ["0", "-3", "abc"]) {
-      const r = await cli({ interactive: false }, "agent", "logs", id, "--bytes", bad);
-      expect(r.code, bad).toBe(1);
-      expect(r.err).toContain("positive whole number");
-    }
-  }, 30_000);
+      // tA_agent_exec_pty_size_from_context: the size of a terminal session is asked of the context, once, and
+      // this process's own stdout is not read for it
+      let asked = 0;
+      const size = () => {
+        asked++;
+        return { cols: 132, rows: 43 };
+      };
+      const readsOfStdout: string[] = [];
+      const columns = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+      const rows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+      for (const key of ["columns", "rows"] as const) {
+        Object.defineProperty(process.stdout, key, {
+          configurable: true,
+          get: () => {
+            readsOfStdout.push(key);
+            return 80;
+          },
+        });
+      }
+      try {
+        const sized = await cli(
+          { interactive: true, pty: { ok: false, reason: "no terminal here" }, size },
+          "agent",
+          "exec",
+          "--pty",
+          "--",
+          "true",
+        );
+        expect(sized.err).toContain("UNSUPPORTED: no terminal here");
+        expect(asked).toBe(1);
+        await cli({ interactive: true, size }, "agent", "exec", "--", "true");
+        expect(asked).toBe(1);
+        expect(readsOfStdout).toEqual([]);
+      } finally {
+        for (const [key, was] of [
+          ["columns", columns],
+          ["rows", rows],
+        ] as const) {
+          if (was) Object.defineProperty(process.stdout, key, was);
+          else delete (process.stdout as { columns?: number; rows?: number })[key];
+        }
+      }
+    },
+    30_000,
+  );
+
+  unixTest(
+    "tA_agent_attach_resolves_name_or_id",
+    async () => {
+      const started = await cli(
+        { interactive: true },
+        "agent",
+        "exec",
+        "--name",
+        "Piped",
+        "--",
+        "sleep",
+        "30",
+      );
+      expect(started.code, started.err).toBe(0);
+      const id = /started (a_\S+)/.exec(started.out)?.[1] as string;
+      // found by id, by name and by the name in another case: each gets the answer about that session
+      for (const ref of [id, "piped", "PIPED"]) {
+        const r = await cli({ interactive: true }, "agent", "attach", ref);
+        expect(r.code, ref).toBe(1);
+        expect(r.err, ref).toContain(`NOT_ATTACHABLE: session ${id} runs on pipes`);
+      }
+      for (const ref of ["nobody", "a_000000000_0000", "../x"]) {
+        const r = await cli({ interactive: true }, "agent", "attach", ref);
+        expect(r.code, ref).toBe(1);
+        expect(r.err, ref).toContain("NOT_FOUND");
+      }
+    },
+    30_000,
+  );
+
+  unixTest(
+    "tA_agent_attach_refuses_pipes_and_ended",
+    async () => {
+      const started = await cli({ interactive: true }, "agent", "exec", "--", "true");
+      const id = /started (a_\S+)/.exec(started.out)?.[1] as string;
+      for (
+        let i = 0;
+        i < 80 && !(await cli({ interactive: false }, "agent", "ls")).out.includes("exited (0)");
+        i++
+      ) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      const pipes = await cli({ interactive: true }, "agent", "attach", id);
+      expect(pipes.code).toBe(1);
+      expect(pipes.err).toContain("it has no terminal to attach to");
+      // The same record as a terminal session would have left it: only the mode differs (no PTY runs under Bun).
+      const file = join(
+        sessionDirOf(
+          sessionPlace({ base: resolveBase({ KODEL_STATE_DIR: state }), root: dir }),
+          id,
+        ),
+        "session.json",
+      );
+      writeFileSync(file, readFileSync(file, "utf8").replace('"mode":"pipes"', '"mode":"pty"'));
+      expect(readFileSync(file, "utf8")).toContain('"mode":"pty"');
+      const ended = await cli({ interactive: true }, "agent", "attach", id);
+      expect(ended.code).toBe(1);
+      expect(ended.err).toContain(`NOT_ATTACHABLE: session ${id} is exited`);
+    },
+    30_000,
+  );
+
+  unixTest(
+    "tA_agent_logs_is_a_read_an_engine_may_run_and_validates_bytes",
+    async () => {
+      const started = await cli({ interactive: true }, "agent", "exec", "--", "echo", "hi");
+      const id = /started (a_\S+)/.exec(started.out)?.[1] as string;
+      for (
+        let i = 0;
+        i < 80 && !(await cli({ interactive: false }, "agent", "ls")).out.includes("exited (0)");
+        i++
+      ) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      const asEngine = await cli({ interactive: false, engine: true }, "agent", "logs", id);
+      expect(asEngine).toMatchObject({ code: 0 });
+      expect(asEngine.out).toContain("hi");
+      for (const bad of ["0", "-3", "abc"]) {
+        const r = await cli({ interactive: false }, "agent", "logs", id, "--bytes", bad);
+        expect(r.code, bad).toBe(1);
+        expect(r.err).toContain("positive whole number");
+      }
+    },
+    30_000,
+  );
 
   test("tA_state_label_reads_as_one_word_with_its_detail", () => {
     const row = (status: Record<string, unknown>, problem?: string) =>
@@ -299,6 +489,39 @@ describe("kodel agent", () => {
   );
 
   test("tA_agents_alias_works", async () => {
-    expect((await cli({ interactive: false }, "agents", "ls")).out).toBe("no agents\n");
+    expect((await cli({ interactive: false, platform: "linux" }, "agents", "ls")).out).toBe(
+      "no agents\n",
+    );
+  });
+});
+
+describe("resolveSession", () => {
+  test("tA_agent_attach_unreadable_session_names_the_reason: a session that cannot be judged is not NOT_FOUND", async () => {
+    const rows: SessionListEntry[] = [
+      { id: "a_000000000_0001", name: "ok", status: { state: "running" } },
+      { id: "a_000000000_0002", name: "broken", status: { state: "lost" }, problem: "CANNOT_READ" },
+      { id: "a_000000000_0003", status: { state: "lost" }, problem: "NEWER_FORMAT" },
+      { id: "a_000000000_0004", name: "far", status: { state: "lost" }, problem: "FOREIGN" },
+    ];
+    const adapter = { list: async () => rows } as unknown as SessionAdapter;
+    expect(await resolveSession(adapter, "ok")).toEqual({ id: "a_000000000_0001", name: "ok" });
+    for (const [ref, code, text] of [
+      ["broken", "CANNOT_READ", "cannot be read"],
+      ["a_000000000_0002", "CANNOT_READ", "cannot be read"],
+      ["a_000000000_0003", "NEWER_FORMAT", "upgrade kodel"],
+      ["FAR", "CANNOT_READ", "another machine"],
+      ["nobody", "NOT_FOUND", "no agent"],
+      // what is no name matches no row, and not the unreadable row that has no name either
+      ["../x", "NOT_FOUND", "no agent"],
+      ["-x", "NOT_FOUND", "no agent"],
+      ["", "NOT_FOUND", "no agent"],
+    ] as const) {
+      const error = await resolveSession(adapter, ref).then(
+        () => undefined,
+        (e: { code: string; message: string }) => e,
+      );
+      expect(error?.code, ref).toBe(code);
+      expect(error?.message, ref).toContain(text);
+    }
   });
 });

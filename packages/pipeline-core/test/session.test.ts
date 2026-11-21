@@ -10,6 +10,7 @@ import {
   type SessionSnapshot,
   type SessionSpec,
   trackBracketedPaste,
+  trackBracketedPasteChunk,
   validateSpec,
 } from "../src/session";
 
@@ -59,7 +60,48 @@ describe("session ids and names", () => {
   });
 });
 
+describe("session error codes", () => {
+  test("tA_session_error_codes_pin_not_attachable", () => {
+    expect(SESSION_ERROR_CODES).toContain("NOT_ATTACHABLE");
+    expect([...SESSION_ERROR_CODES]).toEqual([
+      "UNKNOWN",
+      "NOT_FOUND",
+      "CANNOT_READ",
+      "NEWER_FORMAT",
+      "NAME_TAKEN",
+      "NAME_USED",
+      "SPEC_INVALID",
+      "PLATFORM_UNSUPPORTED",
+      "IDENTITY_UNKNOWN",
+      "HOLDER_BOOT_FAILED",
+      "STATE_UNWRITABLE",
+      "NOT_RUNNING",
+      "STILL_RUNNING",
+      "UNSUPPORTED",
+      "NOT_ATTACHABLE",
+    ]);
+  });
+});
+
 describe("validateSpec", () => {
+  test("tA_validate_spec_size_only_for_pty", () => {
+    const size = { cols: 120, rows: 40 };
+    expect(validateSpec({ ...base, mode: "pty", size })).toBeUndefined();
+    expect(validateSpec({ ...base, mode: "pty" })).toBeUndefined();
+    expect(validateSpec({ ...base, size })).toContain("pty");
+    expect(validateSpec({ ...base, mode: "pipes", size })).toContain("pty");
+    for (const bad of [
+      { cols: 0, rows: 24 },
+      { cols: 80, rows: -1 },
+      { cols: 80.5, rows: 24 },
+      { cols: 80 },
+      { cols: 100_000, rows: 24 },
+      "80x24",
+    ]) {
+      expect(validateSpec({ ...base, mode: "pty", size: bad as never })).toBe("size is not valid");
+    }
+  });
+
   test("tA_validate_spec_accepts_a_plain_spec", () => {
     expect(validateSpec(base)).toBeUndefined();
     expect(validateSpec({ command: "echo hi", cwd: "C:\\work" })).toBeUndefined();
@@ -195,5 +237,87 @@ describe("send planning", () => {
     expect(trackBracketedPaste("\u001b[?2004h x \u001b[?2004l", true)).toBe(false);
     expect(trackBracketedPaste("\u001b[?2004l x \u001b[?2004h", false)).toBe(true);
     expect(trackBracketedPaste("plain", true)).toBe(true);
+  });
+
+  test("tA_track_bracketed_paste_follows_a_full_reset: a program that crashed and was `reset` has the mode off", () => {
+    expect(trackBracketedPaste("\u001bc", true)).toBe(false);
+    expect(trackBracketedPaste("\u001b[?2004h x \u001bc", false)).toBe(false);
+    // a switch after the reset wins; a reset before no switch leaves the mode off
+    expect(trackBracketedPaste("\u001bc \u001b[?2004h", false)).toBe(true);
+    expect(trackBracketedPaste("\u001bc \u001b[?2004l", true)).toBe(false);
+    // `ESC c` inside a longer sequence is not a reset
+    expect(trackBracketedPaste("\u001b[?2004h\u001b]0;abc", false)).toBe(true);
+  });
+
+  test("tA_track_bracketed_paste_combined_modes: a switch that sets several modes at once", () => {
+    expect(trackBracketedPaste("\u001b[?1049;2004h", false)).toBe(true);
+    expect(trackBracketedPaste("\u001b[?2004;1004;25l", true)).toBe(false);
+    expect(trackBracketedPaste("\u001b[?1;2004;1000h x \u001b[?25;2004l", false)).toBe(false);
+    expect(trackBracketedPaste("\u001b[?2004l\u001b[?1049;2004h", false)).toBe(true);
+    // other modes, a mode that only ends in the digits, and a sequence that is no switch leave it as it was
+    for (const other of [
+      "\u001b[?1049h",
+      "\u001b[?12004h",
+      "\u001b[?20041h",
+      "\u001b[?2004$p",
+      "\u001b[2004h",
+      "\u001b[?2004",
+    ]) {
+      expect(trackBracketedPaste(other, false), JSON.stringify(other)).toBe(false);
+      expect(trackBracketedPaste(other.replace("h", "l"), true), JSON.stringify(other)).toBe(true);
+    }
+    // cut at every place, the halves in two chunks
+    for (const [text, start] of [
+      ["\u001b[?1049;2004h", false],
+      ["\u001b[?1049;2004;1004l", true],
+      ["\u001b[?2004;1h", false],
+    ] as const) {
+      for (let cut = 1; cut < text.length; cut++) {
+        let track = trackBracketedPasteChunk(`text${text.slice(0, cut)}`, { on: start, carry: "" });
+        expect(track.on, `${JSON.stringify(text)} ${cut}`).toBe(start);
+        track = trackBracketedPasteChunk(`${text.slice(cut)}more`, track);
+        expect(track.on, `${JSON.stringify(text)} ${cut}`).toBe(!start);
+        expect(track.carry).toBe("");
+      }
+      let track = { on: start, carry: "" };
+      for (const char of text) track = trackBracketedPasteChunk(char, track);
+      expect(track.on).toBe(!start);
+    }
+    // the carry is bounded: nothing that cannot become a switch is kept
+    expect(trackBracketedPasteChunk(`\u001b[?${"1;".repeat(100)}`).carry).toBe("");
+    expect(trackBracketedPasteChunk("\u001b[31").carry).toBe("");
+    expect(trackBracketedPasteChunk("x".repeat(500)).carry).toBe("");
+  });
+});
+
+describe("bracketed paste over chunks", () => {
+  test("tA_bracketed_paste_carry", () => {
+    const on = "\u001b[?2004h";
+    const off = "\u001b[?2004l";
+    for (const [first, second, start, end] of [
+      [on, off, false, false],
+      [off, on, true, true],
+    ] as const) {
+      // each switch cut at every place, the two halves in two chunks
+      for (let cut = 1; cut < first.length; cut++) {
+        let track = { on: start, carry: "" };
+        track = trackBracketedPasteChunk(`text${first.slice(0, cut)}`, track);
+        expect(track.on).toBe(start);
+        track = trackBracketedPasteChunk(`${first.slice(cut)}more`, track);
+        expect(track.on).toBe(!start);
+        track = trackBracketedPasteChunk(second.slice(0, cut), track);
+        track = trackBracketedPasteChunk(second.slice(cut), track);
+        expect(track.on).toBe(end);
+        // output without a switch keeps the state, however long
+        track = trackBracketedPasteChunk("x".repeat(50), track);
+        expect(track.on).toBe(end);
+      }
+    }
+    // byte by byte, and the default start
+    let track = trackBracketedPasteChunk("");
+    for (const char of `a${on}b`) track = trackBracketedPasteChunk(char, track);
+    expect(track.on).toBe(true);
+    // the old function looks at one string only: the split switch is what the carry is for
+    expect(trackBracketedPaste("\u001b[?20", false)).toBe(false);
   });
 });

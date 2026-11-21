@@ -1,19 +1,24 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   decodeRecord,
+  deriveStatus,
   encodeRecord,
   nameMarkerSchema,
   type RecordKind,
   SESSION_FORMAT_VERSION,
+  SESSION_RECORD_CAPABILITIES,
   sessionRecordSchema,
   statusRecordSchema,
   stopRecordSchema,
 } from "../src";
 
 const dir = join(import.meta.dir, "../../../fixtures/session-formats/v1");
-const kindOf = (file: string): RecordKind => {
+const kindOf = (name: string): RecordKind => {
+  // the goldens of a terminal session are the same records, taken from its holder
+  const file = name.replace("-pty.json", ".json");
   if (file === "session.json") return "session";
   if (file === "stop.json") return "stop";
   if (file === "name.json") return "name";
@@ -28,13 +33,36 @@ describe("session record codec (format v1)", () => {
   test("tA_session_fixture_directory_is_complete", () => {
     expect(files.sort()).toEqual([
       "name.json",
+      "session-pty.json",
       "session.json",
+      "status-exited-pty.json",
       "status-exited.json",
+      "status-killed-pty.json",
       "status-killed.json",
       "status-lost.json",
+      "status-running-pty.json",
       "status-running.json",
+      "status-stopped-pty.json",
       "stop.json",
     ]);
+  });
+
+  test("tA_pipes_goldens_byte_identical: taking the goldens of a terminal session left the others as they were", () => {
+    const pinned: Record<string, string> = {
+      "name.json": "2441458cc350458109119d2e638c0ac982fb64dbce0f7f6b5e4a4ac33f45b9b0",
+      "session.json": "48b370024b29c1510b79a85cc17ba20976945a1f0f07d9692b97ebce5e69cf42",
+      "status-exited.json": "cb53c8b844ac8ce1eeccc19884382a3f6175de94639dcb5908abe3e911fec106",
+      "status-killed.json": "9ba58aa0c589e5aa5dbd378c6f58f500cafcdb3be4ce8bacc09a3ecdec0bd96a",
+      "status-lost.json": "4bcac44e0092a2ecb79a625d9e6ac069f36dc0dd4f374446b243dbf849418052",
+      "status-running.json": "dacd64e5591d13885eb991a54315aeb7ce4865880ccf3a0f5997a5a7d30adbe5",
+      "stop.json": "525d124846be46113236c65c25e0b79f602bea38ce225a580e9e0d916369cbd3",
+    };
+    expect(files.filter((f) => !f.includes("-pty")).sort()).toEqual(Object.keys(pinned).sort());
+    for (const [file, hash] of Object.entries(pinned)) {
+      // a checkout that rewrites line ends would change the bytes, not the golden
+      const text = readFileSync(join(dir, file), "utf8").replace(/\r\n/g, "\n");
+      expect(createHash("sha256").update(text).digest("hex"), file).toBe(hash);
+    }
   });
 
   for (const file of files) {
@@ -144,5 +172,120 @@ describe("session record codec (format v1)", () => {
     expect(() => encodeRecord("status", { ...decoded.record, extra: 1 } as never)).toThrow();
     const { since: _since, ...missing } = decoded.record;
     expect(() => encodeRecord("status", missing as never)).toThrow();
+  });
+
+  const SOCK = "/masked/run/a_000000000_0000-00000000.sock";
+  const at = 1_700_000_100_000;
+  /** The status an engine decides from a stored record: the whole decoded record goes in, `sock` with it. */
+  const derive = (status: Record<string, unknown>, holderAlive: boolean) => {
+    const decoded = decodeRecord("status", status);
+    if (!decoded.ok) throw new Error(decoded.why);
+    return deriveStatus(
+      {
+        exists: true,
+        session: { v: 1, started: 1_700_000_000_000 },
+        status: decoded.record,
+        holderAlive,
+        childAlive: holderAlive,
+        stop: "missing",
+      },
+      at,
+    );
+  };
+  const statusFiles = files.filter((f) => f.startsWith("status-"));
+
+  test("tA_status_sock_roundtrip", () => {
+    const raw = { ...load("status-running.json"), sock: SOCK };
+    const decoded = decodeRecord("status", raw);
+    expect(decoded.ok).toBe(true);
+    if (!decoded.ok) return;
+    expect(decoded.record.sock).toBe(SOCK);
+    expect(JSON.parse(encodeRecord("status", decoded.record))).toEqual(raw);
+    expect(decodeRecord("status", { ...raw, sock: 7 })).toMatchObject({
+      ok: false,
+      code: "CANNOT_READ",
+    });
+    expect(decodeRecord("status", { ...raw, v: SESSION_FORMAT_VERSION + 1 })).toMatchObject({
+      ok: false,
+      code: "NEWER_FORMAT",
+    });
+    expect(SESSION_RECORD_CAPABILITIES[1].sock).toBe(true);
+    expect(SESSION_RECORD_CAPABILITIES[1].pty).toBe(true);
+  });
+
+  test("tA_status_sock_ignored_same_status", () => {
+    for (const file of statusFiles) {
+      for (const alive of [true, false]) {
+        const { sock: _sock, ...without } = { ...load(file), sock: SOCK };
+        const withSock = decodeRecord("status", { ...load(file), sock: SOCK });
+        // the record that is judged does carry the field: the decision is the same with it and without
+        expect(withSock.ok && withSock.record.sock).toBe(SOCK);
+        expect("sock" in without).toBe(false);
+        expect(derive({ ...load(file), sock: SOCK }, alive)).toEqual(derive(without, alive));
+      }
+    }
+  });
+
+  test("tA_status_sock_dropped_reencode_same_status", () => {
+    // An older build: its schema has no `sock`. Its decode drops the field (an unknown field of a known `v` is
+    // ignored) and its encode writes the rest. What `attachable` then answers is in the test of this name in
+    // `packages/local/test/session-socket.test.ts`.
+    const older = statusRecordSchema.omit({ sock: true }).strip();
+    for (const file of statusFiles) {
+      const stored = { ...load(file), sock: SOCK };
+      const read = older.safeParse(stored);
+      expect(read.success, file).toBe(true);
+      if (!read.success) continue;
+      const rewritten = JSON.parse(JSON.stringify(read.data)) as Record<string, unknown>;
+      expect("sock" in rewritten, file).toBe(false);
+      // nothing but `sock` was lost on the way through the older build
+      expect({ ...rewritten, sock: SOCK }).toEqual(stored);
+      const again = decodeRecord("status", rewritten);
+      expect(again.ok, file).toBe(true);
+      expect(again.ok && again.record.sock, file).toBeUndefined();
+      for (const alive of [true, false]) {
+        expect(derive(rewritten, alive), file).toEqual(derive(stored, alive));
+      }
+    }
+  });
+
+  test("tA_session_key_table_has_sock", () => {
+    expect(Object.keys(statusRecordSchema.shape)).toContain("sock");
+    expect(Object.keys(sessionRecordSchema.shape.spec.shape)).not.toContain("size");
+    const withSize = { ...(load("session.json").spec as object), size: { cols: 80, rows: 24 } };
+    const decoded = decodeRecord("session", { ...load("session.json"), spec: withSize });
+    expect(decoded.ok && "size" in decoded.record.spec).toBe(false);
+    if (!decoded.ok) return;
+    expect(() => encodeRecord("session", { ...decoded.record, spec: withSize } as never)).toThrow();
+  });
+
+  // The goldens of a terminal session are taken from a real holder: the built artifact under Node, with a PTY.
+  const ptyFiles = files.filter((f) => f.includes("-pty"));
+  test("tA_pty_fixtures_roundtrip", () => {
+    for (const file of ptyFiles) {
+      const raw = load(file);
+      const decoded = decodeRecord(kindOf(file), raw);
+      expect(decoded.ok).toBe(true);
+      if (!decoded.ok) continue;
+      expect(JSON.parse(encodeRecord(kindOf(file), decoded.record as never))).toEqual(raw);
+      if (file !== "status-running-pty.json") expect("sock" in raw).toBe(false);
+    }
+    expect(ptyFiles.sort()).toEqual([
+      "session-pty.json",
+      "status-exited-pty.json",
+      "status-killed-pty.json",
+      "status-running-pty.json",
+      "status-stopped-pty.json",
+    ]);
+    // the mask reaches the socket path: no folder of a person, no uid, no real id or hash
+    expect(load("status-running-pty.json").sock).toBe(SOCK);
+    // a holder that failed before the child existed names no child and no socket
+    expect("child" in load("status-killed-pty.json")).toBe(false);
+    expect(load("session-pty.json").spec).not.toHaveProperty("size");
+    expect(load("session-pty.json").mode).toBe("pty");
+    expect(load("status-killed-pty.json")).toMatchObject({ reason: "holder_error" });
+    // a session a person stopped: killed, with the reason, and the child it had
+    expect(load("status-stopped-pty.json")).toMatchObject({ state: "killed", reason: "stopped" });
+    expect(load("status-stopped-pty.json")).toHaveProperty("child");
   });
 });

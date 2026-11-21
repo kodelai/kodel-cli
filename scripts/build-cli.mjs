@@ -34,6 +34,9 @@ for (const [entry, out] of [
       "node",
       "--outfile",
       out,
+      // The PTY module is native and optional: it stays out of the bundle and is imported when asked for.
+      "--external",
+      "@lydell/node-pty",
       "--banner",
       "#!/usr/bin/env node",
       "--define",

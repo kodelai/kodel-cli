@@ -1,6 +1,7 @@
 /** Local adapters: file-based state store, process executor, git snapshots, system clock. */
 export * from "./agent-log";
 export * from "./agent-log-ticker";
+export * from "./attach-server";
 export * from "./command";
 export * from "./config";
 export * from "./engines";
@@ -17,7 +18,9 @@ export * from "./session-finder";
 export * from "./session-holder";
 export * from "./session-paths";
 export * from "./session-pipes";
+export * from "./session-pty";
 export * from "./session-records";
+export * from "./session-socket";
 export * from "./storage";
 export * from "./storage-paths";
 export * from "./store";

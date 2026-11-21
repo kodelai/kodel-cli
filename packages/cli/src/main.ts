@@ -12,7 +12,12 @@ if (process.argv[2] === "hook") {
     intermediateMain(JSON.parse(process.argv[4] ?? "{}") as { exec: string; args: string[] });
     process.exit(0);
   }
-  process.exit(await holderMain());
+  // The PTY module is loaded here, in the holder, and only for a terminal session; the session code imports none.
+  process.exit(await holderMain({ loadPty: async () => (await import("./pty-loader")).loadPty() }));
+} else if (process.argv[2] === "pty-check") {
+  // Not a command of the CLI: the packaging checks ask an installed kodel whether its PTY module works.
+  const { ptyCheckMain } = await import("./pty-loader");
+  process.exit(await ptyCheckMain(process.argv.slice(3), (text) => process.stdout.write(text)));
 } else {
   await runKodel();
 }

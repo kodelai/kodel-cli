@@ -15,8 +15,9 @@ export interface SessionPlace {
   dir: string;
   /** Name markers of this checkout. */
   namesDir: string;
-  /** Sockets (PTY, M2) are `<runDir>/<id>.sock`. */
+  /** The checkout key. The socket of a terminal session carries it in its name (`session-socket.ts`). */
   key: string;
+  uid: number;
 }
 
 export interface SessionPlaceInput {
@@ -42,7 +43,7 @@ export const sessionPlace = (input: SessionPlaceInput): SessionPlace => {
   const uid = input.uid ?? currentUid();
   const runDir = join(input.base, "run", String(uid));
   const key = sessionCheckoutKey(input.root);
-  return { runDir, dir: join(runDir, key), namesDir: join(runDir, `${key}.names`), key };
+  return { runDir, dir: join(runDir, key), namesDir: join(runDir, `${key}.names`), key, uid };
 };
 
 /** The folder of one session. Refuses anything but the shape the local adapter makes. */

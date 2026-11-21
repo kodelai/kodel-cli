@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -84,6 +93,57 @@ describe("the artifact check", () => {
     expect(commandsValidInCmd()).toBe(true);
     expect(commandsValidInCmd("  command: npm test && npm run lint\n")).toBe(false);
     expect(commandsValidInCmd("  command: echo 'hi' > out\n")).toBe(false);
+  });
+
+  test("tA_check_artifact_bundled_module_names_are_real: each name the check looks for is in the module, and in no source of kodel", () => {
+    const text = readFileSync(script, "utf8");
+    const list = /for \(const inside of \[([^\]]+)\]\)/.exec(text)?.[1] ?? "";
+    const names = [...list.matchAll(/"([^"]+)"/g)].map((match) => match[1] as string);
+    expect(names.length).toBeGreaterThanOrEqual(3);
+    const sources = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+        entry.isDirectory()
+          ? entry.name === "node_modules"
+            ? []
+            : sources(join(dir, entry.name))
+          : /\.(ts|js|mjs)$/.test(entry.name)
+            ? [join(dir, entry.name)]
+            : [],
+      );
+    const read = (files: string[]): string =>
+      files.map((file) => readFileSync(file, "utf8")).join("\n");
+    // a name of kodel's own would fail the check of every build
+    const own = read(
+      ["cli", "local", "pipeline-core"].flatMap((name) =>
+        sources(join(repo, "packages", name, "src")),
+      ),
+    );
+    for (const name of names) expect(own.includes(name), name).toBe(false);
+    const module = join(repo, "packages", "cli", "node_modules", "@lydell", "node-pty");
+    if (!existsSync(module)) {
+      console.log("the names are not compared with the module: @lydell/node-pty is not installed");
+      return;
+    }
+    // a name the module does not have could never show that it was bundled
+    const theirs = read(sources(module));
+    for (const name of names) expect(theirs.includes(name), name).toBe(true);
+  });
+
+  test("tA_check_pty_artifact_keeps_installers_out_of_home: pnpm's cache and state go to the temporary folder", () => {
+    const text = readFileSync(join(repo, "scripts", "check-pty-artifact.mjs"), "utf8");
+    const env = /const env = \{([\s\S]*?)\n\};/.exec(text)?.[1] ?? "";
+    for (const key of [
+      "npm_config_cache",
+      "BUN_INSTALL",
+      "PNPM_HOME",
+      "npm_config_store_dir",
+      "npm_config_cache_dir",
+      "npm_config_state_dir",
+      "XDG_CACHE_HOME",
+      "XDG_STATE_HOME",
+    ]) {
+      expect(new RegExp(`\\b${key}: join\\(cache, `).test(env), key).toBe(true);
+    }
   });
 
   test("t5btp_check_artifact_gets_past_the_version_with_a_real_one", () => {

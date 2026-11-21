@@ -1,8 +1,14 @@
 # Tests
 
 - Unit and contract tests live next to the code in `packages/*/test`.
-- `e2e/`: the built binary driven by scripted and adversarial fake agents (macOS, Linux, Windows).
+- `e2e/`: the built binary driven by scripted and adversarial fake agents (macOS, Linux).
 - `agents/`: scenarios on real agents; assert on run state, journal and tool calls, not on text.
+- `pty/`: terminal sessions (`kodel agent exec --pty`, `kodel agent attach`) on a real PTY. The holder and the
+  CLI under test are the built artifact on Node (`bun run build` first), and the terminals the CLI runs in are
+  opened by `pty/host.mjs`, because Bun cannot host a PTY. Where the tests cannot run (no terminal can be opened,
+  as in a sandbox; no build, or a build older than the sources) every test is skipped and the file prints
+  `PTY tests skipped: N, <reason>`; with `KODEL_REQUIRE_PTY=1` (the CI `pty` job) they fail instead. The same job
+  runs `bun test packages/local` with that variable, so the tests there that bind a unix socket cannot skip.
 - `../fixtures/formats/`: golden fixtures per format version.
 
 Every decision in the decision log has a test plan; test names carry the decision id (e.g. `t12_...`).

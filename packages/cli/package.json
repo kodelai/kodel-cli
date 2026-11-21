@@ -33,5 +33,8 @@
   "devDependencies": {
     "@kodel-ai/local": "workspace:*",
     "@kodel-ai/pipeline-core": "workspace:*"
+  },
+  "optionalDependencies": {
+    "@lydell/node-pty": "1.1.0"
   }
 }

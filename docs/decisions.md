@@ -60,6 +60,13 @@ A decision made this way is written to the journal with `decided_by: agent` and 
 pipeline alike, and `kodel status <run>` shows a `by agent:` line for each. A person's decision is written
 as before and carries no mark.
 
+**What "no mark" does not prove.** A dialog (`decisions.dialog: true`) is answered by whoever can type into the
+client that shows it. If that client runs inside a terminal session (`kodel agent exec --pty`), any process of the
+same user can type into it through the session's attach socket (`docs/session-formats.md`), the agent in that
+session included, and the journal cannot tell such an answer from the person's: it is written with no
+`decided_by: agent`. Nothing in kodel stops or marks this. A project that needs the difference keeps `dialog` off
+for agents it runs in terminal sessions.
+
 There is no switch for `ack`, `resume` or `seal`: they stay with a person, and the config refuses a key
 for them. An agent that can propose a change of the pipeline and also accept it can weaken the checks
 that judge its own work; prefer to leave `pipeline_change` off.
