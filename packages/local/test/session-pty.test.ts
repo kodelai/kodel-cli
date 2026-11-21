@@ -350,6 +350,38 @@ describe("pty trait", () => {
     },
   );
 
+  test.skipIf(process.platform === "win32")(
+    "tA_pty_default_writes_by_descriptor_on_every_system: the stream is not the way, on macOS or on Linux",
+    async () => {
+      const base = shortDir("kd-default-");
+      const taken: string[] = [];
+      const raw = new FakeRawPty();
+      const out = openSync(join(base, "by-number"), "w");
+      Object.assign(raw, {
+        fd: out,
+        _socket: {
+          destroyed: false,
+          write(_data: Uint8Array, done: () => void) {
+            taken.push("stream");
+            done();
+          },
+        },
+      });
+      const request = { file: "/bin/sh", args: [], cwd: "/", env: {}, cols: 80, rows: 24 };
+      // no second argument: the stream's own write spins the loop on a program that does not read, on Linux as on
+      // macOS, so a terminal with a descriptor is written to by that descriptor
+      await new Promise<void>((resolve) =>
+        ptyFromModule({ spawn: () => raw })
+          .spawn(request)
+          .write(Buffer.from("typed"), resolve),
+      );
+      closeSync(out);
+      expect(taken).toEqual([]);
+      expect(readFileSync(join(base, "by-number"), "utf8")).toBe("typed");
+      rmSync(base, { recursive: true, force: true });
+    },
+  );
+
   test.skipIf(!duplicateApplies || duplicateSkipReason !== undefined)(
     "tA_pty_writer_never_writes_to_a_reused_descriptor: typed bytes go to the terminal or nowhere",
     async () => {

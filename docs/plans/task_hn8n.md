@@ -1100,3 +1100,23 @@ Fixed:
   `unixTest`; `take-session-fixtures.mjs` also stops a session that is still `starting`.
 - Not changed: the holder's SIGTERM/SIGHUP listeners are registered after the bind, so a signal during `parts.load()`
   or the bind takes the default action (the record becomes `lost`, a bound socket is swept by the next `stop`/`rm`).
+
+## First CI run: the write to a terminal on Linux
+
+- The `pty` job on ubuntu failed `tA_attach_input_flood_paused_at_bound` and `tA_attach_send_flood_paused_at_bound` (the
+  second client of each test, attached after the flood, never got a frame), and `tA_pty_input_bytes_unchanged`. On
+  Linux in a container (Debian, arm64) the same two flood tests failed, and so did `tA_bye_flushed_before_holder_ends`.
+- Cause, seen with `strace` and a small script: the module's stream writes to a terminal opened for reading and
+  writing through libuv's blocking path, so on a program that does not read the holder's main thread answers `EAGAIN`
+  to `write(2)` without end (state `R`, a core busy) and serves nobody. Round 3's "on Linux the write goes through
+  the module's stream and is non-blocking" was read from the module's code and was wrong. `setBlocking(false)` on the
+  stream's handle returns 0 and changes nothing; `fs.write` on the master's descriptor with a retry on `EAGAIN` keeps
+  the loop alive.
+- Fixed: `ptyFromModule` writes by descriptor on every POSIX system (`ownWrites` defaults to true). A duplicate of the
+  descriptor exists on macOS only (`/dev/fd/N` of a master side opens another terminal on Linux), so on Linux the
+  writer takes the module's own number and relies on `gone()` (the hazard is written in `descriptorWriter`). New test:
+  `tA_pty_default_writes_by_descriptor_on_every_system`.
+- Checked on Linux after the fix (Debian arm64, glibc, not root, `KODEL_REQUIRE_PTY=1`): `tests/pty` 48 pass, 0 fail
+  (it was 45 pass and 3 fail); the local holder tests 89 pass, 1 skip (the macOS-only descriptor test).
+  `tA_pty_input_bytes_unchanged` passed on Linux arm64 before the fix too; it failed only on the ubuntu x64 runner, so
+  whether this fix reaches it is for the next CI run to show.

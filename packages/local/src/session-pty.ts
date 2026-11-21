@@ -167,13 +167,17 @@ export const duplicateDescriptor = (fd: number): number | undefined => {
  * Writes to the terminal's descriptor itself: one at a time, in order, and what the terminal has no room for is
  * tried again later. On macOS the module's stream cannot be used for a program that does not read: its write
  * tries again at once and without end, in the loop's own thread (a raw terminal has room for about a kilobyte),
- * and the holder stands still until the program reads.
+ * and the holder stands still until the program reads. The same holds on Linux (a `write` that answers `EAGAIN`
+ * over and over in the loop's thread, a core busy, and no new client served), and `setBlocking(false)` on the
+ * stream's handle does not change it.
  *
  * A write is made by number, in another thread, some time after it was asked for: a number that was closed
  * meanwhile may be another file by then, and typed bytes would land in it. So with `owned` the descriptor is the
  * writer's own (a duplicate): nobody else closes it, and `close` closes it only when no write is on its way.
  * Without `owned` the number is somebody else's, and `gone` is all there is: asked before every write, it says
- * the descriptor is closed.
+ * the descriptor is closed. That is the case on Linux, where a terminal's master side cannot be duplicated: what
+ * is left is a write that was handed to the system just as the module closed the number, and a terminal is closed
+ * when its program is gone and nobody is left to type to.
  */
 export const descriptorWriter = (
   fd: number,
@@ -241,13 +245,21 @@ export const descriptorWriter = (
 };
 
 /**
+ * A duplicate of the terminal's descriptor where there is one to be had: macOS only. On Linux `/dev/fd/N` of a
+ * master side opens another terminal, so the writer there takes the module's own number (see `descriptorWriter`).
+ */
+const duplicateWhereItIsADuplicate = (fd: number): number | undefined =>
+  process.platform === "darwin" ? duplicateDescriptor(fd) : undefined;
+
+/**
  * The trait over a loaded module. `ownWrites` says the module's stream cannot be trusted with a program that
- * does not read (see `descriptorWriter`).
+ * does not read (see `descriptorWriter`): it is so on macOS and on Linux alike, because libuv writes to a terminal
+ * opened for reading and writing in the loop's own thread and tries again at once and without end.
  */
 export const ptyFromModule = (
   module: RawPtyModule,
-  ownWrites = process.platform === "darwin",
-  duplicate: (fd: number) => number | undefined = duplicateDescriptor,
+  ownWrites = true,
+  duplicate: (fd: number) => number | undefined = duplicateWhereItIsADuplicate,
 ): Pty => ({
   spawn(request) {
     const raw = module.spawn(request.file, request.args, {
