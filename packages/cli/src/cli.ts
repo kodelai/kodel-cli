@@ -867,7 +867,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     )
     .option(
       "--status",
-      "say whether kodel serve runs here and what its next cycle would do; changes nothing",
+      "say whether kodel serve runs here, its limits and start rules, and what waits; changes nothing",
     )
     .action(async (opts: { status?: boolean }) => {
       const environment = env.environment ?? process.env;

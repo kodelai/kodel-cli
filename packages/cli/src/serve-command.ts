@@ -1,5 +1,5 @@
 /**
- * `kodel serve` and `kodel serve --status` (TASK-G8KM, T-43). The loop itself is `createServeDaemon` in
+ * `kodel serve` and `kodel serve --status` (TASK-G8KM, T-44). The loop itself is `createServeDaemon` in
  * `@kodel-ai/local`; this is the command around it: the record that keeps it to one per checkout, the
  * signals that end it (the action in hand is finished, the workers go on), the exit codes a service
  * manager reads, and the read-only report of `--status`.
@@ -18,7 +18,7 @@ import {
   type ServeTasksPort,
   serveTasksOf,
 } from "@kodel-ai/local";
-import type { ServeAction } from "@kodel-ai/pipeline-core/serve";
+import type { ServeStartRule } from "@kodel-ai/pipeline-core/serve";
 import { plain } from "./plain";
 import { serveLauncherOf } from "./worker-factory";
 import type { WorkerLauncher } from "./worker-launcher";
@@ -142,19 +142,15 @@ export interface ServeStatusInput {
   now?: number;
 }
 
-function actionLine(action: ServeAction): string | undefined {
-  switch (action.kind) {
-    case "start":
-      return `start ${plain(action.taskKey)} (pipeline ${plain(action.pipeline)})`;
-    case "resume":
-      return `resume the agent of ${plain(action.runId)} after the decision at journal line ${action.seq}`;
-    case "note":
-      return `note in ${plain(action.runId)} that ${plain(action.worker)} is gone (${action.reason})`;
-    case "give_up":
-      return `give up on ${plain(action.taskKey)}: ${plain(action.reason)}`;
-    case "log":
-      return undefined;
-  }
+function ruleLine(rule: ServeStartRule): string {
+  const { status, priority, parent, approval } = rule.match;
+  return [
+    `pipeline ${plain(rule.pipeline)}`,
+    ...(status === undefined ? [] : [`status ${status.map(plain).join(",")}`]),
+    ...(priority === undefined ? [] : [`priority ${priority.map(plain).join(",")}`]),
+    ...(parent === undefined ? [] : [`parent ${plain(parent)}`]),
+    `approval ${approval}`,
+  ].join(", ");
 }
 
 /** What `kodel serve --status` prints. It reads the record, the runs, the worker records and the tasks; it writes nothing. */
@@ -222,19 +218,13 @@ export async function printServeStatus(input: ServeStatusInput): Promise<void> {
   out(
     `limits:      workers ${plan.counts.workers} of ${plan.counts.max_workers}, runs with a worker ${plan.counts.runs.length} of ${plan.counts.max_runs}\n`,
   );
-  out(
-    rules.start === undefined
-      ? "start rule:  none; a daemon only resumes and notes\n"
-      : `start rule:  pipeline ${plain(rules.start.pipeline)}\n`,
-  );
+  if (rules.start.length === 0) out("start rules: none; a daemon only resumes and notes\n");
+  rules.start.forEach((rule, i) => {
+    out(`${`rule ${i + 1}:`.padEnd(13)}${ruleLine(rule)}\n`);
+  });
   if (plan.blocked !== undefined) out(`starts:      blocked: ${plain(plan.blocked)}\n`);
   for (const runId of plan.waiting.resumes) out(`${waitLabel} resume of ${plain(runId)}\n`);
   for (const key of plan.waiting.starts) out(`${waitLabel} start of ${plain(key)}\n`);
-  const next = plan.actions.flatMap((a) => actionLine(a) ?? []);
-  if (next.length === 0) {
-    out(rules.enabled ? "next cycle:  nothing\n" : "next cycle:  nothing (serve is off)\n");
-  }
-  for (const line of next) out(`next cycle:  ${line}\n`);
   for (const runId of plan.orphans) {
     out(
       `no agent:    ${plain(runId)}: open run with a task and no agent; any agent continues it with pipeline_next_step\n`,

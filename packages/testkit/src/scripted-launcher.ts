@@ -1,6 +1,6 @@
 /**
  * A launcher of background workers without processes, for the tests of `kodel serve` (TASK-G8KM,
- * T-43). `start` and `resume` make a record (`kw-<run>`, `kw-<run>-d<seq>`) and, by default, drive the
+ * T-44). `start` and `resume` make a record (`kw-<run>`, `kw-<run>-d<seq>`) and, by default, drive the
  * run through the host the way an agent would (complete each agent step) until a `waiting` or `done`
  * answer; then the record is `exited`. Switches make a launch lost, silent, failing, exiting early, or
  * throwing after it made its record. Records can be removed (`kodel agent rm`) and stopped.

@@ -1100,10 +1100,10 @@ describe("task_9pns the real adapter", () => {
   );
 });
 
-// ── kodel serve (TASK-G8KM, T-43) ───────────────────────────────────────────
+// ── kodel serve (TASK-G8KM, T-44) ───────────────────────────────────────────
 
-describe("t43 the launcher for kodel serve", () => {
-  test("t43_worker_status_carries_last_output_at", async () => {
+describe("t44 the launcher for kodel serve", () => {
+  test("t44_worker_status_carries_last_output_at", async () => {
     const adapter = new ScriptedSessionAdapter();
     const launcher = createSessionWorkerLauncher(deps(adapter));
     await launcher.start({ runId: RUN, workdir: ROOT, title: "t" });
@@ -1126,7 +1126,7 @@ describe("t43 the launcher for kodel serve", () => {
     expect(timedOut?.lastOutputAt).toBeUndefined();
   });
 
-  test("t43_tui_start_takes_the_start_lock", async () => {
+  test("t44_tui_start_takes_the_start_lock", async () => {
     const key = await seedTask();
     const launcher = new FakeLauncher();
     const short = () =>

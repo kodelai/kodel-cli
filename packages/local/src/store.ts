@@ -1250,7 +1250,7 @@ export class FileStore {
 
   /**
    * Held by a starter of background workers (`kodel serve`, the TUI's `s`) from its check that a task
-   * is not started yet and the limits have room to the end of the launch (TASK-G8KM, T-43). Taken
+   * is not started yet and the limits have room to the end of the launch (TASK-G8KM, T-44). Taken
    * before `start.lock` and a run's lock, never while holding either. The holder is named by pid and
    * process identity; the lock is taken over only when that process is gone, never for its age: a slow
    * start that is alive keeps it. A waiter gives up after 15 s with `STATE_LOCKED`.

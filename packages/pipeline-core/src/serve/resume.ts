@@ -1,6 +1,6 @@
 /**
  * When a background worker of a run is resumed after the person's decision (TASK-9PNS, Decision 1c;
- * TASK-G8KM, T-43). Pure: the journal, the run and the worker's latest record in, a verdict out. The
+ * TASK-G8KM, T-44). Pure: the journal, the run and the worker's latest record in, a verdict out. The
  * TUI words the verdict on the card and offers `s resumes`; `kodel serve` acts on it. Nothing here
  * starts anything: the name of the record (`kw-<run>-d<seq>`) is what makes a resume happen once.
  *
@@ -42,6 +42,8 @@ export interface DecisionInfo {
   decision?: DecisionMark;
   /** An agent was served, claimed or completed a step after the decision. */
   moved: boolean;
+  /** The time of every wait line of the run, in order: a worker may have stopped at one before the last. */
+  waits?: number[];
 }
 
 /**
@@ -124,15 +126,18 @@ export function decisionOf(journal: readonly JournalRecord[]): DecisionInfo {
   // The last wait of the run, whoever answered it: a wait after the decision is the run waiting again
   // (the resumed worker exits at it), a wait before an older decision belongs to that one and is stale.
   let lastWait: WaitMark | undefined;
+  const waits: number[] = [];
   for (const record of journal) {
-    if (record.seq <= previousDecisionSeq) continue;
     const kind = WAIT_EVENTS[record.event];
     if (kind === undefined) continue;
     if (record.event === "pipeline_change_proposed" && record.withdrawn === true) continue;
+    waits.push(record.ts);
+    if (record.seq <= previousDecisionSeq) continue;
     lastWait = { seq: record.seq, ts: record.ts, kind, node: text(record.node) ?? "pipeline" };
   }
+  const waitList = waits.length === 0 ? {} : { waits };
   if (decision === undefined)
-    return { ...(lastWait === undefined ? {} : { lastWait }), moved: false };
+    return { ...(lastWait === undefined ? {} : { lastWait }), moved: false, ...waitList };
   const accepted = journal[decisionRecordIndex];
   if (
     lastWait === undefined &&
@@ -150,7 +155,7 @@ export function decisionOf(journal: readonly JournalRecord[]): DecisionInfo {
     }
   }
   const moved = journal.some((r) => r.seq > decision.seq && MOVED_EVENTS.includes(r.event));
-  return { ...(lastWait === undefined ? {} : { lastWait }), decision, moved };
+  return { ...(lastWait === undefined ? {} : { lastWait }), decision, moved, ...waitList };
 }
 
 /** What a resume needs to know of a worker: its latest session record, as `kodel agent ls` reads it. */
@@ -197,6 +202,7 @@ export type ResumeNo =
   | "dead"
   | "over"
   | "not_at_wait"
+  | "went_on"
   | "wait_before_start"
   | "waiting_person"
   | "undecided"
@@ -238,8 +244,19 @@ export function resumeVerdict(
   // the worker stopped there, it did not die before one.
   if (lastWait === undefined) return no(run.waitsForPerson ? "waiting_person" : "not_at_wait");
   if (!exitedAtWait(worker, lastWait)) {
-    if (lastWait.ts < worker.started && run.status === "running" && !run.waitsForPerson) {
-      return no("wait_before_start");
+    // It stopped at an earlier wait and another agent took the run on to a later one: not a death.
+    const stoppedAtOne = (run.marks?.waits ?? []).some(
+      (ts) =>
+        ts < lastWait.ts &&
+        ts >= worker.started &&
+        (worker.since === undefined || worker.since >= ts),
+    );
+    if (stoppedAtOne) return no("went_on");
+    if (lastWait.ts < worker.started) {
+      // The run waits now, but no wait line came after this worker started: a pipeline file edited by
+      // hand while it worked. It stopped at that wait.
+      if (run.waitsForPerson) return no("waiting_person");
+      if (run.status === "running") return no("wait_before_start");
     }
     return no("not_at_wait");
   }

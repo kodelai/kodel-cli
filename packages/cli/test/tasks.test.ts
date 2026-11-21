@@ -287,29 +287,30 @@ describe("the header of the list", () => {
     await cli("task", "set", b, "--comment", "the latest note");
     const lines = (await cli("task", "list")).out.split("\n").filter((l) => !l.startsWith("    "));
     const header = lines[0] ?? "";
-    expect(header).toMatch(/^KEY\s+STATUS\s+PRIORITY\s+TITLE\s+SUBTASKS\s+PARENT$/);
+    expect(header).toMatch(/^KEY\s+STATUS\s+PRIORITY\s+APPROVE\s+TITLE\s+SUBTASKS\s+PARENT$/);
     const rows = lines.filter((l) => l.startsWith("KDL-"));
     expect(rows.length).toBe(2);
-    for (const col of ["STATUS", "PRIORITY", "TITLE", "SUBTASKS", "PARENT"]) {
+    for (const col of ["STATUS", "PRIORITY", "APPROVE", "TITLE", "SUBTASKS", "PARENT"]) {
       const at = header.indexOf(col);
       for (const row of rows) expect(row[at - 1], `${col} in ${row}`).toBe(" ");
     }
     const row = rows.find((r) => r.startsWith(a)) ?? "";
     expect(row.indexOf("high")).toBe(header.indexOf("PRIORITY"));
     expect(row.indexOf("Short")).toBe(header.indexOf("TITLE"));
+    // Made without a terminal, so both are an agent's tasks and wait for approval.
+    expect(row.indexOf("waits")).toBe(header.indexOf("APPROVE"));
   });
 
-  test("the latest comment stays under its row, and subtasks and parent are columns", async () => {
+  test("the latest comment stays under its row, and approval, subtasks and parent are columns", async () => {
     await config(ENABLED);
     const parent = await add("Parent");
     const child = await add("Child", "--parent", parent);
     await cli("task", "set", child, "--comment", "note here");
     const out = (await cli("task", "list")).out.split("\n");
     const at = out.findIndex((l) => l.startsWith(child));
-    expect(out[at]).toMatch(new RegExp(`Child\\s+-\\s+${parent}$`));
-    // Made without a terminal, so it is an agent's task and says so before its comment.
-    expect(out[at + 1]).toBe("    waits for approval");
-    expect(out[at + 2]).toBe('    "note here"');
+    // Made without a terminal, so it is an agent's task and its row says it waits for approval.
+    expect(out[at]).toMatch(new RegExp(`\\swaits\\s+Child\\s+-\\s+${parent}$`));
+    expect(out[at + 1]).toBe('    "note here"');
     expect(out.find((l) => l.startsWith(parent))).toMatch(/\s0\/1\s/);
   });
 
@@ -336,8 +337,8 @@ describe("the header of the list", () => {
     await add("bad\u001b[2Jtitle");
     const out = (await cli("task", "list")).out;
     expect(out).not.toContain("\u001b");
-    // The header, the row and the line that says it waits for approval.
-    expect(out.split("\n").filter(Boolean).length).toBe(3);
+    // The header and the row.
+    expect(out.split("\n").filter(Boolean).length).toBe(2);
   });
 });
 
@@ -553,7 +554,7 @@ describe("plural aliases of the command groups", () => {
   });
 });
 
-describe("tasks an agent made or changed (T-43)", () => {
+describe("tasks an agent made or changed (T-44)", () => {
   async function as(
     who: { interactive: boolean; environment?: Record<string, string>; yes?: boolean },
     ...args: string[]
@@ -583,7 +584,7 @@ describe("tasks an agent made or changed (T-43)", () => {
   const keyOf = (text: string) => /created (\S+):/.exec(text)?.[1] ?? "";
   const shown = async (key: string) => (await cli("task", "show", key)).out;
 
-  test("t43_task_add_and_set_mark_without_a_terminal", async () => {
+  test("t44_task_add_and_set_mark_without_a_terminal", async () => {
     await config(ENABLED);
     const byPerson = keyOf((await as(person, "task", "add", "Typed at a terminal")).out);
     expect(await shown(byPerson)).not.toContain("waits for approval");
@@ -601,15 +602,18 @@ describe("tasks an agent made or changed (T-43)", () => {
     expect(await shown(byPerson)).not.toContain("waits for approval");
     await as(engine, "task", "set", byPerson, "--priority", "high");
     expect(await shown(byPerson)).toContain("waits for approval");
-    expect((await cli("task", "list")).out).toContain("    waits for approval");
+    const listed = (await cli("task", "list")).out.split("\n");
+    expect(listed.find((l) => l.startsWith(byPerson))).toMatch(/\swaits\s/);
 
     // A person's own change marks nothing.
     const other = keyOf((await as(person, "task", "add", "Another")).out);
     await as(person, "task", "set", other, "--title", "Renamed by a person");
     expect(await shown(other)).not.toContain("waits for approval");
+    const after = (await cli("task", "list")).out.split("\n");
+    expect(after.find((l) => l.startsWith(other))).toMatch(/\s-\s+Renamed by a person/);
   });
 
-  test("t43_approve_is_a_persons_command", async () => {
+  test("t44_approve_is_a_persons_command", async () => {
     await config(ENABLED);
     const key = keyOf((await as({ interactive: false }, "task", "add", "An agent's idea")).out);
 

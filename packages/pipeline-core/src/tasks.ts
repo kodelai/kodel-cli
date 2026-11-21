@@ -153,7 +153,7 @@ export interface Task {
    * the tools. A task without it counts as a person's.
    */
   created_by?: "agent";
-  /** The run `task_create` was called in, when the agent named one. */
+  /** The run the task was made in, when one was named (by an agent or a person); not a run that started it. */
   created_in_run?: string;
   /** ISO 8601: the last time an agent changed the title, body, status, priority or parent. */
   agent_edited_at?: string;

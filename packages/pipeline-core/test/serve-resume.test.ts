@@ -1,5 +1,5 @@
 /**
- * The resume rule (TASK-G8KM, T-43): one named case per verdict. The TUI words the same verdicts on
+ * The resume rule (TASK-G8KM, T-44): one named case per verdict. The TUI words the same verdicts on
  * its card (`packages/cli/test/worker-resume.test.ts`); `kodel serve` acts on them.
  */
 import { describe, expect, test } from "bun:test";
@@ -59,8 +59,8 @@ const why = (v: ResumeVerdict) => (v.kind === "no" ? v.why : "resume");
 const verdict = (r: ResumeRunView, w: ServeWorkerView | undefined, refuseMoved = true) =>
   why(resumeVerdict(r, w, { refuseMoved }));
 
-describe("t43 the resume verdicts", () => {
-  test("t43_resume_verdict_resume", () => {
+describe("t44 the resume verdicts", () => {
+  test("t44_resume_verdict_resume", () => {
     const v = resumeVerdict(run(), worker(), { refuseMoved: true });
     expect(v).toMatchObject({
       kind: "resume",
@@ -71,43 +71,65 @@ describe("t43 the resume verdicts", () => {
     expect(verdict(run({ status: "paused" }), worker())).toBe("resume");
   });
 
-  test("t43_resume_verdict_no_worker", () => {
+  test("t44_resume_verdict_no_worker", () => {
     expect(verdict(run(), undefined)).toBe("no_worker");
   });
 
-  test("t43_resume_verdict_unknown", () => {
+  test("t44_resume_verdict_unknown", () => {
     expect(verdict(run(), worker({ state: "unknown", label: "unknown" }))).toBe("unknown");
   });
 
-  test("t43_resume_verdict_active", () => {
+  test("t44_resume_verdict_active", () => {
     expect(verdict(run(), worker({ state: "running" }))).toBe("active");
     expect(verdict(run(), worker({ state: "starting" }))).toBe("active");
   });
 
-  test("t43_resume_verdict_dead", () => {
+  test("t44_resume_verdict_dead", () => {
     expect(verdict(run(), worker({ state: "lost" }))).toBe("dead");
     expect(verdict(run(), worker({ state: "killed" }))).toBe("dead");
   });
 
-  test("t43_resume_verdict_over", () => {
+  test("t44_resume_verdict_over", () => {
     for (const status of ["completed", "failed", "canceled"] as const) {
       expect(verdict(run({ status }), worker())).toBe("over");
     }
   });
 
-  test("t43_resume_verdict_not_at_wait", () => {
+  test("t44_resume_verdict_not_at_wait", () => {
     // no wait at all, and an exit before the wait began
     expect(verdict(run({}, build([{ event: "run_started" }])), worker())).toBe("not_at_wait");
     expect(verdict(run(), worker({ since: 3_999 }))).toBe("not_at_wait");
   });
 
-  test("t43_resume_verdict_wait_before_start", () => {
-    expect(verdict(run(), worker({ started: 4_001, since: 9_000 }))).toBe("wait_before_start");
-    // while the run waits it is not that case
-    expect(verdict(run({ waitsForPerson: true }), worker({ started: 4_001 }))).toBe("not_at_wait");
+  test("t44_resume_verdict_went_on", () => {
+    // The worker exited at the gate (4000), the person decided, another agent took the run on to its
+    // next gate (8000): the worker stopped correctly, it did not die outside a wait.
+    const onward = build([
+      { event: "run_started" },
+      { event: "node_entered", node: "plan" },
+      { event: "gate_waiting", node: "plan-approval", attempt: 1 },
+      { event: "gate_decided", node: "plan-approval", decision: "approved" },
+      { event: "step_served", node: "impl" },
+      { event: "agent_completed", node: "impl" },
+      { event: "gate_waiting", node: "final-approval", attempt: 1 },
+    ]);
+    expect(verdict(run({ waitsForPerson: true }, onward), worker())).toBe("went_on");
+    expect(verdict(run({}, onward), worker(), false)).toBe("went_on");
+    // an exit before any wait of its life is still not at a wait
+    expect(verdict(run({}, onward), worker({ since: 3_999 }))).toBe("not_at_wait");
   });
 
-  test("t43_resume_verdict_waiting_person", () => {
+  test("t44_resume_verdict_wait_before_start", () => {
+    expect(verdict(run(), worker({ started: 4_001, since: 9_000 }))).toBe("wait_before_start");
+    // while the run waits it is not that case
+    // while the run waits with no wait line since the worker started (a hand-edited pipeline file), it
+    // stopped at that wait
+    expect(verdict(run({ waitsForPerson: true }), worker({ started: 4_001 }))).toBe(
+      "waiting_person",
+    );
+  });
+
+  test("t44_resume_verdict_waiting_person", () => {
     expect(verdict(run({ waitsForPerson: true }), worker())).toBe("waiting_person");
     // a wait with no wait line in the journal (a pipeline file edited by hand) is still a wait
     const noWaitLine = build([{ event: "run_started" }]);
@@ -116,12 +138,12 @@ describe("t43 the resume verdicts", () => {
     expect(verdict(run({ waitsForPerson: true }), worker({ since: 3_999 }))).toBe("not_at_wait");
   });
 
-  test("t43_resume_verdict_undecided", () => {
+  test("t44_resume_verdict_undecided", () => {
     const waiting = build([{ event: "run_started" }, { event: "gate_waiting", node: "g" }]);
     expect(verdict(run({}, waiting), worker({ since: 3_500 }))).toBe("undecided");
   });
 
-  test("t43_resume_verdict_agent_decided", () => {
+  test("t44_resume_verdict_agent_decided", () => {
     const byAgent = build([
       { event: "run_started" },
       { event: "node_entered", node: "plan" },
@@ -131,23 +153,23 @@ describe("t43 the resume verdicts", () => {
     expect(verdict(run({}, byAgent), worker())).toBe("agent_decided");
   });
 
-  test("t43_resume_verdict_already_resumed", () => {
+  test("t44_resume_verdict_already_resumed", () => {
     expect(verdict(run(), worker({ resumed: [4] }))).toBe("already_resumed");
   });
 
-  test("t43_resume_verdict_no_session_id", () => {
+  test("t44_resume_verdict_no_session_id", () => {
     const { sessionId: _, ...rest } = worker();
     expect(verdict(run(), rest)).toBe("no_session_id");
   });
 
-  test("t43_resume_verdict_moved", () => {
+  test("t44_resume_verdict_moved", () => {
     const moved = [...GATE, ...build([{ event: "step_served" }]).map((r) => ({ ...r, seq: 5 }))];
     expect(verdict(run({}, moved), worker())).toBe("moved");
     // the TUI does not refuse it: it offers the resume with a warning
     expect(verdict(run({}, moved), worker(), false)).toBe("resume");
   });
 
-  test("t43_worker_note_is_not_a_sign_of_life", () => {
+  test("t44_worker_note_is_not_a_sign_of_life", () => {
     expect(NOT_A_SIGN_OF_LIFE).toContain("worker_note");
     expect(NOT_A_SIGN_OF_LIFE).toContain("agent_session_named");
     // a hand-edited pipeline accepted is dated by the last line before it that is a sign of life

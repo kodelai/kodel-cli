@@ -54,8 +54,8 @@ const refused = async (work: Promise<unknown>): Promise<KodelError> => {
   throw new Error("did not fail");
 };
 
-describe("the mark on tasks an agent made or changed (T-43)", () => {
-  test("t43_task_mark_is_set_by_the_tool", async () => {
+describe("the mark on tasks an agent made or changed (T-44)", () => {
+  test("t44_task_mark_is_set_by_the_tool", async () => {
     const a = adapter();
     const service = new TaskService(a);
     const tools = buildTaskTools(a.capabilities);
@@ -104,7 +104,7 @@ describe("the mark on tasks an agent made or changed (T-43)", () => {
     expect(needsApproval((await a.get(key, o()))?.task as Task)).toBe(true);
   });
 
-  test("t43_task_mark_round_trip", async () => {
+  test("t44_task_mark_round_trip", async () => {
     await mkdir(join(root, TASKS_DIR), { recursive: true });
     for (const [name, key] of [
       ["person-before-marks.yaml", "TASK-BBBB"],
@@ -161,7 +161,7 @@ describe("the mark on tasks an agent made or changed (T-43)", () => {
     }
   });
 
-  test("t43_approve_refuses_a_changed_task", async () => {
+  test("t44_approve_refuses_a_changed_task", async () => {
     const a = adapter();
     const made = await a.create({ title: "An agent's task", created_by: "agent" }, o());
     const shown = made.updated_at;
@@ -188,7 +188,7 @@ describe("the mark on tasks an agent made or changed (T-43)", () => {
     });
   });
 
-  test("t43_agent_edit_needs_a_new_approval", async () => {
+  test("t44_agent_edit_needs_a_new_approval", async () => {
     const a = adapter();
     const parent = (await a.create({ title: "Parent" }, o())).key;
     const edits: [string, TaskPatch][] = [

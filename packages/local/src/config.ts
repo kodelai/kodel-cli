@@ -122,8 +122,8 @@ export interface ProjectConfig {
    */
   engines: Record<string, EngineProfile>;
   /**
-   * What `kodel serve` may do (TASK-G8KM, T-43): the person's block, off by default. Without `start`
-   * the daemon starts nothing and only resumes and watches.
+   * What `kodel serve` may do (TASK-G8KM, T-44): the person's block, off by default. Without `start`
+   * rules the daemon starts nothing and only resumes and watches.
    */
   serve: ServeRules;
 }
@@ -135,6 +135,7 @@ export const DEFAULT_SERVE: ServeRules = {
   max_workers: 1,
   max_runs: 1,
   stalled_after_s: 1800,
+  start: [],
 };
 
 export const DEFAULT_WORKTREE: WorktreeConfig = { mode: "auto", dir: DEFAULT_WORKTREE_DIR };
@@ -251,42 +252,44 @@ export const serveSchema = z
     max_runs: z.number().int().min(1).max(64).optional(),
     stalled_after_s: z.number().int().min(0).max(86_400).optional(),
     start: z
-      .object({
-        pipeline: z.string().min(1),
-        match: z
+      .array(
+        z
           .object({
-            status: names.optional(),
-            priority: names.optional(),
-            parent: z.string().min(1).max(64).optional(),
+            pipeline: z.string().min(1),
+            match: z
+              .object({
+                status: names.optional(),
+                priority: names.optional(),
+                parent: z.string().min(1).max(64).optional(),
+                approval: z.enum(["required", "any"]).optional(),
+              })
+              .strict()
+              .optional(),
           })
-          .strict()
-          .optional(),
-      })
-      .strict()
+          .strict(),
+      )
+      .max(64)
       .optional(),
   })
   .strict();
 
 /** The `serve` block with its defaults. */
 export function serveRulesOf(given: z.infer<typeof serveSchema> | undefined): ServeRules {
-  const start = given?.start;
   return {
     enabled: given?.enabled ?? DEFAULT_SERVE.enabled,
     max_workers: given?.max_workers ?? DEFAULT_SERVE.max_workers,
     max_runs: given?.max_runs ?? DEFAULT_SERVE.max_runs,
     stalled_after_s: given?.stalled_after_s ?? DEFAULT_SERVE.stalled_after_s,
-    ...(start === undefined
-      ? {}
-      : {
-          start: {
-            pipeline: start.pipeline,
-            match: {
-              ...(start.match?.status === undefined ? {} : { status: start.match.status }),
-              ...(start.match?.priority === undefined ? {} : { priority: start.match.priority }),
-              ...(start.match?.parent === undefined ? {} : { parent: start.match.parent }),
-            },
-          },
-        }),
+    start: (given?.start ?? []).map((rule) => ({
+      pipeline: rule.pipeline,
+      match: {
+        ...(rule.match?.status === undefined ? {} : { status: rule.match.status }),
+        ...(rule.match?.priority === undefined ? {} : { priority: rule.match.priority }),
+        ...(rule.match?.parent === undefined ? {} : { parent: rule.match.parent }),
+        // Required unless the person says otherwise: an agent's task waits for `kodel task approve`.
+        approval: rule.match?.approval ?? "required",
+      },
+    })),
   };
 }
 

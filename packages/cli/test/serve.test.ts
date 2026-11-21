@@ -1,5 +1,5 @@
 /**
- * `kodel serve` at the command line (TASK-G8KM, T-43): the refusals and their exit code, a clean stop,
+ * `kodel serve` at the command line (TASK-G8KM, T-44): the refusals and their exit code, a clean stop,
  * `--status` (which writes nothing), the one launcher factory, a dead worker in `status` and `report`,
  * the test names of the serve files, the tool surface, and the real session adapter through a gate
  * with a script standing for `claude` (skipped where the process table cannot be read).
@@ -76,7 +76,7 @@ const real = test.skipIf(
 const posix = test.skipIf(process.platform === "win32");
 
 const TASKS = "tasks:\n  enabled: true\n  adapters:\n    local:\n      prefix: KDL\n";
-const SERVE_ON = "serve:\n  enabled: true\n  start:\n    pipeline: one\n";
+const SERVE_ON = "serve:\n  enabled: true\n  start:\n    - pipeline: one\n";
 
 let dir: string;
 let stateDir: string;
@@ -170,8 +170,8 @@ function snapshot(root: string): string[] {
 const recordFile = () => servePlace({ base: stateDir, root: dir }).file;
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-describe("t43 kodel serve refuses what a restart does not fix", () => {
-  test("t43_serve_on_windows_starts_no_workers", async () => {
+describe("t44 kodel serve refuses what a restart does not fix", () => {
+  test("t44_serve_on_windows_starts_no_workers", async () => {
     const result = await cli(["serve"], { platform: "win32" });
     expect(result.code).toBe(SERVE_EXIT_REFUSED);
     expect(result.code).toBe(78);
@@ -186,7 +186,7 @@ describe("t43 kodel serve refuses what a restart does not fix", () => {
     expect(status.out).toContain("starts no workers");
   });
 
-  test("t43_serve_outside_a_project_refuses", async () => {
+  test("t44_serve_outside_a_project_refuses", async () => {
     const none = mkdtempSync(join(tmpdir(), "kodel-serve-none-"));
     made.push(none);
     let err = "";
@@ -206,7 +206,7 @@ describe("t43 kodel serve refuses what a restart does not fix", () => {
     expect(existsSync(join(stateDir, "serve"))).toBe(false);
   });
 
-  test("t43_serve_refuses_from_an_engine_command", async () => {
+  test("t44_serve_refuses_from_an_engine_command", async () => {
     const engine = await cli(["serve"], {
       environment: { KODEL_STATE_DIR: stateDir, KODEL_ENGINE: "1" },
     });
@@ -233,8 +233,8 @@ describe("t43 kodel serve refuses what a restart does not fix", () => {
   });
 });
 
-describe("t43 kodel serve refuses a record it cannot write", () => {
-  test("t43_serve_unwritable_state_base_refuses", async () => {
+describe("t44 kodel serve refuses a record it cannot write", () => {
+  test("t44_serve_unwritable_state_base_refuses", async () => {
     // The state base is a file: the record cannot be made under it, and a restart would not change that.
     const file = join(stateDir, "a-file");
     writeFileSync(file, "");
@@ -252,8 +252,8 @@ describe("t43 kodel serve refuses a record it cannot write", () => {
   });
 });
 
-describe("t43 kodel serve stops cleanly", () => {
-  test("t43_serve_stops_cleanly", async () => {
+describe("t44 kodel serve stops cleanly", () => {
+  test("t44_serve_stops_cleanly", async () => {
     // In the process: an abort is a stop; the record is gone and the exit is 0.
     const controller = new AbortController();
     const running = cli(["serve"], { signal: controller.signal });
@@ -280,7 +280,7 @@ describe("t43 kodel serve stops cleanly", () => {
   }, 30_000);
 
   posix(
-    "t43_serve_stops_cleanly_on_a_signal",
+    "t44_serve_stops_cleanly_on_a_signal",
     async () => {
       const entry = join(import.meta.dir, "../../local/src/session-holder-entry.ts");
       const adapter = new PipesSessionAdapter({
@@ -347,11 +347,11 @@ function until(child: ChildProcess, done: (text: string) => boolean): Promise<st
   });
 }
 
-describe("t43 kodel serve --status", () => {
-  test("t43_serve_status_acts_on_nothing", async () => {
+describe("t44 kodel serve --status", () => {
+  test("t44_serve_status_acts_on_nothing", async () => {
     writeFileSync(join(storeRoot(), "config.yaml"), `worktree:\n  mode: auto\n${TASKS}${SERVE_ON}`);
     const orphanKey = await seedTask("A task with a run and no agent");
-    const nextKey = await seedTask("A task the next cycle starts");
+    await seedTask("A task the next cycle starts");
     const h = host();
     const orphan = await h.start({
       pipeline: "one",
@@ -381,9 +381,10 @@ describe("t43 kodel serve --status", () => {
       expect(out).toContain(`kodel serve: active (pid ${process.pid}, since`);
       expect(out).toContain(`state base:  ${stateDir}`);
       expect(out).toContain("limits:      workers 0 of 1, runs with a worker 0 of 1");
-      expect(out).toContain("start rule:  pipeline one");
-      expect(out).toContain(`next cycle:  start ${nextKey} (pipeline one)`);
-      expect(out).not.toContain(`start ${orphanKey}`);
+      expect(out).toContain("rule 1:      pipeline one, approval required");
+      // What the next cycle would do is not shown here (TASK-H9QP).
+      expect(out).not.toContain("next cycle");
+      expect(out).not.toContain(`start of ${orphanKey}`);
       expect(out).toContain(
         `no agent:    ${orphan.run.runId}: open run with a task and no agent; any agent continues it with pipeline_next_step`,
       );
@@ -416,11 +417,11 @@ describe("t43 kodel serve --status", () => {
   }, 30_000);
 });
 
-describe("t43 kodel serve --status when serve is off", () => {
-  test("t43_serve_status_disabled_says_what_it_would_do", async () => {
+describe("t44 kodel serve --status when serve is off", () => {
+  test("t44_serve_status_disabled_says_what_it_would_do", async () => {
     writeFileSync(
       join(storeRoot(), "config.yaml"),
-      `worktree:\n  mode: auto\n${TASKS}serve:\n  enabled: false\n  start:\n    pipeline: one\n`,
+      `worktree:\n  mode: auto\n${TASKS}serve:\n  enabled: false\n  start:\n    - pipeline: one\n    - pipeline: one\n      match:\n        priority: [high]\n        approval: any\n`,
     );
     const key = await seedTask("A task a daemon would start");
     let out = "";
@@ -438,12 +439,15 @@ describe("t43 kodel serve --status when serve is off", () => {
     expect(out).toContain("config:      serve.enabled is not true; a daemon would be idle");
     expect(out).toContain(`if enabled:  start of ${key}`);
     expect(out).not.toContain("waits:");
-    expect(out).toContain("next cycle:  nothing (serve is off)");
+    expect(out).toContain(
+      "rule 1:      pipeline one, approval required\nrule 2:      pipeline one, priority high, approval any\n",
+    );
+    expect(out).not.toContain("next cycle");
   });
 });
 
-describe("t43 one launcher", () => {
-  test("t43_one_launcher_factory", async () => {
+describe("t44 one launcher", () => {
+  test("t44_one_launcher_factory", async () => {
     const src = (name: string) => readFileSync(join(import.meta.dir, "../src", name), "utf8");
     const cli_ = src("cli.ts");
     expect(cli_).not.toContain("createSessionWorkerLauncher");
@@ -476,8 +480,8 @@ describe("t43 one launcher", () => {
   });
 });
 
-describe("t43 a dead worker in status and report", () => {
-  test("t43_status_and_report_show_a_dead_worker", async () => {
+describe("t44 a dead worker in status and report", () => {
+  test("t44_status_and_report_show_a_dead_worker", async () => {
     const key = await seedTask("Add a flag");
     const h = host();
     const started = await h.start({
@@ -518,8 +522,8 @@ describe("t43 a dead worker in status and report", () => {
   });
 });
 
-describe("t43 the decision id", () => {
-  test("t43_test_names_carry_the_decision_id", () => {
+describe("t44 the decision id", () => {
+  test("t44_test_names_carry_the_decision_id", () => {
     const repo = join(import.meta.dir, "../../..");
     // The decision id as docs/serve.md names it; the test names carry it in lower case, without the dash.
     const heading = readFileSync(join(repo, "docs/serve.md"), "utf8").match(
@@ -554,8 +558,8 @@ describe("t43 the decision id", () => {
   });
 });
 
-describe("t43 the tool surface", () => {
-  test("t43_tool_surface_has_no_note_and_no_approve", () => {
+describe("t44 the tool surface", () => {
+  test("t44_tool_surface_has_no_note_and_no_approve", () => {
     const decider: AgentDecider = {
       decideGate: async () => ({ ok: true }),
       acceptChange: async () => ({ ok: true }),
@@ -704,9 +708,9 @@ async function realWorld(hang = false) {
   return { adapter, daemon, h, lines };
 }
 
-describe("t43 the real session adapter", () => {
+describe("t44 the real session adapter", () => {
   real(
-    "t43_serve_real_adapter_through_a_gate",
+    "t44_serve_real_adapter_through_a_gate",
     async () => {
       const { adapter, daemon, h, lines } = await realWorld();
       const settle = async (name: string) => {
@@ -746,7 +750,7 @@ describe("t43 the real session adapter", () => {
   );
 
   real(
-    "t43_serve_real_adapter_notes_a_killed_holder",
+    "t44_serve_real_adapter_notes_a_killed_holder",
     async () => {
       const { adapter, daemon, h, lines } = await realWorld(true);
       expect(await daemon.cycle()).toEqual({ kind: "active" });

@@ -122,7 +122,7 @@ without engine steps, so such a run writes the same bytes as before. No publishe
 
 Golden fixture: `fixtures/formats/v2-engine/`, a real run with an engine step.
 
-## Worker notes (TASK-G8KM, T-43)
+## Worker notes (TASK-G8KM, T-44)
 
 `kodel serve` (`docs/serve.md`) journals the event `worker_note` when a background worker of a run is gone
 (`what: gone`, `worker`, `id?`, `reason`: `lost`, `killed`, `exited` or `not_started`, `exit_code?`, `at?`; see

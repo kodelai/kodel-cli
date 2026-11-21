@@ -2567,7 +2567,7 @@ describe("task_9pns the Report tab of a run waiting at a human gate", () => {
   });
 });
 
-// ── kodel serve (TASK-G8KM, T-43) ───────────────────────────────────────────
+// ── kodel serve (TASK-G8KM, T-44) ───────────────────────────────────────────
 
 const SERVE_RECORD = {
   v: 1,
@@ -2580,11 +2580,11 @@ const SERVE_RECORD = {
   build: "0.1.0+dev",
 };
 
-describe("t43 the TUI with kodel serve", () => {
+describe("t44 the TUI with kodel serve", () => {
   const exited = () =>
     worker("r_1", { state: "exited", label: "exited (0)", exitCode: 0, since: NOW - 20_000 });
 
-  test("t43_tui_leaves_the_resume_to_serve", () => {
+  test("t44_tui_leaves_the_resume_to_serve", () => {
     const m = withWorkers(model([decidedSession()]), statuses(["r_1", exited()]), false, {
       kind: "active",
       pid: 4242,
@@ -2607,7 +2607,7 @@ describe("t43 the TUI with kodel serve", () => {
     expect(kept.offers.r_1?.offer).toBeUndefined();
   });
 
-  test("t43_tui_keeps_a_moved_offer_when_serve_is_on", () => {
+  test("t44_tui_keeps_a_moved_offer_when_serve_is_on", () => {
     const moved = session("r_1", "running", { lastWait: WAIT, decision: DECIDED, moved: true });
     const m = withWorkers(model([moved]), statuses(["r_1", exited()]), false, {
       kind: "active",
@@ -2621,7 +2621,7 @@ describe("t43 the TUI with kodel serve", () => {
     expect(screen(m, WIDER)).not.toContain("kodel serve resumes it");
   });
 
-  test("t43_tui_keeps_the_offer_of_another_checkouts_run", async () => {
+  test("t44_tui_keeps_the_offer_of_another_checkouts_run", async () => {
     // The daemon serves its own checkout only: a run another checkout made keeps the offer here.
     const foreign = { ...decidedSession(), foreignRoot: "/elsewhere" };
     const m = withWorkers(model([foreign]), statuses(["r_1", exited()]), false, {
@@ -2651,7 +2651,7 @@ describe("t43 the TUI with kodel serve", () => {
     expect(loaded.sessions.map((x) => x.foreignRoot)).toEqual(["/elsewhere", undefined]);
   });
 
-  test("t43_tui_gone_line_advises_only_an_open_run", () => {
+  test("t44_tui_gone_line_advises_only_an_open_run", () => {
     const gone = { worker: "kw-r_1", id: "a_000000001_fake", reason: "killed", at: NOW };
     const killed = worker("r_1", { state: "killed", label: "killed" });
     const open = withWorkers(
@@ -2670,7 +2670,7 @@ describe("t43 the TUI with kodel serve", () => {
     expect(screen(done, WIDER)).not.toContain("any agent continues the run");
   });
 
-  test("t43_tui_offers_again_when_serve_is_silent", () => {
+  test("t44_tui_offers_again_when_serve_is_silent", () => {
     const m = withWorkers(model([decidedSession()]), statuses(["r_1", exited()]), false, {
       kind: "silent",
       pid: 4242,
@@ -2683,7 +2683,7 @@ describe("t43 the TUI with kodel serve", () => {
     expect(header).toContain("(pid 4242): s resumes");
   });
 
-  test("t43_tui_reads_serve_with_the_worker_records", async () => {
+  test("t44_tui_reads_serve_with_the_worker_records", async () => {
     const launcher = new FakeLauncher();
     launcher.statusMap.set("r_1", exited());
     let kind: "active" | "silent" = "active";
@@ -2708,7 +2708,7 @@ describe("t43 the TUI with kodel serve", () => {
     await quit();
   });
 
-  test("t43_tui_shows_a_dead_worker", () => {
+  test("t44_tui_shows_a_dead_worker", () => {
     const gone = {
       worker: "kw-r_1",
       id: "a_000000001_fake",

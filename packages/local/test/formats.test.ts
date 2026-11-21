@@ -67,7 +67,7 @@ const V2_ENGINE_OPEN = "r_0mw18z17b_0uiy";
 const V2_ENGINE_UNKNOWN = "r_0mw18z1td_qe4s";
 const V2_ENGINE_RUNS = [V2_ENGINE_FINISHED, V2_ENGINE_OPEN, V2_ENGINE_UNKNOWN];
 /**
- * The format-2 runs with a `worker_note` (T-43, `fixtures/formats/v2-worker/`), started by a real
+ * The format-2 runs with a `worker_note` (T-44, `fixtures/formats/v2-worker/`), started by a real
  * `kodel serve` daemon with a scripted launcher: one whose worker's holder was lost (another agent then
  * finished it), one left open after a launch that threw before it made a record (`not_started`).
  */
@@ -294,7 +294,7 @@ describe("every stored format against the current engine", () => {
     });
   });
 
-  test("t43_v2_worker_fixtures_open_and_report_the_gone_worker", async () => {
+  test("t44_v2_worker_fixtures_open_and_report_the_gone_worker", async () => {
     await copyRuns("v2-worker");
     const before = await hashTree(runsDir());
     const host = hostFor();
@@ -317,7 +317,7 @@ describe("every stored format against the current engine", () => {
     expect(await hashTree(runsDir())).toEqual(before);
   });
 
-  test("t43_v2_worker_open_run_goes_on_in_format_2", async () => {
+  test("t44_v2_worker_open_run_goes_on_in_format_2", async () => {
     // The open run (no agent was started for it) is continued by any agent; its workdir, a placeholder
     // in the fixture, is made real.
     await mkdir(root, { recursive: true });

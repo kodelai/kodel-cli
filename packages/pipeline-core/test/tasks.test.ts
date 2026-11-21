@@ -183,12 +183,12 @@ describe("the registry of task adapters", () => {
   });
 });
 
-describe("tasks an agent made or changed (T-43)", () => {
+describe("tasks an agent made or changed (T-44)", () => {
   const T0 = "2026-03-01T10:00:00.000Z";
   const T1 = "2026-03-01T10:05:00.000Z";
   const T2 = "2026-03-01T10:10:00.000Z";
 
-  test("t43_needs_approval_table", () => {
+  test("t44_needs_approval_table", () => {
     const table: [string, Parameters<typeof needsApproval>[0], boolean][] = [
       ["a person's task (no marks)", { created_at: T0 }, false],
       ["a person's task approved anyway", { created_at: T0, approved_at: T1 }, false],

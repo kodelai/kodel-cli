@@ -19,7 +19,7 @@ type Plain = (text: string) => string;
 
 const SHOWN_COMMENTS = 5;
 
-export const TASK_HEADER = ["KEY", "STATUS", "PRIORITY", "TITLE", "SUBTASKS", "PARENT"];
+export const TASK_HEADER = ["KEY", "STATUS", "PRIORITY", "APPROVE", "TITLE", "SUBTASKS", "PARENT"];
 
 /** One row of cells per task; the latest comment is not a cell, it goes under the row (`formatTaskTable`). */
 function taskCells(t: TaskSummary, plain: Plain): string[] {
@@ -27,6 +27,7 @@ function taskCells(t: TaskSummary, plain: Plain): string[] {
     plain(t.key),
     `${plain(t.status)}${t.state === t.status ? "" : ` (${t.state})`}`,
     t.priority === undefined ? "-" : plain(t.priority),
+    t.needs_approval === true ? "waits" : "-",
     plain(t.title),
     t.subtasks ? `${t.subtasks.done}/${t.subtasks.total}` : "-",
     t.parent === undefined ? "-" : plain(t.parent),
@@ -43,7 +44,6 @@ export function formatTaskTable(tasks: TaskSummary[], plain: Plain, withHeader: 
   const out: string[] = withHeader ? [lines[0] ?? ""] : [];
   tasks.forEach((t, i) => {
     out.push(lines[i + offset] ?? "");
-    if (t.needs_approval === true) out.push("    waits for approval");
     if (t.comment !== undefined) out.push(`    "${plain(t.comment)}"`);
   });
   return out;

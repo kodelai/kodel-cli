@@ -1643,7 +1643,7 @@ export class LocalRun {
   }
 
   /**
-   * Journal that a background worker of this run is gone (TASK-G8KM, T-43). The name must be this
+   * Journal that a background worker of this run is gone (TASK-G8KM, T-44). The name must be this
    * run's (`kw-<run>` or `kw-<run>-d<n>`): the engine checks only the shape, the tie of a name to a run
    * is the local launcher's convention. Once per record id (without an id, per name and reason), looked
    * up under the run's lock so two daemons cannot both write it. `written` is false for a repeat;

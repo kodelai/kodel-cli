@@ -1,5 +1,5 @@
 /**
- * `kodel serve` with the real `claude` (TASK-G8KM, T-43): the daemon is the real CLI process from
+ * `kodel serve` with the real `claude` (TASK-G8KM, T-44): the daemon is the real CLI process from
  * source, its workers are real background sessions, and the person decides the gate through the host,
  * as `kodel gate` does. It covers the two done-when cases of the plan in one run: a matching task is
  * started, its worker stops at the gate, the daemon resumes it after the decision in a later cycle and
@@ -64,7 +64,7 @@ const SERVE_ON = [
   "  max_workers: 1",
   "  max_runs: 1",
   "  start:",
-  "    pipeline: tiny",
+  "    - pipeline: tiny",
   "",
 ].join("\n");
 
@@ -102,9 +102,9 @@ async function until<T>(
   throw new Error(`timed out waiting for ${what}; the daemon said:\n${log()}`);
 }
 
-describe("t43 kodel serve with the real claude", () => {
+describe("t44 kodel serve with the real claude", () => {
   scenario(
-    "t43_live_serve_runs_a_task_through_a_gate",
+    "t44_live_serve_runs_a_task_through_a_gate",
     async () => {
       const sandbox = makeSandbox({
         fixture: { pipeline: TINY_PIPELINE },

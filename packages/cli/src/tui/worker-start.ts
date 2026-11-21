@@ -45,7 +45,7 @@ export interface StartHost {
   open(runId: string): Promise<LocalRun | StartRun | undefined>;
   runSummaries(): Promise<{ meta: { runId: string }; state: RunState | undefined }[]>;
   /**
-   * The lock `kodel serve` takes around its starts (TASK-G8KM, T-43), so the two never start one task
+   * The lock `kodel serve` takes around its starts (TASK-G8KM, T-44), so the two never start one task
    * twice; throws `STATE_LOCKED` after a wait. A host without it starts without the lock.
    */
   withWorkerStartLock?<T>(fn: () => Promise<T>): Promise<T>;

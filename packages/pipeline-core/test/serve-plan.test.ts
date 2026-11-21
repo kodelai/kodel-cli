@@ -1,5 +1,5 @@
 /**
- * The plan of one cycle of `kodel serve` (TASK-G8KM, T-43): pure rules over the person's block, the
+ * The plan of one cycle of `kodel serve` (TASK-G8KM, T-44): pure rules over the person's block, the
  * runs, their workers, the tasks and the daemon's memory.
  */
 import { describe, expect, test } from "bun:test";
@@ -10,8 +10,10 @@ import {
   admitStart,
   decisionOf,
   giveUpComment,
+  isGiveUpComment,
   matchesRule,
   planServe,
+  ruleFor,
   type ServeAction,
   type ServeInput,
   type ServeMemory,
@@ -52,7 +54,7 @@ const rules = (over: Partial<ServeRules> = {}): ServeRules => ({
   max_workers: 1,
   max_runs: 1,
   stalled_after_s: 1800,
-  start: { pipeline: "dev", match: {} },
+  start: [{ pipeline: "dev", match: { approval: "required" } }],
   ...over,
 });
 
@@ -137,8 +139,8 @@ const startsOf = (actions: ServeAction[]) => of(actions, "start").map((a) => a.t
 const logsOf = (actions: ServeAction[], problem?: string) =>
   of(actions, "log").filter((a) => problem === undefined || a.problem === problem);
 
-describe("t43 starting tasks", () => {
-  test("t43_matching_task_is_started_at_most_once", () => {
+describe("t44 starting tasks", () => {
+  test("t44_matching_task_is_started_at_most_once", () => {
     const limits = { max_workers: 64, max_runs: 64 };
     const runs = [run("r_1", { taskKey: "T-NAMED", status: "completed" })];
     const cases: [ServeTaskView, string][] = [
@@ -176,7 +178,7 @@ describe("t43 starting tasks", () => {
     expect(startsOf(after.actions)).toEqual([]);
   });
 
-  test("t43_rule_matches", () => {
+  test("t44_rule_matches", () => {
     const t = task("T-1", { status: "todo", priority: "high", parent: "T-P" });
     expect(matchesRule(t, {})).toBe(true);
     expect(matchesRule(t, { status: ["todo"] })).toBe(true);
@@ -199,18 +201,90 @@ describe("t43 starting tasks", () => {
     // a rule that does not match starts nothing; no `start` block starts nothing
     const none = planServe(
       input({
-        rules: rules({ start: { pipeline: "dev", match: { priority: ["urgent"] } } }),
+        rules: rules({
+          start: [{ pipeline: "dev", match: { priority: ["urgent"], approval: "required" } }],
+        }),
         tasks: tasks([task("T-A", { priority: "low" })]),
       }),
     );
     expect(startsOf(none.actions)).toEqual([]);
-    const { start: _, ...noStart } = rules();
+    const noStart = rules({ start: [] });
     expect(
       startsOf(planServe(input({ rules: noStart, tasks: tasks([task("T-A")]) })).actions),
     ).toEqual([]);
   });
 
-  test("t43_incomplete_list_starts_nothing", () => {
+  test("t44_rule_approval_required_skips_and_any_takes_an_agents_task", () => {
+    const agents = task("T-AGENT", { needs_approval: true });
+    // the match: `required` (the default) leaves the task out, `any` takes it
+    expect(matchesRule(agents, {})).toBe(false);
+    expect(matchesRule(agents, { approval: "required" })).toBe(false);
+    expect(matchesRule(agents, { approval: "any" })).toBe(true);
+    expect(matchesRule(task("T-P"), { approval: "any" })).toBe(true);
+    // the admission: fail closed without a rule's setting
+    expect(admitStart({ task: agents, runs: [] })).toEqual({ ok: false, why: "not_approved" });
+    expect(admitStart({ task: agents, runs: [], approval: "required" })).toEqual({
+      ok: false,
+      why: "not_approved",
+    });
+    expect(admitStart({ task: agents, runs: [], approval: "any" })).toEqual({ ok: true });
+
+    const big = { max_workers: 9, max_runs: 9 };
+    const required = planServe(input({ rules: rules(big), tasks: tasks([agents, task("T-P")]) }));
+    expect(startsOf(required.actions)).toEqual(["T-P"]);
+    const any = planServe(
+      input({
+        rules: rules({ ...big, start: [{ pipeline: "triage", match: { approval: "any" } }] }),
+        tasks: tasks([agents]),
+      }),
+    );
+    expect(of(any.actions, "start")).toEqual([
+      { kind: "start", taskKey: "T-AGENT", pipeline: "triage" },
+    ]);
+  });
+
+  test("t44_first_matching_rule_wins_and_names_the_pipeline", () => {
+    const start = [
+      { pipeline: "dev", match: { priority: ["high"], approval: "required" as const } },
+      { pipeline: "triage", match: { approval: "any" as const } },
+    ];
+    const high = task("T-HIGH", { priority: "high" });
+    const agentsHigh = task("T-AGENT", { priority: "high", needs_approval: true });
+    const low = task("T-LOW", { priority: "low" });
+    expect(ruleFor(high, start)?.pipeline).toBe("dev");
+    // not taken by the `required` rule, so a later `any` rule takes it
+    expect(ruleFor(agentsHigh, start)?.pipeline).toBe("triage");
+    expect(ruleFor(low, start)?.pipeline).toBe("triage");
+    expect(ruleFor(agentsHigh, start.slice(0, 1))).toBeUndefined();
+
+    // one order across the rules: tracker priority, then list order
+    const plan = planServe(
+      input({
+        rules: rules({ max_workers: 9, max_runs: 9, start }),
+        tasks: tasks([low, agentsHigh, high]),
+      }),
+    );
+    expect(of(plan.actions, "start")).toEqual([
+      { kind: "start", taskKey: "T-AGENT", pipeline: "triage" },
+      { kind: "start", taskKey: "T-HIGH", pipeline: "dev" },
+      { kind: "start", taskKey: "T-LOW", pipeline: "triage" },
+    ]);
+    // the give-up names the pipeline of the rule that matched
+    const gave = planServe(
+      input({
+        rules: rules({ start }),
+        tasks: tasks([low]),
+        memory: memory({
+          attempts: { "T-LOW": { count: 3, last_at: NOW - 60_000, reason: "boom" } },
+        }),
+      }),
+    );
+    expect(of(gave.actions, "give_up")).toEqual([
+      { kind: "give_up", taskKey: "T-LOW", pipeline: "triage", reason: "boom" },
+    ]);
+  });
+
+  test("t44_incomplete_list_starts_nothing", () => {
     const plan = planServe(input({ tasks: tasks([task("T-A")], { complete: false }) }));
     expect(startsOf(plan.actions)).toEqual([]);
     expect(logsOf(plan.actions, "environment")).toHaveLength(1);
@@ -237,8 +311,8 @@ describe("t43 starting tasks", () => {
   });
 });
 
-describe("t43 the two limits", () => {
-  test("t43_limits_table", () => {
+describe("t44 the two limits", () => {
+  test("t44_limits_table", () => {
     // one case per row: a run at its gate holds a run place and no worker place; a running worker
     // holds both; `unknown` holds both; a lost worker and an ended run hold neither.
     const rows: [string, ServeRunView, { run: boolean; worker: boolean }][] = [
@@ -276,7 +350,7 @@ describe("t43 the two limits", () => {
     }
   });
 
-  test("t43_two_limits_hold_and_the_rest_wait", () => {
+  test("t44_two_limits_hold_and_the_rest_wait", () => {
     const list = [
       task("T-LOW", { priority: "low" }),
       task("T-NONE"),
@@ -320,7 +394,7 @@ describe("t43 the two limits", () => {
     expect(startsOf(second.actions)).toEqual(["T-B"]);
   });
 
-  test("t43_over_the_limit_starts_nothing", () => {
+  test("t44_over_the_limit_starts_nothing", () => {
     // the person started two by key in the TUI: over both limits, the daemon adds nothing
     const runs = [
       run("r_a", { taskKey: "T-A", worker: worker("r_a") }),
@@ -372,7 +446,7 @@ describe("t43 the two limits", () => {
     ).toEqual([]);
   });
 
-  test("t43_resumes_go_before_starts", () => {
+  test("t44_resumes_go_before_starts", () => {
     // max_workers full: both resumes wait, oldest decision first, and no start
     const runs = [
       decided("r_new", 7_000),
@@ -423,7 +497,7 @@ describe("t43 the two limits", () => {
     expect(logsOf(planServe(input({ runs: [movedRun], memory: m.memory })).actions)).toEqual([]);
   });
 
-  test("t43_three_dead_workers_pause_starts", () => {
+  test("t44_three_dead_workers_pause_starts", () => {
     const rulesNine = rules({ max_workers: 9, max_runs: 9 });
     const dead = (id: string, since: number) =>
       run(id, { taskKey: `T-${id}`, worker: worker(id, { state: "lost", since }) });
@@ -571,8 +645,8 @@ describe("t43 the two limits", () => {
   });
 });
 
-describe("t43 workers that stall or die", () => {
-  test("t43_stalled_from_last_output_at", () => {
+describe("t44 workers that stall or die", () => {
+  test("t44_stalled_from_last_output_at", () => {
     const at = (w: Partial<ServeWorkerView>, over: Partial<ServeInput> = {}) =>
       logsOf(
         planServe(input({ runs: [run("r_s", { worker: worker("r_s", w) })], ...over })).actions,
@@ -616,7 +690,7 @@ describe("t43 workers that stall or die", () => {
     expect(first.actions.every((a) => a.kind === "log")).toBe(true);
   });
 
-  test("t43_sleep_gap_stalls_no_worker", () => {
+  test("t44_sleep_gap_stalls_no_worker", () => {
     // the machine slept for hours: the last gap between two cycles is `quietFrom`, so no worker is
     // stalled on waking, though none printed anything for longer than the limit
     const runs = ["r_1", "r_2", "r_3"].map((id) =>
@@ -629,7 +703,7 @@ describe("t43 workers that stall or die", () => {
     expect(logsOf(after.actions, "stalled")).toHaveLength(3);
   });
 
-  test("t43_dead_worker_is_noted_once_per_record", () => {
+  test("t44_dead_worker_is_noted_once_per_record", () => {
     const runs = [
       run("r_lost", { worker: worker("r_lost", { state: "lost", since: 7_000 }) }),
       run("r_kill", { worker: worker("r_kill", { state: "killed", label: "killed (timeout)" }) }),
@@ -684,8 +758,8 @@ describe("t43 workers that stall or die", () => {
   });
 });
 
-describe("t43 a worker that stopped at a wait with no wait line", () => {
-  test("t43_worker_at_a_wait_without_a_wait_line_is_not_dead", () => {
+describe("t44 a worker that stopped at a wait with no wait line", () => {
+  test("t44_worker_at_a_wait_without_a_wait_line_is_not_dead", () => {
     const rulesNine = rules({ max_workers: 9, max_runs: 9 });
     // the run waits for a person (a pipeline file edited by hand), but the journal has no wait line
     const waiting = (id: string, since: number) =>
@@ -710,8 +784,38 @@ describe("t43 a worker that stopped at a wait with no wait line", () => {
   });
 });
 
-describe("t43 attempts at a start", () => {
-  test("t43_gives_up_after_three_attempts", () => {
+describe("t44 a worker whose run another agent took on", () => {
+  test("t44_worker_that_stopped_at_an_earlier_wait_is_not_dead", () => {
+    const onward = build([
+      { event: "run_started" },
+      { event: "gate_waiting", node: "g", ts: 200 },
+      { event: "gate_decided", node: "g", decision: "approved", ts: 300 },
+      { event: "step_served", node: "impl", ts: 400 },
+      { event: "agent_completed", node: "impl", ts: 450 },
+      { event: "gate_waiting", node: "g2", ts: 500 },
+    ]);
+    const taken = run("r_on", {
+      taskKey: "T-r_on",
+      waitsForPerson: true,
+      marks: decisionOf(onward),
+      worker: worker("r_on", { id: "a1", state: "exited", label: "exited (0)", since: 210 }),
+    });
+    const plan = planServe(
+      input({
+        runs: [taken],
+        memory: memory({ mine: ["r_on"], dead_in_a_row: 2 }),
+        tasks: tasks([task("T-N")]),
+      }),
+    );
+    expect(of(plan.actions, "note")).toEqual([]);
+    expect(plan.memory.dead_in_a_row).toBe(0);
+    // it will never be resumed, so it frees its place in max_runs (1): the next task starts
+    expect(startsOf(plan.actions)).toEqual(["T-N"]);
+  });
+});
+
+describe("t44 attempts at a start", () => {
+  test("t44_gives_up_after_three_attempts", () => {
     const list = tasks([task("T-A")]);
     // a failed attempt is tried again 60 s later, not sooner
     const failed = memory({
@@ -730,7 +834,7 @@ describe("t43 attempts at a start", () => {
     });
     const gave = planServe(input({ tasks: list, memory: third }));
     expect(of(gave.actions, "give_up")).toEqual([
-      { kind: "give_up", taskKey: "T-A", reason: "boom" },
+      { kind: "give_up", taskKey: "T-A", pipeline: "dev", reason: "boom" },
     ]);
     expect(startsOf(gave.actions)).toEqual([]);
     expect(gave.memory.attempts).toEqual(third.attempts);
@@ -755,8 +859,104 @@ describe("t43 attempts at a start", () => {
   });
 });
 
-describe("t43 the plan is pure", () => {
-  test("t43_plan_is_pure", () => {
+describe("t44 a give-up that cannot be written", () => {
+  test("t44_give_up_comment_fits_the_tracker", () => {
+    const comment = giveUpComment("dev", "x".repeat(2_000));
+    expect(comment.length).toBeLessThanOrEqual(500);
+    expect(isGiveUpComment(comment)).toBe(true);
+    expect(comment.endsWith("or start it by its key in the TUI.")).toBe(true);
+  });
+
+  test("t44_given_up_in_memory_is_not_planned_again", () => {
+    const list = tasks([task("T-A")]);
+    const given = memory({
+      attempts: { "T-A": { count: 3, last_at: NOW - 60_000, reason: "boom", given_up: true } },
+    });
+    const plan = planServe(input({ tasks: list, memory: given }));
+    expect(of(plan.actions, "give_up")).toEqual([]);
+    expect(startsOf(plan.actions)).toEqual([]);
+  });
+});
+
+describe("t44 a resumed worker at a wait with no wait line", () => {
+  test("t44_resumed_worker_at_a_hand_edit_wait_is_not_dead", () => {
+    // gate (4000), decision (5000), resumed worker started after it; the pipeline file was edited by hand
+    // while it worked, so the run waits with no new wait line
+    const resumed = run("r_hand", {
+      taskKey: "T-r_hand",
+      waitsForPerson: true,
+      marks: decisionOf(gateDecided()),
+      worker: worker("r_hand", {
+        id: "a_d4",
+        name: "kw-r_hand-d4",
+        state: "exited",
+        label: "exited (0)",
+        started: 6_000,
+        since: 7_000,
+        decisionSeq: 4,
+      }),
+    });
+    const plan = planServe(
+      input({ runs: [resumed], memory: memory({ mine: ["r_hand"], dead_in_a_row: 2 }) }),
+    );
+    expect(of(plan.actions, "note")).toEqual([]);
+    expect(plan.memory.dead_in_a_row).toBe(0);
+  });
+});
+
+describe("t44 a resume that keeps failing", () => {
+  test("t44_failed_resume_is_retried_then_given_up", () => {
+    const run = decided("r_res");
+    const key = `r_res:${decisionOf(gateDecided()).decision?.seq}`;
+    const list = tasks([task("T-N")]);
+    // a failed attempt waits 60 s; meanwhile it goes before any start, as a waiting resume does
+    const soon = planServe(
+      input({
+        runs: [run],
+        tasks: list,
+        memory: memory({
+          resume_attempts: { [key]: { count: 1, last_at: NOW - 1_000, reason: "no claude" } },
+        }),
+      }),
+    );
+    expect(of(soon.actions, "resume")).toEqual([]);
+    expect(soon.waiting.resumes).toEqual(["r_res"]);
+    expect(startsOf(soon.actions)).toEqual([]);
+    // after 60 s it is tried again
+    const again = planServe(
+      input({
+        runs: [run],
+        tasks: list,
+        memory: memory({
+          resume_attempts: { [key]: { count: 2, last_at: NOW - 60_000, reason: "no claude" } },
+        }),
+      }),
+    );
+    expect(of(again.actions, "resume")).toHaveLength(1);
+    // after three: one line, no resume, no place held
+    const gave = planServe(
+      input({
+        runs: [run],
+        tasks: list,
+        memory: memory({
+          resume_attempts: { [key]: { count: 3, last_at: NOW - 60_000, reason: "no claude" } },
+        }),
+      }),
+    );
+    expect(of(gave.actions, "resume")).toEqual([]);
+    expect(logsOf(gave.actions, "resume_failed")).toHaveLength(1);
+    expect(gave.waiting.resumes).toEqual([]);
+    expect(
+      logsOf(
+        planServe(input({ runs: [run], tasks: list, memory: gave.memory })).actions,
+        "resume_failed",
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("t44 the plan is pure", () => {
+  test("t44_plan_is_pure", () => {
     const given = input({
       rules: rules({ max_workers: 2, max_runs: 3 }),
       runs: [

@@ -1,5 +1,5 @@
 /**
- * The loop of `kodel serve` (TASK-G8KM, T-43). Each cycle reads the config, the runs, the worker
+ * The loop of `kodel serve` (TASK-G8KM, T-44). Each cycle reads the config, the runs, the worker
  * records and (when a start is possible) the tasks, asks `planServe` what to do and does it, one action
  * at a time: a note that a worker is gone, a resume after a person's decision, a give-up comment, a
  * start of a task. It decides nothing about a run: the host port it is given has no gate, ack, seal,
@@ -39,15 +39,18 @@ import {
   planServe,
   type RunDecision,
   resumeVerdict,
+  ruleFor,
   type ServeAction,
   type ServeInput,
   type ServeMemory,
   type ServePlan,
   type ServeRules,
   type ServeRunView,
+  type ServeStartRule,
   type ServeTaskView,
   type ServeUnreadableRun,
   type ServeWorkerView,
+  START_ATTEMPTS,
   servePlaces,
 } from "@kodel-ai/pipeline-core/serve";
 import { parse } from "yaml";
@@ -380,6 +383,9 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
   };
   /** Ended runs, read once: nothing about them changes any more. */
   const ended = new Map<string, ServeRunView>();
+  // Ended runs of this checkout whose worker may still be alive (an agent finishing its last answer, a run
+  // canceled under it): their records are read until the worker has stopped, so it keeps its worker place.
+  const endedWatch = new Set<string>();
   /** `UNPARSED` when the first read of the config did not parse: the first one that does is a change. */
   let baseConfig: string | undefined;
   let baseBuild: string | undefined;
@@ -425,7 +431,7 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
       const runId = summary.meta.runId;
       const known = ended.get(runId);
       if (known !== undefined) {
-        runs.push(known);
+        if (!endedWatch.has(runId)) runs.push(known);
         continue;
       }
       const state = summary.state;
@@ -443,7 +449,8 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
       };
       if (ENDED.includes(state.status)) {
         ended.set(runId, base);
-        runs.push(base);
+        if (deps.host.foreignRootOf?.(summary.meta) === undefined) endedWatch.add(runId);
+        else runs.push(base);
       } else if (deps.host.foreignRootOf?.(summary.meta) !== undefined) {
         // Another checkout's run: it names its task, but its worker is not this daemon's business.
         runs.push(base);
@@ -451,13 +458,27 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
         own.push({ summary, runId });
       }
     }
-    const ids = [...own.map((o) => o.runId), ...broken.map((b) => b.meta.runId)];
+    const watched = [...endedWatch].filter((id) => ended.has(id));
+    const ids = [...own.map((o) => o.runId), ...broken.map((b) => b.meta.runId), ...watched];
     const workers =
       ids.length === 0
         ? new Map<string, ServeWorkerView>()
         : await deps.launcher.statuses(ids).catch((error: unknown) => {
             throw new Error(`the worker records cannot be read: ${messageOf(error)}`);
           });
+    for (const runId of watched) {
+      const view = ended.get(runId) as ServeRunView;
+      const worker = workers.get(runId);
+      if (
+        worker !== undefined &&
+        (worker.state === "starting" || worker.state === "running" || worker.state === "unknown")
+      ) {
+        runs.push({ ...view, worker });
+      } else {
+        endedWatch.delete(runId);
+        runs.push(view);
+      }
+    }
     const unreadable: ServeUnreadableRun[] = [];
     for (const summary of broken) {
       const worker = workers.get(summary.meta.runId);
@@ -526,7 +547,7 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
   /** Whether a start can happen at all, and why not. */
   const environment = async (
     config: ProjectConfig,
-    rule: NonNullable<ServeRules["start"]>,
+    start: readonly ServeStartRule[],
   ): Promise<{ ok: true } | { ok: false; reason: string }> => {
     if (config.worktree.mode !== "auto") {
       return {
@@ -546,10 +567,12 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
       };
     }
     const listed = await deps.host.list();
-    if (!listed.pipelines.some((p) => p.name === rule.pipeline)) {
+    // Every rule's pipeline: a rule that cannot start would leave its tasks to a later rule.
+    const missing = start.find((rule) => !listed.pipelines.some((p) => p.name === rule.pipeline));
+    if (missing !== undefined) {
       return {
         ok: false,
-        reason: `the pipeline ${rule.pipeline} does not load; nothing is started`,
+        reason: `the pipeline ${missing.pipeline} does not load; nothing is started`,
       };
     }
     const at = now();
@@ -568,26 +591,27 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
       : { ok: false, reason: `${preflight.result.reason}; nothing is started` };
   };
 
-  /** The `todo` tasks of the rule, read page by page; filtered by the tracker where it can. */
+  /** The `todo` tasks, read page by page; filtered by the tracker where it can (one rule only). */
   const listTasks = async (
-    rule: NonNullable<ServeRules["start"]>,
+    start: readonly ServeStartRule[],
   ): Promise<
     | { ok: true; list: ServeTaskView[]; complete: boolean; priorities: string[] }
     | { ok: false; reason: string }
   > => {
     const tasks = deps.tasks as ServeTasksPort;
     const caps = tasks.capabilities;
-    const match = rule.match;
+    // With several rules a filter of one would hide the tasks of the others: the plan matches them all.
+    const match = start.length === 1 ? start[0]?.match : undefined;
     const filter = {
       state: ["todo"] as TaskState[],
       limit: SERVE_TASK_PAGE,
-      ...(match.status?.length === 1 && match.status[0] !== undefined
+      ...(match?.status?.length === 1 && match.status[0] !== undefined
         ? { status: match.status[0] }
         : {}),
-      ...(caps.priority && match.priority?.length === 1 && match.priority[0] !== undefined
+      ...(caps.priority && match?.priority?.length === 1 && match.priority[0] !== undefined
         ? { priority: match.priority[0] }
         : {}),
-      ...(caps.subtasks && match.parent !== undefined ? { parent: match.parent } : {}),
+      ...(caps.subtasks && match?.parent !== undefined ? { parent: match.parent } : {}),
     };
     const list: ServeTaskView[] = [];
     let complete = true;
@@ -597,7 +621,7 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
         if (page >= SERVE_TASK_PAGES) {
           return {
             ok: false,
-            reason: `more than ${SERVE_TASK_PAGE * SERVE_TASK_PAGES} candidates; narrow the rule (serve.start.match)`,
+            reason: `more than ${SERVE_TASK_PAGE * SERVE_TASK_PAGES} candidates; narrow the rules (serve.start[].match)`,
           };
         }
         const answer = await tasks.list(cursor === undefined ? filter : { ...filter, cursor });
@@ -626,17 +650,17 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
     const { runs, unreadable } = await gatherRuns();
     let env: ServeInput["environment"] = { ok: true };
     let tasks: ServeInput["tasks"];
-    const rule = serve.start;
     const wanted =
-      rule !== undefined && (forStatus || (serve.enabled && memory.dead_in_a_row < DEAD_IN_A_ROW));
-    if (rule !== undefined && wanted) {
+      serve.start.length > 0 &&
+      (forStatus || (serve.enabled && memory.dead_in_a_row < DEAD_IN_A_ROW));
+    if (wanted) {
       try {
-        env = await environment(config, rule);
+        env = await environment(config, serve.start);
       } catch (error) {
         env = { ok: false, reason: `the start conditions cannot be read: ${messageOf(error)}` };
       }
       if (env.ok) {
-        const listed = await listTasks(rule);
+        const listed = await listTasks(serve.start);
         if (listed.ok) {
           tasks = { list: listed.list, complete: listed.complete, priorities: listed.priorities };
         } else {
@@ -740,6 +764,7 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
     }
     const located = await run.location();
     const workdir = located === undefined ? deps.root : await run.inProject(located.path);
+    const key = `${action.runId}:${action.seq}`;
     try {
       const { name } = await deps.launcher.resume({
         runId: action.runId,
@@ -747,26 +772,43 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
         sessionId: action.sessionId,
         decision: marks.decision,
       });
+      if (memory.resume_attempts !== undefined) delete memory.resume_attempts[key];
       say(`resumed: run ${action.runId} as ${name}`);
     } catch (error) {
       if (error instanceof SessionError && error.code === "NAME_TAKEN") {
         say(`resumed: run ${action.runId} was resumed already (kodel agent ls)`);
         return;
       }
-      throw error;
+      const tried = memory.resume_attempts?.[key];
+      const count = (tried?.count ?? 0) + 1;
+      memory.resume_attempts = {
+        ...memory.resume_attempts,
+        [key]: { count, last_at: now(), reason: messageOf(error) },
+      };
+      say(
+        `not resumed: run ${action.runId} (attempt ${count} of ${START_ATTEMPTS}): ${messageOf(error)}`,
+      );
     }
   };
 
-  const giveUp = async (
-    action: Extract<ServeAction, { kind: "give_up" }>,
-    rule: NonNullable<ServeRules["start"]>,
-  ) => {
+  const giveUp = async (action: Extract<ServeAction, { kind: "give_up" }>) => {
     const tasks = deps.tasks;
     if (tasks === undefined) return;
-    await tasks.comment(
-      action.taskKey,
-      giveUpComment(rule.pipeline, redactText(action.reason, rules)),
-    );
+    try {
+      await tasks.comment(
+        action.taskKey,
+        giveUpComment(action.pipeline, redactText(action.reason, rules)),
+      );
+    } catch (error) {
+      // Without the comment the attempts would plan the give-up again every cycle: this daemon gives
+      // up on the task in its memory instead, and says so once.
+      const attempt = memory.attempts[action.taskKey];
+      if (attempt !== undefined) memory.attempts[action.taskKey] = { ...attempt, given_up: true };
+      say(
+        `gave up: ${action.taskKey}: not started after 3 attempts: ${action.reason}; the comment could not be written (${messageOf(error)}), so this daemon does not start it again until it restarts`,
+      );
+      return;
+    }
     delete memory.attempts[action.taskKey];
     say(`gave up: ${action.taskKey}: not started after 3 attempts: ${action.reason}`);
   };
@@ -814,11 +856,24 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
           takeBack();
           return;
         }
+        const view = fullTaskViewOf(task);
+        // The task may have changed since the plan: the rule that matches it now decides, and only for the
+        // pipeline the plan chose.
+        const rule = ruleFor(view, config.serve.start);
+        if (rule === undefined || rule.pipeline !== action.pipeline) {
+          takeBack();
+          sayOnChange(
+            `start:${key}`,
+            `not started: ${key}: ${rule === undefined ? "no start rule matches it now" : `the rule that matches it now names pipeline ${rule.pipeline}`}`,
+          );
+          return;
+        }
         const admitted = admitStart({
-          task: fullTaskViewOf(task),
+          task: view,
           runs,
           unreadable,
           limits: { max_workers: config.serve.max_workers, max_runs: config.serve.max_runs },
+          approval: rule.match.approval,
         });
         if (!admitted.ok) {
           takeBack();
@@ -861,23 +916,26 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
           say(
             `not launched: ${key}: run ${runId} was made but no agent was started: ${messageOf(error)}`,
           );
-          let recorded = true;
+          let recorded: boolean | undefined;
           try {
             recorded = (await deps.launcher.statuses([runId])).has(runId);
           } catch {
-            // Cannot tell: a worker may have started, so nothing is written (fail closed).
+            // Cannot tell: a worker may have started. The run waits in `unlaunched` without a note; the next
+            // plan, which runs only once the records read, drops it if a record came and notes it if not.
           }
-          if (!recorded) {
+          if (recorded !== true) {
             // It counts as a worker that ended outside a wait; its note is tried again until written.
             const at = now();
             memory.unlaunched.push({ runId, at });
-            await note({
-              kind: "note",
-              runId,
-              worker: `kw-${runId}`,
-              reason: "not_started",
-              at,
-            });
+            if (recorded === false) {
+              await note({
+                kind: "note",
+                runId,
+                worker: `kw-${runId}`,
+                reason: "not_started",
+                at,
+              });
+            }
           }
         }
       });
@@ -984,7 +1042,7 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
             await resume(action, config);
             break;
           case "give_up":
-            if (config.serve.start !== undefined) await giveUp(action, config.serve.start);
+            await giveUp(action);
             break;
           case "start":
             await start(action, config);

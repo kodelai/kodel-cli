@@ -1,6 +1,6 @@
 /**
  * The record of a running `kodel serve`: `<state base>/serve/<uid>/<checkoutKey>.json` (TASK-G8KM,
- * T-43). Machine-local, not history: it says which process serves a checkout, since when, whether it
+ * T-44). Machine-local, not history: it says which process serves a checkout, since when, whether it
  * is active and the counts of its last cycle, so a second daemon refuses and the TUI and `--status`
  * can tell. One codec: `decode` ignores unknown optional fields of a known `v` (builds of different
  * age read one file) and refuses a newer `v`; `encode` is strict and writes every field or refuses.

@@ -1,5 +1,5 @@
 /**
- * The record of a running `kodel serve` (TASK-G8KM, T-43): `<state base>/serve/<uid>/<checkoutKey>.json`.
+ * The record of a running `kodel serve` (TASK-G8KM, T-44): `<state base>/serve/<uid>/<checkoutKey>.json`.
  * Machine-local, not history. One daemon per checkout holds it: `acquireServeRecord` makes it or
  * refuses while the recorded process is alive; the daemon rewrites it after each cycle and removes it
  * when it stops. The TUI and `kodel serve --status` read it with `readServeStatus`.

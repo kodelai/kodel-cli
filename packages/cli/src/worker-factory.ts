@@ -1,5 +1,5 @@
 /**
- * The one place the CLI builds the launcher of background workers (TASK-9PNS, TASK-G8KM T-43): `tui`
+ * The one place the CLI builds the launcher of background workers (TASK-9PNS, TASK-G8KM T-44): `tui`
  * and `serve` both start their agents through what `openWorkerLauncher` returns, so a worker started
  * by the daemon is the same process, with the same lists and the same server, as one started with `s`.
  */

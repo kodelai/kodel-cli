@@ -819,7 +819,7 @@ export class LocalPipelineHost implements PipelineHost {
   }
 
   /**
-   * Run `fn` holding `worker-start.lock` in the lock root (TASK-G8KM, T-43): what a starter of
+   * Run `fn` holding `worker-start.lock` in the lock root (TASK-G8KM, T-44): what a starter of
    * background workers holds from its check that a task is not started to the end of the launch.
    * Taken before `start.lock`, which `start` takes inside. `STATE_LOCKED` after 15 s of waiting.
    */

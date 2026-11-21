@@ -876,7 +876,7 @@ export type RunEvent =
       restarting?: true;
     }
   /**
-   * A background worker of the run is gone (TASK-G8KM, T-43): written by the daemon that started it, a
+   * A background worker of the run is gone (TASK-G8KM, T-44): written by the daemon that started it, a
    * fact about the run's agent and nothing else, so only journaled. The engine checks the shape only;
    * whether `worker` belongs to the run is the host's convention.
    */

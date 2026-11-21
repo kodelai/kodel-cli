@@ -9,7 +9,7 @@ project config:
 - it **notes** in a run that its worker is gone, so `kodel status`, `kodel report` and the TUI say so.
 
 It decides nothing about a run: it never approves a gate, resumes a pause, accepts a change or acks a state.
-Those stay your commands. The design decision is **T-43** (see the end of this page).
+Those stay your commands. The design decision is **T-44** (see the end of this page).
 
 It runs in the foreground, prints one plain, redacted line per event, and is meant to be run by a service
 manager (examples below). It needs tasks (`docs/tasks.md`) and the same things a worker started from the
@@ -27,13 +27,23 @@ serve:
   max_workers: 2           # 1..64, default 1: worker processes alive at once
   max_runs: 4              # 1..64, default 1: open runs that have a worker
   stalled_after_s: 1800    # 0..86400, default 1800; 0: never
-  start:                   # absent: starts nothing, only resumes and watches
-    pipeline: dev
-    match:                 # every key optional; an empty match is every `todo` task
-      status: [todo]             # exact status names
-      priority: [urgent, high]   # any of
-      parent: TASK-AB12          # direct children only
+  start:                   # absent or []: starts nothing, only resumes and watches
+    - pipeline: dev        # the first rule whose match fits a task wins
+      match:               # every key optional; an empty match is every `todo` task you approved
+        status: [todo]             # exact status names
+        priority: [urgent, high]   # any of
+        parent: TASK-AB12          # direct children only
+        approval: required         # default; `any` also takes a task that waits for `kodel task approve`
+    - pipeline: triage
+      match:
+        approval: any
 ```
+
+`start` is a list of rules. For each `todo` task the daemon takes the first rule whose `match` fits it, and
+that rule's `pipeline` is the one the task starts with; a task no rule fits is not started. With `approval:
+required` (the default) a task that waits for your approval does not fit the rule, so a later rule with
+`approval: any` may take it. In the example a person's urgent child of TASK-AB12 starts with `dev`, and every
+other `todo` task, an agent's too, starts with `triage`. A key a rule does not know is an error that names it.
 
 With `enabled` not `true`, or a config that does not load, the daemon is idle: it does nothing, says why
 once and looks again every cycle. A kodel older than this block refuses the whole config (`unknown key:
@@ -54,19 +64,22 @@ serve`), see `docs/run-formats.md`.
 
 A task is started when all of these hold:
 
-- its state is `todo` and your `match` matches it;
+- its state is `todo` and one of your rules matches it (the first one that does decides the pipeline);
 - no run names it, and the tracker lists no run for it besides the one it was found in;
-- it does not wait for your approval (below);
+- it does not wait for your approval (below), unless the rule that matched it says `approval: any`;
 - its latest comment is not the daemon's give-up;
 - both limits have room, and starts are not paused.
 
-Tasks go in the tracker's priority order, then its list order. A start is what `s` does in the TUI: a run
+Tasks go in the tracker's priority order, then its list order, across all the rules: a rule decides only
+whether a task is taken and with which pipeline. The pipeline of every rule must load, or nothing starts. A start is what `s` does in the TUI: a run
 through the host with the task's key, then one worker for it, from the `HEAD` of the checkout at that moment.
 If the host answers with a run that already existed, the daemon launches nothing for it.
 
 The daemon launches **once per run**. If the launch fails and no worker record exists for the run, it writes
 `gone` with `not_started` into the run and leaves it; the task is not started again, and any agent can
-continue the run with `pipeline_next_step`.
+continue the run with `pipeline_next_step`. If the worker records cannot be read right after the failed launch,
+the daemon writes nothing then and looks again in the next cycle that reads them: a record found then means
+nothing is written, no record means the same `not_started` note.
 
 A start that fails before a run exists is tried again in later cycles, 60 seconds apart. After three, the
 task gets a comment:
@@ -74,6 +87,9 @@ task gets a comment:
 ```
 kodel serve: not started after 3 attempts (pipeline dev): <reason>. A newer comment makes the daemon try again; or start it by its key in the TUI.
 ```
+
+A long reason is cut so the comment fits the tracker's 500 characters. If the tracker refuses the comment
+anyway, the daemon logs the give-up once and does not start the task again until it restarts.
 
 Problems of the environment use no attempt: no `claude`, not signed in, `decisions.dialog` on, a pipeline that
 does not load or has uncommitted changes, no git, `worktree.mode: off`, a tracker that cannot attach runs or
@@ -96,10 +112,13 @@ whole backlog one dead run at a time.
 
 - `max_runs` counts open runs that have a worker, from the start until the run ends or its worker is gone
   for good. A run waiting at a gate keeps its place. So does a run you have decided but the daemon does not
-  resume because an agent moved it on since your decision, and a run whose worker exited at a wait you have
+  resume because an agent moved it on since your decision, a run whose worker exited at a wait you have
   not decided yet: each keeps its place until the run ends (or you remove its worker records). With
   `max_runs: 1` such a run blocks every start; continue it with any agent (`pipeline_next_step`) or end it.
-- `max_workers` counts worker processes that are starting or running (and those whose state cannot be read).
+  A run whose worker died before a wait, or stopped at a wait that another agent then took the run on from
+  (that worker is not counted or noted as dead), frees its place: the daemon never resumes that worker.
+- `max_workers` counts worker processes that are starting or running (and those whose state cannot be read),
+  also a worker still finishing after its run ended.
 
 A start needs room in both; a resume needs room in `max_workers` only. When `max_workers` is full, resumes
 wait, oldest decision first, and every waiting resume goes before any new start. A start you make by key in
@@ -116,6 +135,11 @@ the TUI uses to offer `s resumes`. Right before, the daemon reads the journal ag
 claimed or completed a step since your decision, it does not resume. It reads the worker records again too:
 if the run's record was removed (`kodel agent rm`), the run is no longer going, or `max_workers` is full by
 now, it does not resume in this cycle.
+
+A resume whose launch fails (no `claude`, not signed in) is tried again 60 seconds later; meanwhile it goes
+before any start, as a resume waiting for a worker place does. After three failures the daemon logs
+`resume_failed` once and does not try that decision
+again: continue the run with any agent (`pipeline_next_step`), or stop the daemon and resume it in the TUI.
 
 Removing a resume's record (`kodel agent rm`) frees its name, so that decision may be resumed again.
 Removing every record of a run takes the run away from the daemon: it is not resumed and nothing is launched
@@ -146,8 +170,8 @@ sleep) gets one log line per quiet spell, nothing else.
 ## Tasks an agent made or changed
 
 A task an agent made with `task_create`, or whose title, body, status, priority or parent an agent changed
-with `task_update`, **waits for your approval** before the daemon starts it: `kodel task show`, `list` and the
-TUI say `waits for approval`. Approve it with:
+with `task_update`, **waits for your approval** before the daemon starts it: `kodel task show` and the TUI say
+`waits for approval`, and `kodel task list` says `waits` in its `APPROVE` column. Approve it with:
 
 ```bash
 kodel task approve TASK-AB12
@@ -158,13 +182,17 @@ you were reading; look again`). A task made at a terminal
 by a person (`kodel task add`, the TUI) does not wait; tasks without a mark, including every task from before
 this change, count as yours. See `docs/tasks.md`.
 
+You may let a rule start such tasks without approval: `approval: any` in its `match`. Only you edit the `serve`
+block, and the default stays `required`; a rule with `any` starts what an agent wrote as it is, so give it a
+pipeline whose gates you read (the `triage` rule above).
+
 ## `kodel serve --status`
 
 Prints, and changes nothing: whether a daemon runs for this checkout (its pid, since when, active or idle and
-why, its state base), the counts against the limits, what waits, what the next cycle would start, and open runs
-with a task and no agent. With `serve.enabled` not true the next cycle does nothing, and the tasks and runs a
-daemon would take up once enabled are listed as `if enabled:`. Run it before you turn the block on: it shows which of your existing tasks would
-start.
+why, its state base), the counts against the limits, your start rules in order (`rule 1:`, `rule 2:`, ...),
+why starts are blocked, what waits for a place, and open runs with a task and no agent. With `serve.enabled`
+not true the tasks and runs a daemon would take up once enabled are listed as `if enabled:`. It does not show
+what the next cycle would do; a separate command will (TASK-H9QP).
 
 ## Exit codes
 
@@ -302,19 +330,20 @@ launchd (macOS):
   with a task in `progress`, no agent and no note; `kodel status`, the TUI and `--status` show it, and any agent
   continues it with `pipeline_next_step`. A dead worker of a format-1 run is logged again after each restart.
 
-## Decision T-43
+## Decision T-44
 
 *A daemon (`kodel serve`) starts and resumes background workers by the person's `serve` block; one pure
 function plans, one launcher starts each run's agent once, one lock admits, one owner resumes; it decides
 nothing about a run and writes only the fact that a worker is gone; a task an agent made or changed waits for
-a person.*
+a person, unless the person's rule says `approval: any`.*
 
-Test plan: the `t43_*` tests. The decision is refuted if, on one checkout with one daemon, one state base and
+Test plan: the `t44_*` tests. The decision is refuted if, on one checkout with one daemon, one state base and
 builds with this change:
 
 - a task is started twice;
 - a task an agent made, or whose title, body, status, priority or parent an agent changed through the tools,
-  is started by the daemon without a `kodel task approve` after that;
+  is started by the daemon without a `kodel task approve` after that, unless the rule that matched it says
+  `approval: any`;
 - more worker processes than `max_workers`, or more open worker runs than `max_runs`, exist after an act of the
   daemon;
 - a decided run of a worker is not resumed within two cycles of a free worker place with no TUI open, or is

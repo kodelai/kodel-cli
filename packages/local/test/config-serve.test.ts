@@ -34,13 +34,14 @@ type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 const _shapeIsTheCoreType: Same<ReturnType<typeof serveRulesOf>, ServeRules> = true;
 const _inputKeys: Same<keyof z.infer<typeof serveSchema>, keyof ServeRules> = true;
 
-describe("the serve block of the config (T-43)", () => {
-  test("t43_serve_block_defaults_and_strict_keys", async () => {
+describe("the serve block of the config (T-44)", () => {
+  test("t44_serve_block_defaults_and_strict_keys", async () => {
     expect((await loadConfig(dir)).serve).toEqual({
       enabled: false,
       max_workers: 1,
       max_runs: 1,
       stalled_after_s: 1800,
+      start: [],
     });
     expect(DEFAULT_SERVE).toEqual((await loadConfig(dir)).serve);
     await write("version: 1\n");
@@ -54,11 +55,14 @@ describe("the serve block of the config (T-43)", () => {
         "  max_runs: 4",
         "  stalled_after_s: 0",
         "  start:",
-        "    pipeline: dev",
-        "    match:",
-        "      status: [todo]",
-        "      priority: [urgent, high]",
-        "      parent: TASK-AB12",
+        "    - pipeline: dev",
+        "      match:",
+        "        status: [todo]",
+        "        priority: [urgent, high]",
+        "        parent: TASK-AB12",
+        "    - pipeline: triage",
+        "      match:",
+        "        approval: any",
         "",
       ].join("\n"),
     );
@@ -67,23 +71,37 @@ describe("the serve block of the config (T-43)", () => {
       max_workers: 2,
       max_runs: 4,
       stalled_after_s: 0,
-      start: {
-        pipeline: "dev",
-        match: { status: ["todo"], priority: ["urgent", "high"], parent: "TASK-AB12" },
-      },
+      start: [
+        {
+          pipeline: "dev",
+          match: {
+            status: ["todo"],
+            priority: ["urgent", "high"],
+            parent: "TASK-AB12",
+            approval: "required",
+          },
+        },
+        { pipeline: "triage", match: { approval: "any" } },
+      ],
     });
-    // An empty match is every `todo` task.
-    await write("serve:\n  start:\n    pipeline: dev\n");
-    expect((await loadConfig(dir)).serve.start).toEqual({ pipeline: "dev", match: {} });
+    // An empty match is every `todo` task that needs no approval.
+    await write("serve:\n  start:\n    - pipeline: dev\n");
+    expect((await loadConfig(dir)).serve.start).toEqual([
+      { pipeline: "dev", match: { approval: "required" } },
+    ]);
+    // An empty list starts nothing, as no list does.
+    await write("serve:\n  start: []\n");
+    expect((await loadConfig(dir)).serve.start).toEqual([]);
 
-    // Strict at every level.
-    for (const text of [
-      "serve:\n  enable: true\n",
-      "serve:\n  start:\n    pipeline: dev\n    when: always\n",
-      "serve:\n  start:\n    pipeline: dev\n    match:\n      state: [todo]\n",
-    ]) {
+    // Strict at every level, and the refusal names the key.
+    for (const [text, key] of [
+      ["serve:\n  enable: true\n", "enable"],
+      ["serve:\n  start:\n    - pipeline: dev\n      when: always\n", "when"],
+      ["serve:\n  start:\n    - pipeline: dev\n      match:\n        state: [todo]\n", "state"],
+    ] as const) {
       const error = await refusal(text);
       expect(error.code).toBe("CONFIG_INVALID");
+      expect(error.message).toContain(key);
     }
     // Bounds.
     for (const text of [
@@ -95,7 +113,10 @@ describe("the serve block of the config (T-43)", () => {
       "serve:\n  stalled_after_s: 86401\n",
       "serve:\n  max_workers: 1.5\n",
       "serve:\n  enabled: yes please\n",
-      "serve:\n  start:\n    match: {}\n",
+      "serve:\n  start:\n    - match: {}\n",
+      // The old shape, one rule and not a list.
+      "serve:\n  start:\n    pipeline: dev\n",
+      "serve:\n  start:\n    - pipeline: dev\n      match:\n        approval: never\n",
     ]) {
       expect((await refusal(text)).code).toBe("CONFIG_INVALID");
     }
@@ -103,7 +124,7 @@ describe("the serve block of the config (T-43)", () => {
     expect((await loadConfig(dir)).serve.max_workers).toBe(64);
   });
 
-  test("t43_release_note_promises_are_pinned", async () => {
+  test("t44_release_note_promises_are_pinned", async () => {
     // What an older kodel says about the block is what this one says about any key it does not know.
     const error = await refusal("serve_v2:\n  enabled: true\n");
     expect(error.message).toContain(

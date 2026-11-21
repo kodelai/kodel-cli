@@ -295,8 +295,8 @@ export class MemoryTaskAdapter implements TaskAdapter {
     if (input.priority !== undefined) row.priority = input.priority;
     else if (this.capabilities.priority) row.priority = DEFAULT_PRIORITY;
     if (input.parent !== undefined) row.parent = this.parentOf(input.parent).key;
-    if (input.created_by === "agent" && this.capabilities.provenance === true) {
-      row.created_by = "agent";
+    if (this.capabilities.provenance === true) {
+      if (input.created_by === "agent") row.created_by = "agent";
       if (input.run !== undefined) row.created_in_run = input.run;
     }
     this.rows.set(row.key, row);

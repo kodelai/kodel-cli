@@ -1,5 +1,5 @@
 /**
- * What `kodel serve` does in one cycle (TASK-G8KM, T-43). Pure: the person's rules, the runs, the
+ * What `kodel serve` does in one cycle (TASK-G8KM, T-44). Pure: the person's rules, the runs, the
  * workers, the tasks and the daemon's memory in (`now` is an input), the actions and the new memory
  * out. The daemon acts only on what this returns; `kodel serve --status` shows it and acts on nothing.
  *
@@ -7,7 +7,7 @@
  * after a decision a person made, a start of a task, a give-up comment on a task and a log line.
  */
 import type { RunStatus } from "../run";
-import type { TaskState } from "../tasks";
+import { TASK_LIMITS, type TaskState } from "../tasks";
 import {
   type DecisionInfo,
   type ResumeNo,
@@ -16,12 +16,29 @@ import {
   type ServeWorkerView,
 } from "./resume";
 
+/** `required`: a task that waits for `kodel task approve` is not taken; `any`: it is taken too. */
+export type ServeApproval = "required" | "any";
+
+export interface ServeMatch {
+  status?: string[];
+  priority?: string[];
+  parent?: string;
+  approval: ServeApproval;
+}
+
+/** One rule of `serve.start`: the first rule whose match fits a task decides whether and with which pipeline it starts. */
+export interface ServeStartRule {
+  pipeline: string;
+  match: ServeMatch;
+}
+
 export interface ServeRules {
   enabled: boolean;
   max_workers: number;
   max_runs: number;
   stalled_after_s: number;
-  start?: { pipeline: string; match: { status?: string[]; priority?: string[]; parent?: string } };
+  /** Empty: the daemon starts nothing and only resumes and watches. */
+  start: ServeStartRule[];
 }
 
 export interface ServeTaskView {
@@ -52,17 +69,32 @@ export interface ServeRunView {
 }
 
 export interface ServeMemory {
-  attempts: Record<string, { count: number; last_at: number; reason: string }>;
+  attempts: Record<
+    string,
+    {
+      count: number;
+      last_at: number;
+      reason: string;
+      /** The give-up comment could not be written: this daemon starts the task no more and does not try again. */
+      given_up?: boolean;
+    }
+  >;
   /** Run ids this daemon started, for the count below. */
   mine: string[];
   dead_in_a_row: number;
   /** Marks of log lines already printed, and of workers already counted. */
   logged: string[];
   /**
-   * Runs this daemon made whose agent did not start and left no worker record: each counts once as a
-   * worker that ended outside a wait, and gets its `not_started` note (`noted` once it is written).
+   * Runs this daemon made whose agent did not start and left no worker record, or whose records could not be
+   * read right after the failed launch: each counts once as a worker that ended outside a wait, and gets its
+   * `not_started` note (`noted` once it is written), unless a worker record shows up first.
    */
   unlaunched: { runId: string; at: number; noted?: true }[];
+  /**
+   * Failed resumes by `<run id>:<decision seq>`: tried again `START_RETRY_MS` apart, given up after
+   * `START_ATTEMPTS`, so a resume that cannot work neither repeats every cycle nor holds a worker place.
+   */
+  resume_attempts?: Record<string, { count: number; last_at: number; reason: string }>;
 }
 
 export interface ServeUnreadableRun {
@@ -93,7 +125,8 @@ export type ServeLogProblem =
   | "unreadable"
   | "queued"
   | "environment"
-  | "paused";
+  | "paused"
+  | "resume_failed";
 
 export type ServeAction =
   | {
@@ -108,7 +141,7 @@ export type ServeAction =
     }
   | { kind: "resume"; runId: string; seq: number; sessionId: string }
   | { kind: "start"; taskKey: string; pipeline: string }
-  | { kind: "give_up"; taskKey: string; reason: string }
+  | { kind: "give_up"; taskKey: string; pipeline: string; reason: string }
   | { kind: "log"; mark: string; problem: ServeLogProblem; runId?: string; detail?: string };
 
 export interface ServePlan {
@@ -148,7 +181,12 @@ const GIVE_UP_PREFIX = `kodel serve: not started after ${START_ATTEMPTS} attempt
 
 /** The comment the daemon leaves on a task it gave up on; the latest comment of that text stops the starts. */
 export function giveUpComment(pipeline: string, reason: string): string {
-  return `${GIVE_UP_PREFIX} (pipeline ${pipeline}): ${reason}. A newer comment makes the daemon try again; or start it by its key in the TUI.`;
+  const head = `${GIVE_UP_PREFIX} (pipeline ${pipeline}): `;
+  const tail = ". A newer comment makes the daemon try again; or start it by its key in the TUI.";
+  // A tracker refuses a longer comment, and a give-up that cannot be written would be tried for ever.
+  const room = Math.max(0, TASK_LIMITS.comment - head.length - tail.length);
+  const clipped = reason.length > room ? `${reason.slice(0, Math.max(0, room - 1))}…` : reason;
+  return `${head}${clipped}${tail}`;
 }
 
 export const isGiveUpComment = (comment: string | undefined): boolean =>
@@ -162,6 +200,8 @@ const RELEASES_RUN: readonly ResumeNo[] = [
   "dead",
   "not_at_wait",
   "wait_before_start",
+  // Another agent took the run on from a later wait: this worker is never resumed again.
+  "went_on",
   "already_resumed",
   "no_session_id",
   "agent_decided",
@@ -207,6 +247,8 @@ export function admitStart(input: {
   /** Runs that cannot be read: their workers hold their places, as in `planServe`. */
   unreadable?: ServeUnreadableRun[];
   limits?: { max_workers: number; max_runs: number };
+  /** The approval setting of the rule that took the task; without one, approval is required (fail closed). */
+  approval?: ServeApproval;
 }): Admission {
   const { task, runs, limits } = input;
   if (task.state === "done") return { ok: false, why: "done" };
@@ -214,7 +256,9 @@ export function admitStart(input: {
   if (task.started_runs > 0 || runs.some((r) => r.taskKey === task.key)) {
     return { ok: false, why: "has_run" };
   }
-  if (task.needs_approval === true) return { ok: false, why: "not_approved" };
+  if (task.needs_approval === true && input.approval !== "any") {
+    return { ok: false, why: "not_approved" };
+  }
   if (isGiveUpComment(task.comment)) return { ok: false, why: "gave_up" };
   if (limits !== undefined) {
     const now = servePlaces(runs, input.unreadable);
@@ -224,11 +268,15 @@ export function admitStart(input: {
   return { ok: true };
 }
 
-/** Whether a task matches the start rule: every key given holds; an empty match is every task. */
+/**
+ * Whether a task matches a start rule: every key given holds, and a task that waits for approval only
+ * under `approval: any`; a match with no other key is every task.
+ */
 export function matchesRule(
   task: ServeTaskView,
-  match: NonNullable<ServeRules["start"]>["match"],
+  match: Omit<ServeMatch, "approval"> & { approval?: ServeApproval },
 ): boolean {
+  if (task.needs_approval === true && match.approval !== "any") return false;
   if (match.status !== undefined && !match.status.includes(task.status)) return false;
   if (
     match.priority !== undefined &&
@@ -238,6 +286,14 @@ export function matchesRule(
   }
   if (match.parent !== undefined && task.parent !== match.parent) return false;
   return true;
+}
+
+/** The first rule whose match fits the task: it decides whether and with which pipeline the task starts. */
+export function ruleFor(
+  task: ServeTaskView,
+  start: readonly ServeStartRule[],
+): ServeStartRule | undefined {
+  return start.find((rule) => matchesRule(task, rule.match));
 }
 
 /** Log lines printed once: a mark is remembered until the condition is gone. */
@@ -312,6 +368,9 @@ export function planServe(input: ServeInput): ServePlan {
     dead_in_a_row: input.memory.dead_in_a_row,
     logged: [...input.memory.logged],
     unlaunched: input.memory.unlaunched.map((u) => ({ ...u })),
+    ...(input.memory.resume_attempts === undefined
+      ? {}
+      : { resume_attempts: structuredClone(input.memory.resume_attempts) }),
   };
   const lines = new Lines(memory.logged);
   const notes: ServeAction[] = [];
@@ -445,11 +504,26 @@ export function planServe(input: ServeInput): ServePlan {
 
   // Resumes, oldest decision first; each needs a worker place only.
   const resumable: { run: ServeRunView; seq: number; ts: number; sessionId: string }[] = [];
+  const retrying: string[] = [];
   for (const run of runs) {
     const verdict = verdicts.get(run.runId);
     if (verdict === undefined) continue;
     if (verdict.kind === "resume") {
       const sessionId = run.worker?.sessionId;
+      const tried = memory.resume_attempts?.[`${run.runId}:${verdict.seq}`];
+      if (tried !== undefined && tried.count >= START_ATTEMPTS) {
+        lines.once(`resume_failed:${run.runId}:${verdict.seq}`, {
+          problem: "resume_failed",
+          runId: run.runId,
+          detail: `not resumed after ${START_ATTEMPTS} attempts: ${tried.reason}; continue the run with any agent, or stop kodel serve and resume it in the TUI`,
+        });
+        continue;
+      }
+      if (tried !== undefined && now - tried.last_at < START_RETRY_MS) {
+        // It goes before any start, as a waiting resume does: a start must not take its worker place.
+        retrying.push(run.runId);
+        continue;
+      }
       if (sessionId !== undefined) {
         resumable.push({ run, seq: verdict.seq, ts: verdict.decision.ts, sessionId });
       }
@@ -466,7 +540,7 @@ export function planServe(input: ServeInput): ServePlan {
   }
   resumable.sort((a, b) => a.ts - b.ts || a.seq - b.seq || a.run.runId.localeCompare(b.run.runId));
   const resumes: ServeAction[] = [];
-  const waitingResumes: string[] = [];
+  const waitingResumes: string[] = [...retrying];
   for (const r of resumable) {
     if (rules.enabled && workers < rules.max_workers) {
       resumes.push({ kind: "resume", runId: r.run.runId, seq: r.seq, sessionId: r.sessionId });
@@ -480,12 +554,9 @@ export function planServe(input: ServeInput): ServePlan {
   const giveUps: ServeAction[] = [];
   const starts: ServeAction[] = [];
   const waitingStarts: string[] = [];
-  const rule = rules.start;
+  const starting = rules.start.length > 0;
   const incomplete =
-    rule !== undefined &&
-    input.tasks !== undefined &&
-    input.environment.ok &&
-    !input.tasks.complete;
+    starting && input.tasks !== undefined && input.environment.ok && !input.tasks.complete;
   const problem = !input.environment.ok
     ? input.environment.reason
     : incomplete
@@ -495,24 +566,34 @@ export function planServe(input: ServeInput): ServePlan {
     problem: "environment",
     ...(problem === undefined ? {} : { detail: problem }),
   });
-  if (rule !== undefined && input.tasks !== undefined && input.environment.ok && !incomplete) {
+  if (starting && input.tasks !== undefined && input.environment.ok && !incomplete) {
     const priorities = input.tasks.priorities;
+    // One order across every rule: the rule decides only whether the task is taken and its pipeline.
     const candidates = input.tasks.list
-      .map((task, order) => ({ task, order }))
-      .filter(({ task }) => matchesRule(task, rule.match) && admitStart({ task, runs }).ok === true)
+      .flatMap((task, order) => {
+        const rule = ruleFor(task, rules.start);
+        return rule !== undefined &&
+          admitStart({ task, runs, approval: rule.match.approval }).ok === true
+          ? [{ task, order, rule }]
+          : [];
+      })
       .sort(
         (a, b) =>
           priorityRank(priorities, a.task.priority) - priorityRank(priorities, b.task.priority) ||
           a.order - b.order,
-      )
-      .map(({ task }) => task);
+      );
     const queued: string[] = [];
-    for (const task of candidates) {
+    for (const { task, rule } of candidates) {
       const attempt = memory.attempts[task.key];
       if (attempt !== undefined && attempt.count >= START_ATTEMPTS) {
         // The attempts stay until the comment is written (the daemon clears them then).
-        if (rules.enabled) {
-          giveUps.push({ kind: "give_up", taskKey: task.key, reason: attempt.reason });
+        if (rules.enabled && attempt.given_up !== true) {
+          giveUps.push({
+            kind: "give_up",
+            taskKey: task.key,
+            pipeline: rule.pipeline,
+            reason: attempt.reason,
+          });
         }
         continue;
       }
@@ -557,7 +638,7 @@ export function planServe(input: ServeInput): ServePlan {
     orphans: runs
       .filter((r) => isOpen(r) && r.taskKey !== undefined && r.worker === undefined)
       .map((r) => r.runId),
-    ...(rule === undefined
+    ...(!starting
       ? {}
       : problem !== undefined
         ? { blocked: problem }

@@ -218,7 +218,7 @@ visits are neutral names (`fixture-host:1`, `fixture-host:2`, `fixture-gone:1`).
 
 ## `v2-worker/`
 
-Two runs of run-state format 2 with a `worker_note` (T-43, TASK-G8KM: the journal-only event `kodel serve`
+Two runs of run-state format 2 with a `worker_note` (T-44, TASK-G8KM: the journal-only event `kodel serve`
 writes when a worker it watches is gone; see `docs/run-formats.md`). Format 2 is amended in place for it
 (capability `workerNotes`); the state has no new field. A throwaway script (not part of this repository) drove
 a real daemon (`createServeDaemon` of `@kodel-ai/local`, with `LocalPipelineHost` and the `local` task

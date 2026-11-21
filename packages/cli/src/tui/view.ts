@@ -122,7 +122,7 @@ import { type ResumeOffer, resumeOffer } from "./worker-resume";
 export const SECTIONS = ["Sessions", "Pipeline", "Tasks", "Report"] as const;
 
 /**
- * What the screen knows of `kodel serve` for this checkout (TASK-G8KM, T-43), read at each read of the
+ * What the screen knows of `kodel serve` for this checkout (TASK-G8KM, T-44), read at each read of the
  * worker records: `active` takes the resumes over from the screen; `silent` (alive, no cycle for 2 min)
  * gives them back and is named in the header; anything else (`off`, idle, unreadable) is as if none ran.
  */

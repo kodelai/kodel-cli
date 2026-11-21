@@ -560,11 +560,12 @@ export class LocalTaskAdapter implements TaskAdapter {
       if (input.body !== undefined) record.body = input.body;
       if (input.comment !== undefined) record.comments = [{ at, text: input.comment }];
       if (parentKey !== undefined) record.parent = parentKey;
-      if (input.run !== undefined) record.runs = [input.run];
-      if (input.created_by === "agent") {
-        record.created_by = "agent";
-        if (input.run !== undefined) record.created_in_run = input.run;
+      if (input.run !== undefined) {
+        record.runs = [input.run];
+        // Whoever made it: the run it was found in is not a run that started it.
+        record.created_in_run = input.run;
       }
+      if (input.created_by === "agent") record.created_by = "agent";
       try {
         // `wx`: a key somebody took meanwhile is never overwritten.
         await writeFile(this.file(key), serialize(record), { flag: "wx" });

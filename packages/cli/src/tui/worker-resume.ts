@@ -121,6 +121,11 @@ export function resumeOffer(
       };
     case "not_at_wait":
       return notAtGate(session, worker);
+    case "went_on":
+      return {
+        line: `${exitWord(worker)} at a wait; another agent went on`,
+        why: `the agent stopped at an earlier wait and another agent took the run on; any agent continues the run with pipeline_next_step ${session.id}`,
+      };
     case "waiting_person":
       return { line: "agent waiting for you", why: "the run waits for your decision" };
     case "undecided":

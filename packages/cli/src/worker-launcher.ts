@@ -107,7 +107,7 @@ export interface WorkerLauncher {
   stop(runId: string): Promise<void>;
 }
 
-/** A worker of a run that `kodel serve` saw gone, as its `worker_note` says (TASK-G8KM, T-43). */
+/** A worker of a run that `kodel serve` saw gone, as its `worker_note` says (TASK-G8KM, T-44). */
 export interface WorkerGone {
   worker: string;
   id?: string;

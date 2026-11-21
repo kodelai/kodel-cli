@@ -26,7 +26,7 @@
 Settled by the person and not reopened: one PR; automatic resume whenever the daemon is on; no approval of the block;
 a dead worker goes into the run; `lastOutputAt` as an optional field of `WorkerStatus`; two limits (`max_workers`,
 `max_runs`); a mark on tasks an agent made and an approval by a person; in-memory state with the give-up as the
-task's latest comment; one start rule; exit 78; decision id `T-43` (`T-44` if TASK-HN8N takes it first). Settled by
+task's latest comment; one start rule; exit 78; decision id `T-44` (planned as `T-43`; `T-44` because main took `T-43` first). Settled by
 the fixes of plan-fix 1 and kept as defaults unless the person says otherwise: every task not made by a person at a
 terminal counts as an agent's; tasks without a mark count as the person's; `kodel task approve <key>` is the way to
 approve; a tracker that cannot keep the mark starts nothing; `max_workers: 1` and `max_runs: 1` by default; only the
@@ -222,70 +222,70 @@ Pure (`packages/pipeline-core/test/serve-*.test.ts`, `format-codecs.test.ts`):
 
 | Criterion | Test |
 | --- | --- |
-| One named case per verdict (`no_worker`, `unknown`, `active`, `dead`, `over`, `not_at_wait`, `wait_before_start`, `waiting_person`, `undecided`, `agent_decided`, `already_resumed`, `no_session_id`, `moved`, `resume`); the TUI's table passes unchanged; `RunDecision` is `WorkerDecision` | `t43_resume_verdict_<why>`, `t43_resume_verdict_is_the_tui_rule`, `t43_run_decision_is_worker_decision` |
-| Started at most once: not when done, in progress, named by a run, with a run in the tracker besides `created_in_run`, waiting for an approval, given up | `t43_matching_task_is_started_at_most_once` |
-| `needsApproval`: made by an agent; a person's or an approved task whose title, body, status, priority or parent an agent changed (each a case); approved after the edit: no; equal times: yes; a comment: no; the engine's own update: no | `t43_needs_approval_table` |
-| Status, priority, parent (direct children only); an empty match is every `todo` task | `t43_rule_matches` |
-| An incomplete list (`complete: false`) plans no start and one `environment` line | `t43_incomplete_list_starts_nothing` |
-| One case per row of the two counts: at a gate (run yes, worker no), running (both), `unknown` (both), lost (neither), ended (neither) | `t43_limits_table` |
-| Both limits hold; the rest wait in priority order; `queued` logged on change only; over a limit after a TUI start: nothing new | `t43_two_limits_hold_and_the_rest_wait`, `t43_over_the_limit_starts_nothing` |
-| `max_workers` full: resumes wait, oldest decision first, and go before any start; a resume never needs `max_runs` | `t43_resumes_go_before_starts` |
-| Three daemon-started workers in a row ended outside a wait: no start, one line; a worker at a wait or done resets | `t43_three_dead_workers_pause_starts` |
-| Stalled from the latest of last output, start, daemon start, last gap; `0` never; once per quiet spell | `t43_stalled_from_last_output_at`, `t43_sleep_gap_stalls_no_worker` |
-| Lost, killed by timeout, exited outside a wait: one note per record id; a second worker under a reused name is noted too; stopped by a person: none | `t43_dead_worker_is_noted_once_per_record` |
-| Three attempts 60 s apart, then give-up; the give-up comment stops retries; a newer comment re-arms | `t43_gives_up_after_three_attempts` |
-| Same input, same plan; the subpath imports no `node:` module | `t43_plan_is_pure` |
-| `worker_note` in `decide()`: journaled in format 2 with no state change; each a no-op: a name or id over the bound or with other characters, a reason outside the four, a non-integer exit code, an ended run, format 1 | `t43_worker_note_shape_<case>`, `t43_worker_note_format_1_is_untouched` |
+| One named case per verdict (`no_worker`, `unknown`, `active`, `dead`, `over`, `not_at_wait`, `wait_before_start`, `waiting_person`, `undecided`, `agent_decided`, `already_resumed`, `no_session_id`, `moved`, `resume`); the TUI's table passes unchanged; `RunDecision` is `WorkerDecision` | `t44_resume_verdict_<why>`, `t44_resume_verdict_is_the_tui_rule`, `t44_run_decision_is_worker_decision` |
+| Started at most once: not when done, in progress, named by a run, with a run in the tracker besides `created_in_run`, waiting for an approval, given up | `t44_matching_task_is_started_at_most_once` |
+| `needsApproval`: made by an agent; a person's or an approved task whose title, body, status, priority or parent an agent changed (each a case); approved after the edit: no; equal times: yes; a comment: no; the engine's own update: no | `t44_needs_approval_table` |
+| Status, priority, parent (direct children only); an empty match is every `todo` task | `t44_rule_matches` |
+| An incomplete list (`complete: false`) plans no start and one `environment` line | `t44_incomplete_list_starts_nothing` |
+| One case per row of the two counts: at a gate (run yes, worker no), running (both), `unknown` (both), lost (neither), ended (neither) | `t44_limits_table` |
+| Both limits hold; the rest wait in priority order; `queued` logged on change only; over a limit after a TUI start: nothing new | `t44_two_limits_hold_and_the_rest_wait`, `t44_over_the_limit_starts_nothing` |
+| `max_workers` full: resumes wait, oldest decision first, and go before any start; a resume never needs `max_runs` | `t44_resumes_go_before_starts` |
+| Three daemon-started workers in a row ended outside a wait: no start, one line; a worker at a wait or done resets | `t44_three_dead_workers_pause_starts` |
+| Stalled from the latest of last output, start, daemon start, last gap; `0` never; once per quiet spell | `t44_stalled_from_last_output_at`, `t44_sleep_gap_stalls_no_worker` |
+| Lost, killed by timeout, exited outside a wait: one note per record id; a second worker under a reused name is noted too; stopped by a person: none | `t44_dead_worker_is_noted_once_per_record` |
+| Three attempts 60 s apart, then give-up; the give-up comment stops retries; a newer comment re-arms | `t44_gives_up_after_three_attempts` |
+| Same input, same plan; the subpath imports no `node:` module | `t44_plan_is_pure` |
+| `worker_note` in `decide()`: journaled in format 2 with no state change; each a no-op: a name or id over the bound or with other characters, a reason outside the four, a non-integer exit code, an ended run, format 1 | `t44_worker_note_shape_<case>`, `t44_worker_note_format_1_is_untouched` |
 | The event is in the key tables; the fixture `v2-worker` opens (`status`, `report`), round-trips, an open one goes on | `t41_*` over `v2-worker` |
-| The daemon's record: round trip, unknown optional field ignored, newer `v` refused, a fixture per version | `t43_serve_record_round_trip` |
+| The daemon's record: round trip, unknown optional field ignored, newer `v` refused, a fixture per version | `t44_serve_record_round_trip` |
 
 Adapter (`packages/local/test/`; real host and tracker, fake clock, `ScriptedLauncher`). They run on all three OSes
 because process liveness is injected (`isSame`); the three that use real processes are POSIX only and marked `*`:
 
 | Criterion | Test |
 | --- | --- |
-| Done-when 1: a new matching task starts, stops at its gate, is resumed in the cycle after the gate is approved (counted with the fake clock), finishes; no TUI | `t43_task_runs_through_a_gate_with_no_tui` |
-| Done-when 2: `max_runs: 1`: the second starts only after the first run ended, also while the first waits at its gate; `max_workers: 1`, `max_runs: 2`: it starts when the first reaches its gate, and the first's resume comes in the first cycle after the second's worker left | `t43_limit_one_second_task_waits`, `t43_resume_waits_for_a_worker_place` |
-| `host.start` answers `reused` or `terminal`: no note, no launch, no attempt | `t43_existing_run_is_not_given_a_worker` |
-| `launcher.start` throws and no record exists: `gone not_started`, the places are free, the task is not started again; it throws and a record exists: no note | `t43_failed_launch_is_noted_not_retried`, `t43_launch_that_spawned_is_not_noted` |
-| A worker exited at its gate or was stopped and the person removed its record: nothing is launched, nothing is noted, also by a new daemon | `t43_rm_after_start_launches_nothing` |
-| `noteWorker` in the host: a name that is not `kw-<this run>` or `kw-<this run>-d<n>` is refused; a second call with the same id writes nothing | `t43_note_worker_binds_the_name_to_the_run` |
-| Two processes on one store (daemon and the TUI's `startTask`) make one run for a task and pass no limit `*`; a live slow holder is never taken over, a dead one and a reused pid are (injected); a waiter gives up after 15 s on both paths; a start that holds `worker-start.lock` while another process holds `start.lock` finishes (no cycle) | `t43_two_processes_start_a_task_once`, `t43_start_lock_stale_only_when_gone`, `t43_start_lock_waiter_gives_up`, `t43_lock_order_has_no_cycle` |
-| A holder that is gone is noted in the next cycle; a new daemon notes nothing twice; for a format-1 run it is logged once per daemon | `t43_dead_holder_noted_within_one_cycle`, `t43_restart_does_not_repeat_notes`, `t43_format_1_dead_worker_is_logged_once` |
-| An agent's journal line between plan and act cancels the resume; `NAME_TAKEN` is success; two loops resume once; removing a record re-arms or releases | `t43_resume_is_skipped_when_an_agent_moved`, `t43_resume_name_taken_is_success`, `t43_rm_rearms_or_releases_a_run` |
-| The first of two actions throws, the second runs; a stop request ends after the action in hand; `kodel agent ls` fails: the cycle does nothing | `t43_cycle_survives_a_failed_action`, `t43_stop_finishes_the_action_in_hand`, `t43_unreadable_workers_stop_the_cycle` |
-| `enabled: false` or a config that does not load: idle, logged once, active when fixed; config outside the block or the build changed: 75 | `t43_idle_until_enabled`, `t43_changed_config_or_build_ends_the_daemon` |
-| Environment problems, each a named case (`ChoiceNeeded`, `STATE_LOCKED`, no `claude`, `worktree.mode: off` (still resumes), tracker without `provenance`, tracker without runs, more than 5 pages): no attempt, no comment, logged on change; preflight at most once a minute | `t43_environment_<case>_is_not_an_attempt` |
-| A second daemon refuses and names the pid; dead or recycled pid taken over; two takers, one wins; unreadable refuses; the status table (active, idle, gone, silent, unreadable) | `t43_second_serve_refuses_and_names_the_pid`, `t43_stale_record_is_taken_over`, `t43_takeover_race_has_one_winner`, `t43_serve_status_table` |
-| The three reasons a run cannot be opened are three log lines | `t43_unreadable_runs_say_why` |
-| A secret in a title, a failure reason, a decision reason is in no log line, comment or note | `t43_log_and_comments_are_redacted` |
-| The daemon's host port has no decision call; the journal's decisions are only the test's; apart from `worker_note` a daemon's run has the file names and event kinds of a TUI's; no MCP tool list names `worker_note`, `noteWorker` or `approve` | `t43_daemon_decides_nothing`, `t43_serve_adds_only_worker_notes`, `t43_tool_surface_has_no_note_and_no_approve` |
-| A cycle over 500 ended runs reads each once | `t43_ended_runs_are_read_once` |
-| The block: off by default, strict, bounds; the zod shape is the core type; the refusal text for an unknown key and `NOT_A_SIGN_OF_LIFE` are pinned | `t43_serve_block_defaults_and_strict_keys`, `t43_release_note_promises_are_pinned` |
-| Task mark: `task_create` and an editing `task_update` set it, the tools cannot clear it or approve; an old file reads as a person's, an older schema keeps the keys, the fixture round-trips; `approve` sets `approved_at` later than the edit and refuses a task changed since it was shown | `t43_task_mark_is_set_by_the_tool`, `t43_task_mark_round_trip`, `t43_approve_refuses_a_changed_task` |
-| An agent rewrites a person's task to match the rule, or an approved one: not started until `kodel task approve` | `t43_agent_edit_needs_a_new_approval` |
+| Done-when 1: a new matching task starts, stops at its gate, is resumed in the cycle after the gate is approved (counted with the fake clock), finishes; no TUI | `t44_task_runs_through_a_gate_with_no_tui` |
+| Done-when 2: `max_runs: 1`: the second starts only after the first run ended, also while the first waits at its gate; `max_workers: 1`, `max_runs: 2`: it starts when the first reaches its gate, and the first's resume comes in the first cycle after the second's worker left | `t44_limit_one_second_task_waits`, `t44_resume_waits_for_a_worker_place` |
+| `host.start` answers `reused` or `terminal`: no note, no launch, no attempt | `t44_existing_run_is_not_given_a_worker` |
+| `launcher.start` throws and no record exists: `gone not_started`, the places are free, the task is not started again; it throws and a record exists: no note | `t44_failed_launch_is_noted_not_retried`, `t44_launch_that_spawned_is_not_noted` |
+| A worker exited at its gate or was stopped and the person removed its record: nothing is launched, nothing is noted, also by a new daemon | `t44_rm_after_start_launches_nothing` |
+| `noteWorker` in the host: a name that is not `kw-<this run>` or `kw-<this run>-d<n>` is refused; a second call with the same id writes nothing | `t44_note_worker_binds_the_name_to_the_run` |
+| Two processes on one store (daemon and the TUI's `startTask`) make one run for a task and pass no limit `*`; a live slow holder is never taken over, a dead one and a reused pid are (injected); a waiter gives up after 15 s on both paths; a start that holds `worker-start.lock` while another process holds `start.lock` finishes (no cycle) | `t44_two_processes_start_a_task_once`, `t44_start_lock_stale_only_when_gone`, `t44_start_lock_waiter_gives_up`, `t44_lock_order_has_no_cycle` |
+| A holder that is gone is noted in the next cycle; a new daemon notes nothing twice; for a format-1 run it is logged once per daemon | `t44_dead_holder_noted_within_one_cycle`, `t44_restart_does_not_repeat_notes`, `t44_format_1_dead_worker_is_logged_once` |
+| An agent's journal line between plan and act cancels the resume; `NAME_TAKEN` is success; two loops resume once; removing a record re-arms or releases | `t44_resume_is_skipped_when_an_agent_moved`, `t44_resume_name_taken_is_success`, `t44_rm_rearms_or_releases_a_run` |
+| The first of two actions throws, the second runs; a stop request ends after the action in hand; `kodel agent ls` fails: the cycle does nothing | `t44_cycle_survives_a_failed_action`, `t44_stop_finishes_the_action_in_hand`, `t44_unreadable_workers_stop_the_cycle` |
+| `enabled: false` or a config that does not load: idle, logged once, active when fixed; config outside the block or the build changed: 75 | `t44_idle_until_enabled`, `t44_changed_config_or_build_ends_the_daemon` |
+| Environment problems, each a named case (`ChoiceNeeded`, `STATE_LOCKED`, no `claude`, `worktree.mode: off` (still resumes), tracker without `provenance`, tracker without runs, more than 5 pages): no attempt, no comment, logged on change; preflight at most once a minute | `t44_environment_<case>_is_not_an_attempt` |
+| A second daemon refuses and names the pid; dead or recycled pid taken over; two takers, one wins; unreadable refuses; the status table (active, idle, gone, silent, unreadable) | `t44_second_serve_refuses_and_names_the_pid`, `t44_stale_record_is_taken_over`, `t44_takeover_race_has_one_winner`, `t44_serve_status_table` |
+| The three reasons a run cannot be opened are three log lines | `t44_unreadable_runs_say_why` |
+| A secret in a title, a failure reason, a decision reason is in no log line, comment or note | `t44_log_and_comments_are_redacted` |
+| The daemon's host port has no decision call; the journal's decisions are only the test's; apart from `worker_note` a daemon's run has the file names and event kinds of a TUI's; no MCP tool list names `worker_note`, `noteWorker` or `approve` | `t44_daemon_decides_nothing`, `t44_serve_adds_only_worker_notes`, `t44_tool_surface_has_no_note_and_no_approve` |
+| A cycle over 500 ended runs reads each once | `t44_ended_runs_are_read_once` |
+| The block: off by default, strict, bounds; the zod shape is the core type; the refusal text for an unknown key and `NOT_A_SIGN_OF_LIFE` are pinned | `t44_serve_block_defaults_and_strict_keys`, `t44_release_note_promises_are_pinned` |
+| Task mark: `task_create` and an editing `task_update` set it, the tools cannot clear it or approve; an old file reads as a person's, an older schema keeps the keys, the fixture round-trips; `approve` sets `approved_at` later than the edit and refuses a task changed since it was shown | `t44_task_mark_is_set_by_the_tool`, `t44_task_mark_round_trip`, `t44_approve_refuses_a_changed_task` |
+| An agent rewrites a person's task to match the rule, or an approved one: not started until `kodel task approve` | `t44_agent_edit_needs_a_new_approval` |
 
 CLI and TUI (`packages/cli/test/`):
 
 | Criterion | Test |
 | --- | --- |
-| Refusals with 78: Windows (platform injected; says so, starts nothing), `KODEL_ENGINE`, second daemon; `SIGTERM` and `SIGHUP`: 0, record gone, a worker goes on `*` | `t43_serve_on_windows_starts_no_workers`, `t43_serve_refuses_from_an_engine_command`, `t43_serve_stops_cleanly` |
-| `--status` prints the daemon, the counts, what would start, runs with a task and no agent; it writes nothing | `t43_serve_status_acts_on_nothing` |
-| `tui` and `serve` use one launcher factory; `lastOutputAt` is copied, absent when the record has none | `t43_one_launcher_factory`, `t43_worker_status_carries_last_output_at` |
-| `kodel task approve` needs a terminal and a yes; `task add` and `task set` without a terminal or under `KODEL_ENGINE` mark the task | `t43_approve_is_a_persons_command`, `t43_task_add_and_set_mark_without_a_terminal` |
-| `status` and `report` show a `worker_note`; the TUI card shows it | `t43_status_and_report_show_a_dead_worker`, `t43_tui_shows_a_dead_worker` |
-| Active daemon: no resume offer, the header; idle, gone or silent: today's offer; the TUI's start holds the lock; every TASK-9PNS test unchanged | `t43_tui_leaves_the_resume_to_serve`, `t43_tui_offers_again_when_serve_is_silent`, `t43_tui_start_takes_the_start_lock` |
-| Real session adapter, a fake `claude` that drives the run through the host, under the guard of the existing `real` tests: start, gate, `kodel gate approved`, resume, done; a killed holder is noted `*` | `t43_serve_real_adapter_through_a_gate` |
-| Every test of the serve files carries the id that `docs/serve.md` names for the decision | `t43_test_names_carry_the_decision_id` |
+| Refusals with 78: Windows (platform injected; says so, starts nothing), `KODEL_ENGINE`, second daemon; `SIGTERM` and `SIGHUP`: 0, record gone, a worker goes on `*` | `t44_serve_on_windows_starts_no_workers`, `t44_serve_refuses_from_an_engine_command`, `t44_serve_stops_cleanly` |
+| `--status` prints the daemon, the counts, what would start, runs with a task and no agent; it writes nothing | `t44_serve_status_acts_on_nothing` |
+| `tui` and `serve` use one launcher factory; `lastOutputAt` is copied, absent when the record has none | `t44_one_launcher_factory`, `t44_worker_status_carries_last_output_at` |
+| `kodel task approve` needs a terminal and a yes; `task add` and `task set` without a terminal or under `KODEL_ENGINE` mark the task | `t44_approve_is_a_persons_command`, `t44_task_add_and_set_mark_without_a_terminal` |
+| `status` and `report` show a `worker_note`; the TUI card shows it | `t44_status_and_report_show_a_dead_worker`, `t44_tui_shows_a_dead_worker` |
+| Active daemon: no resume offer, the header; idle, gone or silent: today's offer; the TUI's start holds the lock; every TASK-9PNS test unchanged | `t44_tui_leaves_the_resume_to_serve`, `t44_tui_offers_again_when_serve_is_silent`, `t44_tui_start_takes_the_start_lock` |
+| Real session adapter, a fake `claude` that drives the run through the host, under the guard of the existing `real` tests: start, gate, `kodel gate approved`, resume, done; a killed holder is noted `*` | `t44_serve_real_adapter_through_a_gate` |
+| Every test of the serve files carries the id that `docs/serve.md` names for the decision | `t44_test_names_carry_the_decision_id` |
 
 Manual, outside the sandbox, at the final gate: the two done-when cases with a real `claude`
-(`tests/agents/claude-code-serve.test.ts`, `t43_live_serve_runs_a_task_through_a_gate`, `KODEL_AGENT_TESTS=1`); the
+(`tests/agents/claude-code-serve.test.ts`, `t44_live_serve_runs_a_task_through_a_gate`, `KODEL_AGENT_TESTS=1`); the
 systemd unit and the launchd plist (stop the service, the worker is still in `kodel agent ls`); a daemon under
 another `KODEL_STATE_DIR` (`--status` in the shell says no daemon and names the shell's state base). Not covered by
 any test: an older kodel on the same run, an agent's `pipeline_start` for the same task in the same second, a TUI
 built before this change, two clones on one tracker, the double step after an automatic resume (accepted).
 
-Refuted (T-43) if, on one checkout with one daemon, one state base and builds with this change: a task is started
+Refuted (T-44) if, on one checkout with one daemon, one state base and builds with this change: a task is started
 twice; a task an agent made, or whose title, body, status, priority or parent an agent changed through the tools, is
 started by the daemon without a `kodel task approve` after that; more worker processes than `max_workers` or more
 open worker runs than `max_runs` exist after an act of the daemon; a decided run of a worker is not resumed within
@@ -419,8 +419,8 @@ by the daemon; a run of format 1 is changed or refused because of a note.
 11. **Docs.** `docs/serve.md`: the block, a cycle, the two limits and the order, the pause after three dead workers,
     resume and its limit, the note, agent-made tasks and the approval, `--status`, exit codes, the record, the TUI
     with a daemon, the accepted risks in plain words, the limits above, what a unit needs (workers must outlive the
-    daemon, 78 means do not restart, the state base, linger) and the two examples below, T-43.
-    `docs/run-formats.md`: "Worker notes (TASK-G8KM, T-43)": format 2 gets the event from now on, also a run in
+    daemon, 78 means do not restart, the state base, linger) and the two examples below, T-44.
+    `docs/run-formats.md`: "Worker notes (TASK-G8KM, T-44)": format 2 gets the event from now on, also a run in
     flight; records already written are not rewritten; format 1 is unchanged; an older kodel ignores it and counts it
     as a sign of life; and "The `serve` block": an older kodel refuses the config, a server already running does not
     see it. `docs/tasks.md`: the mark, `kodel task approve`, the task file keys. `docs/history.md`: the event.
@@ -454,10 +454,10 @@ by the daemon; a run of format 1 is changed or refused because of a note.
       <key>StandardOutPath</key><string>/Users/me/Library/Logs/kodel-serve.log</string>
     </dict></plist>
     ```
-12. **Decision T-43** (the person copies it to the decision log). *A daemon (`kodel serve`) starts and resumes
+12. **Decision T-44** (the person copies it to the decision log). *A daemon (`kodel serve`) starts and resumes
     background workers by the person's `serve` block; one pure function plans, one launcher starts each run's agent
     once, one lock admits, one owner resumes; it decides nothing about a run and writes only the fact that a worker
-    is gone; a task an agent made or changed waits for a person.* Test plan: the `t43_*` tests. Refutation: the list
+    is gone; a task an agent made or changed waits for a person.* Test plan: the `t44_*` tests. Refutation: the list
     under "Refuted".
 13. `bun run typecheck`, `bun run lint`, `bun test`, `bun run build && node scripts/check-artifact.mjs`; the
     real-adapter and live tests and the manual scenario outside the sandbox.
@@ -514,10 +514,10 @@ From plan-revise 2 (critique attempt 2 and the recheck):
   to extend. Taken instead: the rule is in the MCP server's task instructions, and the plan says that outside this
   repository that text and `KODEL_ENGINE` are the only guards.
 - **[tests] a test for "an older kodel ignores the note, refuses the config, keeps the task keys".** Cannot be run
-  here; named as a check at release, and what this build promises is pinned (`t43_release_note_promises_are_pinned`).
+  here; named as a check at release, and what this build promises is pinned (`t44_release_note_promises_are_pinned`).
 - **[recheck, tests] a test for a record removed before the `started` note; [recheck, invariants] the journal
   contradicts itself after a launcher that throws.** Both notes are cut; the second is now
-  `t43_launch_that_spawned_is_not_noted`.
+  `t44_launch_that_spawned_is_not_noted`.
 
 Decided by the person at plan-approval (each stands as an accepted risk above): **I3, G6, G7, S8** (no approval of
 the block); **S2, S11 in part** (one PR; still cut: `poll_s`, `max_start_attempts`, the rule list); **G2, I7, G14,
@@ -582,3 +582,22 @@ and the give-up); **G12** is met by not touching the deny list.
   (`packages/cli/src/claude-worker.ts`): `kodel task approve` is a person's command and refuses under
   `KODEL_ENGINE` all the same, but denying it up front keeps a worker from trying. Unlike a `serve*` pattern it
   matches only after a spelling of the kodel binary, so no other program is refused.
+- The decision id is `T-44`, not `T-43`: main took `T-43` first (the `model` step without `engine`), so the
+  test names, docs and comments of `kodel serve` carry `T-44`.
+- `kodel task list` shows the approval as a column (`APPROVE`: `waits` or `-`) instead of an indented
+  `waits for approval` line under the row. The person's decision at the final gate.
+- `serve.start` is a list of rules `{ pipeline, match? }`, not one rule: the first rule whose match fits a task
+  decides whether it starts and with which pipeline (the start and the give-up comment carry that rule's
+  pipeline); the order of candidates stays tracker priority, then list order, across all rules; an empty list
+  starts nothing. The person's decision at the final gate.
+- `match.approval: required | any` (default `required`): a rule with `any` also starts a task that waits for
+  `kodel task approve`; `admitStart` applies the matched rule's setting and still requires approval when it is
+  given none. The person's decision at the final gate, recorded under T-44 in `docs/decisions.md`.
+- `kodel serve --status` no longer prints `next cycle:` lines; it shows the start rules instead, and a separate
+  command (TASK-H9QP) will show the plan. The person's decision at the final gate.
+- Two verdicts were added to the rule that frees a `max_runs` place: `wait_before_start` (a resumed worker that
+  died before its next wait) and `went_on` (a new verdict: the worker stopped at an earlier wait and another agent
+  took the run on to a later one; it is not noted or counted as dead, and the daemon never resumes it).
+- Failed resumes are retried like starts (60 s apart, given up after three with one `resume_failed` line;
+  `ServeMemory.resume_attempts`); a resume waiting out its retry goes before any start. Not in the plan; added after
+  review found a failing resume repeated every cycle and holding the only worker place.

@@ -365,8 +365,8 @@ describe("task_9pns the resume offer", () => {
   });
 });
 
-describe("t43 the TUI and kodel serve share one rule", () => {
-  test("t43_run_decision_is_worker_decision", () => {
+describe("t44 the TUI and kodel serve share one rule", () => {
+  test("t44_run_decision_is_worker_decision", () => {
     // both ways assignable: one type under two names
     const a: RunDecision = { seq: 1, ts: 1, kind: "gate", node: "g", outcome: "approved" };
     const b: WorkerDecision = a;
@@ -374,7 +374,7 @@ describe("t43 the TUI and kodel serve share one rule", () => {
     expect(c).toBe(a);
   });
 
-  test("t43_resume_verdict_is_the_tui_rule", () => {
+  test("t44_resume_verdict_is_the_tui_rule", () => {
     // Over every case the card knows, `s resumes` is offered exactly when the core rule says resume
     // (the TUI does not refuse a run an agent moved in: it warns).
     const info = decisionOf(GATE);

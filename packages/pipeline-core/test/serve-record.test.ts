@@ -1,5 +1,5 @@
 /**
- * The record of a running `kodel serve` (TASK-G8KM, T-43): machine-local state with one codec. A
+ * The record of a running `kodel serve` (TASK-G8KM, T-44): machine-local state with one codec. A
  * known `v` ignores unknown optional fields, a newer `v` says "upgrade kodel", `encode` is strict.
  */
 import { describe, expect, test } from "bun:test";
@@ -28,8 +28,8 @@ const RECORD: ServeRecord = {
   counts: { workers: 1, max_workers: 2, runs: 1, max_runs: 4 },
 };
 
-describe("t43 the daemon's record", () => {
-  test("t43_serve_record_round_trip", () => {
+describe("t44 the daemon's record", () => {
+  test("t44_serve_record_round_trip", () => {
     // round trip
     const text = encodeServeRecord(RECORD);
     const read = decodeServeRecord(JSON.parse(text));

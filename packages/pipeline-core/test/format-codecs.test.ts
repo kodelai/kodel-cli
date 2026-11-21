@@ -827,7 +827,7 @@ describe("t42 the format-2 runs with an engine step", () => {
   });
 });
 
-describe("t43 the note that a worker is gone", () => {
+describe("t44 the note that a worker is gone", () => {
   const NOW = 50_000;
   const v2Start = (): RunState => {
     const started = decide(AGENT_THEN_COMMAND, undefined, start(), 0);
@@ -847,7 +847,7 @@ describe("t43 the note that a worker is gone", () => {
       ...over,
     }) as RunEvent;
 
-  test("t43_worker_note_shape_is_journaled_with_no_state_change", () => {
+  test("t44_worker_note_shape_is_journaled_with_no_state_change", () => {
     const state = v2Start();
     const before = JSON.stringify(encodeRunState(state));
     const result = decide(AGENT_THEN_COMMAND, state, note(), NOW);
@@ -887,7 +887,7 @@ describe("t43 the note that a worker is gone", () => {
     expect(summarizeRun(state, []).workers_gone).toBeUndefined();
   });
 
-  test("t43_worker_note_shape_minimal_note_is_journaled", () => {
+  test("t44_worker_note_shape_minimal_note_is_journaled", () => {
     const result = decide(
       AGENT_THEN_COMMAND,
       v2Start(),
@@ -909,7 +909,7 @@ describe("t43 the note that a worker is gone", () => {
     ["at_after_the_record", { at: NOW + 1 }],
   ];
   for (const [name, over] of noOps) {
-    test(`t43_worker_note_shape_${name}`, () => {
+    test(`t44_worker_note_shape_${name}`, () => {
       const state = v2Start();
       const before = JSON.stringify(encodeRunState(state));
       const result = decide(AGENT_THEN_COMMAND, state, note(over), NOW);
@@ -921,7 +921,7 @@ describe("t43 the note that a worker is gone", () => {
     });
   }
 
-  test("t43_worker_note_shape_ended_run", () => {
+  test("t44_worker_note_shape_ended_run", () => {
     const canceled = decide(AGENT_THEN_COMMAND, v2Start(), { type: "cancel" }, 10);
     if (!canceled.ok) throw canceled.error;
     const result = decide(AGENT_THEN_COMMAND, canceled.state, note(), NOW);
@@ -929,7 +929,7 @@ describe("t43 the note that a worker is gone", () => {
     expect(result.ok && result.journal).toEqual([]);
   });
 
-  test("t43_v2_worker_fixture_holds_the_notes_and_reports_them", () => {
+  test("t44_v2_worker_fixture_holds_the_notes_and_reports_them", () => {
     // The golden runs of `fixtures/formats/v2-worker/` (a real daemon, a scripted launcher): one run whose
     // worker's holder was lost and that another agent then finished, one left open after a launch that
     // threw before it made a record.
@@ -956,7 +956,7 @@ describe("t43 the note that a worker is gone", () => {
     expect(reasons).toEqual({ r_0mwq65e84_mwmp: ["lost"], r_0mwq65epm_wgg7: ["not_started"] });
   });
 
-  test("t43_worker_note_format_1_is_untouched", () => {
+  test("t44_worker_note_format_1_is_untouched", () => {
     expect(V2_ONLY_EVENTS).toContain("worker_note");
     expect(V1_EVENTS).not.toContain("worker_note");
     expect(capabilitiesOf(1).workerNotes).toBe(false);

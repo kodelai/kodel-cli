@@ -1,6 +1,6 @@
 /**
  * `kodel serve` on a real host and tracker, with a fake clock and a launcher without processes
- * (TASK-G8KM, T-43). Process liveness is injected where a test needs a holder alive or gone; the tests
+ * (TASK-G8KM, T-44). Process liveness is injected where a test needs a holder alive or gone; the tests
  * that use real processes are POSIX only.
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
@@ -69,7 +69,7 @@ interface Setup {
 }
 
 function configText(setup: Setup): string {
-  const serve = setup.serve ?? ["serve:", "  enabled: true", "  start:", "    pipeline: gated"];
+  const serve = setup.serve ?? ["serve:", "  enabled: true", "  start:", "    - pipeline: gated"];
   return `${["tasks:", "  enabled: true", ...serve, ...(setup.config ?? [])].join("\n")}\n`;
 }
 
@@ -199,6 +199,24 @@ async function world(
   };
 }
 
+/** A launcher whose records cannot be read once, right after a launch that failed. */
+class StatusesFailOnce extends ScriptedLauncher {
+  failNextStatusesAfterStart = false;
+  private armed = false;
+  override async start(input: { runId: string; workdir: string; title: string }) {
+    this.armed = this.failNextStatusesAfterStart;
+    return super.start(input);
+  }
+  override async statuses(runIds: readonly string[]): Promise<Map<string, ServeWorkerView>> {
+    if (this.armed) {
+      this.armed = false;
+      this.failNextStatusesAfterStart = false;
+      throw new Error("kodel agent ls failed");
+    }
+    return super.statuses(runIds);
+  }
+}
+
 const starts = (launcher: ScriptedLauncher) => launcher.calls.filter((c) => c.kind === "start");
 const resumes = (launcher: ScriptedLauncher) => launcher.calls.filter((c) => c.kind === "resume");
 const notesOf = (journal: JournalRecord[]) => journal.filter((r) => r.event === "worker_note");
@@ -223,8 +241,8 @@ class HookedLauncher extends ScriptedLauncher {
   }
 }
 
-describe("kodel serve on the local host (T-43)", () => {
-  test("t43_task_runs_through_a_gate_with_no_tui", async () => {
+describe("kodel serve on the local host (T-44)", () => {
+  test("t44_task_runs_through_a_gate_with_no_tui", async () => {
     await project();
     const w = await world();
     const key = await w.make("Task A");
@@ -255,7 +273,7 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(w.lines.some((l) => l.startsWith("resumed:"))).toBe(true);
   });
 
-  test("t43_limit_one_second_task_waits", async () => {
+  test("t44_limit_one_second_task_waits", async () => {
     await project();
     const w = await world();
     const a = await w.make("Task A", { priority: "high" });
@@ -280,9 +298,9 @@ describe("kodel serve on the local host (T-43)", () => {
     expect((await w.task(b)).state).toBe("progress");
   });
 
-  test("t43_resume_waits_for_a_worker_place", async () => {
+  test("t44_resume_waits_for_a_worker_place", async () => {
     await project({
-      serve: ["serve:", "  enabled: true", "  max_runs: 2", "  start:", "    pipeline: gated"],
+      serve: ["serve:", "  enabled: true", "  max_runs: 2", "  start:", "    - pipeline: gated"],
     });
     const w = await world();
     const a = await w.make("Task A", { priority: "high" });
@@ -308,7 +326,7 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(resumes(w.launcher)[0]?.runId).toBe(runA);
   });
 
-  test("t43_existing_run_is_not_given_a_worker", async () => {
+  test("t44_existing_run_is_not_given_a_worker", async () => {
     await project();
     const w = await world();
     const key = await w.make("Task A");
@@ -328,7 +346,7 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(w.lines.filter((l) => l.startsWith(`not started: ${key}:`))).toHaveLength(1);
   });
 
-  test("t43_failed_launch_is_noted_not_retried", async () => {
+  test("t44_failed_launch_is_noted_not_retried", async () => {
     await project();
     const w = await world();
     const key = await w.make("Task A");
@@ -353,7 +371,7 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(w.daemon.memory().unlaunched).toEqual([]);
   });
 
-  test("t43_failed_launch_note_is_tried_again", async () => {
+  test("t44_failed_launch_note_is_tried_again", async () => {
     await project();
     const w = await world();
     let failNote = true;
@@ -394,7 +412,7 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(w.daemon.memory().unlaunched).toEqual([]);
   });
 
-  test("t43_launch_that_spawned_is_not_noted", async () => {
+  test("t44_launch_that_spawned_is_not_noted", async () => {
     await project();
     const w = await world();
     const key = await w.make("Task A");
@@ -405,7 +423,43 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(notesOf(await w.journal(runId))).toHaveLength(0);
   });
 
-  test("t43_rm_after_start_launches_nothing", async () => {
+  for (const [behaviour, noted] of [
+    ["failing", true],
+    ["throws_after_record", false],
+  ] as const) {
+    test(`t44_failed_launch_with_unread_records_is_checked_again_${behaviour}`, async () => {
+      await project();
+      const host = newHost();
+      const launcher = new StatusesFailOnce({ host, now: () => t });
+      const w = await world({ launcher, host });
+      const key = await w.make("Task A");
+      launcher.next.push(behaviour);
+      launcher.failNextStatusesAfterStart = true;
+      await w.daemon.cycle();
+      const runId = await w.runOf(key);
+      expect(launcher.failNextStatusesAfterStart).toBe(false);
+      expect(notesOf(await w.journal(runId))).toHaveLength(0);
+      expect(w.daemon.memory().unlaunched.map((u) => u.runId)).toEqual([runId]);
+      tick();
+      await w.daemon.cycle();
+      const notes = notesOf(await w.journal(runId));
+      if (noted) {
+        expect(notes).toHaveLength(1);
+        expect(notes[0]).toMatchObject({ worker: `kw-${runId}`, reason: "not_started" });
+        expect(w.daemon.memory().dead_in_a_row).toBe(1);
+      } else {
+        expect(notes).toHaveLength(0);
+        expect(w.daemon.memory().dead_in_a_row).toBe(0);
+      }
+      tick();
+      await w.daemon.cycle();
+      expect(notesOf(await w.journal(runId))).toHaveLength(noted ? 1 : 0);
+      expect(w.daemon.memory().unlaunched).toEqual([]);
+      expect(starts(launcher)).toHaveLength(1);
+    });
+  }
+
+  test("t44_rm_after_start_launches_nothing", async () => {
     await project();
     const w = await world();
     const a = await w.make("Task A");
@@ -437,7 +491,7 @@ describe("kodel serve on the local host (T-43)", () => {
     );
   });
 
-  test("t43_note_worker_binds_the_name_to_the_run", async () => {
+  test("t44_note_worker_binds_the_name_to_the_run", async () => {
     await project();
     const host = newHost();
     const started = await host.start({ pipeline: "gated", task: "something", restart: false });
@@ -478,7 +532,7 @@ describe("kodel serve on the local host (T-43)", () => {
     ]);
   });
 
-  test("t43_dead_holder_noted_within_one_cycle", async () => {
+  test("t44_dead_holder_noted_within_one_cycle", async () => {
     await project();
     const w = await world();
     const key = await w.make("Task A");
@@ -497,7 +551,7 @@ describe("kodel serve on the local host (T-43)", () => {
     });
   });
 
-  test("t43_dropped_note_is_logged_once", async () => {
+  test("t44_dropped_note_is_logged_once", async () => {
     await project();
     const w = await world();
     const key = await w.make("Task A");
@@ -517,7 +571,7 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(w.lines.filter((l) => l.startsWith("noted:"))).toEqual([]);
   });
 
-  test("t43_restart_does_not_repeat_notes", async () => {
+  test("t44_restart_does_not_repeat_notes", async () => {
     await project();
     const w = await world();
     const key = await w.make("Task A");
@@ -536,7 +590,7 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(w.lines.filter((l) => l.startsWith("noted:"))).toHaveLength(1);
   });
 
-  test("t43_format_1_dead_worker_is_logged_once", async () => {
+  test("t44_format_1_dead_worker_is_logged_once", async () => {
     await project({ serve: ["serve:", "  enabled: true"] });
     const GATE = "r_0mvxulus6_0m28";
     const runDir = join(storeRoot(), "runs", GATE);
@@ -580,7 +634,7 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(w.lines.filter((l) => l.startsWith("dead:"))).toHaveLength(2);
   });
 
-  test("t43_resume_is_skipped_when_an_agent_moved", async () => {
+  test("t44_resume_is_skipped_when_an_agent_moved", async () => {
     await project();
     const host = newHost();
     let hook: ((runId: string) => Promise<void>) | undefined;
@@ -632,7 +686,7 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(w.lines.filter((l) => l.startsWith("moved:"))).toHaveLength(1);
   });
 
-  test("t43_resume_name_taken_is_success", async () => {
+  test("t44_resume_name_taken_is_success", async () => {
     await project();
     const host = newHost();
     const launcher = new HookedLauncher({ host, now: () => t });
@@ -663,7 +717,7 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(w.launcher.of(runId)).toHaveLength(2);
   });
 
-  test("t43_resume_rereads_the_worker_records", async () => {
+  test("t44_resume_rereads_the_worker_records", async () => {
     await project();
     const host = newHost();
     const launcher = new HookedLauncher({ host, now: () => t });
@@ -685,9 +739,9 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(w.lines.some((l) => l.startsWith("failed:"))).toBe(false);
   });
 
-  test("t43_resume_rechecks_max_workers", async () => {
+  test("t44_resume_rechecks_max_workers", async () => {
     await project({
-      serve: ["serve:", "  enabled: true", "  max_runs: 2", "  start:", "    pipeline: gated"],
+      serve: ["serve:", "  enabled: true", "  max_runs: 2", "  start:", "    - pipeline: gated"],
     });
     const host = newHost();
     const launcher = new HookedLauncher({ host, now: () => t });
@@ -717,7 +771,83 @@ describe("kodel serve on the local host (T-43)", () => {
     );
   });
 
-  test("t43_rm_rearms_or_releases_a_run", async () => {
+  test("t44_worker_of_an_ended_run_keeps_its_worker_place", async () => {
+    await project({
+      serve: ["serve:", "  enabled: true", "  max_runs: 2", "  start:", "    - pipeline: gated"],
+    });
+    const w = await world();
+    const a = await w.make("Task A", { priority: "high" });
+    await w.daemon.cycle();
+    const runA = await w.runOf(a);
+    await w.approve(runA);
+    tick();
+    await w.daemon.cycle();
+    expect((await w.state(runA)).status).toBe("completed");
+    // The run is over, but its agent is still finishing its last answer.
+    const latest = w.launcher.of(runA).at(-1);
+    if (latest === undefined) throw new Error("no record");
+    latest.state = "running";
+    delete latest.since;
+    const b = await w.make("Task B", { priority: "normal" });
+    tick();
+    await w.daemon.cycle();
+    expect((await w.task(b)).runs).toEqual([]);
+    tick();
+    await w.daemon.cycle();
+    expect((await w.task(b)).runs).toEqual([]);
+    // It exits: the place is free and the run is not read again.
+    latest.state = "exited";
+    latest.since = t;
+    tick();
+    await w.daemon.cycle();
+    expect((await w.task(b)).runs).toHaveLength(1);
+    const before = w.launcher.calls.filter(
+      (c) => c.kind === "statuses" && c.runIds?.includes(runA),
+    ).length;
+    tick();
+    await w.daemon.cycle();
+    const after = w.launcher.calls.filter(
+      (c) => c.kind === "statuses" && c.runIds?.includes(runA),
+    ).length;
+    expect(after).toBe(before);
+  });
+
+  test("t44_failing_resume_gives_up_and_frees_the_worker_place", async () => {
+    await project({
+      serve: ["serve:", "  enabled: true", "  max_runs: 2", "  start:", "    - pipeline: gated"],
+    });
+    const w = await world();
+    const a = await w.make("Task A", { priority: "high" });
+    await w.daemon.cycle();
+    const runA = await w.runOf(a);
+    await w.approve(runA);
+    const failing = spyOn(w.launcher, "resume").mockImplementation(async () => {
+      throw new Error("claude is not signed in");
+    });
+    try {
+      for (let i = 0; i < 3; i++) {
+        tick(61_000);
+        await w.daemon.cycle();
+      }
+      expect(failing).toHaveBeenCalledTimes(3);
+      expect(w.lines.filter((l) => l.startsWith(`not resumed: run ${runA} (attempt`))).toHaveLength(
+        3,
+      );
+      // given up: said once, not tried again, and the one worker place is free for a start
+      const b = await w.make("Task B", { priority: "normal" });
+      tick(61_000);
+      await w.daemon.cycle();
+      tick(61_000);
+      await w.daemon.cycle();
+      expect(failing).toHaveBeenCalledTimes(3);
+      expect(w.lines.filter((l) => l.startsWith(`resume_failed: run ${runA}`))).toHaveLength(1);
+      expect((await w.task(b)).runs).toHaveLength(1);
+    } finally {
+      failing.mockRestore();
+    }
+  });
+
+  test("t44_rm_rearms_or_releases_a_run", async () => {
     await project();
     const w = await world();
     const key = await w.make("Task A");
@@ -750,7 +880,7 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(notesOf(await w.journal(runB))).toHaveLength(0);
   });
 
-  test("t43_cycle_survives_a_failed_action", async () => {
+  test("t44_cycle_survives_a_failed_action", async () => {
     await project({
       serve: [
         "serve:",
@@ -758,7 +888,7 @@ describe("kodel serve on the local host (T-43)", () => {
         "  max_runs: 2",
         "  max_workers: 2",
         "  start:",
-        "    pipeline: gated",
+        "    - pipeline: gated",
       ],
     });
     const w = await world();
@@ -774,11 +904,13 @@ describe("kodel serve on the local host (T-43)", () => {
     tick();
     await w.daemon.cycle();
     expect(resumes(w.launcher).map((c) => c.runId)).toEqual([runA, runB]);
-    expect(w.lines.some((l) => l.startsWith(`failed: resume run ${runA}`))).toBe(true);
+    expect(w.lines.some((l) => l.startsWith(`not resumed: run ${runA} (attempt 1 of 3)`))).toBe(
+      true,
+    );
     expect((await w.state(runB)).status).toBe("completed");
   });
 
-  test("t43_stop_finishes_the_action_in_hand", async () => {
+  test("t44_stop_finishes_the_action_in_hand", async () => {
     await project({
       serve: [
         "serve:",
@@ -786,7 +918,7 @@ describe("kodel serve on the local host (T-43)", () => {
         "  max_runs: 2",
         "  max_workers: 2",
         "  start:",
-        "    pipeline: gated",
+        "    - pipeline: gated",
       ],
     });
     const host = newHost();
@@ -815,7 +947,7 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(w.launcher.of(runB)).toHaveLength(1);
   });
 
-  test("t43_unreadable_workers_stop_the_cycle", async () => {
+  test("t44_unreadable_workers_stop_the_cycle", async () => {
     await project();
     const w = await world();
     const a = await w.make("Task A");
@@ -833,7 +965,7 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(w.lines.some((l) => l.includes("the worker records cannot be read"))).toBe(true);
   });
 
-  test("t43_unreadable_workers_write_an_idle_record", async () => {
+  test("t44_unreadable_workers_write_an_idle_record", async () => {
     await project();
     const written: { state: string; reason?: string }[] = [];
     const w = await world();
@@ -861,7 +993,7 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(written.at(-1)?.reason).toContain("the worker records cannot be read");
   });
 
-  test("t43_unreadable_runs_name_the_cause", async () => {
+  test("t44_unreadable_runs_name_the_cause", async () => {
     await project();
     const host = newHost();
     const failing: ServeHostPort = Object.assign(Object.create(host) as LocalPipelineHost, {
@@ -879,7 +1011,7 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(w.lines.some((l) => l.includes("worker records"))).toBe(false);
   });
 
-  test("t43_record_taken_over_ends_the_daemon", async () => {
+  test("t44_record_taken_over_ends_the_daemon", async () => {
     await project();
     const w = await world();
     const file = join(tmp, "serve.json");
@@ -911,8 +1043,8 @@ describe("kodel serve on the local host (T-43)", () => {
     );
   });
 
-  test("t43_idle_until_enabled", async () => {
-    await project({ serve: ["serve:", "  enabled: false", "  start:", "    pipeline: gated"] });
+  test("t44_idle_until_enabled", async () => {
+    await project({ serve: ["serve:", "  enabled: false", "  start:", "    - pipeline: gated"] });
     const w = await world();
     await w.make("Task A");
     expect((await w.daemon.cycle()).kind).toBe("idle");
@@ -934,7 +1066,7 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(starts(w.launcher)).toHaveLength(1);
   });
 
-  test("t43_changed_config_or_build_ends_the_daemon", async () => {
+  test("t44_changed_config_or_build_ends_the_daemon", async () => {
     await project();
     let build = "1";
     const w = await world({
@@ -958,7 +1090,7 @@ describe("kodel serve on the local host (T-43)", () => {
     expect((await other.cycle()).kind).toBe("restart");
   });
 
-  test("t43_unread_build_or_broken_yaml_is_no_restart", async () => {
+  test("t44_unread_build_or_broken_yaml_is_no_restart", async () => {
     await project();
     let build: string | undefined;
     const w = await world({
@@ -1007,7 +1139,7 @@ describe("kodel serve on the local host (T-43)", () => {
       expect((await w.task(key)).comments ?? []).toEqual([]);
     };
 
-    test("t43_environment_task_read_under_the_lock_is_not_an_attempt", async () => {
+    test("t44_environment_task_read_under_the_lock_is_not_an_attempt", async () => {
       await project();
       const w = await world();
       const key = await w.make("Task A");
@@ -1033,7 +1165,7 @@ describe("kodel serve on the local host (T-43)", () => {
       expect(w.lines.filter((l) => l.includes("tracker down"))).toHaveLength(1);
     });
 
-    test("t43_environment_check_that_throws_blocks_only_starts", async () => {
+    test("t44_environment_check_that_throws_blocks_only_starts", async () => {
       await project();
       const w = await world();
       const a = await w.make("Task A");
@@ -1052,7 +1184,7 @@ describe("kodel serve on the local host (T-43)", () => {
       expect(w.lines.some((l) => l.includes("the start conditions cannot be read"))).toBe(true);
     });
 
-    test("t43_environment_choice_needed_is_not_an_attempt", async () => {
+    test("t44_environment_choice_needed_is_not_an_attempt", async () => {
       await project();
       await writeFile(
         join(storeRoot(), "pipelines", "gated.yaml"),
@@ -1068,7 +1200,7 @@ describe("kodel serve on the local host (T-43)", () => {
       expect(w.lines.filter((l) => l.includes("not committed"))).toHaveLength(1);
     });
 
-    test("t43_environment_state_locked_is_not_an_attempt", async () => {
+    test("t44_environment_state_locked_is_not_an_attempt", async () => {
       await project();
       const host = newHost({ workerStartLock: { workerStartWaitMs: 50 } });
       const w = await world({ host });
@@ -1094,7 +1226,7 @@ describe("kodel serve on the local host (T-43)", () => {
       expect(starts(w.launcher)).toHaveLength(1);
     });
 
-    test("t43_environment_no_claude_is_not_an_attempt", async () => {
+    test("t44_environment_no_claude_is_not_an_attempt", async () => {
       await project();
       const w = await world();
       const key = await w.make("Task A");
@@ -1117,7 +1249,7 @@ describe("kodel serve on the local host (T-43)", () => {
       expect(starts(w.launcher)).toHaveLength(1);
     });
 
-    test("t43_environment_worktree_mode_off_is_not_an_attempt", async () => {
+    test("t44_environment_worktree_mode_off_is_not_an_attempt", async () => {
       await project();
       const first = await world();
       const a = await first.make("Task A");
@@ -1147,7 +1279,7 @@ describe("kodel serve on the local host (T-43)", () => {
       capabilities: { ...real.capabilities, ...change },
     });
 
-    test("t43_environment_tracker_without_provenance_is_not_an_attempt", async () => {
+    test("t44_environment_tracker_without_provenance_is_not_an_attempt", async () => {
       await project();
       const service = await openTasks();
       const w = await world({
@@ -1162,7 +1294,7 @@ describe("kodel serve on the local host (T-43)", () => {
       expect(w.lines.filter((l) => l.includes("cannot keep the mark"))).toHaveLength(1);
     });
 
-    test("t43_environment_tracker_without_runs_is_not_an_attempt", async () => {
+    test("t44_environment_tracker_without_runs_is_not_an_attempt", async () => {
       await project();
       const service = await openTasks();
       const w = await world({ deps: { tasks: wrapped(serveTasksOf(service), { runs: "none" }) } });
@@ -1175,7 +1307,7 @@ describe("kodel serve on the local host (T-43)", () => {
       expect(w.lines.filter((l) => l.includes("cannot attach runs"))).toHaveLength(1);
     });
 
-    test("t43_environment_more_than_five_pages_is_not_an_attempt", async () => {
+    test("t44_environment_more_than_five_pages_is_not_an_attempt", async () => {
       await project();
       const service = await openTasks();
       const real = serveTasksOf(service);
@@ -1199,7 +1331,7 @@ describe("kodel serve on the local host (T-43)", () => {
     });
   });
 
-  test("t43_unreadable_runs_say_why", async () => {
+  test("t44_unreadable_runs_say_why", async () => {
     await project({
       serve: [
         "serve:",
@@ -1207,7 +1339,7 @@ describe("kodel serve on the local host (T-43)", () => {
         "  max_runs: 3",
         "  max_workers: 3",
         "  start:",
-        "    pipeline: gated",
+        "    - pipeline: gated",
       ],
     });
     const w = await world();
@@ -1233,9 +1365,74 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(unreadable.find((l) => l.includes(modified ?? "?"))).toContain("was modified");
   });
 
-  test("t43_log_and_comments_are_redacted", async () => {
+  test("t44_give_up_with_a_long_reason_is_written_once", async () => {
     await project({
-      serve: ["serve:", "  enabled: true", "  start:", "    pipeline: gated"],
+      serve: ["serve:", "  enabled: true", "  start:", "    - pipeline: gated"],
+    });
+    const host = newHost();
+    const port: ServeHostPort = {
+      open: (id) => host.open(id),
+      runSummaries: () => host.runSummaries(),
+      list: () => host.list(),
+      taskLink: () => host.taskLink(),
+      withWorkerStartLock: (fn) => host.withWorkerStartLock(fn),
+      start: async () => {
+        throw new Error(`the launch failed: ${"y".repeat(800)}`);
+      },
+    };
+    const w = await world({ host, deps: { host: port } });
+    const key = await w.make("Task with a long failure");
+    for (let i = 0; i < 6; i++) {
+      await w.daemon.cycle();
+      tick(61_000);
+    }
+    const comments = (await w.task(key)).comments ?? [];
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.text.length).toBeLessThanOrEqual(500);
+    expect(w.lines.filter((l) => l.startsWith("gave up:"))).toHaveLength(1);
+    expect(w.lines.filter((l) => l.startsWith("failed:"))).toEqual([]);
+  });
+
+  test("t44_give_up_comment_refused_is_given_up_in_memory", async () => {
+    await project({
+      serve: ["serve:", "  enabled: true", "  start:", "    - pipeline: gated"],
+    });
+    const host = newHost();
+    const port: ServeHostPort = {
+      open: (id) => host.open(id),
+      runSummaries: () => host.runSummaries(),
+      list: () => host.list(),
+      taskLink: () => host.taskLink(),
+      withWorkerStartLock: (fn) => host.withWorkerStartLock(fn),
+      start: async () => {
+        throw new Error("the launch failed");
+      },
+    };
+    const w = await world({ host, deps: { host: port } });
+    const key = await w.make("Task whose tracker refuses the comment");
+    const comment = spyOn(w.service, "update").mockImplementation(async () => ({
+      ok: false,
+      code: "INVALID_TASK",
+      message: "refused",
+    }));
+    try {
+      for (let i = 0; i < 6; i++) {
+        await w.daemon.cycle();
+        tick(61_000);
+      }
+    } finally {
+      comment.mockRestore();
+    }
+    expect(w.daemon.memory().attempts[key]?.given_up).toBe(true);
+    const gave = w.lines.filter((l) => l.startsWith("gave up:"));
+    expect(gave).toHaveLength(1);
+    expect(gave[0]).toContain("the comment could not be written");
+    expect(w.lines.filter((l) => l.startsWith("failed:"))).toEqual([]);
+  });
+
+  test("t44_log_and_comments_are_redacted", async () => {
+    await project({
+      serve: ["serve:", "  enabled: true", "  start:", "    - pipeline: gated"],
     });
     const host = newHost();
     const rules: RedactRule[] = [{ name: "word", pattern: /hunter2/g }];
@@ -1278,7 +1475,7 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(JSON.stringify(notes)).not.toContain(SECRET);
   });
 
-  test("t43_daemon_decides_nothing", async () => {
+  test("t44_daemon_decides_nothing", async () => {
     await project();
     const host = newHost();
     const calledHost = new Set<string>();
@@ -1350,7 +1547,7 @@ describe("kodel serve on the local host (T-43)", () => {
     expect(decisions[0]?.decided_by).toBeUndefined();
   });
 
-  test("t43_serve_adds_only_worker_notes", async () => {
+  test("t44_serve_adds_only_worker_notes", async () => {
     await project({
       serve: [
         "serve:",
@@ -1358,7 +1555,7 @@ describe("kodel serve on the local host (T-43)", () => {
         "  max_runs: 4",
         "  max_workers: 4",
         "  start:",
-        "    pipeline: gated",
+        "    - pipeline: gated",
       ],
     });
     const w = await world();
@@ -1393,7 +1590,7 @@ describe("kodel serve on the local host (T-43)", () => {
     expect((await kinds(runC)).filter((k) => !before.includes(k))).toEqual(["worker_note"]);
   });
 
-  test("t43_ended_runs_are_read_once", async () => {
+  test("t44_ended_runs_are_read_once", async () => {
     const summaries: RunSummary[] = Array.from({ length: 500 }, (_, i) => {
       const runId = `r_0mw${String(i).padStart(6, "0")}_abcd`;
       return {
@@ -1434,11 +1631,12 @@ describe("kodel serve on the local host (T-43)", () => {
     }
     expect(performance.now() - began).toBeLessThan(2_000);
     expect(opened).toEqual([]);
-    // No ended run is asked about its worker.
-    expect(launcher.calls.filter((c) => c.kind === "statuses")).toHaveLength(0);
+    // An ended run is asked about its worker once, in the cycle that first sees it ended (a worker may
+    // still be finishing); with none alive, never again.
+    expect(launcher.calls.filter((c) => c.kind === "statuses")).toHaveLength(1);
   });
 
-  test("t43_agent_edit_needs_a_new_approval in the daemon", async () => {
+  test("t44_agent_edit_needs_a_new_approval in the daemon", async () => {
     await project({
       serve: [
         "serve:",
@@ -1446,7 +1644,7 @@ describe("kodel serve on the local host (T-43)", () => {
         "  max_runs: 4",
         "  max_workers: 4",
         "  start:",
-        "    pipeline: gated",
+        "    - pipeline: gated",
       ],
     });
     const w = await world();
@@ -1489,7 +1687,74 @@ describe("kodel serve on the local host (T-43)", () => {
     expect((await w.task(byPerson)).runs).toHaveLength(1);
   });
 
-  test("t43_ended_runs_are_read_once on the local host", async () => {
+  test("t44_rule_with_approval_any_starts_an_agents_task_with_its_pipeline", async () => {
+    // A required rule alone leaves the agent's task waiting for `kodel task approve`.
+    await project({
+      serve: ["serve:", "  enabled: true", "  start:", "    - pipeline: gated"],
+    });
+    // A second pipeline whose first step tells the runs apart.
+    await writeFile(
+      join(storeRoot(), "pipelines", "triage.yaml"),
+      GATED.replace("name: gated", "name: triage")
+        .replace("slug: write", "slug: sort")
+        .replace("from: write", "from: sort")
+        .replace("to: write", "to: sort"),
+    );
+    git("add", "-A");
+    git("commit", "-q", "-m", "triage");
+    const w = await world();
+    const made = await w.service.create({ title: "An agent's task", created_by: "agent" });
+    if (!made.ok) throw new Error(JSON.stringify(made));
+    const key = (made.task as Task).key;
+    await w.daemon.cycle();
+    tick();
+    await w.daemon.cycle();
+    expect(starts(w.launcher)).toHaveLength(0);
+    expect((await w.task(key)).runs).toEqual([]);
+
+    // The person adds a later rule that takes tasks an agent wrote: the first rule still skips it.
+    await writeConfig({
+      serve: [
+        "serve:",
+        "  enabled: true",
+        "  start:",
+        "    - pipeline: gated",
+        "    - pipeline: triage",
+        "      match:",
+        "        approval: any",
+      ],
+    });
+    const after = w.newDaemon();
+    tick();
+    await after.cycle();
+    expect(starts(w.launcher)).toHaveLength(1);
+    const runId = await w.runOf(key);
+    expect((await w.state(runId)).trail[0]).toBe("sort");
+    expect((await w.task(key)).approved_at).toBeUndefined();
+  });
+
+  test("t44_task_made_in_a_run_is_started", async () => {
+    await project();
+    const w = await world();
+    const first = await w.make("Task A");
+    await w.daemon.cycle();
+    const runId = await w.runOf(first);
+    await w.approve(runId);
+    tick();
+    await w.daemon.cycle();
+    expect((await w.state(runId)).status).toBe("completed");
+    // A person's `kodel task add --run <id>`: the run it was found in is not a run that started it.
+    const made = await w.service.create({ title: "Found in a run", run: runId });
+    if (!made.ok) throw new Error(JSON.stringify(made));
+    const key = (made.task as Task).key;
+    expect((await w.task(key)).created_in_run).toBe(runId);
+    tick();
+    await w.daemon.cycle();
+    expect(starts(w.launcher)).toHaveLength(2);
+    expect((await w.task(key)).runs).toHaveLength(2);
+  });
+
+  test("t44_ended_runs_are_read_once on the local host", async () => {
     await project();
     const w = await world();
     const key = await w.make("Task A");
@@ -1533,12 +1798,12 @@ describe("kodel serve on the local host (T-43)", () => {
   });
 });
 
-describe("the start lock (T-43)", () => {
+describe("the start lock (T-44)", () => {
   // Two real processes, each with its own host and daemon, so the lock is decided by its file and a
   // live holder of another pid. Both run the daemon's start path: the TUI's `startTask` lives in the CLI
   // package, which this one cannot import; it takes the same `withWorkerStartLock` of the host.
   test.skipIf(process.platform === "win32")(
-    "t43_two_processes_start_a_task_once",
+    "t44_two_processes_start_a_task_once",
     async () => {
       await project({
         serve: [
@@ -1547,7 +1812,7 @@ describe("the start lock (T-43)", () => {
           "  max_runs: 4",
           "  max_workers: 4",
           "  start:",
-          "    pipeline: gated",
+          "    - pipeline: gated",
         ],
       });
       const service = await openTasks();
@@ -1610,7 +1875,7 @@ describe("the start lock (T-43)", () => {
           "  max_runs: 3",
           "  max_workers: 4",
           "  start:",
-          "    pipeline: gated",
+          "    - pipeline: gated",
         ],
       });
       const second = [await make("Task C"), await make("Task D")];
@@ -1621,7 +1886,7 @@ describe("the start lock (T-43)", () => {
     60_000,
   );
 
-  test("t43_start_lock_stale_only_when_gone", async () => {
+  test("t44_start_lock_stale_only_when_gone", async () => {
     await mkdir(storeRoot(), { recursive: true });
     const lock = join(storeRoot(), "worker-start.lock");
     const identity = { method: "ps-lstart" as const, value: "then" };
@@ -1645,7 +1910,7 @@ describe("the start lock (T-43)", () => {
   });
 
   test.skipIf(process.platform === "win32")(
-    "t43_start_lock_stale_only_when_gone with real processes",
+    "t44_start_lock_stale_only_when_gone with real processes",
     async () => {
       await mkdir(storeRoot(), { recursive: true });
       const child = spawn("sleep", ["30"], { stdio: "ignore" });
@@ -1664,7 +1929,7 @@ describe("the start lock (T-43)", () => {
     },
   );
 
-  test("t43_start_lock_waiter_gives_up", async () => {
+  test("t44_start_lock_waiter_gives_up", async () => {
     await mkdir(storeRoot(), { recursive: true });
     const lock = join(storeRoot(), "worker-start.lock");
     const wait = async (holder: Record<string, unknown>) => {
@@ -1702,7 +1967,7 @@ describe("the start lock (T-43)", () => {
     expect(unconfirmed).toContain(`${lock} names pid 4242`);
   });
 
-  test("t43_lock_order_has_no_cycle", async () => {
+  test("t44_lock_order_has_no_cycle", async () => {
     await project();
     const host = newHost();
     // Another process holds `start.lock` for a moment; it never asks for `worker-start.lock`.

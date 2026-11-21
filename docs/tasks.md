@@ -139,7 +139,9 @@ kodel task schema                     # what the tracker offers; add a key to se
 kodel task doctor                     # is the adapter set up and reachable
 ```
 
-`list`, `show` and `schema` take `--json` (characters that could reorder or fake a line in a terminal are
+`list` prints a table: `KEY`, `STATUS`, `PRIORITY`, `APPROVE` (`waits` for a task that waits for
+`kodel task approve`, below; `-` otherwise), `TITLE`, `SUBTASKS` and `PARENT`, with the latest comment on an
+indented line under its row (`--no-headers` drops the header). `list`, `show` and `schema` take `--json` (characters that could reorder or fake a line in a terminal are
 escaped there too). A long list prints `more: kodel task list ... --cursor ...` with the same filters.
 `--field name=value` always sends text; an adapter turns it into a number or a flag for a field that is
 one. While tasks are off every command refuses and says how to turn them on.
@@ -149,8 +151,9 @@ one. While tasks are off every command refuses and says how to turn them on.
 `kodel serve` (`docs/serve.md`) starts tasks on its own, so a task an agent wrote must not start work
 before you have read it. Kodel marks such tasks:
 
-- `task_create` marks the task as an agent's (`created_by: agent`, and `created_in_run` when the agent
-  passed the run);
+- `task_create` marks the task as an agent's (`created_by: agent`); a task made with a run, by an agent
+  or by `kodel task add --run`, also keeps that run as `created_in_run`, which `kodel serve` does not count
+  as a run that started the task;
 - a `task_update` that changes the title, body, status, priority or parent (also by `clear`) sets
   `agent_edited_at`; a comment, a run or a field does not, and neither does what the engine itself does to
   the task of a run;
@@ -159,7 +162,9 @@ before you have read it. Kodel marks such tasks:
   approval.
 
 A marked task **waits for an approval** until an approval is later than the last agent edit (equal times
-wait). `kodel task show`, `list` and the TUI say `waits for approval`, and `kodel serve` does not start it.
+wait). `kodel task show` and the TUI say `waits for approval`, `kodel task list` says `waits` in its `APPROVE`
+column, and `kodel serve` does not start it unless a rule of your `serve` block says `approval: any`
+(`docs/serve.md`).
 Approve it with:
 
 ```bash
@@ -333,9 +338,9 @@ runs:
 created_at: 2026-10-22T09:14:03.000Z
 updated_at: 2026-10-23T10:02:41.000Z
 created_by: agent           # only on a task an agent made
-created_in_run: r_0mvimyn54_tc9o   # the run the agent made it in, when it said
+created_in_run: r_0mvimyn54_tc9o   # the run it was made in, when one was named
 agent_edited_at: 2026-10-23T10:02:41.000Z   # the last edit by an agent of the title, body, status, priority or parent
-approved_at: 2026-10-23T11:00:00.000Z       # the last `kodel task approve`
+approved_at: 2026-10-22T12:00:00.000Z       # the last `kodel task approve` (here before the agent's edit: it waits again)
 ```
 
 - The last four keys are optional and are the mark (see above); a file without them is a person's task. An
