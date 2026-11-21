@@ -34,7 +34,13 @@ export interface SocketPathInput {
 }
 
 const bytesOf = (text: string): number => new TextEncoder().encode(text).length;
-const join = (dir: string, name: string): string => `${dir.replace(/\/+$/, "")}/${name}`;
+/** `dir` without the slashes that end it: a scan from the end, so a text full of slashes costs no more than its length. */
+const withoutTrailingSlashes = (dir: string): string => {
+  let end = dir.length;
+  while (end > 0 && dir.charCodeAt(end - 1) === 0x2f) end--;
+  return dir.slice(0, end);
+};
+const join = (dir: string, name: string): string => `${withoutTrailingSlashes(dir)}/${name}`;
 
 /** The two file names a session's socket can have: beside the records, and in a fallback folder. */
 export const socketNames = (
@@ -87,7 +93,7 @@ export const socketPathQualifies = (
   const name = path.slice(cut + 1);
   if (dir.split("/").some((part) => part === "." || part === "..")) return undefined;
   const names = socketNames(input);
-  if (name === names.primary && dir === input.runDir.replace(/\/+$/, ""))
+  if (name === names.primary && dir === withoutTrailingSlashes(input.runDir))
     return { kind: "run", dir };
   const folder = dir.slice(dir.lastIndexOf("/") + 1);
   if (name === names.hashed && folder === socketTmpDirName(input.uid)) {

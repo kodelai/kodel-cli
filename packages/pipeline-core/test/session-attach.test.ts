@@ -743,6 +743,26 @@ describe("socket path candidates", () => {
     expect(wide.map((c) => c.kind)).toEqual(["tmp"]);
   });
 
+  test("tA_socket_path_trailing_slashes_are_scanned_not_matched: a folder full of slashes costs its length", () => {
+    // the same candidates with and without the slashes that end a folder, however many there are
+    const plain = socketCandidates({ ...base, runDir: "/s/run/501", tmpDir: "/var/tmp/x" });
+    const slashed = socketCandidates({ ...base, runDir: "/s/run/501//", tmpDir: "/var/tmp/x///" });
+    expect(slashed.map((c) => c.path)).toEqual(plain.map((c) => c.path));
+    // a path that qualifies when its run folder was given with slashes at the end
+    const run = plain[0];
+    if (!run) throw new Error("no run candidate");
+    expect(socketPathQualifies(run.path, { ...base, runDir: "/s/run/501///" })).toEqual({
+      kind: "run",
+      dir: "/s/run/501",
+    });
+    // slashes inside a folder name, in the middle and in a quantity nobody sends, take a scan and not a search
+    const many = `/s${"/".repeat(200_000)}x${"/".repeat(200_000)}`;
+    const began = performance.now();
+    socketCandidates({ ...base, runDir: many, tmpDir: many });
+    socketPathQualifies(`${many}/${names.primary}`, { ...base, runDir: many });
+    expect(performance.now() - began).toBeLessThan(2_000);
+  });
+
   test("tA_socket_fallback_order", () => {
     const all = socketCandidates({ ...base, runDir: "/s/run/501", tmpDir: "/var/tmp/x/" });
     expect(all).toEqual([
