@@ -604,9 +604,9 @@ export type RunEvent =
       /** A limit of the patch the host knows of (another branch wrote to the same tree meanwhile). */
       changesNote?: string;
       /**
-       * Only for a step a worker handed in (with a claim token), when usage is recorded: the models of the worker's
-       * own log for this step (T-43), or an empty list when that log was not found. Its presence says the step was
-       * a worker's; the host writes it for every such hand-in.
+       * Only for a step a worker handed in (with a claim token) whose node asks for a model, when usage is recorded:
+       * the models of the worker's own log for this step (T-43), or an empty list when that log was not found. The
+       * report also knows a worker's step from its claim, so the field is absent for a step that asks for no model.
        */
       workerModels?: string[];
     }

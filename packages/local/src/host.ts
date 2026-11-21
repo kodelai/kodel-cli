@@ -1184,7 +1184,6 @@ export class LocalRun {
     return spec;
   }
 
-  /** The pipeline the run is on now. */
   /** Whether the step in the pipeline in force asks for a model: only such a step's worker log is looked for. */
   private async asksForModel(slug: string): Promise<boolean> {
     try {
@@ -1199,6 +1198,7 @@ export class LocalRun {
     }
   }
 
+  /** The pipeline the run is on now. */
   async currentSpec(state?: RunState): Promise<PipelineSpec> {
     return this.specFor((state ?? (await this.state())).specHash);
   }
