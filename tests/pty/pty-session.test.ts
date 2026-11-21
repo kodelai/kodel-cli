@@ -233,14 +233,15 @@ describe("a terminal session on a real PTY", () => {
     "tA_bye_flushed_before_holder_ends: a client that reads late still gets the last output and the end",
     async () => {
       const w = newWorld();
-      const { id } = await w
-        .adapter()
-        .start(
-          sh(
-            w,
-            "echo ready; read line; head -c 3000000 /dev/zero | tr '\\0' x; echo; echo LAST-LINE; exit 7",
-          ),
-        );
+      const { id } = await w.adapter().start(
+        sh(
+          w,
+          // The second before `exit` is for the holder to take what the program wrote: on Linux the kernel
+          // throws away output nobody has read yet when the program that leads the session ends, and a holder that
+          // is a few kilobytes behind (a loaded machine, 3 MB at once) would lose the end of it.
+          "echo ready; read line; head -c 3000000 /dev/zero | tr '\\0' x; echo; echo LAST-LINE; sleep 1; exit 7",
+        ),
+      );
       const client = await attach(w, id);
       await client.sees("ready");
       // the client stops reading, the program writes 3 MB and ends: the holder has them queued when it ends

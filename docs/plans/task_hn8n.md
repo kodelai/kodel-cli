@@ -1120,3 +1120,19 @@ Fixed:
   (it was 45 pass and 3 fail); the local holder tests 89 pass, 1 skip (the macOS-only descriptor test).
   `tA_pty_input_bytes_unchanged` passed on Linux arm64 before the fix too; it failed only on the ubuntu x64 runner, so
   whether this fix reaches it is for the next CI run to show.
+
+## The late reader on Linux (CI, ubuntu `pty` job)
+
+- `tA_bye_flushed_before_holder_ends` failed on the ubuntu runner and in a Linux container with two CPUs (5 of 5, and
+  4 of 6 in a timeline run), after the write fix. The client had 2,995,000 of 3,000,022 bytes; the holder's own
+  `tail.txt` lacked `LAST-LINE` too, so the end was lost before the holder read it, not on the way to the client.
+- Measured: a bare reader of the module loses nothing on the same output (0 of 12, with or without a slave
+  descriptor held open), and the holder is idle half the time (a CPU profile), so it is neither the module's 200 ms
+  socket timeout nor a starved loop. What is left is the kernel: when the session leader ends, the hangup of its
+  terminal flushes what was written towards the master and has not been read (`pty_flush_buffer`). A reader that is
+  a few kilobytes behind at that moment loses them.
+- A progress-based wait in `flushed` and in `socketStream.close()` was tried and taken out again: it was not what
+  fixed this, and under Bun (the test runner) the queue of a stream is not reported as Node's, so it could not be
+  shown by a test. The 1.5 s bound stays.
+- The test now has the program wait a second before it exits, and `docs/session-formats.md` says that on Linux the end
+  of a burst of output at the moment a program exits can be lost.

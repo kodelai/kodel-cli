@@ -102,6 +102,11 @@ remove no socket and it cannot attach; nothing else differs.
   server that runs inside the session may show a gate, a pause or a pipeline change as a dialog, and whoever can
   type into the session, through the socket too, can answer it; the journal records the person's decision
   (`docs/decisions.md`).
+- **On Linux the end of a burst of output can be lost.** When the program that leads the session ends, the kernel
+  hangs up its terminal and throws away what was written to it and nobody has read yet. A holder that is a few
+  kilobytes behind at that moment (a loaded machine, megabytes written at once, then an exit) misses the end of the
+  output, in the ring, in `tail.txt` and for every client. A program that writes less, or that does not leave at the
+  moment it stops writing, is not touched. macOS keeps the data.
 - **The replay is not redacted.** The holder keeps the last 1 MiB of raw terminal bytes in memory and gives them to
   every client that connects. Only `tail.txt` is on disk: stripped of escape sequences, then redacted.
 - **The tail of a full-screen program is repaint fragments** (cursor moves between the pieces of a word), so a
