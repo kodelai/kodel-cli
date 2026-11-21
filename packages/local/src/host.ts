@@ -98,6 +98,7 @@ import {
   unknownReason,
   validateReport,
   type WaitScope,
+  type WorkerGoneReason,
 } from "@kodel-ai/pipeline-core";
 import { type AgentLogRun, AgentLogWriter } from "./agent-log";
 import type { AgentLogTickers } from "./agent-log-ticker";
@@ -1639,6 +1640,63 @@ export class LocalRun {
       await this.tieEnd(decision);
       return decision;
     });
+  }
+
+  /**
+   * Journal that a background worker of this run is gone (TASK-G8KM, T-44). The name must be this
+   * run's (`kw-<run>` or `kw-<run>-d<n>`): the engine checks only the shape, the tie of a name to a run
+   * is the local launcher's convention. Once per record id (without an id, per name and reason), looked
+   * up under the run's lock so two daemons cannot both write it. `written` is false for a repeat;
+   * `dropped` says the engine did not take a note that is no repeat (a run that ended, a format with no
+   * place for it, a field out of bounds such as a time ahead of the clock), so a caller can say so once.
+   */
+  noteWorker(input: {
+    worker: string;
+    id?: string;
+    reason: WorkerGoneReason;
+    exit_code?: number;
+    at?: number;
+  }): Promise<{ written: boolean; dropped?: true }> {
+    const own = new RegExp(`^kw-${this.runId.replace(/[^A-Za-z0-9_]/g, "")}(?:-d[1-9][0-9]*)?$`);
+    if (!own.test(input.worker)) {
+      return Promise.reject(
+        new KodelError(
+          "INVALID_ARGUMENTS",
+          `"${input.worker}" is not the name of a worker of run ${this.runId}`,
+        ),
+      );
+    }
+    const step = this.queue
+      .catch(() => undefined)
+      .then(() =>
+        this.locked(async () => {
+          const journal = await this.host.store.readJournal(this.runId);
+          const repeat = journal.some(
+            (r) =>
+              r.event === "worker_note" &&
+              (input.id !== undefined
+                ? r.id === input.id
+                : r.id === undefined && r.worker === input.worker && r.reason === input.reason),
+          );
+          if (repeat) return { written: false };
+          const decision = await this.decideAndWrite(
+            {
+              type: "worker_note",
+              what: "gone",
+              worker: input.worker,
+              ...(input.id === undefined ? {} : { id: input.id }),
+              reason: input.reason,
+              ...(input.exit_code === undefined ? {} : { exit_code: input.exit_code }),
+              ...(input.at === undefined ? {} : { at: input.at }),
+            },
+            false,
+          );
+          if (!decision.ok) throw decision.error;
+          return decision.noop ? { written: false, dropped: true as const } : { written: true };
+        }),
+      );
+    this.queue = step;
+    return step;
   }
 
   /** The `history.changes` settings the run recorded when it started; none when it keeps no patches. */

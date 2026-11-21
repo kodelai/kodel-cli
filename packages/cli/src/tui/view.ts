@@ -1,7 +1,7 @@
 /** The screens as pure functions: a model and a size in, lines out; a key and a model in, a model out. */
 import { TASK_LIMITS } from "@kodel-ai/pipeline-core";
 import { plain } from "../plain";
-import type { WorkerProgress, WorkerStatus } from "../worker-launcher";
+import { type WorkerProgress, type WorkerStatus, workerGoneLine } from "../worker-launcher";
 import {
   bold,
   clip,
@@ -121,6 +121,16 @@ import { type ResumeOffer, resumeOffer } from "./worker-resume";
 
 export const SECTIONS = ["Sessions", "Pipeline", "Tasks", "Report"] as const;
 
+/**
+ * What the screen knows of `kodel serve` for this checkout (TASK-G8KM, T-44), read at each read of the
+ * worker records: `active` takes the resumes over from the screen; `silent` (alive, no cycle for 2 min)
+ * gives them back and is named in the header; anything else (`off`, idle, unreadable) is as if none ran.
+ */
+export type ServeView = { kind: "off" } | { kind: "active" | "silent"; pid: number; since: number };
+
+/** The card's line for a run whose resume the daemon does. */
+export const SERVE_RESUMES_LINE = "agent exited at your decision · kodel serve resumes it";
+
 export interface Model {
   section: number;
   sessions: Session[];
@@ -187,6 +197,8 @@ export interface Model {
   offers: Record<string, ResumeOffer>;
   /** The TUI's own decision work is running a step: no resume is offered meanwhile. */
   workPending: boolean;
+  /** `kodel serve` for this checkout, as last read. */
+  serve: ServeView;
   /** Tasks whose start is in flight (the run and the agent are being made). */
   starting: Record<string, true>;
   /** Runs whose agent was just started and not yet read: the row says `agent starting`. */
@@ -452,6 +464,7 @@ export function initialModel(
     workers: {},
     offers: {},
     workPending: false,
+    serve: { kind: "off" },
     starting: {},
     workerStarting: {},
     resuming: {},
@@ -575,7 +588,17 @@ function withOffers(m: Model): Model {
   for (const s of m.sessions) {
     const worker = m.workers[s.id];
     if (worker === undefined) continue;
-    offers[s.id] = resumeOffer(s, worker, m.workPending);
+    const offer = resumeOffer(s, worker, m.workPending);
+    // An active daemon resumes it in its next cycle: offering it here too would only race it. A run
+    // an agent moved on since the decision, or one of another checkout, the daemon leaves alone, so
+    // the offer stays here.
+    offers[s.id] =
+      offer.offer !== undefined &&
+      !offer.offer.moved &&
+      s.foreignRoot === undefined &&
+      m.serve.kind === "active"
+        ? { line: SERVE_RESUMES_LINE, why: "kodel serve resumes the agent in its next cycle" }
+        : offer;
   }
   return { ...m, offers };
 }
@@ -606,6 +629,7 @@ export function withWorkers(
   m: Model,
   statuses: ReadonlyMap<string, WorkerStatus>,
   pending: boolean,
+  serve: ServeView = m.serve,
 ): Model {
   const workers: Record<string, WorkerView> = {};
   for (const [runId, status] of statuses) {
@@ -620,7 +644,7 @@ export function withWorkers(
     ),
   );
   return questionsKept(
-    withOffers({ ...m, workers, workPending: pending, workerStarting, resuming }),
+    withOffers({ ...m, workers, workPending: pending, workerStarting, resuming, serve }),
   );
 }
 
@@ -822,6 +846,14 @@ function resumeQuestionKey(m: Model, key: string, alone: boolean, size: Size): M
 export function workerLine(m: Model, s: Session): string | undefined {
   if (m.workerStarting[s.id] !== undefined) return "agent starting";
   if (m.resuming[s.id] !== undefined) return "agent resuming";
+  const gone = s.workerGone;
+  // The note is about the latest record (or a run whose records are not read): then it says more than the state.
+  if (gone !== undefined) {
+    const w = m.workers[s.id];
+    if (w === undefined || gone.id === undefined || w.id === gone.id) {
+      return workerGoneLine(gone, plain, s.status === "running" || s.status === "waiting");
+    }
+  }
   const offer = m.offers[s.id];
   if (offer === undefined || offer.line === "") return undefined;
   return offer.line;
@@ -837,6 +869,7 @@ function workerTag(m: Model, s: Session): string | undefined {
   if (w === undefined) return undefined;
   const offer = m.offers[s.id];
   if (offer?.offer !== undefined) return `${WORKER_MARK} s resumes`;
+  if (offer?.line === SERVE_RESUMES_LINE) return `${WORKER_MARK} serve resumes`;
   if (offer?.line === "agent waiting for you") return `${WORKER_MARK} for you`;
   if (w.state === "killed")
     return `${WORKER_MARK} ${w.label.startsWith("stopped") ? "stopped" : "killed"}`;
@@ -853,6 +886,7 @@ function workerStyle(m: Model, s: Session, line: string): string {
   ) {
     return cyan(line);
   }
+  if (line === SERVE_RESUMES_LINE) return cyan(line);
   if (line.startsWith("agent stopped")) return dim(line);
   return red(line);
 }
@@ -2908,6 +2942,16 @@ function pipesBody(m: Model, cols: number, height: number): string[] {
   return panes(m, layout, left, right, height);
 }
 
+/** The header's words for `kodel serve`: nothing when none runs or it is idle. */
+function serveWords(m: Model): string {
+  if (m.serve.kind === "active") return `${cyan(`serve on (pid ${m.serve.pid})`)}${dim(" · ")}`;
+  if (m.serve.kind === "silent") {
+    const at = new Date(m.serve.since).toTimeString().slice(0, 5);
+    return `${yellow(`serve silent since ${at} (pid ${m.serve.pid}): s resumes`)}${dim(" · ")}`;
+  }
+  return "";
+}
+
 function menuLine(m: Model, cols: number): string {
   const items = SECTIONS.map((name, i) => {
     const count = menuCount(m, i);
@@ -2915,7 +2959,8 @@ function menuLine(m: Model, cols: number): string {
     const text = ` ${i + 1} ${name}${badge} `;
     return i === m.section ? inverse(stripAnsi(text)) : text;
   });
-  const right = dim(m.source === "demo" ? "sample data " : "live ");
+  const live = dim(m.source === "demo" ? "sample data " : "live ");
+  const right = `${serveWords(m)}${live}`;
   const left = `${bold(MENU_BRAND)}${items.join("")}`;
   const gap = cols - visibleLength(left) - visibleLength(right);
   return fit(gap >= 1 ? `${left}${" ".repeat(gap)}${right}` : left, cols);

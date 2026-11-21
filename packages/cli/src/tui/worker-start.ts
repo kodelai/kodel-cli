@@ -9,6 +9,7 @@ import type { Caller } from "@kodel-ai/pipeline-core";
 import {
   ChoiceNeeded,
   type JournalRecord,
+  KodelError,
   type RunState,
   SessionError,
 } from "@kodel-ai/pipeline-core";
@@ -43,6 +44,11 @@ export interface StartHost {
   }>;
   open(runId: string): Promise<LocalRun | StartRun | undefined>;
   runSummaries(): Promise<{ meta: { runId: string }; state: RunState | undefined }[]>;
+  /**
+   * The lock `kodel serve` takes around its starts (TASK-G8KM, T-44), so the two never start one task
+   * twice; throws `STATE_LOCKED` after a wait. A host without it starts without the lock.
+   */
+  withWorkerStartLock?<T>(fn: () => Promise<T>): Promise<T>;
 }
 
 export interface WorkerOptionsInput {
@@ -82,7 +88,7 @@ export function createWorkerOptions(
     return { ok: true, pipelines };
   };
 
-  const startTask = async (key: string, pipeline: string): Promise<StartResult> => {
+  const startLocked = async (key: string, pipeline: string): Promise<StartResult> => {
     // Read again: the question may have stood on the screen for a while.
     const slot = await loadTask(tasks, key);
     if (slot.status !== "ready") {
@@ -136,6 +142,22 @@ export function createWorkerOptions(
         runId,
         message: `run ${runId} was made but no agent was started: ${messageOf(error)}. Any agent in the project continues it with pipeline_next_step and this run id.`,
       };
+    }
+  };
+
+  // From the check that the task is not started to the agent's launch, under the daemon's lock.
+  const startTask = async (key: string, pipeline: string): Promise<StartResult> => {
+    if (host.withWorkerStartLock === undefined) return startLocked(key, pipeline);
+    try {
+      return await host.withWorkerStartLock(() => startLocked(key, pipeline));
+    } catch (error) {
+      if (error instanceof KodelError && error.code === "STATE_LOCKED") {
+        return {
+          ok: false,
+          message: `Could not start ${key}: another start is in progress, try again.`,
+        };
+      }
+      throw error;
     }
   };
 

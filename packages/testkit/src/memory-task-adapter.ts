@@ -12,6 +12,7 @@ import {
   type FieldValue,
   KodelError,
   type NewTask,
+  needsApproval,
   type StatusInfo,
   type SubtaskRef,
   TASK_CONTRACT,
@@ -58,6 +59,8 @@ export interface MemoryTaskOptions {
   workflow?: Record<string, string[]>;
   /** Called first in every method: a test throws or hangs here. */
   before?: (method: string, o: CallOptions) => Promise<void> | void;
+  /** The time in milliseconds; by default a clock that moves one second at every write. */
+  clock?: () => number;
 }
 
 interface Row {
@@ -74,6 +77,10 @@ interface Row {
   fields: Record<string, FieldValue>;
   created_at: string;
   updated_at: string;
+  created_by?: "agent";
+  created_in_run?: string;
+  agent_edited_at?: string;
+  approved_at?: string;
 }
 
 const invalid = (message: string) => new KodelError("INVALID_TASK", message);
@@ -94,11 +101,13 @@ export class MemoryTaskAdapter implements TaskAdapter {
       fields: true,
       priority: true,
       types: false,
+      provenance: true,
       ...options.capabilities,
     };
   }
 
   private now(): string {
+    if (this.options.clock !== undefined) return new Date(this.options.clock()).toISOString();
     this.tick += 1000;
     return new Date(this.tick).toISOString();
   }
@@ -209,6 +218,12 @@ export class MemoryTaskAdapter implements TaskAdapter {
       task.comments = row.comments.slice(-comments);
     }
     if (Object.keys(row.fields).length > 0) task.fields = { ...row.fields };
+    if (this.capabilities.provenance === true) {
+      if (row.created_by !== undefined) task.created_by = row.created_by;
+      if (row.created_in_run !== undefined) task.created_in_run = row.created_in_run;
+      if (row.agent_edited_at !== undefined) task.agent_edited_at = row.agent_edited_at;
+      if (row.approved_at !== undefined) task.approved_at = row.approved_at;
+    }
     return task;
   }
 
@@ -242,6 +257,8 @@ export class MemoryTaskAdapter implements TaskAdapter {
       };
     }
     if (this.capabilities.runs !== "none") s.run_count = row.runs.length;
+    if (needsApproval(task)) s.needs_approval = true;
+    if (task.created_in_run !== undefined) s.created_in_run = task.created_in_run;
     const shown = Object.fromEntries(
       Object.entries(row.fields).filter(([name]) => FIELDS.find((f) => f.name === name)?.summary),
     );
@@ -278,6 +295,10 @@ export class MemoryTaskAdapter implements TaskAdapter {
     if (input.priority !== undefined) row.priority = input.priority;
     else if (this.capabilities.priority) row.priority = DEFAULT_PRIORITY;
     if (input.parent !== undefined) row.parent = this.parentOf(input.parent).key;
+    if (this.capabilities.provenance === true) {
+      if (input.created_by === "agent") row.created_by = "agent";
+      if (input.run !== undefined) row.created_in_run = input.run;
+    }
     this.rows.set(row.key, row);
     return this.toTask(row);
   }
@@ -377,6 +398,13 @@ export class MemoryTaskAdapter implements TaskAdapter {
       }
     }
     const wasDone = this.stateOf(row) === "done";
+    const before = {
+      title: row.title,
+      body: row.body,
+      status: row.status,
+      priority: row.priority,
+      parent: row.parent,
+    };
     if (patch.status !== undefined) row.status = patch.status;
     if (patch.priority !== undefined) row.priority = patch.priority;
     if (patch.title !== undefined) row.title = patch.title;
@@ -395,12 +423,51 @@ export class MemoryTaskAdapter implements TaskAdapter {
       else delete row.fields[name.slice("fields.".length)];
     }
     row.updated_at = this.now();
+    if (
+      patch.by_agent === true &&
+      this.capabilities.provenance === true &&
+      (row.title !== before.title ||
+        row.body !== before.body ||
+        row.status !== before.status ||
+        row.priority !== before.priority ||
+        row.parent !== before.parent)
+    ) {
+      // Never before an approval, as the local adapter: an edit in the instant of an approval waits.
+      const approved = row.approved_at;
+      row.agent_edited_at =
+        approved !== undefined && Date.parse(approved) > Date.parse(row.updated_at)
+          ? approved
+          : row.updated_at;
+    }
     const out: { task: Task; open_subtasks?: number } = { task: this.toTask(row) };
     if (!wasDone && this.stateOf(row) === "done") {
       const open = this.children(row.key).filter((k) => this.stateOf(k) !== "done").length;
       if (open > 0) out.open_subtasks = open;
     }
     return out;
+  }
+
+  async approve(key: string, seen: string, o: CallOptions): Promise<Task | undefined> {
+    await this.enter("approve", o);
+    if (this.capabilities.provenance !== true) {
+      throw new KodelError("TASK_UNSUPPORTED", "this tracker keeps no approvals");
+    }
+    const row = this.find(key);
+    if (!row) return undefined;
+    if (row.updated_at !== seen) {
+      throw new KodelError(
+        "TASK_TRANSITION_REFUSED",
+        `${row.key} changed while you were reading; look again`,
+      );
+    }
+    // Strictly later than the last agent edit, also when the clock has not moved since.
+    const last = Math.max(
+      Date.parse(row.created_at) || 0,
+      Date.parse(row.agent_edited_at ?? "") || 0,
+    );
+    row.approved_at = new Date(Math.max(Date.parse(this.now()), last + 1)).toISOString();
+    row.updated_at = row.approved_at;
+    return this.toTask(row);
   }
 
   async verify(o: CallOptions): Promise<TaskProblem[]> {

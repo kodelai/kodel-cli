@@ -148,6 +148,17 @@ export interface Task {
   /** ISO 8601, set by the adapter (a tracker has its own clock). */
   created_at: string;
   updated_at: string;
+  /**
+   * Provenance (an adapter with `capabilities.provenance`): the task was made by an agent through
+   * the tools. A task without it counts as a person's.
+   */
+  created_by?: "agent";
+  /** The run the task was made in, when one was named (by an agent or a person); not a run that started it. */
+  created_in_run?: string;
+  /** ISO 8601: the last time an agent changed the title, body, status, priority or parent. */
+  agent_edited_at?: string;
+  /** ISO 8601: the last time a person approved the task (`kodel task approve`). */
+  approved_at?: string;
 }
 
 /**
@@ -170,6 +181,9 @@ export interface TaskSummary {
   run_count?: number;
   /** Only the fields declared with `summary: true`. */
   fields?: Record<string, FieldValue>;
+  /** `needsApproval` of the task; absent when it does not wait. */
+  needs_approval?: boolean;
+  created_in_run?: string;
 }
 
 export interface SubtaskRef {
@@ -188,6 +202,8 @@ export interface NewTask {
   run?: string;
   parent?: string;
   fields?: Record<string, FieldValue>;
+  /** Set by the caller of the service (the task tools), never taken from a tool's input. */
+  created_by?: "agent";
 }
 
 /** `undefined` leaves a field alone; `null` is never used: clearing is the explicit `clear`. */
@@ -205,6 +221,11 @@ export interface TaskPatch {
   fields?: Record<string, FieldValue>;
   /** `body`, `priority`, `type`, `parent` or `fields.<name>`. */
   clear?: string[];
+  /**
+   * The change comes from an agent: a change of the title, body, status, priority or parent then
+   * sets `agent_edited_at`. Set by the caller of the service, never taken from a tool's input.
+   */
+  by_agent?: boolean;
 }
 
 export interface TaskFilter {
@@ -225,6 +246,26 @@ export interface TaskProblem {
   message: string;
 }
 
+/**
+ * Whether a task waits for a person's approval before anything starts it on its own: it was made
+ * by an agent or an agent changed it, and no approval is later than the last of those. Equal times
+ * wait, and a time that cannot be read waits too (fail closed).
+ */
+export function needsApproval(
+  task: Pick<Task, "created_by" | "created_at" | "agent_edited_at" | "approved_at">,
+): boolean {
+  const byAgent = task.created_by === "agent";
+  if (!byAgent && task.agent_edited_at === undefined) return false;
+  const times: number[] = [];
+  if (byAgent) times.push(Date.parse(task.created_at));
+  if (task.agent_edited_at !== undefined) times.push(Date.parse(task.agent_edited_at));
+  if (times.some(Number.isNaN)) return true;
+  if (task.approved_at === undefined) return true;
+  const approved = Date.parse(task.approved_at);
+  if (Number.isNaN(approved)) return true;
+  return !(approved > Math.max(...times));
+}
+
 // ── the adapter ─────────────────────────────────────────────────────────────
 
 export interface TaskAdapterCapabilities {
@@ -238,6 +279,11 @@ export interface TaskAdapterCapabilities {
   priority: boolean;
   /** The tracker has task types. */
   types: boolean;
+  /**
+   * The tracker keeps who made or changed a task (`created_by`, `agent_edited_at`, `approved_at`)
+   * and can `approve`. Off unless `true`.
+   */
+  provenance?: boolean;
 }
 
 export interface CallOptions {
@@ -270,6 +316,11 @@ export interface TaskAdapter {
   ): Promise<{ task: Task; open_subtasks?: number } | undefined>;
   /** For `kodel task doctor`: what is wrong with the setup, empty when nothing. */
   verify?(o: CallOptions): Promise<TaskProblem[]>;
+  /**
+   * A person approves a task an agent made or changed. `seen` is the `updated_at` the person was
+   * shown: a task that changed since is refused, not approved. `undefined` for an unknown key.
+   */
+  approve?(key: string, seen: string, o: CallOptions): Promise<Task | undefined>;
 }
 
 /**
@@ -434,12 +485,18 @@ export function validateNewTask(input: NewTask): void {
   if (input.run !== undefined) checkRunId("run", input.run);
   if (input.parent !== undefined) checkKeyInput("parent", input.parent);
   if (input.fields !== undefined) checkFields(input.fields);
+  if (input.created_by !== undefined && input.created_by !== "agent") {
+    throw invalid('created_by can only be "agent"');
+  }
 }
 
 export function validatePatch(patch: TaskPatch): void {
   const keys = Object.keys(patch).filter(
-    (k) => (patch as Record<string, unknown>)[k] !== undefined,
+    (k) => k !== "by_agent" && (patch as Record<string, unknown>)[k] !== undefined,
   );
+  if (patch.by_agent !== undefined && typeof patch.by_agent !== "boolean") {
+    throw invalid("by_agent must be true or false");
+  }
   if (keys.length === 0) {
     throw invalid("nothing to change: give at least one field besides the key");
   }

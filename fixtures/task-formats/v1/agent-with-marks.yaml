@@ -1,0 +1,15 @@
+v: 1
+id: MMMM
+key: TASK-MMMM
+title: Add a test for an empty pipeline file
+body: An empty pipeline file gives a stack trace instead of a message.
+priority: high
+status: todo
+runs:
+  - r_0mviewgvl_i1ig
+created_at: 2026-11-20T14:01:01.000Z
+updated_at: 2026-11-20T14:03:03.000Z
+created_by: agent
+created_in_run: r_0mviewgvl_i1ig
+agent_edited_at: 2026-11-20T14:03:03.000Z
+approved_at: 2026-11-20T14:02:02.000Z

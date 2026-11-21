@@ -257,6 +257,17 @@ export interface RunReport {
    * the model asked for and the models the logs show (information only; it decides nothing).
    */
   models?: ModelMarksReport;
+  /** Background workers of the run that a daemon saw gone (`worker_note`), in order; absent when none. */
+  workers_gone?: WorkerGoneReport[];
+}
+
+/** A worker of the run that is gone, as its `worker_note` says. */
+export interface WorkerGoneReport {
+  at: number;
+  worker: string;
+  id?: string;
+  reason: string;
+  exit_code?: number;
 }
 
 const seconds = (from: number, to: number) => Math.max(0, Math.round((to - from) / 100) / 10);
@@ -316,6 +327,7 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
   let lastAgentStep: string | undefined;
   const pipelineChanges: PipelineChangeReport[] = [];
   const agentDecisions: AgentDecisionReport[] = [];
+  const workersGone: WorkerGoneReport[] = [];
   const attemptOf = (name: string, attempt: number) =>
     nodes.get(name)?.attempts.find((a) => a.attempt === attempt);
   /** Every attempt as an interval, with the branch it ran in; `to` is filled when it ends. */
@@ -466,6 +478,17 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
         break;
       case "task_link":
         if (record.what === "restarted" || record.restarting === true) taskRestarted = true;
+        break;
+      case "worker_note":
+        if (record.what === "gone" && typeof record.worker === "string") {
+          workersGone.push({
+            at: typeof record.at === "number" ? record.at : record.ts,
+            worker: record.worker,
+            ...(typeof record.id === "string" ? { id: record.id } : {}),
+            reason: typeof record.reason === "string" ? record.reason : "unknown",
+            ...(typeof record.exit_code === "number" ? { exit_code: record.exit_code } : {}),
+          });
+        }
         break;
       case "node_finished":
         if (name && attempt !== undefined) {
@@ -663,6 +686,7 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
     agent_log: agentLogReport(state, lastAgentStep),
     usage,
     tool_calls: toolCallsReport(state, journal),
+    ...(workersGone.length === 0 ? {} : { workers_gone: workersGone }),
   };
 }
 

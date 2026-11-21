@@ -1,0 +1,20 @@
+{
+  "v": 1,
+  "pid": 4242,
+  "identity": {
+    "method": "ps-lstart",
+    "value": "Sat Nov 21 10:00:00 2026"
+  },
+  "started": 1795251094810,
+  "cycle_at": 1795251095802,
+  "state": "active",
+  "root": "/kodel-fixture/checkout",
+  "state_base": "/kodel-fixture/state",
+  "build": "0.1.0+fixture",
+  "counts": {
+    "workers": 0,
+    "max_workers": 1,
+    "runs": 0,
+    "max_runs": 1
+  }
+}

@@ -70,3 +70,20 @@ for agents it runs in terminal sessions.
 There is no switch for `ack`, `resume` or `seal`: they stay with a person, and the config refuses a key
 for them. An agent that can propose a change of the pipeline and also accept it can weaken the checks
 that judge its own work; prefer to leave `pipeline_change` off.
+
+## `kodel serve` decides nothing (T-44)
+
+The daemon (`docs/serve.md`) starts and resumes background workers by the person's `serve` block: one pure
+function plans, one launcher starts each run's agent once, one lock admits a start, one owner resumes. It
+decides nothing about a run (no gate, pause, change of the pipeline or `ack`; a resume after your decision only
+gives the run an agent again) and writes only the fact that a worker is gone (`worker_note`). A task an agent
+made or changed waits until a person runs `kodel task approve`, and the `serve` block is the person's, like this
+one: the agent is told not to edit it and not to run `kodel serve` or `kodel task approve`. Test plan: the `t44_*`
+tests; the refutation criteria are at the end of `docs/serve.md`.
+
+The person decided that a rule of the block may start tasks an agent wrote without an approval:
+`serve.start[].match.approval: any` (the default stays `required`). Only the person edits the `serve` block, so
+this is a person's decision made once for a rule, not one the agent can make; a task that waits for approval
+and is not taken by a `required` rule may be taken by a later `any` rule
+(`t44_rule_approval_required_skips_and_any_takes_an_agents_task`,
+`t44_rule_with_approval_any_starts_an_agents_task_with_its_pipeline`).

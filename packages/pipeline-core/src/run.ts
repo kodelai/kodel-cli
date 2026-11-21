@@ -528,6 +528,8 @@ export type AgentLogFailure = (typeof AGENT_LOG_FAILURES)[number];
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
+/** A worker's record name or id in a `worker_note`: bounded and opaque. */
+const WORKER_NAME = /^[A-Za-z0-9._-]{1,64}$/;
 
 /** The mark of a claim's holder: a prefix of the hash, which gives nothing of the token away. */
 const markOf = (tokenHash: string) => `w-${tokenHash.slice(0, 8)}`;
@@ -872,7 +874,31 @@ export type RunEvent =
       note?: string;
       /** The task had been done and the person allowed starting it again. */
       restarting?: true;
+    }
+  /**
+   * A background worker of the run is gone (TASK-G8KM, T-44): written by the daemon that started it, a
+   * fact about the run's agent and nothing else, so only journaled. The engine checks the shape only;
+   * whether `worker` belongs to the run is the host's convention.
+   */
+  | {
+      type: "worker_note";
+      what: "gone";
+      worker: string;
+      id?: string;
+      reason: WorkerGoneReason;
+      exit_code?: number;
+      /** When the worker was seen gone (milliseconds); not after the record's own time. */
+      at?: number;
     };
+
+/** Why a worker is gone: its holder vanished, its timeout killed it, it exited outside a wait, or it never started. */
+export type WorkerGoneReason = "lost" | "killed" | "exited" | "not_started";
+export const WORKER_GONE_REASONS: readonly WorkerGoneReason[] = [
+  "lost",
+  "killed",
+  "exited",
+  "not_started",
+];
 
 export type Effect =
   /** Remember the working tree under this key, so a `diff` check can compare against it. */
@@ -1969,6 +1995,7 @@ class Machine {
     if (event.type === "agent_log_saved") return this.agentLogSaved(event);
     if (event.type === "agent_log_failed") return this.agentLogFailed(event);
     if (event.type === "agent_session_named") return this.agentSessionNamed(event);
+    if (event.type === "worker_note") return this.workerNote(event);
     if (event.type === "usage_recorded") return this.usageRecorded(event);
     if (event.type === "usage_failed") return this.usageFailed(event);
     if (event.type === "tool_calls_recorded") return this.toolCallsRecorded(event);
@@ -2531,6 +2558,35 @@ class Machine {
     hashes[event.session] = event.name_hash;
     log.nameHashes = hashes;
     this.log("agent_session_named", { session: event.session, name: event.name });
+  }
+
+  /**
+   * Journal that a worker of the run is gone. A fact the host writes, not a request of anyone, so
+   * whatever does not hold is a quiet no-op, and so is a format that has no place for it: a refusal
+   * would offer an upgrade nobody asked for. Nothing in the state changes.
+   */
+  private workerNote(event: Extract<RunEvent, { type: "worker_note" }>) {
+    if (this.ended || !this.caps.workerNotes) throw new Repeat();
+    const name = (value: unknown) => typeof value === "string" && WORKER_NAME.test(value);
+    if (
+      event.what !== "gone" ||
+      !name(event.worker) ||
+      (event.id !== undefined && !name(event.id)) ||
+      !WORKER_GONE_REASONS.includes(event.reason) ||
+      (event.exit_code !== undefined && !Number.isSafeInteger(event.exit_code)) ||
+      (event.at !== undefined &&
+        (!Number.isSafeInteger(event.at) || event.at < 0 || event.at > this.now))
+    ) {
+      throw new Repeat();
+    }
+    this.log("worker_note", {
+      what: "gone",
+      worker: event.worker,
+      ...(event.id === undefined ? {} : { id: event.id }),
+      reason: event.reason,
+      ...(event.exit_code === undefined ? {} : { exit_code: event.exit_code }),
+      ...(event.at === undefined ? {} : { at: event.at }),
+    });
   }
 
   private agentLogFailed(event: Extract<RunEvent, { type: "agent_log_failed" }>) {

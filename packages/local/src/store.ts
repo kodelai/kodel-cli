@@ -51,6 +51,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { sha256 } from "./integrity";
 import { MAX_PATCH_KB, preparePatch } from "./patch-text";
+import { type ProcessIdentity, processIdentity, sameProcess } from "./process-table";
 import { CONFIG_FILE } from "./project-locate";
 import { ensurePlace, StoragePathsError, type StoragePlace, scrubHome } from "./storage-paths";
 import { sameDir } from "./worktree";
@@ -102,7 +103,16 @@ export interface StoreOptions {
   isAlive?: (pid: number) => boolean;
   clock?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  /** Whether the process of a lock's holder is still the one that wrote it; for `worker-start.lock`. */
+  isSame?: (pid: number, identity: ProcessIdentity | undefined) => boolean;
+  /** The identity of this process, written into `worker-start.lock`. */
+  identity?: () => ProcessIdentity | undefined;
+  /** How long a start waits for `worker-start.lock`; 15 s by default. */
+  workerStartWaitMs?: number;
 }
+
+/** How long a start waits for another start to let `worker-start.lock` go. */
+export const WORKER_START_WAIT_MS = 15_000;
 
 /** How long a copy of the agent's log may hold its lock before another process takes it over. */
 export const AGENT_LOG_STALE_MS = 300_000;
@@ -146,6 +156,15 @@ const processIsAlive = (pid: number): boolean => {
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 };
+
+/**
+ * Whether the holder named in a lock's text is gone (`true`), alive (`false`), or the text cannot tell
+ * (`undefined`: the default rules of age and an unfinished file apply).
+ */
+type LockJudge = (text: string) => boolean | undefined;
+
+/** How long the verdict on the holder of `worker-start.lock` is kept while a waiter polls the file. */
+const HOLDER_CHECK_MS = 1_000;
 
 /** A lock file that stays empty this long was left by a process that died while creating it. */
 const UNFINISHED_LOCK_MS = 5_000;
@@ -283,6 +302,8 @@ export class FileStore {
   private readonly agentLogStaleMs: number;
   private readonly pid: number;
   private readonly isAlive: (pid: number) => boolean;
+  private readonly isSame: (pid: number, identity: ProcessIdentity | undefined) => boolean;
+  private readonly identity: () => ProcessIdentity | undefined;
   private readonly clock: () => number;
   private readonly wait: (ms: number) => Promise<void>;
   private writes = 0;
@@ -300,6 +321,8 @@ export class FileStore {
     this.agentLogStaleMs = options.agentLogStaleMs ?? AGENT_LOG_STALE_MS;
     this.pid = options.pid ?? process.pid;
     this.isAlive = options.isAlive ?? processIsAlive;
+    this.isSame = options.isSame ?? sameProcess;
+    this.identity = options.identity ?? (() => processIdentity(this.pid));
     this.clock = options.clock ?? Date.now;
     this.wait = options.sleep ?? sleep;
     const place = options.place;
@@ -1225,6 +1248,68 @@ export class FileStore {
     return this.queued("start", join(this.lockRoot, "start.lock"), fn, true);
   }
 
+  /**
+   * Held by a starter of background workers (`kodel serve`, the TUI's `s`) from its check that a task
+   * is not started yet and the limits have room to the end of the launch (TASK-G8KM, T-44). Taken
+   * before `start.lock` and a run's lock, never while holding either. The holder is named by pid and
+   * process identity; the lock is taken over only when that process is gone, never for its age: a slow
+   * start that is alive keeps it. A waiter gives up after 15 s with `STATE_LOCKED`.
+   */
+  async withWorkerStartLock<T>(fn: () => Promise<T>): Promise<T> {
+    const lockPath = join(this.lockRoot, "worker-start.lock");
+    // The file is polled every 20 ms, but asking about its holder spawns `ps` on macOS: the verdict on
+    // one holder is kept for a second.
+    let judged: { text: string; at: number; gone: boolean | undefined } | undefined;
+    let unconfirmed: number | undefined;
+    const previous = this.held.get("worker-start") ?? Promise.resolve();
+    const run = previous
+      .catch(() => undefined)
+      .then(() =>
+        this.lockedRun("worker-start", lockPath, () => fn(), true, {
+          timeoutMs: this.options.workerStartWaitMs ?? WORKER_START_WAIT_MS,
+          staleMs: Number.POSITIVE_INFINITY,
+          holder: () => {
+            const identity = this.identity();
+            return identity === undefined ? {} : { identity };
+          },
+          judge: (text) => {
+            const now = this.clock();
+            if (judged !== undefined && judged.text === text && now - judged.at < HOLDER_CHECK_MS) {
+              return judged.gone;
+            }
+            let holder: { pid?: unknown; identity?: ProcessIdentity } | undefined;
+            try {
+              holder = JSON.parse(text) as { pid?: unknown; identity?: ProcessIdentity };
+            } catch {
+              return undefined;
+            }
+            if (typeof holder?.pid !== "number") return undefined;
+            const gone = !this.isSame(holder.pid, holder.identity);
+            unconfirmed = !gone && holder.identity === undefined ? holder.pid : undefined;
+            judged = { text, at: now, gone };
+            return gone;
+          },
+          busy: "another start is in progress, try again",
+        }).catch((error: unknown) => {
+          if (
+            error instanceof KodelError &&
+            error.code === "STATE_LOCKED" &&
+            unconfirmed !== undefined
+          ) {
+            // A holder with no identity cannot be told from another process that got its pid: name
+            // the file, so a person can see that it is left over and remove it.
+            throw new KodelError(
+              "STATE_LOCKED",
+              `${error.message} (${lockPath} names pid ${unconfirmed}, which is alive but not known to be the process that took the lock; if no kodel start is running, remove the file)`,
+            );
+          }
+          throw error;
+        }),
+      );
+    this.held.set("worker-start", run);
+    return run;
+  }
+
   private queued<T>(
     key: string,
     lockPath: string,
@@ -1253,6 +1338,7 @@ export class FileStore {
     lockPath: string,
     staleMs: number,
     sameAs?: string,
+    judge?: LockJudge,
   ): Promise<string | undefined> {
     const now = this.clock();
     let text: string;
@@ -1265,6 +1351,8 @@ export class FileStore {
     // Asked about the very lock that was judged before: a different one is somebody else's, taken
     // since, and is not ours to remove.
     if (sameAs !== undefined && text !== sameAs) return undefined;
+    const judged = judge?.(text);
+    if (judged !== undefined) return judged ? text : undefined;
     let holder: { pid: number; since: number } | undefined;
     try {
       holder = JSON.parse(text) as { pid: number; since: number };
@@ -1287,8 +1375,12 @@ export class FileStore {
    * Remove an abandoned lock. Only one waiter at a time gets to do it (a second lock file guards the
    * removal), and it looks again once it is in, so a lock that someone took in the meantime stays.
    */
-  private async takeOverAbandoned(lockPath: string, staleMs: number): Promise<boolean> {
-    const seen = await this.lockAbandoned(lockPath, staleMs);
+  private async takeOverAbandoned(
+    lockPath: string,
+    staleMs: number,
+    judge?: LockJudge,
+  ): Promise<boolean> {
+    const seen = await this.lockAbandoned(lockPath, staleMs, undefined, judge);
     if (seen === undefined) return false;
     const guardPath = `${lockPath}.takeover`;
     let guard: Awaited<ReturnType<typeof open>>;
@@ -1307,7 +1399,7 @@ export class FileStore {
       await guard.close();
       // Only the lock that was judged abandoned goes: if its holder let it go and someone took it
       // since, the text is different and it stays.
-      if ((await this.lockAbandoned(lockPath, staleMs, seen)) === undefined) return false;
+      if ((await this.lockAbandoned(lockPath, staleMs, seen, judge)) === undefined) return false;
       await rm(lockPath, { force: true });
       return true;
     } finally {
@@ -1320,7 +1412,15 @@ export class FileStore {
     lockPath: string,
     fn: (lock: HeldLock) => Promise<T>,
     makeFolder: boolean,
-    params: { timeoutMs: number; staleMs: number } = {
+    params: {
+      timeoutMs: number;
+      staleMs: number;
+      /** More fields of the lock file that name the holder. */
+      holder?: () => Record<string, unknown>;
+      judge?: LockJudge;
+      /** The message of `STATE_LOCKED` when the wait runs out. */
+      busy?: string;
+    } = {
       timeoutMs: this.lockTimeoutMs,
       staleMs: this.staleLockMs,
     },
@@ -1341,7 +1441,9 @@ export class FileStore {
       try {
         const handle = await open(lockPath, "wx");
         try {
-          await handle.writeFile(JSON.stringify({ pid: this.pid, since: this.clock(), token }));
+          await handle.writeFile(
+            JSON.stringify({ pid: this.pid, since: this.clock(), token, ...params.holder?.() }),
+          );
         } finally {
           await handle.close();
         }
@@ -1351,9 +1453,12 @@ export class FileStore {
           throw new KodelError("UNKNOWN_RUN", `there is no run "${name}"`);
         }
         if (!lockBusy(error)) throw error;
-        if (await this.takeOverAbandoned(lockPath, params.staleMs)) continue;
+        if (await this.takeOverAbandoned(lockPath, params.staleMs, params.judge)) continue;
         if (this.clock() >= deadline) {
-          throw new KodelError("STATE_LOCKED", `timed out waiting for the lock on ${name}`);
+          throw new KodelError(
+            "STATE_LOCKED",
+            params.busy ?? `timed out waiting for the lock on ${name}`,
+          );
         }
         await this.wait(20);
       }

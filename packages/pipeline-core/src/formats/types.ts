@@ -30,6 +30,8 @@ export interface FormatCapabilities {
   firstDuplicateEdgeWins: boolean;
   /** The event that names a session of the agent (`agent_session_named`). Format 1 never wrote it. */
   sessionNames: boolean;
+  /** The event that says a background worker of the run is gone (`worker_note`). Format 1 never wrote it. */
+  workerNotes: boolean;
   /** The pipeline features a snapshot of this format can use. */
   pipelineFeatures: readonly PipelineFeature[];
 }

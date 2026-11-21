@@ -460,6 +460,16 @@ export function formatReport(
       lines.push(`  ${when}  ${what}  "${plain(decision.instruction).slice(0, 200)}"`);
     }
   }
+  if ((report.workers_gone ?? []).length > 0) {
+    lines.push("", "background agents that kodel serve saw gone:");
+    for (const gone of report.workers_gone ?? []) {
+      // Local time, as `kodel agent ls`, status and the TUI give the same note.
+      const at = new Date(gone.at);
+      const when = `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, "0")}-${String(at.getDate()).padStart(2, "0")} ${at.toTimeString().slice(0, 5)}`;
+      const code = gone.exit_code === undefined ? "" : ` (exit ${gone.exit_code})`;
+      lines.push(`  ${when}  ${plain(gone.worker)}  ${plain(gone.reason)}${code}`);
+    }
+  }
   if (changed.length > 0) {
     lines.push("", "attempts that ran on another definition than the one before:", ...changed);
   }

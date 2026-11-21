@@ -11,6 +11,8 @@ import {
   runSlug,
   SAFE_SESSION_ID,
 } from "@kodel-ai/pipeline-core";
+import { NOT_A_SIGN_OF_LIFE } from "@kodel-ai/pipeline-core/serve";
+import { workerNotesOf } from "../worker-launcher";
 import type { PipeEntry } from "./pipelines";
 import { canReadPipelines, loadPipelines } from "./pipes-load";
 import {
@@ -52,6 +54,8 @@ export interface SessionSource {
   >;
   open(runId: string): Promise<RunHandle | undefined>;
   pipelineProposals(): Promise<unknown[]>;
+  /** The root of another checkout that made the run; a source with one history per checkout has none. */
+  foreignRootOf?(meta: { runId: string; root?: string }): string | undefined;
 }
 
 export interface Loaded {
@@ -115,12 +119,14 @@ async function buildSession(
   { meta, state }: Summary,
   now: number,
 ): Promise<Session> {
+  const foreignRoot = source.foreignRootOf?.(meta);
   const base = {
     id: meta.runId,
     title: meta.slug ?? state?.slug ?? runSlug(undefined, meta.task),
     pipeline: meta.pipeline,
     ...(meta.workdir === undefined ? {} : { workdir: meta.workdir }),
     ...(state?.taskKey === undefined ? {} : { taskKey: state.taskKey }),
+    ...(foreignRoot === undefined ? {} : { foreignRoot }),
     steps: [] as StepLine[],
     log: [] as string[],
   };
@@ -154,6 +160,7 @@ async function buildSession(
   const journal = await run.journal().catch(() => [] as JournalRecord[]);
   const agentSession = agentSessionOf(journal);
   const decided = decisionOf(journal);
+  const gone = workerNotesOf(journal).at(-1);
   const full = {
     ...base,
     steps: stepLines(state),
@@ -161,6 +168,7 @@ async function buildSession(
     ...(agentSession === undefined ? {} : { agentSession }),
     ...(decided.lastWait === undefined ? {} : { lastWait: decided.lastWait }),
     ...(decided.decision === undefined ? {} : { decision: decided.decision, moved: decided.moved }),
+    ...(gone === undefined ? {} : { workerGone: gone }),
   };
   const ended =
     state.status === "completed" || state.status === "failed" || state.status === "canceled";
@@ -389,9 +397,6 @@ function lastTs(journal: JournalRecord[], event: string): number | undefined {
 function sinceLast(journal: JournalRecord[], state: RunState): number {
   return lastSign(journal) ?? state.startedAt;
 }
-
-/** The name of a session changing says nothing about the agent: a rename must not make a stuck agent look alive. */
-const NOT_A_SIGN_OF_LIFE = ["agent_session_named"];
 
 function lastSign(journal: JournalRecord[]): number | undefined {
   return journal.findLast((r) => !NOT_A_SIGN_OF_LIFE.includes(r.event))?.ts;

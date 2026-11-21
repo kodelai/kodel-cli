@@ -1,4 +1,5 @@
 /** The terminal loop: alternate screen, raw keys, redraw on a key, a resize, a frame or new data. */
+import type { ServeStatus } from "@kodel-ai/local";
 import { plain } from "../plain";
 import { WORKER_REFRESH_MS, type WorkerLauncher, type WorkerStatus } from "../worker-launcher";
 import { neutralize } from "./ansi";
@@ -38,6 +39,7 @@ import {
   pasteText,
   pickedDecision,
   render,
+  type ServeView,
   shownTask,
   takeEffects,
   tick,
@@ -72,8 +74,24 @@ export interface StartResult {
   runId?: string;
 }
 
-/** A read of the worker records: the statuses by run id, or a read that failed. */
-export type WorkerRead = { ok: true; statuses: Map<string, WorkerStatus> } | { ok: false };
+/** A read of the worker records: the statuses by run id and the daemon's state, or a read that failed. */
+export type WorkerRead =
+  | { ok: true; statuses: Map<string, WorkerStatus>; serve?: ServeView }
+  | { ok: false };
+
+/** The daemon's record as the screen needs it; a status that cannot be read counts as no daemon. */
+export function serveViewOf(status: ServeStatus | undefined): ServeView {
+  if (status === undefined) return { kind: "off" };
+  if (status.kind === "active" || status.kind === "silent") {
+    const { pid, started, cycle_at } = status.record;
+    return {
+      kind: status.kind,
+      pid,
+      since: status.kind === "silent" ? (cycle_at ?? started) : started,
+    };
+  }
+  return { kind: "off" };
+}
 const REFRESH_MS = 2000;
 /** How often the card of a run that is going on is read again. */
 const DETAIL_REFRESH_MS = 4000;
@@ -120,6 +138,8 @@ export interface TuiOptions {
   workerRefreshMs?: number;
   /** The platform, for the one check that skips the worker reads (`win32`); tests set it. */
   platform?: string;
+  /** Reads whether `kodel serve` runs for this checkout; with each read of the worker records. */
+  serve?: () => Promise<ServeStatus>;
 }
 
 /**
@@ -243,17 +263,22 @@ export async function runTui(
   const workersRefresh =
     workers && (options.platform ?? process.platform) !== "win32"
       ? createRefresh<WorkerRead, boolean>({
-          load: async () => ({
-            ok: true,
-            statuses: await workers.statuses(model.sessions.map((s) => s.id)),
-          }),
+          load: async () => {
+            const [statuses, serve] = await Promise.all([
+              workers.statuses(model.sessions.map((s) => s.id)),
+              options.serve === undefined
+                ? undefined
+                : options.serve().then(serveViewOf, () => serveViewOf(undefined)),
+            ]);
+            return { ok: true, statuses, ...(serve === undefined ? {} : { serve }) };
+          },
           loadCard: async (runId) => {
             model = withProgress(model, runId, await workers.progress(runId));
             return true;
           },
           onLoad: (read) => {
             model = read.ok
-              ? withWorkers(model, read.statuses, options.work?.pending() ?? false)
+              ? withWorkers(model, read.statuses, options.work?.pending() ?? false, read.serve)
               : withWorkersUnknown(model);
             draw();
           },

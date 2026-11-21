@@ -3,14 +3,15 @@
  * agent or from a tracker goes through `plain` (the caller's), which takes out what could mislead a
  * person reading a terminal.
  */
-import type {
-  FieldInfo,
-  SubtaskRef,
-  Task,
-  TaskAdapterCapabilities,
-  TaskProblem,
-  TaskSummary,
-  ToolFailure,
+import {
+  type FieldInfo,
+  needsApproval,
+  type SubtaskRef,
+  type Task,
+  type TaskAdapterCapabilities,
+  type TaskProblem,
+  type TaskSummary,
+  type ToolFailure,
 } from "@kodel-ai/pipeline-core";
 import { formatTable } from "./table";
 
@@ -18,7 +19,7 @@ type Plain = (text: string) => string;
 
 const SHOWN_COMMENTS = 5;
 
-export const TASK_HEADER = ["KEY", "STATUS", "PRIORITY", "TITLE", "SUBTASKS", "PARENT"];
+export const TASK_HEADER = ["KEY", "STATUS", "PRIORITY", "APPROVE", "TITLE", "SUBTASKS", "PARENT"];
 
 /** One row of cells per task; the latest comment is not a cell, it goes under the row (`formatTaskTable`). */
 function taskCells(t: TaskSummary, plain: Plain): string[] {
@@ -26,6 +27,7 @@ function taskCells(t: TaskSummary, plain: Plain): string[] {
     plain(t.key),
     `${plain(t.status)}${t.state === t.status ? "" : ` (${t.state})`}`,
     t.priority === undefined ? "-" : plain(t.priority),
+    t.needs_approval === true ? "waits" : "-",
     plain(t.title),
     t.subtasks ? `${t.subtasks.done}/${t.subtasks.total}` : "-",
     t.parent === undefined ? "-" : plain(t.parent),
@@ -61,6 +63,17 @@ export function formatTask(task: Task, subtasks: SubtaskRef[], plain: Plain): st
   if (task.id !== undefined) lines.push(`  id: ${plain(task.id)}`);
   if (task.parent !== undefined) lines.push(`  parent: ${plain(task.parent)}`);
   if (task.url !== undefined) lines.push(`  url: ${plain(task.url)}`);
+  if (task.created_by === "agent") {
+    const run = task.created_in_run === undefined ? "" : ` in run ${plain(task.created_in_run)}`;
+    lines.push(`  created by: an agent${run}`);
+  }
+  if (task.agent_edited_at !== undefined) {
+    lines.push(`  changed by an agent: ${plain(task.agent_edited_at)}`);
+  }
+  if (task.approved_at !== undefined) lines.push(`  approved: ${plain(task.approved_at)}`);
+  if (needsApproval(task)) {
+    lines.push(`  waits for approval: kodel task approve ${plain(task.key)}`);
+  }
   lines.push(`  created: ${plain(task.created_at)}   updated: ${plain(task.updated_at)}`);
   if (task.runs.length > 0) lines.push(`  runs: ${task.runs.map(plain).join(", ")}`);
   for (const [name, value] of Object.entries(task.fields ?? {})) {

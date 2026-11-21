@@ -130,6 +130,7 @@ function parseEntry(raw: unknown): SessionListEntry | undefined {
   }
   if (raw.status.childAlive === true) status.childAlive = true;
   if (typeof raw.status.since === "number") status.since = raw.status.since;
+  if (typeof raw.status.lastOutputAt === "number") status.lastOutputAt = raw.status.lastOutputAt;
   const entry: SessionListEntry = { id: raw.id, status };
   if (typeof raw.name === "string") entry.name = raw.name;
   if (typeof raw.command === "string") entry.command = raw.command;
@@ -191,6 +192,10 @@ export function workerStatusOf(entries: readonly SessionListEntry[]): WorkerStat
     resumed,
     resumes: resumed.length,
     ...(latest.name.decisionSeq === undefined ? {} : { decisionSeq: latest.name.decisionSeq }),
+    ...(unknown || entry.status.lastOutputAt === undefined
+      ? {}
+      : { lastOutputAt: entry.status.lastOutputAt }),
+    ...(!unknown && entry.status.reason === "stopped" ? { stopped: true as const } : {}),
   };
 }
 

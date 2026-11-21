@@ -18,7 +18,20 @@ const PROFILES: [string, MemoryTaskOptions][] = [
 
 for (const [name, options] of PROFILES) {
   describe(`task adapter conformance: the in-memory adapter, ${name}`, () => {
-    for (const c of taskAdapterContract(() => ({ adapter: new MemoryTaskAdapter(options) }))) {
+    for (const c of taskAdapterContract(() => {
+      let now = Date.UTC(2026, 0, 1);
+      let moving = true;
+      const clock = () => {
+        if (moving) now += 1000;
+        return now;
+      };
+      return {
+        adapter: new MemoryTaskAdapter({ ...options, clock }),
+        stopClock: () => {
+          moving = false;
+        },
+      };
+    })) {
       test(c.name, c.run);
     }
   });

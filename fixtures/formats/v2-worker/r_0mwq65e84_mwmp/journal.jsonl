@@ -1,0 +1,20 @@
+{"v":2,"seq":1,"ts":1795251094922,"event":"run_started","run":"r_0mwq65e84_mwmp","task":"Add a health check","slug":"add-a-health-check","spec":"c2d10172115bc039","workdir":"/kodel-fixture/workdir/r_0mwq65e84_mwmp","branch":"kodel/r_0mwq65e84_mwmp","pipelineFile":".kodel/pipelines/gated.yaml","task_key":"TASK-CXZX","history":{"changes":{"enabled":false,"exclude":[],"max_kb":512},"output":{"enabled":true,"max_kb":64},"prompts":{"enabled":true},"executor":{"enabled":true},"tool_log":{"enabled":true},"agent_log":{"enabled":true,"mode":"full","preview_chars":{"user":4000,"agent":4000,"tool_input":4000,"tool_result":8000},"max_kb":20480,"interval_s":10},"usage":{"enabled":true,"prices":{}},"tool_calls":{"enabled":true,"preview_chars":200}},"engine":{"version":"0.1.0","commit":"fixture","record_version":2,"meta_version":2},"executor":{"client":{"value":{"name":"kodel-serve","version":"0.1.0"},"source":"observed"}},"base_commit":"f8452bd5c8bcf37a39ca3aa84e41467c329ddd6d"}
+{"v":2,"seq":2,"ts":1795251094922,"event":"node_entered","node":"write","attempt":1,"visit":1,"rework":false,"definition":{"work":"88cb6f44fbdb6f47","checks":"4f53cda18c2baa0c","routing":"7d536a05953bad84"}}
+{"v":2,"seq":3,"ts":1795251095035,"event":"task_link","what":"linked","task":"TASK-CXZX"}
+{"v":2,"seq":4,"ts":1795251095152,"event":"worker_note","what":"gone","worker":"kw-r_0mwq65e84_mwmp","id":"a_000000001_test","reason":"lost","at":1795251095090}
+{"v":2,"seq":5,"ts":1795251095158,"event":"step_served","node":"write","attempt":1,"n":1,"ref":"served/write-1-1.json","prompt_hash":"14b3c75dec393e1ab9d5c0d38196432215e6ffbc05b85b79ae529442a6d415ae","executor":{"client":{"value":{"name":"fixture-agent","version":"0.0.0"},"source":"observed"}}}
+{"v":2,"seq":6,"ts":1795251095164,"event":"agent_log_failed","reason":"session_unknown"}
+{"v":2,"seq":7,"ts":1795251095167,"event":"usage_failed","reason":"agent_unsupported"}
+{"v":2,"seq":8,"ts":1795251095170,"event":"tool_calls_failed","reason":"agent_unsupported"}
+{"v":2,"seq":9,"ts":1795251095210,"event":"agent_completed","node":"write","attempt":1,"outcome":"passed","summary":"the health check is in","executor":{},"head":"f8452bd5c8bcf37a39ca3aa84e41467c329ddd6d"}
+{"v":2,"seq":10,"ts":1795251095210,"event":"node_finished","node":"write","attempt":1,"outcome":"passed","status":"passed"}
+{"v":2,"seq":11,"ts":1795251095210,"event":"node_entered","node":"review","attempt":1,"visit":2,"rework":false,"definition":{"work":"956350af3749ec14","checks":"4f53cda18c2baa0c","routing":"dd1235a21c9cf693"}}
+{"v":2,"seq":12,"ts":1795251095210,"event":"gate_waiting","node":"review","attempt":1}
+{"v":2,"seq":13,"ts":1795251095314,"event":"gate_decided","node":"review","decision":"approved","reason":null}
+{"v":2,"seq":14,"ts":1795251095314,"event":"node_finished","node":"review","attempt":1,"outcome":"approved","status":"passed"}
+{"v":2,"seq":15,"ts":1795251095314,"event":"node_entered","node":"ship","attempt":1,"visit":3,"rework":false,"definition":{"work":"260c5124289fd9df","checks":"4f53cda18c2baa0c","routing":"cb68b97d0ea0e773"}}
+{"v":2,"seq":16,"ts":1795251095317,"event":"step_served","node":"ship","attempt":1,"n":1,"ref":"served/ship-1-1.json","prompt_hash":"498230609fa5c2728cd528fd1c81958eea634972fa7fec5e31f181eca9ecfdb6","executor":{"client":{"value":{"name":"fixture-agent","version":"0.0.0"},"source":"observed"}}}
+{"v":2,"seq":17,"ts":1795251095363,"event":"agent_completed","node":"ship","attempt":1,"outcome":"passed","summary":"shipped","executor":{},"head":"f8452bd5c8bcf37a39ca3aa84e41467c329ddd6d"}
+{"v":2,"seq":18,"ts":1795251095363,"event":"node_finished","node":"ship","attempt":1,"outcome":"passed","status":"passed"}
+{"v":2,"seq":19,"ts":1795251095363,"event":"run_finished","status":"completed","head":"f8452bd5c8bcf37a39ca3aa84e41467c329ddd6d","commits":[]}
+{"v":2,"seq":20,"ts":1795251095401,"event":"task_link","what":"closed","task":"TASK-CXZX"}

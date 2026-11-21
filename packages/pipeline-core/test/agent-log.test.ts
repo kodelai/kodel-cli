@@ -567,6 +567,7 @@ describe("t41 a consumer that has to know every event", () => {
     cancel: true,
     changes_recorded: true,
     task_note: true,
+    worker_note: true,
     engine_start_pending: true,
     engine_session_started: true,
     engine_session_joined: true,

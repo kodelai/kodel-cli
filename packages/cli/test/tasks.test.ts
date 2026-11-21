@@ -287,26 +287,29 @@ describe("the header of the list", () => {
     await cli("task", "set", b, "--comment", "the latest note");
     const lines = (await cli("task", "list")).out.split("\n").filter((l) => !l.startsWith("    "));
     const header = lines[0] ?? "";
-    expect(header).toMatch(/^KEY\s+STATUS\s+PRIORITY\s+TITLE\s+SUBTASKS\s+PARENT$/);
+    expect(header).toMatch(/^KEY\s+STATUS\s+PRIORITY\s+APPROVE\s+TITLE\s+SUBTASKS\s+PARENT$/);
     const rows = lines.filter((l) => l.startsWith("KDL-"));
     expect(rows.length).toBe(2);
-    for (const col of ["STATUS", "PRIORITY", "TITLE", "SUBTASKS", "PARENT"]) {
+    for (const col of ["STATUS", "PRIORITY", "APPROVE", "TITLE", "SUBTASKS", "PARENT"]) {
       const at = header.indexOf(col);
       for (const row of rows) expect(row[at - 1], `${col} in ${row}`).toBe(" ");
     }
     const row = rows.find((r) => r.startsWith(a)) ?? "";
     expect(row.indexOf("high")).toBe(header.indexOf("PRIORITY"));
     expect(row.indexOf("Short")).toBe(header.indexOf("TITLE"));
+    // Made without a terminal, so both are an agent's tasks and wait for approval.
+    expect(row.indexOf("waits")).toBe(header.indexOf("APPROVE"));
   });
 
-  test("the latest comment stays under its row, and subtasks and parent are columns", async () => {
+  test("the latest comment stays under its row, and approval, subtasks and parent are columns", async () => {
     await config(ENABLED);
     const parent = await add("Parent");
     const child = await add("Child", "--parent", parent);
     await cli("task", "set", child, "--comment", "note here");
     const out = (await cli("task", "list")).out.split("\n");
     const at = out.findIndex((l) => l.startsWith(child));
-    expect(out[at]).toMatch(new RegExp(`Child\\s+-\\s+${parent}$`));
+    // Made without a terminal, so it is an agent's task and its row says it waits for approval.
+    expect(out[at]).toMatch(new RegExp(`\\swaits\\s+Child\\s+-\\s+${parent}$`));
     expect(out[at + 1]).toBe('    "note here"');
     expect(out.find((l) => l.startsWith(parent))).toMatch(/\s0\/1\s/);
   });
@@ -334,6 +337,7 @@ describe("the header of the list", () => {
     await add("bad\u001b[2Jtitle");
     const out = (await cli("task", "list")).out;
     expect(out).not.toContain("\u001b");
+    // The header and the row.
     expect(out.split("\n").filter(Boolean).length).toBe(2);
   });
 });
@@ -547,5 +551,99 @@ describe("plural aliases of the command groups", () => {
     expect(text.match(/\btasks\b(?!\.)/g)?.length ?? 0).toBeLessThan(3);
     const group = withPlural(new Command("widget"));
     expect(group.aliases()).toEqual(["widgets"]);
+  });
+});
+
+describe("tasks an agent made or changed (T-44)", () => {
+  async function as(
+    who: { interactive: boolean; environment?: Record<string, string>; yes?: boolean },
+    ...args: string[]
+  ) {
+    let out = "";
+    let err = "";
+    const asked: string[] = [];
+    const code = await runCli(args, {
+      cwd: dir,
+      out: (t) => {
+        out += t;
+      },
+      err: (t) => {
+        err += t;
+      },
+      interactive: who.interactive,
+      environment: who.environment ?? {},
+      confirm: async (question) => {
+        asked.push(question);
+        return who.yes ?? true;
+      },
+      select: async () => [],
+    });
+    return { code, out, err, asked };
+  }
+  const person = { interactive: true };
+  const keyOf = (text: string) => /created (\S+):/.exec(text)?.[1] ?? "";
+  const shown = async (key: string) => (await cli("task", "show", key)).out;
+
+  test("t44_task_add_and_set_mark_without_a_terminal", async () => {
+    await config(ENABLED);
+    const byPerson = keyOf((await as(person, "task", "add", "Typed at a terminal")).out);
+    expect(await shown(byPerson)).not.toContain("waits for approval");
+    const fromScript = keyOf(
+      (await as({ interactive: false }, "task", "add", "From a script")).out,
+    );
+    expect(await shown(fromScript)).toContain("waits for approval");
+    expect(await shown(fromScript)).toContain("created by: an agent");
+    const engine = { interactive: true, environment: { KODEL_ENGINE: "1" } };
+    const fromEngine = keyOf((await as(engine, "task", "add", "From the engine")).out);
+    expect(await shown(fromEngine)).toContain("waits for approval");
+
+    // `set` from a script or the engine marks a person's task; a comment does not.
+    await as({ interactive: false }, "task", "set", byPerson, "--comment", "a note");
+    expect(await shown(byPerson)).not.toContain("waits for approval");
+    await as(engine, "task", "set", byPerson, "--priority", "high");
+    expect(await shown(byPerson)).toContain("waits for approval");
+    const listed = (await cli("task", "list")).out.split("\n");
+    expect(listed.find((l) => l.startsWith(byPerson))).toMatch(/\swaits\s/);
+
+    // A person's own change marks nothing.
+    const other = keyOf((await as(person, "task", "add", "Another")).out);
+    await as(person, "task", "set", other, "--title", "Renamed by a person");
+    expect(await shown(other)).not.toContain("waits for approval");
+    const after = (await cli("task", "list")).out.split("\n");
+    expect(after.find((l) => l.startsWith(other))).toMatch(/\s-\s+Renamed by a person/);
+  });
+
+  test("t44_approve_is_a_persons_command", async () => {
+    await config(ENABLED);
+    const key = keyOf((await as({ interactive: false }, "task", "add", "An agent's idea")).out);
+
+    const script = await as({ interactive: false }, "task", "approve", key);
+    expect(script.code).toBe(1);
+    expect(script.err).toContain("for a person at a terminal");
+    const engine = await as(
+      { interactive: true, environment: { KODEL_ENGINE: "1" } },
+      "task",
+      "approve",
+      key,
+    );
+    expect(engine.code).toBe(1);
+    expect(engine.err).toContain("will not run from a command the engine runs");
+
+    const no = await as({ interactive: true, yes: false }, "task", "approve", key);
+    expect(no.code).toBe(1);
+    expect(no.out).toContain("An agent's idea");
+    expect(no.asked).toHaveLength(1);
+    expect(await shown(key)).toContain("waits for approval");
+
+    const yes = await as(person, "task", "approve", key);
+    expect(yes.code).toBe(0);
+    expect(yes.out).toContain(`approved ${key}`);
+    expect(await shown(key)).not.toContain("waits for approval");
+    expect(await shown(key)).toContain("approved: ");
+
+    const again = await as(person, "task", "approve", key);
+    expect(again.code).toBe(0);
+    expect(again.out).toContain("does not wait for an approval");
+    expect(again.asked).toHaveLength(0);
   });
 });

@@ -1,5 +1,6 @@
 /** What the screens know about a run: the engine's state boiled down to what a person looks at. */
 import type { ExecutorSource } from "@kodel-ai/pipeline-core";
+import type { WorkerGone } from "../worker-launcher";
 import type { DecisionMark, WaitMark } from "./worker-resume";
 
 /** `unreadable`: nothing can be decided about it, so it does not wait for anyone. */
@@ -83,6 +84,8 @@ export interface Session {
   workdir?: string;
   /** The key of the task the engine tied this run to; absent when the run is not tied to one. */
   taskKey?: string;
+  /** The root of the checkout that made the run, when it is another one: `kodel serve` here leaves it alone. */
+  foreignRoot?: string;
   /** The card's lines about what is asked of the person. */
   headline?: string;
   prompt?: string;
@@ -107,6 +110,8 @@ export interface Session {
   lastWait?: WaitMark;
   decision?: DecisionMark;
   moved?: boolean;
+  /** The latest background worker of the run that `kodel serve` saw gone (`worker_note`). */
+  workerGone?: WorkerGone;
   steps: StepLine[];
   log: string[];
 }

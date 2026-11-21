@@ -20,16 +20,23 @@ describe("task adapter conformance: the local adapter, on real files", () => {
   for (const c of taskAdapterContract(async () => {
     const storeRoot = await mkdtemp(join(tmpdir(), "kodel-tasks-"));
     let now = Date.UTC(2026, 9, 22);
+    let moving = true;
     const adapter = new LocalTaskAdapter({
       storeRoot,
       prefix: "KDL",
       clock: () => {
-        now += 1000;
+        if (moving) now += 1000;
         return now;
       },
       random: seeded(7),
     });
-    return { adapter, dispose: () => rm(storeRoot, { recursive: true, force: true }) };
+    return {
+      adapter,
+      stopClock: () => {
+        moving = false;
+      },
+      dispose: () => rm(storeRoot, { recursive: true, force: true }),
+    };
   })) {
     test(c.name, c.run);
   }

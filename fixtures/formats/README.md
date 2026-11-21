@@ -216,6 +216,32 @@ visits are neutral names (`fixture-host:1`, `fixture-host:2`, `fixture-gone:1`).
   which the unknown outcome ended, so no stored file holds it; the input `engine_session_joined` is
   not journaled.
 
+## `v2-worker/`
+
+Two runs of run-state format 2 with a `worker_note` (T-44, TASK-G8KM: the journal-only event `kodel serve`
+writes when a worker it watches is gone; see `docs/run-formats.md`). Format 2 is amended in place for it
+(capability `workerNotes`); the state has no new field. A throwaway script (not part of this repository) drove
+a real daemon (`createServeDaemon` of `@kodel-ai/local`, with `LocalPipelineHost` and the `local` task
+adapter in a scratch git repository: `tasks.enabled`, a `serve` block that starts every `todo` task in the
+pipeline `gated`, `worktree.mode` left at `auto`, `history.changes` off, no `CLAUDE*` variable). The launcher
+was the `ScriptedLauncher` of `@kodel-ai/testkit`: it starts no process, so the record ids are its own
+(`a_000000001_test`) and the run's worker never ran an agent. The pipeline is written for these runs (`write`,
+the gate `review`, `ship`); each run's `specs/` holds it as it was.
+
+- `r_0mwq65e84_mwmp` (finished): the daemon started it for a task (`run_started` with the client `kodel-serve`,
+  `task_link` `linked`), its launch made a `running` record that printed nothing, the script marked the holder
+  lost, and the next cycle wrote `worker_note` (`what: gone`, `worker: kw-<run id>`, the record's `id`,
+  `reason: lost`, `at`). Then another agent (the script, as `fixture-agent`) went on with `nextStep` and
+  `completeStep`, the person approved the gate (`decideHuman`), `ship` was completed and the task closed.
+- `r_0mwq65epm_wgg7` (open): the daemon started it for a second task and the launch threw before it made a
+  record, so the daemon wrote `worker_note` with `reason: not_started` and no `id`. The run is left `running`
+  at `write` #1, never served: the run with a task and no agent that `kodel serve --status` lists.
+
+They were taken with `node scripts/take-format-fixture.mjs v2-worker <run dir> <run dir>`; as in the other
+directories, the workdir is the placeholder `/kodel-fixture/workdir/<run id>` and there is no `seal.json`.
+The tests open both (`status`, `report`, whose `workers_gone` lists the note), write them back as they were
+read, and continue the open one in format 2 (a step, the gate, a second note written once).
+
 ## `v2-model/`
 
 One run of run-state format 2 with a fork whose two steps ask for a model (T-43: `model` without `engine`), worked by two
