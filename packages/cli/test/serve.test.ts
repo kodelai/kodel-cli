@@ -780,6 +780,20 @@ describe("t44 the real session adapter", () => {
         // The cycle reads the records through `kodel agent ls --json`, as a person's daemon does.
         expect(await daemon.cycle()).toEqual({ kind: "active" });
         const run = (await h.open(runId)) as LocalRun;
+        // T-44 as revised by T-45: while the process the holder started still runs, the worker is
+        // alive for every rule. No note yet; one line with the command that stops it.
+        expect(await adapter.status(id)).toMatchObject({ state: "lost", childAlive: true });
+        expect((await run.journal()).filter((r) => r.event === "worker_note")).toEqual([]);
+        expect(lines).toContain(
+          `child_alive: run ${runId}: kw-${runId}: its process still runs without a holder; stop it: kodel agent stop ${id}`,
+        );
+        // The process is gone at last: a holder that is gone is noted, within one cycle.
+        process.kill(-child, "SIGKILL");
+        for (let i = 0; i < 100; i++) {
+          if ((await adapter.status(id)).childAlive !== true) break;
+          await wait(50);
+        }
+        expect(await daemon.cycle()).toEqual({ kind: "active" });
         const notes = (await run.journal()).filter((r) => r.event === "worker_note");
         expect(notes, lines.join("\n")).toHaveLength(1);
         expect(notes[0]).toMatchObject({ worker: `kw-${runId}`, id, reason: "lost" });
