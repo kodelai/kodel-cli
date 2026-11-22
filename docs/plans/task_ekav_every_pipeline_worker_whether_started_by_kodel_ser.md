@@ -1287,3 +1287,55 @@ After the review (the three blocking findings and the cheap minor ones):
   is not seen from outside); the row of `t44_daemon_finishes_through_the_launcher` says what the code
   does (a failed finish is tried again next cycle); the spike's scripts take this checkout unless
   `EKAV_MAIN` names another, and its note opens with the final verdict.
+
+After the person tried it by hand (the final gate, five comments):
+
+- **`kodel agent doctor` reads at a glance.** One line a check with a mark in front (`✓` holds, `✗` does
+  not, `?` cannot be told), the check, and what was found (a path, a version, the reason). Under every `✗`
+  and `?` an indented `→` line says what to do. The verdict stands apart: an empty line, no indent, `✓ a
+  worker can start` or `✗ a worker cannot start  <the launcher's reason>`, and `✗ kodel serve cannot start
+  one  <reason>` when only a start nobody watches is refused. Green, red and yellow marks and a dimmed value
+  only when stdout is a terminal and `NO_COLOR` is not set (`CliEnv.outIsTerminal`); what a probe or a file
+  said goes through `plain`, so it cannot fake a line or a colour. The seven checks, their order, what is
+  run (only the committed program) and the exit code are as before; the notes above that say "ten lines"
+  and quote `check: yes (detail)` describe the older wording. `decisions.agent` on is still a `✗` (the
+  check is "off"), and its line says that nothing stops a worker. Tests:
+  `t45_doctor_marks_every_check_and_says_what_to_do`, `t45_doctor_verdict_stands_apart`,
+  `t45_doctor_colours_only_a_terminal_without_no_color`, `t45_doctor_value_cannot_fake_a_line_or_a_colour`,
+  and the older rows read the new lines.
+- **`kodel agent ls` is `ID NAME STATE MODE AGENT CONVERSATION`.** `AGENT` is the engine, `CONVERSATION`
+  the id of its conversation (whole for a UUID, cut at 36 characters for a longer id). The `COMMAND` column
+  is gone from the table; `--json` has the command whole. It was not added to `agent logs`: that command
+  prints the session's output and nothing else, and a header there would change what scripts read.
+- **`stop`, `rm` and `logs` take a name or an id**, as `attach` does (`resolveTarget`: an id that is listed
+  is taken as it is, also when its records cannot be judged; else the rule of `resolveSession`: of the
+  sessions that used the name, the one that runs, then the newest). `stop` and `rm` find the session before
+  they ask: an unknown name fails at once with `NOT_FOUND: no agent "<name>"` and no question, and the
+  question names what was found (`Stop agent sh1 (a_…)?`). `rm` still takes the id of a folder that has no
+  record (it is not listed). Tests: `tA_agent_stop_takes_a_name_or_an_id`,
+  `tA_agent_stop_of_an_unknown_name_fails_before_the_question`, `tA_agent_rm_takes_a_name_or_an_id`,
+  `tA_agent_logs_takes_a_name_or_an_id`, `tA_agent_stop_and_rm_by_name_on_a_real_session`.
+- **A terminal worker's deny list has no `Write(...)` rule** (the one-line change the note of steps 4 and 5
+  left open): its paths are denied with `Edit(<path>)` alone, so claude prints no "never matches" warning
+  above the prompt. The print list keeps both, and the print spec stays what it was. A plain `kodel agent
+  start` passes no deny list at all, so it had no such rule. `t45_terminal_worker_list_has_no_write_rule`;
+  `t45_every_denied_path_has_an_edit_rule` no longer asks for a `Write` rule.
+- **`o` shows no shell.** The TUI no longer leaves its alternate screen when it gives the terminal away: it
+  switches its own modes off, clears the screen and writes `opening <name>…` (`handoverScreen`). The child
+  is `kodel agent attach <id> --keep-screen` (a hidden option; `AttachClientOptions.keepScreen`): it clears
+  the screen once for the session's first output, takes the switches of the screen out of the session's
+  output (`createScreenSwitchFilter`: an agent whose program enters or leaves an alternate screen of its own
+  would otherwise show the shell), resets the other modes on every way out, does not leave the screen and
+  prints no `[detached: …]` line. The TUI then writes its usual `SCREEN_ON` and redraws over it. What
+  changed in the guarantees of step 9: while away the TUI still has one thing to put back, so a signal that
+  ends it (and the `exit` handler) ends the child and writes `ESC[?1049l` once, where it wrote nothing
+  before; an outside `SIGTSTP` leaves the alternate screen for the time both are stopped and `SIGCONT`
+  enters it again. Raw mode, the dropped input of the handover, `SIGQUIT` and the return to the same place
+  are as they were. The cost, said in `docs/tasks.md`: no terminal scrollback of the agent's output while
+  it is opened from the TUI. Tests: the rows of `cli/test/tui-run.test.ts` (the alternate screen is left
+  exactly once, at the end, on every path), `t45_attach_client_keeps_the_screen_of_its_starter`,
+  `t45_screen_switch_filter`, `t45_agent_attach_keep_screen_reaches_the_client`; on a real terminal, run on
+  the built file outside the sandbox: the four TUI rows of `tests/pty/worker-terminal.test.ts` (from `o`
+  to the redraw no `ESC[?1049l` and no line of the client), the new
+  `t45_real_tui_keeps_its_screen_when_the_agent_switches_screens`, and
+  `t45_attach_client_keep_screen_leaves_the_terminal_clean` (`tests/pty/attach-client.test.ts`).
