@@ -65,6 +65,7 @@ async function runKodel() {
     out: (text) => process.stdout.write(text),
     err: (text) => process.stderr.write(text),
     interactive: process.stdin.isTTY === true && process.stdout.isTTY === true,
+    outIsTerminal: process.stdout.isTTY === true,
     confirm,
     select,
     environment: process.env,

@@ -122,6 +122,8 @@ export interface CliEnv {
   serveSignal?: AbortSignal;
   /** For `agent`: whether a terminal session can be started (a test answers for a machine it is not on). */
   ptyProbe?: () => { ok: true } | { ok: false; reason: string };
+  /** Whether `out` is a terminal (stdout is a TTY): `agent doctor` colours its marks only there. */
+  outIsTerminal?: boolean;
   /** For `agent`: the size a terminal session starts with (a test has no terminal to ask). */
   terminalSize?: () => { cols: number; rows: number } | undefined;
   /**
@@ -1681,6 +1683,7 @@ Examples:
     ...(env.ptyProbe ? { ptyProbe: env.ptyProbe } : {}),
     ...(env.terminalSize ? { terminalSize: env.terminalSize } : {}),
     ...(env.platform ? { platform: env.platform } : {}),
+    ...(env.outIsTerminal ? { outIsTerminal: true } : {}),
     project: agentProject,
     ...(env.agent === undefined
       ? {}

@@ -1,6 +1,6 @@
 /**
  * `kodel agent doctor` (T-45): one test per check, and what holds for all of them: it only reads, it
- * prints kodel's own words (yes, no, unknown) and nothing a probe printed, it is the agent's to run, and
+ * prints kodel's own words (a mark a check, and what to do) and nothing a probe printed, it is the agent's to run, and
  * it exits 1 only when a worker cannot start.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -23,7 +23,7 @@ import type {
   AgentProjectConfig,
 } from "../src/agent-commands";
 import { AGENT_HUMAN_COMMANDS, AGENT_READ_COMMANDS } from "../src/agent-commands";
-import { runAgentDoctor } from "../src/agent-doctor";
+import { DOCTOR_MARKS, doctorColour, runAgentDoctor } from "../src/agent-doctor";
 import type { Exec } from "../src/claude-worker";
 import { runCli } from "../src/cli";
 import { HUMAN_ONLY_COMMANDS } from "../src/human-only";
@@ -49,7 +49,13 @@ interface Setup {
   /** The launcher's answers: for a start by a person, then for one nobody watches. */
   preflight?: (input: PreflightInput) => PreflightResult;
   pipelines?: number;
+  /** Whether the output is a terminal, and the environment besides `HOME` and `PATH`. */
+  terminal?: boolean;
+  env?: Record<string, string>;
 }
+
+const MARKS: Record<string, "yes" | "no" | "unknown"> = { "✓": "yes", "✗": "no", "?": "unknown" };
+const CHECK_LINE = /^( *)([✓✗?]) (.*?)(?: {2,}(.*))?$/;
 
 async function doctor(setup: Setup = {}) {
   let out = "";
@@ -74,7 +80,8 @@ async function doctor(setup: Setup = {}) {
     out: (text) => {
       out += text;
     },
-    environment: { HOME: "/home/u", PATH: "/usr/bin" },
+    environment: { HOME: "/home/u", PATH: "/usr/bin", ...setup.env },
+    ...(setup.terminal ? { outIsTerminal: true } : {}),
     root: async () => "/proj",
     fail: (message: string): never => {
       throw new Refused(message);
@@ -121,10 +128,34 @@ async function doctor(setup: Setup = {}) {
   };
   const ok = await runAgentDoctor({ ctx, project });
   const lines = out.split("\n").filter((line) => line !== "");
-  /** The answer of a check: the word after its name. */
-  const answer = (check: string) =>
-    lines.find((line) => line.startsWith(`${check}: `))?.slice(check.length + 2);
-  return { ok, out, lines, answer, execs, reads, preflights };
+  /** The checks as printed: the mark, the name, what was found, and the line that says what to do. */
+  const checks = lines.flatMap((line, at) => {
+    const m = CHECK_LINE.exec(line);
+    if (!m) return [];
+    const next = lines[at + 1] ?? "";
+    const under = lines.slice(at + 1).findIndex((l) => CHECK_LINE.test(l));
+    const own = lines.slice(at + 1, under === -1 ? undefined : at + 1 + under);
+    const fix = own.find((l) => /^ +→ /.test(l))?.replace(/^ +→ /, "");
+    return [
+      {
+        indent: (m[1] as string).length,
+        answer: MARKS[m[2] as string] as "yes" | "no" | "unknown",
+        check: m[3] as string,
+        value: m[4],
+        fix,
+        next,
+      },
+    ];
+  });
+  const row = (check: string) => checks.find((c) => c.check === check);
+  /** The answer of a check and what was found, as one string: `no (the reason)`. */
+  const answer = (check: string) => {
+    const found = row(check);
+    if (found === undefined) return undefined;
+    return found.value === undefined ? found.answer : `${found.answer} (${found.value})`;
+  };
+  const fix = (check: string) => row(check)?.fix;
+  return { ok, out, lines, checks, row, answer, fix, execs, reads, preflights };
 }
 
 describe("t45 kodel agent doctor: the seven checks", () => {
@@ -144,6 +175,7 @@ describe("t45 kodel agent doctor: the seven checks", () => {
     const reason = "a terminal session cannot run under Bun: use the built kodel on Node";
     const none = await doctor({ pty: { ok: false, reason } });
     expect(none.answer("a terminal session can run")).toBe(`no (${reason})`);
+    expect(none.fix("a terminal session can run")).toContain("engines.claude.worker: print");
     // The check says what it found; whether a worker can start is the verdict's (a print worker can).
     expect(none.ok).toBe(true);
   });
@@ -159,16 +191,22 @@ describe("t45 kodel agent doctor: the seven checks", () => {
     ]);
     const missing = await doctor({ claude: undefined });
     expect(missing.answer("claude found")).toBe("no (claude is not on PATH)");
+    expect(missing.fix("claude found")).toBe("install claude and make sure it is on PATH");
     // Nothing is run for a program that is not there.
     expect(missing.execs).toEqual([]);
     expect(missing.answer("claude version")).toBeUndefined();
     const out = await doctor({ auth: `${JSON.stringify({ loggedIn: false })}\n` });
-    expect(out.answer("claude signed in")).toBe("no (run claude auth login)");
+    expect(out.answer("claude signed in")).toBe("no");
+    expect(out.fix("claude signed in")).toBe("run claude auth login");
     for (const auth of ["not json", new Error("spawn failed"), "{}"]) {
-      expect((await doctor({ auth })).answer("claude signed in"), String(auth)).toBe("unknown");
+      const r = await doctor({ auth });
+      expect(r.answer("claude signed in"), String(auth)).toBe("unknown");
+      expect(r.fix("claude signed in"), String(auth)).toContain("claude auth status");
     }
     for (const version of ["no number here", new Error("spawn failed")]) {
-      expect((await doctor({ version })).answer("claude version"), String(version)).toBe("unknown");
+      const r = await doctor({ version });
+      expect(r.answer("claude version"), String(version)).toBe("unknown");
+      expect(r.fix("claude version"), String(version)).toContain("claude --version");
     }
     // The program of a terminal worker is `terminal.command[0]`, when the block names one.
     const other = await doctor({
@@ -196,6 +234,7 @@ describe("t45 kodel agent doctor: the seven checks", () => {
       expect(out.answer("claude version"), found.state).toBe(
         "unknown (/tmp/planted is not run: engines.claude.terminal.command is not as committed)",
       );
+      expect(out.fix("claude version"), found.state).toContain("commit .kodel/config.yaml");
       // Only the profile's own program is run, for the sign-in.
       expect(out.execs, found.state).toEqual([["claude", "auth", "status", "--json"]]);
       expect(out.execs.flat(), found.state).not.toContain("/tmp/planted");
@@ -224,14 +263,14 @@ describe("t45 kodel agent doctor: the seven checks", () => {
     const asks = await doctor({
       claudeJson: JSON.stringify({ projects: { "/elsewhere": { hasTrustDialogAccepted: true } } }),
     });
-    expect(asks.answer("worktrees folder trusted")).toContain("no (");
-    // Accepting trust is the person's act: the line says how, and nothing does it for them.
-    expect(asks.answer("worktrees folder trusted")).toContain(
+    expect(asks.answer("worktrees folder trusted")).toBe(`no (${WORKTREES})`);
+    // Accepting trust is the person's act: the line under it says how, and nothing does it for them.
+    expect(asks.fix("worktrees folder trusted")).toBe(
       "start claude in the project root once and accept; kodel never accepts it for you",
     );
-    expect((await doctor({ claudeJson: undefined })).answer("worktrees folder trusted")).toBe(
-      `unknown (${WORKTREES})`,
-    );
+    const unknown = await doctor({ claudeJson: undefined });
+    expect(unknown.answer("worktrees folder trusted")).toBe(`unknown (${WORKTREES})`);
+    expect(unknown.fix("worktrees folder trusted")).toContain("if claude asks");
   });
 
   test("t45_doctor_decisions_dialog_and_agent", async () => {
@@ -245,12 +284,15 @@ describe("t45 kodel agent doctor: the seven checks", () => {
     expect(on.answer("decisions.dialog off")).toContain("no (a background agent cannot answer");
     expect(on.answer("decisions.agent off")).toContain("no (gate, pipeline_change: ");
     expect(on.answer("decisions.agent off")).toContain("a worker's own server never decides");
+    expect(on.fix("decisions.dialog off")).toContain("set decisions.dialog: false");
+    expect(on.fix("decisions.agent off")).toContain("nothing stops a worker");
     // The launcher is asked with what the config says.
     expect(on.preflights[0]?.dialog).toBe(true);
     expect(on.ok).toBe(false);
     const broken = await doctor({ config: new Error("config.yaml: unknown key: serv") });
     expect(broken.answer("decisions.dialog off")).toBe("unknown (config.yaml: unknown key: serv)");
-    expect(broken.answer("a worker can start")).toBe("no (config.yaml: unknown key: serv)");
+    expect(broken.answer("a worker cannot start")).toBe("no (config.yaml: unknown key: serv)");
+    expect(broken.fix("decisions.dialog off")).toContain(".kodel/config.yaml");
     expect(broken.ok).toBe(false);
   });
 
@@ -265,10 +307,15 @@ describe("t45 kodel agent doctor: the seven checks", () => {
     });
     expect(differs.answer("engines block as committed")).toContain("no (");
     expect(differs.out).toContain('engines.claude.worker: committed absent, now "print"');
+    // What differs is under its check, before the line that says what to do.
+    const at = differs.lines.findIndex((l) => l.includes("engines block as committed"));
+    expect(differs.lines[at + 1]).toMatch(/^ {6}\S.*committed absent, now "print"$/);
+    expect(differs.lines[at + 2]).toMatch(/^ {6}→ commit \.kodel\/config\.yaml/);
     const untracked = await doctor({ engines: { state: "untracked", engines: {} } });
     expect(untracked.answer("engines block as committed")).toContain(
       "unknown (git does not track .kodel/config.yaml",
     );
+    expect(untracked.fix("engines block as committed")).toContain("commit .kodel/config.yaml");
     for (const engines of [
       { state: "failed", reason: "fatal: detected dubious ownership", engines: {} } as const,
       new Error("fatal: detected dubious ownership"),
@@ -292,7 +339,7 @@ describe("t45 kodel agent doctor: the seven checks", () => {
     const yes = await doctor();
     expect(yes.ok).toBe(true);
     expect(yes.answer("a worker can start")).toBe("yes");
-    expect(yes.lines.at(-1)).toBe("a worker can start: yes");
+    expect(yes.lines.at(-1)).toBe("✓ a worker can start");
     // The verdict is the launcher's own preflight, for a run with no task: by a person, then unattended.
     expect(yes.preflights).toEqual([
       { dialog: false, taskLink: false, noTask: true, pipelines: 1, worktreesDir: WORKTREES },
@@ -309,7 +356,8 @@ describe("t45 kodel agent doctor: the seven checks", () => {
       preflight: () => ({ ok: false, reason: "claude was not found on PATH" }),
     });
     expect(no.ok).toBe(false);
-    expect(no.answer("a worker can start")).toBe("no (claude was not found on PATH)");
+    expect(no.answer("a worker cannot start")).toBe("no (claude was not found on PATH)");
+    expect(no.answer("a worker can start")).toBeUndefined();
     expect(no.preflights.length).toBe(1);
     // A start a person watches goes on, one nobody watches does not: yes, with the daemon's reason.
     const daemonOnly = await doctor({
@@ -320,11 +368,12 @@ describe("t45 kodel agent doctor: the seven checks", () => {
     });
     expect(daemonOnly.ok).toBe(true);
     expect(daemonOnly.answer("a worker can start")).toBe("yes");
-    expect(daemonOnly.answer("kodel serve can start one")).toBe(
+    expect(daemonOnly.answer("kodel serve cannot start one")).toBe(
       "no (claude will first ask whether the folder is trusted)",
     );
     // Every line is a check and its answer, in the order of the seven.
-    expect(yes.lines.map((line) => line.split(": ")[0])).toEqual([
+    expect(yes.checks.length).toBe(yes.lines.length);
+    expect(yes.checks.map((c) => c.check)).toEqual([
       "platform supported",
       "a terminal session can run",
       "claude found",
@@ -336,7 +385,133 @@ describe("t45 kodel agent doctor: the seven checks", () => {
       "engines block as committed",
       "a worker can start",
     ]);
-    for (const line of yes.lines) expect(line).toMatch(/: (yes|no|unknown)( \(.*\))?$/);
+    for (const c of yes.checks) expect(c.answer, c.check).toBe("yes");
+  });
+});
+
+describe("t45 kodel agent doctor: how the report reads", () => {
+  const broken = () =>
+    doctor({
+      claude: "/usr/bin/claude",
+      auth: `${JSON.stringify({ loggedIn: false })}\n`,
+      claudeJson: undefined,
+      pty: { ok: false, reason: "no terminal module" },
+      config: { dialog: true, agentDecides: ["gate"], worktreesDir: WORKTREES },
+      engines: { state: "differs", head: {}, engines: { claude: { worker: "print" } } },
+      preflight: () => ({ ok: false, reason: "the project asks decisions in a dialog" }),
+    });
+
+  test("t45_doctor_marks_every_check_and_says_what_to_do", async () => {
+    const r = await broken();
+    // One mark a check: what holds, what does not, what cannot be told.
+    expect(r.checks.map((c) => `${DOCTOR_MARKS[c.answer]} ${c.check}`)).toEqual([
+      "✓ platform supported",
+      "✗ a terminal session can run",
+      "✓ claude found",
+      "✓ claude version",
+      "✗ claude signed in",
+      "? worktrees folder trusted",
+      "✗ decisions.dialog off",
+      "✗ decisions.agent off",
+      "✗ engines block as committed",
+      "✗ a worker cannot start",
+    ]);
+    // Under every check that does not hold, or cannot be told, an indented line says what to do;
+    // under one that holds there is none.
+    for (const c of r.checks) {
+      if (c.answer === "yes") expect(c.fix, c.check).toBeUndefined();
+      else expect(c.fix?.length, c.check).toBeGreaterThan(10);
+    }
+    expect(r.lines.filter((l) => /^ +→ /.test(l)).length).toBe(7);
+    // The fix is deeper than its check, and every line of the report is one of the three kinds.
+    for (const line of r.out.split("\n")) {
+      expect(line, line).toMatch(/^(|( {2})?[✓✗?] \S.*| {4,6}\S.*)$/);
+    }
+    // A healthy report has no such line and no mark but the first.
+    const fine = await doctor();
+    expect(fine.out).not.toContain("→");
+    expect(fine.out).not.toMatch(/[✗?]/);
+  });
+
+  test("t45_doctor_verdict_stands_apart", async () => {
+    for (const r of [await doctor(), await broken()]) {
+      const all = r.out.split("\n");
+      const at = all.findIndex((l) => /^[✓✗] a worker can/.test(l));
+      // An empty line before it, no indent on it; the checks above are indented.
+      expect(at).toBeGreaterThan(0);
+      expect(all[at - 1]).toBe("");
+      expect(all.filter((l) => l === "").length).toBe(2); // that one, and the end of the output
+      const verdict = r.checks.at(-1);
+      expect(verdict?.indent).toBe(0);
+      for (const c of r.checks.slice(0, -1)) expect(c.indent, c.check).toBe(2);
+    }
+    const daemonOnly = await doctor({
+      preflight: (input) =>
+        input.unattended === true
+          ? { ok: false, reason: "nobody is there to answer" }
+          : { ok: true },
+    });
+    expect(daemonOnly.lines.slice(-3)).toEqual([
+      "✓ a worker can start",
+      "✗ kodel serve cannot start one  nobody is there to answer",
+      "    → kodel agent start and s in the TUI still can; see the lines marked ✗ and ? above",
+    ]);
+  });
+
+  test("t45_doctor_colours_only_a_terminal_without_no_color", async () => {
+    const ESC = String.fromCharCode(27);
+    const plainOut = (await broken()).out;
+    expect(plainOut).not.toContain(ESC);
+    // Not a terminal, or NO_COLOR set: not one escape, whatever else holds.
+    for (const setup of [
+      { terminal: false },
+      { terminal: true, env: { NO_COLOR: "1" } },
+      { terminal: false, env: { NO_COLOR: "1" } },
+    ]) {
+      expect(doctorColour({ outIsTerminal: setup.terminal, environment: setup.env ?? {} })).toBe(
+        false,
+      );
+    }
+    expect(doctorColour({ outIsTerminal: true, environment: {} })).toBe(true);
+    // An empty NO_COLOR is not set, as the convention has it.
+    expect(doctorColour({ outIsTerminal: true, environment: { NO_COLOR: "" } })).toBe(true);
+    const piped = await doctor({ terminal: true, env: { NO_COLOR: "1" } });
+    expect(piped.out).not.toContain(ESC);
+
+    const coloured = (
+      await doctor({
+        terminal: true,
+        claude: "/usr/bin/claude",
+        auth: `${JSON.stringify({ loggedIn: false })}\n`,
+        claudeJson: undefined,
+      })
+    ).out;
+    // Green for what holds, red for what does not, yellow for what cannot be told; the value dimmed.
+    expect(coloured).toContain(`${ESC}[32m✓${ESC}[0m platform supported`);
+    expect(coloured).toContain(`${ESC}[31m✗${ESC}[0m claude signed in`);
+    expect(coloured).toContain(`${ESC}[33m?${ESC}[0m worktrees folder trusted`);
+    expect(coloured).toContain(`${ESC}[2m/usr/bin/claude${ESC}[0m`);
+    // The same words with the colour taken out.
+    const stripped = coloured.replaceAll(new RegExp(`${ESC}\\[[0-9;]*m`, "g"), "");
+    const same = await doctor({
+      claude: "/usr/bin/claude",
+      auth: `${JSON.stringify({ loggedIn: false })}\n`,
+      claudeJson: undefined,
+    });
+    expect(stripped).toBe(same.out);
+  });
+
+  test("t45_doctor_value_cannot_fake_a_line_or_a_colour", async () => {
+    const ESC = String.fromCharCode(27);
+    const r = await doctor({
+      terminal: true,
+      pty: { ok: false, reason: `bad${ESC}[32m\n  ✓ a worker can start` },
+      preflight: () => ({ ok: false, reason: "no" }),
+    });
+    const line = r.out.split("\n").find((l) => l.includes("a terminal session can run")) ?? "";
+    expect(line).toContain("bad");
+    expect(line).toContain("a worker can start");
+    expect(line.split(ESC).length).toBe(5); // the mark's two and the value's two, none of the reason's
   });
 });
 
@@ -455,11 +630,13 @@ describe("t45 kodel agent doctor through the command", () => {
     const r = await cli({});
     // `claude` is not on this PATH: no worker can start, and that is the one reason for exit 1.
     expect(r.code).toBe(1);
-    expect(r.out).toContain("claude found: no (claude is not on PATH)");
-    expect(r.out).toContain("a worker can start: no (claude was not found on PATH)");
+    expect(r.out).toMatch(/ {2}✗ claude found {2,}claude is not on PATH\n/);
+    expect(r.out).toMatch(/\n\n✗ a worker cannot start {2,}claude was not found on PATH\n/);
+    // A pipe, not a terminal: no colour.
+    expect(r.out).not.toContain(String.fromCharCode(27));
     expect(r.err).toContain("a worker cannot start here");
     // claude's own file does not parse: unknown, never a refusal of its own.
-    expect(r.out).toContain("worktrees folder trusted: unknown");
+    expect(r.out).toMatch(/ {2}\? worktrees folder trusted/);
     expect(r.asked).toBe(0);
     // Its own files, the state base and claude's files: byte for byte what they were.
     expect(snapshot()).toEqual(before);
@@ -477,7 +654,7 @@ describe("t45 kodel agent doctor through the command", () => {
     const r = await cli({ engine: true, interactive: false, launcher });
     expect(r.code, r.err).toBe(0);
     expect(r.err).toBe("");
-    expect(r.out).toContain("a worker can start: yes\n");
+    expect(r.out).toContain("\n\n✓ a worker can start\n");
     expect(r.out).not.toContain("for a person");
     expect(r.asked).toBe(0);
     // It asked the launcher, and started nothing.

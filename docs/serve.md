@@ -34,7 +34,10 @@ optional package `@lydell/node-pty` or its binary missing), a start is refused w
 and the daemon uses no attempt; the refusal spells the line that keeps print workers,
 `engines: { claude: { worker: print } }`, to commit in `.kodel/config.yaml` (`docs/changes.md`). The daemon
 and the TUI use the `engines` block only as committed (`HEAD` of the checkout), since a worker's shell can
-write the file. `kodel agent doctor` says whether a worker can start here, and why not.
+write the file. `kodel agent doctor` says whether a worker can start here, and why not: one line a check
+with a mark in front (`✓` holds, `✗` does not, `?` cannot be told) and what was found, an indented `→` line
+under every `✗` and `?` that says what to do, and the verdict apart at the end. The marks are coloured only
+when the output is a terminal and `NO_COLOR` is not set.
 
 A terminal worker's `kodel mcp` server lives as long as its session, so a worker that is alive keeps the
 server of the build that started it: a fix of the server reaches it only when it is stopped and resumed.
