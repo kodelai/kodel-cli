@@ -8,8 +8,14 @@
  * This module is not a security boundary: the entry points decide who may call it (`requireHuman`).
  */
 import type { ChangeReport, PendingFound } from "@kodel-ai/local";
-import type { Decision, RunState } from "@kodel-ai/pipeline-core";
-import { changesFingerprint, gateChangesText, gateCommentsText } from "./decide-text";
+import type { Decision, GateAttachments, RunState } from "@kodel-ai/pipeline-core";
+import {
+  ATTACHMENTS_MOVED,
+  changesFingerprint,
+  gateAttachmentsText,
+  gateChangesText,
+  gateCommentsText,
+} from "./decide-text";
 import { plain } from "./plain";
 
 /** How long a command (or the UI at quit) stays for the work a decision led into. */
@@ -33,7 +39,16 @@ export interface DecisionRun {
   pendingChange(state?: RunState): Promise<PendingFound | undefined>;
   changesSinceGate(node: string): Promise<ChangeReport>;
   gateResults(node: string): Promise<{ csv: string; count: number } | undefined>;
-  decideHuman(node: string, decision: "approved" | "rejected", reason?: string): Promise<Decision>;
+  /** The attachments the run keeps, on a host that keeps them (T-45). */
+  gateAttachments?(node: string): Promise<GateAttachments>;
+  decideHuman(
+    node: string,
+    decision: "approved" | "rejected",
+    reason?: string,
+    byAgent?: undefined,
+    /** The attachments the person was shown: compared under the run's lock (see `LocalRun.decideHuman`). */
+    seen?: { attachments: string | undefined },
+  ): Promise<Decision>;
   /** `warning`: the session of an engine step whose outcome was unknown could not be judged. */
   resume(node?: string): Promise<Decision & { warning?: string }>;
 }
@@ -79,6 +94,8 @@ export interface PreparedGate {
   /** What the person is shown, to be compared at the write. */
   found: ChangeReport;
   comments: { csv: string; count: number } | undefined;
+  /** The attachments the person is shown; an approval is held against their fingerprint. */
+  attachments: GateAttachments | undefined;
   /** The root of the checkout that made the run, when it is not this one. */
   foreign: string | undefined;
 }
@@ -120,10 +137,12 @@ export async function prepareGateDecision(
   if (input.decision === "reject" && !input.reason && !comments) {
     throw new DecisionRefused('a rejection needs a reason: --reason "..."', "needs_reason");
   }
+  const attachments = await run.gateAttachments?.(node);
   const verb = input.decision === "approve" ? "Approve" : "Reject";
   const questions = [
     [
       gateChangesText(found),
+      gateAttachmentsText(attachments, run.runId),
       comments ? gateCommentsText(comments) : undefined,
       `${verb} "${plain(node)}" of run ${plain(run.runId)}?`,
     ]
@@ -144,6 +163,7 @@ export async function prepareGateDecision(
     questions,
     found,
     comments,
+    attachments,
     foreign,
   };
 }
@@ -164,10 +184,24 @@ export async function commitGateDecision(
   options: { recheck?: boolean } = {},
 ): Promise<Decision> {
   if (options.recheck) await recheckGate(run, prepared, reason);
+  // Always, for the command too: a version written after the person looked (a sibling branch of a
+  // fork goes on writing while a gate waits) is something they have not seen. Not relaxed for a
+  // shared tree: an attachment has a writer and a number, so whose write it is can be told.
+  const approving = prepared.decision === "approve" && run.gateAttachments !== undefined;
+  if (approving && run.gateAttachments) {
+    const now = await run.gateAttachments(prepared.node);
+    if (now.fingerprint !== prepared.attachments?.fingerprint) {
+      throw new DecisionRefused(ATTACHMENTS_MOVED);
+    }
+  }
+  // The same comparison is made again under the run's lock, with the write: a version that lands
+  // between the look above and the decision is refused there, not approved unseen.
   return run.decideHuman(
     prepared.node,
     prepared.decision === "approve" ? "approved" : "rejected",
     reason,
+    undefined,
+    approving ? { attachments: prepared.attachments?.fingerprint } : undefined,
   );
 }
 

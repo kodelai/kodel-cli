@@ -9,7 +9,7 @@
  */
 import { z } from "zod";
 import { type NodeSpec, type PipelineSpec, parsePipeline } from "./pipeline";
-import { defaultRegistry, type Registry } from "./registry";
+import { type CheckHandler, defaultRegistry, type Registry } from "./registry";
 
 /** JSON with the keys of every object sorted, so the same value always gives the same text. */
 export function stableJson(value: unknown): string {
@@ -103,10 +103,14 @@ export function canonicalPipeline(spec: PipelineSpec): string {
  */
 export function parseSnapshot(
   source: string,
-  options: { firstDuplicateEdgeWins?: boolean } = {},
+  options: {
+    firstDuplicateEdgeWins?: boolean;
+    /** The kinds a host adds to the built-in ones (a check kind of its own); read as they are now. */
+    extraChecks?: readonly CheckHandler[];
+  } = {},
 ): PipelineSpec {
   return parsePipeline(source, {
-    registry: snapshotRegistry(),
+    registry: snapshotRegistry(options.extraChecks ?? []),
     ...(options.firstDuplicateEdgeWins ? { firstDuplicateEdgeWins: true } : {}),
   });
 }
@@ -122,7 +126,12 @@ const REMOVED_NODE_FIELDS: Record<string, z.ZodRawShape> = {
   human: { files: z.array(z.string()).optional() },
 };
 
-const snapshotRegistry = (): Registry => {
+const snapshotRegistry = (extra: readonly CheckHandler[]): Registry => {
+  if (extra.length > 0) {
+    const registry = withRemovedFields(defaultRegistry());
+    for (const check of extra) registry.registerCheck(check);
+    return registry;
+  }
   snapshotKinds ??= withRemovedFields(defaultRegistry());
   return snapshotKinds;
 };

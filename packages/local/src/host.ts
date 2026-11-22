@@ -15,9 +15,25 @@ import {
   type AgentDecision,
   type AgentStep,
   type AgentsConfig,
+  ATTACHMENT_LIMITS,
+  type AttachmentContent,
+  type AttachmentInfo,
+  type AttachmentRecord,
+  type AttachmentWriteInput,
+  type AttachmentWritten,
+  attachmentAnswer,
+  attachmentHistory,
+  attachmentInfoOf,
+  attachmentLimitProblem,
+  attachmentNameProblem,
+  attachmentRecords,
+  attachmentRef,
+  attachmentsFingerprint,
+  attachmentTypeOfName,
   type Caller,
   type ChangeSet,
   type ChangesRef,
+  type CheckHandler,
   type CheckVerdict,
   CURRENT_RECORD_VERSION,
   cannotHoldError,
@@ -27,6 +43,7 @@ import {
   claimedStepsOpen,
   cleanExecutorText,
   clientOf,
+  countLines,
   DEFAULT_AGENTS,
   type Decision,
   decide,
@@ -42,10 +59,12 @@ import {
   type ExecutorRecord,
   effectsOf,
   engineOutcome,
+  evaluateAttachment,
   evaluateCommand,
   evaluateDiff,
   evaluateResult,
   foldSessionName,
+  type GateAttachments,
   type HistoryConfig,
   hasEngineSteps,
   hasModelSteps,
@@ -55,7 +74,9 @@ import {
   isTreeId,
   type JournalRecord,
   KodelError,
+  latestAttachments,
   liveClaim,
+  MAX_ATTACHMENTS_SHOWN,
   measurePatch,
   mergeReports,
   modelMarks,
@@ -64,6 +85,7 @@ import {
   type NextStepRequest,
   nextStep,
   type OutputRef,
+  onlyForeignInVisit,
   type PendingChange,
   type PipelineChange,
   type PipelineSpec,
@@ -71,6 +93,7 @@ import {
   parsePipeline,
   type RecordVersion,
   type RedactRule,
+  type Registry,
   type ResultReport,
   type RunEvent,
   type RunFacts,
@@ -94,14 +117,26 @@ import {
   standingOf,
   summarizeRun,
   type TakeOutcome,
+  TELL_ATTACHMENTS,
   TELL_CHANGES_NOTE,
+  unheldCheckFeature,
   unknownReason,
   validateReport,
+  versionOfVisit,
+  visitStartSeq,
   type WaitScope,
   type WorkerGoneReason,
+  withAttachmentKinds,
 } from "@kodel-ai/pipeline-core";
 import { type AgentLogRun, AgentLogWriter } from "./agent-log";
 import type { AgentLogTickers } from "./agent-log-ticker";
+import {
+  type AttachmentHooks,
+  decodeText,
+  diffTexts,
+  readWorkdirFile,
+  typeProblem,
+} from "./attachments";
 import { type CommandOptions, type CommandResult, runCommand } from "./command";
 import { loadAgentHints, loadConfig, type WorktreeConfig } from "./config";
 import { configEngineResolver, launchHash, literalRules } from "./engines";
@@ -274,6 +309,8 @@ export interface HostOptions {
    * cannot start or look up a session, and an engine step it would start fails as such.
    */
   engineSessions?: EngineSessionFactory;
+  /** Tests step into a write of an attachment: after the named file is opened, after the stored file is made. */
+  attachmentHooks?: AttachmentHooks;
   /** The platform engine steps are judged for; this process's by default (tests inject another). */
   platform?: NodeJS.Platform;
   /** Why this host does not run engine steps, when the caller knows a reason beyond the build's flag. */
@@ -565,6 +602,23 @@ function writerOf(
   return (node) => !gates.has(node);
 }
 
+/**
+ * The kinds of the local host: the built-in ones and the `attachment` check, which only a host that
+ * keeps attachments has (T-45). A new registry each time: nobody registers into a shared one.
+ */
+export function localRegistry(): Registry {
+  return withAttachmentKinds(defaultRegistry());
+}
+
+/** The check kinds a registry has beyond the built-in ones: what a kept pipeline is read with besides. */
+export function extraChecksOf(registry: Registry): CheckHandler[] {
+  const builtin = defaultRegistry();
+  return registry
+    .checkKinds()
+    .filter((kind) => builtin.check(kind) === undefined)
+    .flatMap((kind) => registry.check(kind) ?? []);
+}
+
 export class LocalHost {
   readonly store: FileStore;
   readonly snapshotter: GitSnapshotter;
@@ -622,9 +676,11 @@ export class LocalHost {
   ) {
     this.rules = options.rules ?? [];
     const storeRoot = options.storeRoot ?? `${options.root}/.kodel`;
+    const registry = options.engine?.registry ?? localRegistry();
     this.store = new FileStore({
       root: storeRoot,
       rules: this.rules,
+      extraChecks: extraChecksOf(registry),
       ...(options.storage === undefined ? {} : { place: options.storage }),
     });
     this.agentLog =
@@ -668,6 +724,7 @@ export class LocalHost {
     this.engine = {
       fingerprint: hashSource,
       ...options.engine,
+      registry,
       // The host that starts a session waits for it; the visit names it, so another process joins
       // only once it is gone.
       ...(steps === undefined ? {} : { engineSteps: { owner: this.ownerId, ...steps } }),
@@ -1018,6 +1075,11 @@ export class LocalRun {
     private readonly host: LocalHost,
     readonly runId: string,
   ) {}
+
+  /** The kinds this host knows: every pipeline text of the run is read with them. */
+  private get registry(): Registry {
+    return this.host.engine.registry ?? localRegistry();
+  }
 
   /** The run's folder when the history is kept under `~/.kodel` (`storage: home`); none in the project. */
   homeFolder(): string | undefined {
@@ -1376,7 +1438,7 @@ export class LocalRun {
     if (hash === now.specHash) return undefined;
     let spec: PipelineSpec;
     try {
-      spec = parsePipeline(text);
+      spec = parsePipeline(text, { registry: this.registry });
     } catch (error) {
       if (error instanceof KodelError) return undefined;
       throw error;
@@ -1475,7 +1537,7 @@ export class LocalRun {
     }
     let spec: PipelineSpec;
     try {
-      spec = parsePipeline(input.yaml);
+      spec = parsePipeline(input.yaml, { registry: this.registry });
     } catch (error) {
       if (error instanceof KodelError) {
         return { ok: false, code: error.code, message: error.message };
@@ -1544,6 +1606,9 @@ export class LocalRun {
     ) {
       return cannotHoldError(state.v, "a pipeline with a step that asks for a model", this.runId);
     }
+    // A check that reads what the run's format has no record of (an `attachment` check in format 1).
+    const lacking = unheldCheckFeature(spec, registry, capabilitiesOf(state.v));
+    if (lacking !== undefined) return cannotHoldError(state.v, lacking, this.runId);
     if (hasEngineSteps(spec, registry)) {
       const refusal = this.host.engineRefusal(spec);
       if (refusal) return refusal;
@@ -1584,7 +1649,7 @@ export class LocalRun {
     const to = hashSource(input.text);
     let proposed: PipelineSpec;
     try {
-      proposed = parsePipeline(input.text);
+      proposed = parsePipeline(input.text, { registry: this.registry });
     } catch (error) {
       if (error instanceof KodelError) return { ok: false, error };
       throw error;
@@ -1627,10 +1692,17 @@ export class LocalRun {
    * If the state file is not what kodel last wrote, nothing is applied (`STATE_MODIFIED_EXTERNALLY`);
    * `trust` skips that check and is only for a human accepting the change.
    */
-  apply(event: RunEvent, options: { trust?: boolean } = {}): Promise<Decision> {
+  apply(
+    event: RunEvent,
+    options: {
+      trust?: boolean;
+      /** Looked at under the run's lock, right before the event is decided: an error refuses it. */
+      guard?: () => Promise<KodelError | undefined>;
+    } = {},
+  ): Promise<Decision> {
     const step = this.queue
       .catch(() => undefined)
-      .then(() => this.applyLocked(event, options.trust === true));
+      .then(() => this.applyLocked(event, options.trust === true, options.guard));
     this.queue = step;
     // After the lock is let go: the tracker may be slow, and it must not hold up the run's files.
     return step.then(async (decision) => {
@@ -1951,8 +2023,16 @@ export class LocalRun {
     }
   }
 
-  private applyLocked(incoming: RunEvent, trust: boolean): Promise<Decision> {
-    return this.locked(() => this.decideAndWrite(incoming, trust));
+  private applyLocked(
+    incoming: RunEvent,
+    trust: boolean,
+    guard?: () => Promise<KodelError | undefined>,
+  ): Promise<Decision> {
+    return this.locked(async () => {
+      const error = await guard?.();
+      if (error !== undefined) return { ok: false, error } satisfies Decision;
+      return this.decideAndWrite(incoming, trust);
+    });
   }
 
   /**
@@ -3159,6 +3239,22 @@ export class LocalRun {
         step.waiting.changes_note = SHARED_TREE_NOTE;
         if (!worker) step.waiting.tell_the_person += TELL_CHANGES_NOTE;
       }
+      // The attachments are their own group, whatever could be told about the files.
+      const attached = await this.gateAttachments(step.waiting.node_slug);
+      if (attached.list.length > 0) {
+        const fresh = new Set(attached.newSince);
+        step.waiting.attachments = attached.list.slice(0, MAX_ATTACHMENTS_SHOWN).map((info) => ({
+          ...attachmentAnswer(info),
+          ...(fresh.has(info.name) ? { new: true } : {}),
+        }));
+        if (attached.list.length > MAX_ATTACHMENTS_SHOWN) {
+          step.waiting.attachments_omitted = attached.list.length - MAX_ATTACHMENTS_SHOWN;
+        }
+        if (attached.fingerprint !== undefined) {
+          step.waiting.attachments_fingerprint = attached.fingerprint;
+        }
+        if (!worker) step.waiting.tell_the_person += TELL_ATTACHMENTS;
+      }
     }
     if (options.serve !== undefined && "node" in step) {
       // Every step handed out is recorded, each on its own: what a step says does not depend on its
@@ -3742,19 +3838,38 @@ export class LocalRun {
     decision: "approved" | "rejected",
     reason?: string,
     byAgent?: AgentDecision,
+    /**
+     * What the person was shown of the attachments (`attachmentsFingerprint`, `undefined` for none).
+     * Given, it is compared under the run's lock with what the journal holds: a version written since
+     * refuses the decision, so nothing is approved unseen between the caller's look and the write.
+     */
+    seen?: { attachments: string | undefined },
   ) {
     const comments = decision === "rejected" ? await this.gateResults(node) : undefined;
     const parts = [reason, comments ? `Comments (CSV):\n${comments.csv}` : undefined].filter(
       (part): part is string => part !== undefined && part !== "",
     );
     const full = parts.length > 0 ? parts.join("\n\n") : undefined;
-    return this.apply({
-      type: "human_decided",
-      node,
-      decision,
-      ...(full === undefined ? {} : { reason: full }),
-      ...(byAgent === undefined ? {} : { byAgent }),
-    });
+    return this.apply(
+      {
+        type: "human_decided",
+        node,
+        decision,
+        ...(full === undefined ? {} : { reason: full }),
+        ...(byAgent === undefined ? {} : { byAgent }),
+      },
+      seen === undefined
+        ? {}
+        : {
+            guard: async () =>
+              (await this.attachmentsFingerprint()) === seen.attachments
+                ? undefined
+                : new KodelError(
+                    "INVALID_ARGUMENTS",
+                    "an attachment was written while you were reading; look again",
+                  ),
+          },
+    );
   }
 
   /**
@@ -3943,6 +4058,289 @@ export class LocalRun {
       ...decision,
       warning: `the engine session ${open.id} of step "${open.node}" may still run on its own; stop it with kodel agent stop ${open.id}`,
     };
+  }
+
+  // attachments (T-45)
+
+  /** Every version the run's journal holds, oldest first. */
+  async attachmentRecords(): Promise<AttachmentRecord[]> {
+    return attachmentRecords(await this.host.store.readJournal(this.runId));
+  }
+
+  /** What a gate decision is held against (`attachmentsFingerprint`); `undefined` without attachments. */
+  async attachmentsFingerprint(): Promise<string | undefined> {
+    return attachmentsFingerprint(await this.attachmentRecords());
+  }
+
+  /**
+   * What a gate shows of the attachments: the latest version of each name, the names with a version
+   * written since the run stopped at `node`, and the fingerprint an approval is held against. One read
+   * of the journal, so the list and the fingerprint are of the same moment.
+   */
+  async gateAttachments(node: string): Promise<GateAttachments> {
+    const journal = await this.host.store.readJournal(this.runId);
+    const records = attachmentRecords(journal);
+    let stopped = 0;
+    for (const record of journal) {
+      if (record.event === "gate_waiting" && record.node === node) stopped = record.seq;
+    }
+    const latest = latestAttachments(records);
+    return {
+      list: await Promise.all(latest.map((record) => this.attachmentInfo(record))),
+      fingerprint: attachmentsFingerprint(records),
+      newSince: latest.filter((record) => record.seq > stopped).map((record) => record.name),
+    };
+  }
+
+  private async attachmentInfo(record: AttachmentRecord): Promise<AttachmentInfo> {
+    const file = await this.host.store.readAttachmentFile(this.runId, record);
+    return attachmentInfoOf(record, file.state);
+  }
+
+  /** The latest version of each name; with `name`, every version of it, oldest first. */
+  async listAttachments(input: { name?: string } = {}): Promise<AttachmentInfo[]> {
+    const records = await this.attachmentRecords();
+    const listed =
+      input.name === undefined
+        ? latestAttachments(records)
+        : attachmentHistory(records, input.name);
+    return Promise.all(listed.map((record) => this.attachmentInfo(record)));
+  }
+
+  /**
+   * One version, held against its record: the journal says what exists, never the folder. `path` is
+   * for a person's own terminal and the TUI only; no tool returns it.
+   */
+  async readAttachment(input: {
+    name: string;
+    version?: number;
+  }): Promise<AttachmentContent & { path?: string }> {
+    const history = attachmentHistory(await this.attachmentRecords(), input.name);
+    const record =
+      input.version === undefined
+        ? history.at(-1)
+        : history.find((r) => r.version === input.version);
+    if (record === undefined) {
+      throw new KodelError(
+        "INVALID_ARGUMENTS",
+        history.length === 0
+          ? `run ${this.runId} has no attachment "${String(input.name).slice(0, 64)}"`
+          : `attachment "${input.name}" has no version ${input.version} (it has ${history.length})`,
+      );
+    }
+    const file = await this.host.store.readAttachmentFile(this.runId, record);
+    const attachment = attachmentInfoOf(record, file.state);
+    if (file.state !== "ok") return { attachment };
+    if (record.type !== "text") return { attachment, path: file.path };
+    const content = decodeText(file.bytes);
+    // A stored text that does not decode was not written by kodel as text.
+    if (content === undefined) return { attachment: attachmentInfoOf(record, "changed") };
+    return { attachment, content, path: file.path };
+  }
+
+  /**
+   * A text version as the diff from the version before it (the whole text for a first version, or when
+   * the one before does not verify). `undefined` for an image, a version that is not there, and one
+   * whose stored file does not verify. Read-only; the texts are stored redacted already.
+   */
+  async attachmentDiff(
+    name: string,
+    version?: number,
+  ): Promise<{ text: string; truncated: boolean } | undefined> {
+    const history = attachmentHistory(await this.attachmentRecords(), name);
+    const at =
+      version === undefined ? history.length - 1 : history.findIndex((r) => r.version === version);
+    const record = history[at];
+    if (record === undefined || record.type !== "text") return undefined;
+    const verified = async (of: AttachmentRecord | undefined): Promise<string | undefined> => {
+      if (of === undefined || of.type !== "text") return undefined;
+      const file = await this.host.store.readAttachmentFile(this.runId, of);
+      return file.state === "ok" ? decodeText(file.bytes) : undefined;
+    };
+    const now = await verified(record);
+    if (now === undefined) return undefined;
+    const git = this.host.options.attachmentHooks?.git;
+    return diffTexts(await verified(history[at - 1]), now, {
+      name,
+      ...(git === undefined ? {} : { git }),
+    });
+  }
+
+  /**
+   * Keep a version of an attachment for an open agent step. The type is found from the bytes, text is
+   * redacted before it is hashed and stored, and the whole write (the look at the journal, the limits,
+   * the file, the event) is under the run's lock. Throws `KodelError` for a refusal; nothing is left of
+   * a refused write.
+   */
+  async writeAttachment(input: AttachmentWriteInput): Promise<AttachmentWritten> {
+    await this.assertOurs();
+    try {
+      return await this.keepAttachment(input);
+    } catch (error) {
+      if (error instanceof KodelError) {
+        await this.recordRefusal("attachment_write", input.node, input.attempt, error);
+      }
+      throw error;
+    }
+  }
+
+  private async keepAttachment(input: AttachmentWriteInput): Promise<AttachmentWritten> {
+    const { store, rules, engine, clock } = this.host;
+    const hooks = this.host.options.attachmentHooks;
+    const refuse = (message: string) => new KodelError("INVALID_ARGUMENTS", message);
+    const problem = attachmentNameProblem(input.name);
+    if (problem !== undefined) throw refuse(`"${String(input.name).slice(0, 64)}": ${problem}`);
+    const { name } = input;
+    // The name goes into the journal and into a file name: it is not a place for a secret.
+    if (redactText(name, rules) !== name) {
+      throw refuse("the name looks like a secret to the project's redaction rules; choose another");
+    }
+    const type = attachmentTypeOfName(name);
+    if (type === undefined) throw refuse(`"${name}" has no type`);
+    if ((input.content === undefined) === (input.path === undefined)) {
+      throw refuse("give exactly one of `content` and `path`");
+    }
+    // Before any file is read or written: a format with no place for the event, a step that is not open.
+    const before = await this.state();
+    if (!capabilitiesOf(before.v).attachments) {
+      throw cannotHoldError(before.v, "an attachment", this.runId);
+    }
+    const cap = type === "text" ? ATTACHMENT_LIMITS.textBytes : ATTACHMENT_LIMITS.imageBytes;
+    let raw: Uint8Array;
+    if (input.content !== undefined) {
+      if (type !== "text") {
+        throw refuse(
+          "an image is given by `path` (a file in the run's working directory), not by `content`",
+        );
+      }
+      raw = Buffer.from(input.content, "utf8");
+      if (raw.length > cap) {
+        throw refuse(
+          `a text attachment is at most ${cap} bytes a version (this one is ${raw.length})`,
+        );
+      }
+    } else {
+      raw = await readWorkdirFile(await this.cwd(), input.path as string, cap, hooks);
+    }
+    const mismatch = typeProblem(type, raw);
+    if (mismatch !== undefined) throw refuse(mismatch);
+    let stored = raw;
+    let lines: number | undefined;
+    let redacted = false;
+    if (type === "text") {
+      const given = decodeText(raw) ?? "";
+      const text = store.attachmentText(given);
+      redacted = text !== given;
+      stored = Buffer.from(text, "utf8");
+      lines = countLines(text);
+    }
+    const sha = createHash("sha256").update(stored).digest("hex");
+    const event = (version: number, ref: string): RunEvent => ({
+      type: "attachment_written",
+      node: input.node,
+      attempt: input.attempt,
+      name,
+      version,
+      ref,
+      fileType: type,
+      bytes: stored.length,
+      ...(lines === undefined ? {} : { lines }),
+      sha256: sha,
+      scanned: type === "text",
+      ...(redacted ? { redacted: true } : {}),
+      ...(input.claimToken === undefined ? {} : { claimToken: hashSource(input.claimToken) }),
+    });
+    const step = this.queue
+      .catch(() => undefined)
+      .then(() =>
+        this.locked(async (): Promise<AttachmentWritten> => {
+          const journal = await store.readJournal(this.runId);
+          const records = attachmentRecords(journal);
+          const history = attachmentHistory(records, name);
+          const version = (history.at(-1)?.version ?? 0) + 1;
+          // The step and the format, decided on the state as it is under the lock, before any file:
+          // `decide` is pure, and nothing is written for a refusal.
+          const state = await this.state();
+          const dry = decide(
+            await this.specFor(state.specHash),
+            state,
+            event(version, attachmentRef(sha, name)),
+            clock(),
+            engine,
+          );
+          if (!dry.ok) throw dry.error;
+          await store.sweepAttachments(this.runId);
+          // The file a verified record of these bytes already points to is used again.
+          let reuse: AttachmentRecord | undefined;
+          for (const record of records) {
+            if (record.name !== name || record.sha256 !== sha || record.ref === reuse?.ref)
+              continue;
+            if ((await store.readAttachmentFile(this.runId, record)).state === "ok") reuse = record;
+          }
+          // The same bytes again are nothing new only inside one visit of one step: a step entered
+          // again, another step, and a rewrite after the file was changed outside kodel get a record.
+          // Nor is a write nothing new when it stands otherwise to the step's claim than the latest
+          // record does: a version written across the claim does not count for the check, and the
+          // holder's write of the same bytes with its token must get a record that does.
+          const live = liveClaim(state.nodes[input.node], clock());
+          const claim =
+            live === undefined
+              ? "none"
+              : input.claimToken !== undefined && live.token === hashSource(input.claimToken)
+                ? "matched"
+                : "foreign";
+          const latest = history.at(-1);
+          if (
+            reuse !== undefined &&
+            latest !== undefined &&
+            latest.ref === reuse.ref &&
+            latest.sha256 === sha &&
+            latest.node === input.node &&
+            (latest.claim ?? "none") === claim &&
+            latest.seq > visitStartSeq(journal, input.node)
+          ) {
+            return { attachment: attachmentInfoOf(latest, "ok"), unchanged: true };
+          }
+          const limit = attachmentLimitProblem(records, {
+            name,
+            type,
+            bytes: stored.length,
+            stored: reuse === undefined,
+          });
+          if (limit !== undefined) throw refuse(limit);
+          let ref = reuse?.ref;
+          let created = false;
+          for (let n = 0; ref === undefined; n += 1) {
+            if (n > 50) throw refuse(`too many files of "${name}" were changed outside kodel`);
+            const candidate = attachmentRef(sha, name, n);
+            // A file a record points to is never replaced: one changed outside kodel is written beside.
+            if (await store.createAttachment(this.runId, candidate, stored)) {
+              ref = candidate;
+              created = true;
+            }
+          }
+          let decision: Decision;
+          try {
+            await hooks?.afterFile?.(ref);
+            decision = await this.decideAndWrite(event(version, ref), false);
+          } catch (error) {
+            if (created) await store.removeAttachment(this.runId, ref);
+            throw error;
+          }
+          if (!decision.ok || decision.noop) {
+            if (created) await store.removeAttachment(this.runId, ref);
+            throw decision.ok
+              ? new KodelError("NODE_NOT_RUNNING", "the attachment was not recorded")
+              : decision.error;
+          }
+          const written = attachmentRecords(decision.journal).at(-1);
+          if (written === undefined)
+            throw new Error("an attachment was journaled without a record");
+          return { attachment: attachmentInfoOf(written, "ok") };
+        }),
+      );
+    this.queue = step;
+    return step;
   }
 
   async feedback(input: {
@@ -4167,6 +4565,36 @@ function builtinCheckRunners(host: LocalHost): Record<string, CheckRunner> {
             result,
           );
       return { ...verdict, command: redactText(command, host.rules), ...kept };
+    },
+
+    // Judged on the journal and the stored file as they are now, never on the agent's word: the
+    // version this step kept in its current visit, whose file still hashes to what was recorded.
+    async attachment(effect, context) {
+      const name = String(effect.params.name);
+      let journal: JournalRecord[];
+      try {
+        journal = await context.store.readJournal(context.runId);
+      } catch {
+        return { passed: false, reason: "the journal of the run cannot be read" };
+      }
+      const version = versionOfVisit(journal, effect.node, name);
+      if (version === undefined) {
+        return evaluateAttachment(
+          { foreign: onlyForeignInVisit(journal, effect.node, name) },
+          effect.params,
+        );
+      }
+      const file = await context.store.readAttachmentFile(context.runId, version);
+      const text =
+        file.state === "ok" && version.type === "text" ? decodeText(file.bytes) : undefined;
+      return evaluateAttachment(
+        {
+          version,
+          state: file.state,
+          ...(text === undefined ? {} : { lines: countLines(text) }),
+        },
+        effect.params,
+      );
     },
 
     async result(effect, context) {

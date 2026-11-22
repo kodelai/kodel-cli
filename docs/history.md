@@ -116,7 +116,7 @@ project_id: etude-k3f9a2x1
 
 | kept in `~/.kodel/projects/<project_id>/` with `storage: home` | stays in the project |
 | --- | --- |
-| `runs/` (the journal, state, reports, prompts, the agent log of each run) | `config.yaml`, `pipelines/`, `tasks/` |
+| `runs/` (the journal, state, reports, prompts, the agent log and the attachments of each run, `docs/attachments.md`) | `config.yaml`, `pipelines/`, `tasks/` |
 | `proposals/<checkout key>/` (pipelines the agent proposed outside a run) | `worktrees/` (the run worktrees) |
 | `start.lock` | `hooks.log` |
 | `sessions.jsonl` (the hook's index of agent sessions) | |

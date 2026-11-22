@@ -19,19 +19,27 @@ export interface WorkerLauncherInput {
   platform?: string;
 }
 
+/**
+ * The names of the tools the worker's own server serves, which is what the worker may call: the same
+ * lists `createServer` registers for the local host, attachments included (a worker that could not call
+ * their tools could never satisfy an `attachment` check).
+ */
+export async function workerToolNames(dataDir: string): Promise<string[]> {
+  const { buildTaskTools, HISTORY_TOOLS, toolsFor } = await import("@kodel-ai/pipeline-core/mcp");
+  const opened = await openTaskService({ storeRoot: dataDir }).catch(() => undefined);
+  return [
+    ...toolsFor({ taskLink: opened?.runLink !== undefined, attachments: true }).map((t) => t.name),
+    ...HISTORY_TOOLS.map((t) => t.name),
+    ...(opened === undefined ? [] : buildTaskTools(opened.service.capabilities).map((t) => t.name)),
+  ];
+}
+
 export async function openWorkerLauncher(input: WorkerLauncherInput): Promise<WorkerLauncher> {
   const { createSessionWorkerLauncher, execChild, findOnPath } = await import(
     "./worker-launcher-session"
   );
-  const { buildTaskTools, HISTORY_TOOLS, toolsFor } = await import("@kodel-ai/pipeline-core/mcp");
   const { root, environment, self } = input;
-  // The tools the worker's own server serves are what the worker may call.
-  const opened = await openTaskService({ storeRoot: input.dataDir }).catch(() => undefined);
-  const servedTools = [
-    ...toolsFor({ taskLink: opened?.runLink !== undefined }).map((t) => t.name),
-    ...HISTORY_TOOLS.map((t) => t.name),
-    ...(opened === undefined ? [] : buildTaskTools(opened.service.capabilities).map((t) => t.name)),
-  ];
+  const servedTools = await workerToolNames(input.dataDir);
   return createSessionWorkerLauncher({
     adapter: pipesAdapter({ root, environment, launcher: self, rules: [] }),
     self,

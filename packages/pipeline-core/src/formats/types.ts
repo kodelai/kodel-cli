@@ -9,7 +9,7 @@ import type { JournalRecord, RunState } from "../run";
 import type { RecordVersion } from "../version";
 
 /** What a pipeline file can use that a format's own parser reads. */
-export type PipelineFeature = "join" | "engine" | "model";
+export type PipelineFeature = "join" | "engine" | "model" | "attachment";
 
 /**
  * What a format can hold and which behaviours it keeps. The engine asks these, never the number.
@@ -32,6 +32,8 @@ export interface FormatCapabilities {
   sessionNames: boolean;
   /** The event that says a background worker of the run is gone (`worker_note`). Format 1 never wrote it. */
   workerNotes: boolean;
+  /** The event that says a version of an attachment was stored (`attachment_written`, T-45). */
+  attachments: boolean;
   /** The pipeline features a snapshot of this format can use. */
   pipelineFeatures: readonly PipelineFeature[];
 }
