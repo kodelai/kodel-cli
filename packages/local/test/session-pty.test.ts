@@ -8,6 +8,7 @@ import {
   fstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   readSync,
   rmSync,
@@ -1068,6 +1069,68 @@ describe("pty holder, fake terminal", () => {
       const text = readFileSync(join(dir, file), "utf8");
       expect(text.includes("\u001b") || text.includes("ZZSECRETZZ"), file).toBe(false);
     }
+  });
+
+  test("tA_terminal_tail_redacts_a_printed_secret", async () => {
+    // A worker in a terminal prints a secret as a line, as a tool's output or an echoed variable does:
+    // a project rule and the built-in rules both find it, in colour or not, cut by a chunk border or not.
+    const token = `ghp_${"A1b2C3d4E5f6G7h8I9".repeat(2)}`;
+    const world = start({ rules: [{ name: "zz", source: "ZZSECRETZZ", flags: "g" }] });
+    const spawn = await world.spawned();
+    spawn.process.emit("$ echo $API_KEY\r\n");
+    spawn.process.emit("ZZSECRETZZ\r\n");
+    spawn.process.emit(`\u001b[32mexport GH_TOKEN=${token}\u001b[0m\r\n`);
+    spawn.process.emit(`again ${token.slice(0, 12)}`);
+    spawn.process.emit(`${token.slice(12)} and ZZSEC`);
+    spawn.process.emit("RETZZ\r\nthe step is done\r\n");
+    spawn.process.exit(0);
+    await world.done;
+    const tail = readFileSync(join(dir, "tail.txt"), "utf8");
+    expect(tail).not.toContain("ZZSECRETZZ");
+    expect(tail).not.toContain(token);
+    expect(tail).not.toContain(token.slice(4, 16));
+    expect(tail).toContain("[REDACTED:zz]");
+    expect(tail).toContain("[REDACTED:github-token]");
+    // what is not a secret is still there to read
+    expect(tail).toContain("$ echo $API_KEY\n");
+    expect(tail.endsWith("the step is done\n")).toBe(true);
+    // and no other file of the session holds it
+    for (const file of readdirSync(dir, { withFileTypes: true })) {
+      if (!file.isFile()) continue;
+      const text = readFileSync(join(dir, file.name), "utf8");
+      expect(text.includes("ZZSECRETZZ") || text.includes(token), file.name).toBe(false);
+    }
+  });
+
+  test("tA_terminal_tail_painted_secret_is_the_known_limit", async () => {
+    // A full-screen program paints its screen in pieces: it moves the cursor between the halves of a
+    // word, so the text of the tail never holds the word in one piece and no rule can find it. This is
+    // the documented limit of a terminal's tail (`docs/session-formats.md`): the tail is bounded, newer
+    // output replaces it, and `kodel agent rm` or `prune` removes it. The test pins the limit, so a
+    // change of it (a screen model, say) is seen and the docs are changed with it.
+    const world = start({ rules: [{ name: "zz", source: "ZZSECRETZZ", flags: "g" }] });
+    const spawn = await world.spawned();
+    // The second half is painted first, at its column; then the cursor goes back for the first half.
+    spawn.process.emit("\u001b[2J\u001b[5;10HRETZZ\u001b[5;5HZZSEC\u001b[6;1H\r\n");
+    spawn.process.exit(0);
+    await world.done;
+    const tail = readFileSync(join(dir, "tail.txt"), "utf8");
+    // The escape sequences are gone, and the pieces stay as they were written: not the secret as a word.
+    expect(tail.includes("\u001b")).toBe(false);
+    expect(tail).not.toContain("ZZSECRETZZ");
+    expect(tail).not.toContain("[REDACTED:zz]");
+    expect(tail).toContain("RETZZ");
+    expect(tail).toContain("ZZSEC");
+    // The same bytes painted in reading order are a printed word, and that one is caught.
+    rmSync(join(dir, "status.json"));
+    const printed = start({ rules: [{ name: "zz", source: "ZZSECRETZZ", flags: "g" }] });
+    const again = await printed.spawned();
+    again.process.emit("\u001b[2J\u001b[5;5HZZSEC\u001b[5;10HRETZZ\u001b[6;1H\r\n");
+    again.process.exit(0);
+    await printed.done;
+    const caught = readFileSync(join(dir, "tail.txt"), "utf8");
+    expect(caught).toContain("[REDACTED:zz]");
+    expect(caught).not.toContain("ZZSECRETZZ");
   });
 });
 

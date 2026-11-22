@@ -1,15 +1,52 @@
 /**
- * The TUI's `o` on a real terminal (TASK-EKAV, T-45): the built `kodel tui` on Node in a terminal of the
- * test's own, two runs of a project, and for each run a session `kw-<run>` in a terminal of its own with a
- * shell script standing for the agent. The screen hands its terminal to `kodel agent attach` and takes it
- * back where it was.
+ * Workers in a terminal of their own, on a real terminal (TASK-EKAV, T-45), in two parts.
+ *
+ * The TUI's `o`: the built `kodel tui` on Node in a terminal of the test's own, two runs of a project,
+ * and for each run a session `kw-<run>` in a terminal of its own with a shell script standing for the
+ * agent. The screen hands its terminal to `kodel agent attach` and takes it back where it was.
+ *
+ * The launcher: a worker started through the one launcher, with the scripted fake terminal agent of the
+ * testkit as its program (the second half of this file).
  */
 import { afterEach, describe, expect } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { LocalPipelineHost } from "../../packages/local/src";
-import { ARTIFACT, Host, realPtyTests, sleep, type Term, type World, world } from "./harness";
+import { INSIDE_SESSION_REFUSAL } from "../../packages/cli/src/human-only";
+import { serveWorkerOf } from "../../packages/cli/src/worker-factory";
+import type { WorkerLauncher, WorkerStatus } from "../../packages/cli/src/worker-launcher";
+import {
+  createSessionWorkerLauncher,
+  execChild,
+  findOnPath,
+} from "../../packages/cli/src/worker-launcher-session";
+import {
+  LocalPipelineHost,
+  type LocalRun,
+  PipesSessionAdapter,
+  sessionDirOf,
+} from "../../packages/local/src";
+import { SessionError } from "../../packages/pipeline-core/src";
+import { decisionOf } from "../../packages/pipeline-core/src/serve";
+import {
+  type FakeTerminalAgent,
+  type FakeTerminalAgentOptions,
+  writeFakeTerminalAgent,
+} from "../../packages/testkit/src";
+import {
+  ARTIFACT,
+  alive,
+  Host,
+  KODEL,
+  realPtyTests,
+  shortDir,
+  sleep,
+  type Term,
+  until,
+  type World,
+  world,
+} from "./harness";
 
 const real = realPtyTests();
 const ptyTest = real.test;
@@ -32,6 +69,7 @@ const PIPELINE = [
   "    prompt: ok?",
   "edges:",
   "  - { from: write, to: approve }",
+  "  - { from: approve, to: write, when: rejected }",
   "",
 ].join("\n");
 
@@ -243,5 +281,517 @@ describe("the TUI hands its terminal to a run's agent and takes it back", () => 
       await quits(s.term);
     },
     120_000,
+  );
+});
+
+/**
+ * The launcher on a real terminal: the worker of a run is started through the one launcher
+ * (`createSessionWorkerLauncher`) with the real adapter, whose holder is the built artifact on Node, and
+ * the program it finds as `claude` is the scripted fake terminal agent of the testkit. The state base is
+ * the default one of a home folder of the test's own (no `KODEL_STATE_DIR`), as on a person's machine:
+ * what the agent's shell runs finds the session records where a person's commands would.
+ */
+const WORKER_PIPELINE = [
+  "name: one",
+  "nodes:",
+  "  - slug: write",
+  "    kind: agent",
+  "    prompt: write it",
+  "  - slug: approve",
+  "    kind: human",
+  "    prompt: ok?",
+  "  - slug: impl",
+  "    kind: agent",
+  "    prompt: implement it",
+  "edges:",
+  "  - { from: write, to: approve }",
+  "  - { from: approve, to: impl }",
+  "  - { from: approve, to: write, when: rejected }",
+  "",
+].join("\n");
+
+const ENGINE_REFUSAL = "it will not run from a command the engine runs";
+const PASTE_OFF = "\u001b[?2004l";
+
+interface WorkerScene {
+  root: string;
+  env: Record<string, string>;
+  adapter: PipesSessionAdapter;
+  agent: FakeTerminalAgent;
+  pipelines: LocalPipelineHost;
+  /** A launcher as a starter builds one: every call reads the records again. */
+  launcher(): WorkerLauncher;
+  /** A shell a person would type `kodel` into, in a terminal of the test's own. */
+  shell(cols?: number): Promise<Term>;
+  /** A run of the pipeline; `atGate` drives it to its human step first, as its agent would. */
+  run(task: string, atGate?: boolean): Promise<LocalRun>;
+  /** The pids a record names: its holder and the process the holder started. */
+  pids(id: string): Promise<{ holder: number; child: number }>;
+  /** Pids to end when the test is over, whatever happened in it. */
+  strays: number[];
+}
+
+const scenes: { dispose(): Promise<void> }[] = [];
+afterEach(async () => {
+  for (const scene of scenes.splice(0)) await scene.dispose();
+});
+
+async function workerScene(agentOptions: Partial<FakeTerminalAgentOptions> = {}) {
+  const top = shortDir("kd-w-");
+  const root = join(top, "project");
+  const home = join(top, "home");
+  const base = join(home, ".kodel");
+  mkdirSync(join(root, ".kodel", "pipelines"), { recursive: true });
+  mkdirSync(home, { recursive: true });
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
+  git("init", "-q");
+  git("config", "user.email", "t@example.com");
+  git("config", "user.name", "T");
+  writeFileSync(join(root, ".kodel", "pipelines", "one.yaml"), WORKER_PIPELINE);
+  writeFileSync(join(root, ".kodel", "config.yaml"), "worktree:\n  mode: off\n");
+  writeFileSync(join(root, ".gitignore"), ".kodel/runs\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "initial");
+
+  // `kodel` beside the agent: what a person has on PATH, as the agent's shell would spell it.
+  const agent = writeFakeTerminalAgent({
+    dir: join(top, "bin"),
+    shims: { kodel: ["node", ARTIFACT] },
+    ...agentOptions,
+  });
+  const env: Record<string, string> = {
+    PATH: `${agent.bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+    HOME: home,
+    TERM: "xterm-256color",
+    PS1: "$ ",
+  };
+  const adapter = new PipesSessionAdapter({
+    base,
+    root,
+    holder: { exec: "node", args: [ARTIFACT, "session-holder", "holder"] },
+    intermediate: { exec: "node", args: [ARTIFACT, "session-holder"] },
+    // The adapter runs here, under Bun; the holder it starts is Node, which the availability check proved.
+    ptyProbe: () => ({ ok: true }),
+    pollMs: 25,
+  });
+  const pipelines = new LocalPipelineHost({ root, heartbeatMs: 0, environment: env });
+  const host = new Host();
+  hosts.push(host);
+  const strays: number[] = [];
+  const scene: WorkerScene = {
+    root,
+    env,
+    adapter,
+    agent,
+    pipelines,
+    strays,
+    launcher: () =>
+      createSessionWorkerLauncher({
+        adapter,
+        self: { exec: "node", args: [ARTIFACT] },
+        root,
+        stateBase: base,
+        environment: env,
+        rules: [],
+        servedTools: ["pipeline_next_step", "pipeline_complete_step"],
+        which: (name) => findOnPath(name, env),
+        exec: execChild,
+        platform: process.platform,
+        clock: Date.now,
+        uuid: () => randomUUID(),
+        ptyProbe: () => ({ ok: true }),
+        engines: async () => ({ ok: true, engines: { claude: { worker: "terminal" } } }),
+        // The agent is a fake: nothing of it asks about trust.
+        readText: async () =>
+          JSON.stringify({ projects: { "/": { hasTrustDialogAccepted: true } } }),
+      }),
+    async shell(cols = 200) {
+      const term = await host.open("/bin/sh", [], { cwd: root, env, cols, rows: 50 });
+      await term.sh("true");
+      return term;
+    },
+    async run(task, atGate = false) {
+      const started = await pipelines.start({ pipeline: "one", task, restart: true });
+      const run = (await pipelines.open(started.run.runId)) as LocalRun | undefined;
+      if (!run) throw new Error("the run was not made");
+      if (atGate) {
+        await run.nextStep();
+        await run.completeStep("write", 1, "written");
+        const answer = await run.nextStep();
+        if (!("waiting" in answer)) {
+          throw new Error(`the run is not at its gate: ${JSON.stringify(answer)}`);
+        }
+      }
+      return run;
+    },
+    pids: (id) =>
+      until(() => {
+        const file = join(sessionDirOf(adapter.place, id), "status.json");
+        if (!existsSync(file)) return undefined;
+        const status = JSON.parse(readFileSync(file, "utf8")) as {
+          state?: string;
+          holder?: { pid: number };
+          child?: { pid: number };
+        };
+        return status.state === "running" && status.holder && status.child
+          ? { holder: status.holder.pid, child: status.child.pid }
+          : undefined;
+      }, `the record of ${id} to name its processes`),
+  };
+  scenes.push({
+    async dispose() {
+      for (const pid of strays) {
+        for (const target of [-pid, pid]) {
+          try {
+            process.kill(target, "SIGKILL");
+          } catch {
+            // gone
+          }
+        }
+      }
+      for (const entry of await adapter.list().catch(() => [])) {
+        await adapter.stop(entry.id).catch(() => {});
+        await adapter.remove(entry.id).catch(() => {});
+      }
+      rmSync(top, { recursive: true, force: true });
+    },
+  });
+  return scene;
+}
+
+/** Starts the worker of a run through the launcher and answers its record and the agent behind it. */
+async function startWorker(s: WorkerScene, run: LocalRun, title: string) {
+  const before = s.agent.starts().length;
+  const { name } = await s.launcher().start({ runId: run.runId, workdir: s.root, title });
+  expect(name).toBe(`kw-${run.runId}`);
+  const [record] = await s.adapter.list({ name });
+  if (!record) throw new Error(`no record named ${name}`);
+  const started = await until(() => s.agent.starts()[before], "the agent to start");
+  const pids = await s.pids(record.id);
+  s.strays.push(pids.child, started.pid);
+  return { name, id: record.id, record, agent: started, ...pids };
+}
+
+/** The person approves the gate of a run, at a shell of their own: the command asks, and `y` is typed. */
+async function approve(shell: Term, runId: string): Promise<void> {
+  const from = shell.begin(`${KODEL} gate approve ${runId}`);
+  await shell.sees("[y/N]", 60_000, from);
+  shell.type("y\r");
+  const done = await shell.finished(from, 120_000);
+  expect(done.code, done.shown).toBe(0);
+}
+
+const decided = async (run: LocalRun): Promise<boolean> =>
+  (await run.journal()).some((record) => record.event === "gate_decided");
+
+/** The decision of the run as the journal has it: what a resume is asked for. */
+async function decisionIn(run: LocalRun) {
+  const { decision } = decisionOf(await run.journal());
+  if (decision === undefined) throw new Error("the journal has no decision");
+  return decision;
+}
+
+const workerNames = async (s: WorkerScene): Promise<string[]> =>
+  (await s.adapter.list()).map((entry) => entry.name ?? "").sort();
+
+describe("a worker in a terminal of its own, started through the launcher", () => {
+  ptyTest(
+    "t45_real_terminal_worker_attach_detach_finish",
+    async () => {
+      const s = await workerScene({ modes: true });
+      const run = await s.run("attach to the worker");
+      const worker = await startWorker(s, run, "attach to the worker");
+      // A terminal session with the agent record the starter wrote; the agent got the argv of the profile.
+      expect(worker.record).toMatchObject({
+        mode: "pty",
+        status: { state: "running" },
+        agent: { engine: "claude", source: "chosen" },
+      });
+      expect(worker.agent.session).toBe(worker.record.agent?.session ?? "");
+      expect(worker.agent).toMatchObject({
+        tty: true,
+        engine: "1",
+        stateDir: null,
+        resumed: false,
+      });
+      expect(worker.agent.argv).toContain("--strict-mcp-config");
+      expect(worker.agent.argv).not.toContain("-p");
+      expect(worker.agent.argv[worker.agent.argv.indexOf("--permission-mode") + 1]).toBe("dontAsk");
+      expect(worker.agent.prompt).toContain(run.runId);
+      // The holder's child is the agent itself, as with the real program (spike criterion 10).
+      expect(worker.child).toBe(worker.agent.pid);
+      const launcher = s.launcher();
+      expect(await launcher.attachable(run.runId)).toEqual({ ok: true, id: worker.id });
+
+      // A person opens it, types, and leaves it.
+      const shell = await s.shell();
+      const from = shell.begin(`${KODEL} agent attach ${worker.name}`);
+      await shell.sees(`fake-agent ready ${worker.agent.session}`, 30_000, from);
+      shell.type("bg 300\r");
+      const background = await until(
+        () => s.agent.events().find((entry) => entry.event === "bg")?.child as number | undefined,
+        "the agent to leave a child in the background",
+      );
+      s.strays.push(background);
+      shell.type("hello agent\r");
+      await shell.sees("agent heard: hello agent", undefined, from);
+      const leaving = shell.output.length;
+      shell.type(DETACH);
+      const done = await shell.finished(from);
+      expect(done.code).toBe(0);
+      expect(shell.output.slice(leaving)).toContain(`[detached: ${worker.name}]`);
+      // The modes the agent switched on are reset for the person's shell.
+      expect(shell.output.slice(leaving)).toContain(ALT_OFF);
+      expect(shell.output.slice(leaving)).toContain(PASTE_OFF);
+      // The session runs on, with what it started.
+      expect((await s.adapter.status(worker.id)).state).toBe("running");
+      expect(alive(worker.agent.pid)).toBe(true);
+      expect(alive(background)).toBe(true);
+      // Nothing was typed into it by kodel: the agent heard only what the person typed.
+      expect(shell.output.slice(from).match(/agent heard: /g)?.length).toBe(1);
+
+      // `finish` stops it at once, with the processes it started.
+      await launcher.finish(run.runId);
+      expect(await s.adapter.status(worker.id)).toMatchObject({
+        state: "killed",
+        reason: "stopped",
+      });
+      await until(
+        () => !alive(worker.agent.pid) && !alive(background),
+        "the agent and its background child to end",
+      );
+      // A second finish, of a session that is already stopped, is no error; nothing is attachable.
+      await launcher.finish(run.runId);
+      expect((await launcher.attachable(run.runId)).ok).toBe(false);
+      expect(await workerNames(s)).toEqual([worker.name]);
+    },
+    180_000,
+  );
+
+  ptyTest(
+    "t45_real_worker_shell_cannot_decide",
+    async () => {
+      const s = await workerScene();
+      const run = await s.run("decide for me", true);
+      const worker = await startWorker(s, run, "decide for me");
+      // The person looks on from a terminal of their own; what is typed there is the agent's input.
+      const shell = await s.shell(250);
+      const from = shell.begin(`${KODEL} agent attach ${worker.name}`);
+      await shell.sees("fake-agent ready", 30_000, from);
+      const gate = `gate approve ${run.runId}`;
+      // Each command runs in the agent's shell, on the agent's terminal. The last one gets a `y` typed
+      // after it, for a question that must never come.
+      const commands: [string, string, string?][] = [
+        [`kodel ${gate}`, ENGINE_REFUSAL],
+        [`env -u KODEL_ENGINE kodel ${gate}`, INSIDE_SESSION_REFUSAL],
+        [`node ${ARTIFACT} ${gate}`, ENGINE_REFUSAL],
+        [`env -u KODEL_ENGINE node ${ARTIFACT} ${gate}`, INSIDE_SESSION_REFUSAL],
+        [`sh -c 'env -u KODEL_ENGINE kodel ${gate}'`, INSIDE_SESSION_REFUSAL, "y\r"],
+      ];
+      for (const [command, refusal, answer] of commands) {
+        const at = shell.output.length;
+        shell.type(`!${command}\r${answer ?? ""}`);
+        await shell.sees(/\[exit \d+\]/, 60_000, at);
+        const shown = shell.output.slice(at);
+        expect(shown, command).toContain(refusal);
+        expect(shown, command).toContain("[exit 1]");
+        expect(shown, command).not.toContain("[y/N]");
+        expect(await decided(run), command).toBe(false);
+        if (answer !== undefined) {
+          // The `y` was nobody's answer: it reached the agent as a line of its own.
+          await shell.sees("agent heard: y", 30_000, at);
+        }
+      }
+      expect(s.agent.events().filter((entry) => entry.event === "ran").length).toBe(
+        commands.length,
+      );
+      const answer = await run.inspect();
+      expect("waiting" in answer).toBe(true);
+      shell.type(DETACH);
+      await shell.finished(from);
+      // The same command from the person's own shell decides: the gate was there to be decided.
+      await approve(shell, run.runId);
+      expect(await decided(run)).toBe(true);
+    },
+    240_000,
+  );
+
+  ptyTest(
+    "t45_real_orphan_is_not_doubled",
+    async () => {
+      const s = await workerScene({ ignoreHangup: true });
+      const run = await s.run("outlive the holder", true);
+      const worker = await startWorker(s, run, "outlive the holder");
+      // The holder is killed; the agent ignores the hangup of its terminal and lives on.
+      process.kill(worker.holder, "SIGKILL");
+      await until(
+        async () => (await s.adapter.status(worker.id)).state === "lost",
+        "the record to say lost",
+      );
+      await sleep(1_500);
+      expect(alive(worker.agent.pid)).toBe(true);
+      expect(await s.adapter.status(worker.id)).toMatchObject({ state: "lost", childAlive: true });
+      const seen = (await s.launcher().statuses([run.runId])).get(run.runId);
+      expect(seen).toMatchObject({ state: "lost", childAlive: true, terminal: true });
+      expect(serveWorkerOf(seen as WorkerStatus).childAlive).toBe(true);
+      // The person decides. No second agent is started for the run while the first one runs.
+      await approve(await s.shell(), run.runId);
+      const decision = await decisionIn(run);
+      const resume = () =>
+        s.launcher().resume({
+          runId: run.runId,
+          workdir: s.root,
+          sessionId: worker.agent.session ?? "",
+          decision,
+        });
+      await expect(resume()).rejects.toThrow(
+        `its process still runs without a holder; stop it: kodel agent stop ${worker.id}`,
+      );
+      expect(await workerNames(s)).toEqual([worker.name]);
+      expect(s.agent.starts().length).toBe(1);
+      // Once the process is gone the ordinary rule applies: the worker ended at its wait, and is resumed.
+      process.kill(worker.agent.pid, "SIGKILL");
+      await until(
+        async () => (await s.adapter.status(worker.id)).childAlive !== true,
+        "the record to see its process gone",
+      );
+      const { name } = await resume();
+      expect(name).toBe(`kw-${run.runId}-d${decision.seq}`);
+      const resumed = await until(() => s.agent.starts()[1], "the resumed agent to start");
+      s.strays.push(resumed.pid);
+      expect(resumed).toMatchObject({ session: worker.agent.session, resumed: true });
+    },
+    240_000,
+  );
+
+  ptyTest(
+    "t45_real_holder_and_agent_gone_at_a_wait_is_resumed",
+    async () => {
+      const s = await workerScene();
+      const run = await s.run("come back after a reboot", true);
+      const worker = await startWorker(s, run, "come back after a reboot");
+      // A reboot: the holder and the agent are both gone, and nobody recorded an end.
+      process.kill(worker.holder, "SIGKILL");
+      try {
+        process.kill(-worker.child, "SIGKILL");
+      } catch {
+        // the hangup of its terminal ended it first
+      }
+      await until(async () => {
+        const status = await s.adapter.status(worker.id);
+        return status.state === "lost" && status.childAlive !== true;
+      }, "the record to say lost with nothing left of it");
+      expect(alive(worker.agent.pid)).toBe(false);
+      // The state is read again by a starter that knows nothing of before, and the person decides.
+      await approve(await s.shell(), run.runId);
+      const decision = await decisionIn(run);
+      const launcher = s.launcher();
+      const seen = (await launcher.statuses([run.runId])).get(run.runId);
+      expect(seen).toMatchObject({ state: "lost", terminal: true });
+      expect(seen?.childAlive).toBeUndefined();
+      expect(seen?.sessionId).toBe(worker.agent.session ?? "");
+      const input = {
+        runId: run.runId,
+        workdir: s.root,
+        sessionId: seen?.sessionId ?? "",
+        decision,
+      };
+      const { name } = await launcher.resume(input);
+      expect(name).toBe(`kw-${run.runId}-d${decision.seq}`);
+      // One new session, in a terminal, that continues the conversation of the first.
+      const resumed = await until(() => s.agent.starts()[1], "the resumed agent to start");
+      s.strays.push(resumed.pid);
+      expect(resumed).toMatchObject({ session: worker.agent.session, resumed: true, tty: true });
+      const [record] = await s.adapter.list({ name });
+      expect(record).toMatchObject({
+        mode: "pty",
+        status: { state: "running" },
+        agent: { engine: "claude", session: worker.agent.session, resumes: worker.id },
+      });
+      // Once: a second resume of the same decision starts nothing.
+      const again = await s
+        .launcher()
+        .resume(input)
+        .then(
+          () => "started",
+          (error: unknown) => (error instanceof SessionError ? error.code : String(error)),
+        );
+      expect(again).toBe("NAME_TAKEN");
+      expect(await workerNames(s)).toEqual([worker.name, name].sort());
+      expect(s.agent.starts().length).toBe(2);
+    },
+    240_000,
+  );
+
+  /** A worker whose program is a wrapper, the agent behind it; the holder is killed and the wrapper dies. */
+  async function behindADeadWrapper(task: string) {
+    const s = await workerScene({ wrapper: true, ignoreHangup: true });
+    const run = await s.run(task, true);
+    const worker = await startWorker(s, run, task);
+    // The holder's child is the wrapper; the agent is another process, in the wrapper's group.
+    expect(worker.child).not.toBe(worker.agent.pid);
+    process.kill(worker.holder, "SIGKILL");
+    await until(() => !alive(worker.child), "the wrapper to die with its terminal");
+    await until(
+      async () => (await s.adapter.status(worker.id)).state === "lost",
+      "the record to say lost",
+    );
+    expect(alive(worker.agent.pid)).toBe(true);
+    return { s, run, worker };
+  }
+
+  ptyTest(
+    "t45_real_orphan_behind_a_wrapper_is_not_doubled",
+    async () => {
+      const { s, run, worker } = await behindADeadWrapper("stay behind the wrapper");
+      // The recorded child is gone; a process of its group runs: the session is not over.
+      expect(await s.adapter.status(worker.id)).toMatchObject({ state: "lost", childAlive: true });
+      const seen = (await s.launcher().statuses([run.runId])).get(run.runId);
+      expect(seen?.childAlive).toBe(true);
+      await approve(await s.shell(), run.runId);
+      const decision = await decisionIn(run);
+      await expect(
+        s.launcher().resume({
+          runId: run.runId,
+          workdir: s.root,
+          sessionId: worker.agent.session ?? "",
+          decision,
+        }),
+      ).rejects.toThrow("its process still runs without a holder");
+      expect(await workerNames(s)).toEqual([worker.name]);
+      expect(s.agent.starts().length).toBe(1);
+      expect(alive(worker.agent.pid)).toBe(true);
+    },
+    240_000,
+  );
+
+  ptyTest(
+    "t45_real_stop_ends_an_agent_behind_a_dead_wrapper",
+    async () => {
+      const { s, run, worker } = await behindADeadWrapper("be stopped behind the wrapper");
+      expect((await s.adapter.status(worker.id)).childAlive).toBe(true);
+      // `rm` refuses it while the agent runs.
+      await expect(s.adapter.remove(worker.id)).rejects.toMatchObject({ code: "STILL_RUNNING" });
+      // The person's command ends it: the agent is found by its group and signalled by its pid.
+      const shell = await s.shell();
+      const from = shell.begin(`${KODEL} agent stop ${worker.id}`);
+      await shell.sees("[y/N]", 60_000, from);
+      shell.type("y\r");
+      const done = await shell.finished(from, 120_000);
+      expect(done.code, done.shown).toBe(0);
+      expect(done.shown).toContain(`${worker.id}: stopped`);
+      expect(done.shown).not.toContain("nothing was signalled");
+      await until(() => !alive(worker.agent.pid), "the agent to end");
+      const after = await s.adapter.status(worker.id);
+      expect(after.childAlive).not.toBe(true);
+      expect(after.state === "running" || after.state === "starting").toBe(false);
+      // An ended session for every rule: it is listed as stopped, and it can be removed.
+      const listed = (await s.launcher().statuses([run.runId])).get(run.runId);
+      expect(listed?.childAlive).toBeUndefined();
+      expect(listed?.stopped).toBe(true);
+      await s.adapter.remove(worker.id);
+      expect(await s.adapter.list()).toEqual([]);
+    },
+    240_000,
   );
 });

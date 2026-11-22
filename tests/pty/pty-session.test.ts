@@ -28,6 +28,7 @@ import {
   ARTIFACT,
   alive,
   Host,
+  KODEL,
   realPtyTests,
   shortDir,
   until,
@@ -639,6 +640,55 @@ describe("a terminal session on a real PTY", () => {
     expect(client.output).toContain("this command is for a person");
     expect((await w.adapter().status(target.id)).state).toBe("running");
   });
+
+  ptyTest(
+    "tA_exec_attach_real_terminal",
+    async () => {
+      // TASK-K6MA: `exec --pty --attach` starts the session and opens it at once, in the same terminal.
+      const w = newWorld();
+      const host = new Host();
+      hosts.push(host);
+      const term = await host.shell(w);
+      const from = term.begin(`${KODEL} agent exec --pty --attach --name cc -- cat`);
+      // `started` first, then the terminal is the session's: what is typed comes back from `cat`.
+      await term.sees(/started (a_[0-9a-z_]+) \(cc\)/, 30_000, from);
+      const id = /started (a_[0-9a-z_]+) \(cc\)/.exec(term.output.slice(from))?.[1] ?? "";
+      term.type("typed-in\r");
+      await term.sees("typed-in\r\ntyped-in", undefined, from);
+      expect(term.output.slice(from)).not.toContain("attach with:");
+      // The detach chord gives the terminal back; the exit code is the attach's.
+      term.type("\u001c");
+      const done = await term.finished(from);
+      expect(done.code).toBe(0);
+      expect(done.shown).toContain("[detached: cc]");
+      // The session is left running, and the person comes back to it by name.
+      expect((await w.adapter().status(id)).state).toBe("running");
+      const again = term.begin(`${KODEL} agent attach cc`);
+      await term.sees("typed-in\r\ntyped-in", undefined, again);
+      term.type("\u001c");
+      expect((await term.finished(again)).shown).toContain("[detached: cc]");
+
+      // `-a` is the same flag; a command that ends while attached gives its end, and code 0.
+      const short = term.begin(
+        `${KODEL} agent exec --pty -a --name dd -- sh -c 'read line; exit 3'`,
+      );
+      await term.sees(/started a_[0-9a-z_]+ \(dd\)/, 30_000, short);
+      term.type("go\r");
+      const ended = await term.finished(short);
+      expect(ended.code).toBe(0);
+      expect(ended.shown).toContain("[ended: dd, exit 3]");
+      // One that is over before the terminal could be connected gives the same line.
+      const quick = await term.sh(`${KODEL} agent exec --pty --attach --name ee -- true`, 60_000);
+      expect(quick.code).toBe(0);
+      expect(quick.shown).toMatch(/\[ended: ee(, exit 0)?\]/);
+      // Without `--pty` it is refused, and nothing is started.
+      const refused = await term.sh(`${KODEL} agent exec --attach --name ff -- cat`);
+      expect(refused.code).toBe(1);
+      expect(refused.shown).toContain("--attach needs --pty");
+      expect(await w.adapter().list({ name: "ff" })).toEqual([]);
+    },
+    180_000,
+  );
 });
 
 describe("a terminal session passes the session contract", () => {

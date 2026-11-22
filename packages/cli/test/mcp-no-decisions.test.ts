@@ -12,7 +12,8 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { workerMcpConfig, workerWaitCommand } from "../src/claude-worker";
+import { agentProfile } from "../src/agent-profiles";
+import { WORKER_DENIED, workerMcpConfig, workerWaitCommand } from "../src/claude-worker";
 import { runCli } from "../src/cli";
 
 const main = join(import.meta.dir, "../src/main.ts");
@@ -387,4 +388,63 @@ describe("t45 kodel mcp --wait-command", () => {
     expect(code).toBe(1);
     expect(err).toContain("--wait-command needs {run}");
   });
+});
+
+describe("t45 the server of a worker", () => {
+  test("t45_worker_server_serves_no_decision_tool", async () => {
+    // The claude profile's exact server arguments, for a terminal worker (with its wait command) and for
+    // a print worker, in a project whose config lets an agent decide: the server refuses both tools.
+    const profile = agentProfile("claude");
+    if (!profile) throw new Error("no claude profile");
+    for (const terminal of [true, false]) {
+      const dir = makeRepo();
+      const self = {
+        exec: process.execPath,
+        args: [main],
+        root: dir,
+        stateDir: join(dir, "state"),
+      };
+      const config = JSON.parse(
+        profile.mcpConfig(terminal ? { ...self, waitCommand: profile.waitCommand(self) } : self),
+      ) as {
+        mcpServers: Record<
+          string,
+          { command: string; args: string[]; env: Record<string, string> }
+        >;
+      };
+      // One server, ours, with the flag that takes the decisions away.
+      expect(Object.keys(config.mcpServers)).toEqual(["kodel"]);
+      const server = config.mcpServers.kodel;
+      if (!server) throw new Error("no kodel server in the config");
+      expect(server.args).toContain("--no-decisions");
+      const c = await connect(dir, [], server.env, { exec: server.command, args: server.args });
+      try {
+        const tools = (await c.client.listTools()).tools.map((t) => t.name);
+        const decisions = WORKER_DENIED.map((tool) => tool.replace("mcp__kodel__", ""));
+        expect(decisions.sort()).toEqual(["pipeline_accept_change", "pipeline_decide_gate"]);
+        for (const tool of decisions) expect(tools, tool).not.toContain(tool);
+        const runId = await atGate(dir, c.client);
+        // Called all the same (a client that ignores the list): refused, and the gate stays undecided.
+        for (const tool of decisions) {
+          const answer = await c.client
+            .callTool({
+              name: tool,
+              arguments: { run_id: runId, decision: "approved", node_slug: "approve" },
+            })
+            .then(
+              (result) => ({ isError: result.isError === true, text: text(result) }),
+              (error: unknown) => ({ isError: true, text: String(error) }),
+            );
+          expect(answer.isError, `${tool}: ${answer.text}`).toBe(true);
+        }
+        expect(journalEvents(dir, runId)).not.toContain("gate_decided");
+        const waiting = await call(c.client, "pipeline_next_step", { run_id: runId });
+        expect(waiting.waiting).toBeDefined();
+        expect(JSON.stringify(waiting)).not.toContain("pipeline_decide_gate");
+        expect(c.asked).toEqual([]);
+      } finally {
+        await c.close();
+      }
+    }
+  }, 90_000);
 });
