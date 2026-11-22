@@ -19,7 +19,7 @@ import {
 import { type RedactRule, redactText, validateSpec } from "@kodel-ai/pipeline-core";
 import { AGENT_HUMAN_COMMANDS } from "./agent-commands";
 import type { AgentProfile, ProfileSessionArgv, ProfileWorkerArgv } from "./agent-profiles";
-import { digest, sessionIdOf as tailSessionId } from "./claude-stream";
+import { digest } from "./claude-stream";
 import { plain } from "./plain";
 import { WORKER_TERMINAL_TIMEOUT_MS, type WorkerDecision } from "./worker-launcher";
 
@@ -487,26 +487,23 @@ function lastFlag(command: string | undefined, flag: string): string | undefined
 }
 
 /**
- * The session id of a run's worker. From the records' argv: the last `--session-id` of the first
- * record (the prompt, with the title, precedes the flags, so a title holding `--session-id <other>`
- * does not win), else the last `--resume` of the newest `-d` record that has one. The tail's own
- * `result` or `init` id wins when both exist and differ: it is what `claude` used, and a redaction rule
- * may have mangled the argv. Neither: none.
+ * The session id of a run's worker whose records have no `agent` record (written before T-45), from their
+ * argv: the last `--session-id` of the first record (the prompt, with the title, precedes the flags, so a
+ * title holding `--session-id <other>` does not win), else the last `--resume` of the newest `-d` record
+ * that has one. Nothing the agent printed is read for it. Neither: none.
  */
-export function sessionIdOf(records: readonly WorkerRecord[], tail?: string): string | undefined {
+export function sessionIdOf(records: readonly WorkerRecord[]): string | undefined {
   const first = records.find((r) => r.decisionSeq === undefined);
-  let fromArgv = lastFlag(first?.command, "--session-id");
-  if (fromArgv === undefined) {
-    const resumes = records
-      .filter((r) => r.decisionSeq !== undefined)
-      .sort((a, b) => (b.decisionSeq ?? 0) - (a.decisionSeq ?? 0));
-    for (const record of resumes) {
-      fromArgv = lastFlag(record.command, "--resume");
-      if (fromArgv !== undefined) break;
-    }
+  const chosen = lastFlag(first?.command, "--session-id");
+  if (chosen !== undefined) return chosen;
+  const resumes = records
+    .filter((r) => r.decisionSeq !== undefined)
+    .sort((a, b) => (b.decisionSeq ?? 0) - (a.decisionSeq ?? 0));
+  for (const record of resumes) {
+    const resumed = lastFlag(record.command, "--resume");
+    if (resumed !== undefined) return resumed;
   }
-  const fromTail = tail === undefined ? undefined : tailSessionId(tail);
-  return fromTail ?? fromArgv;
+  return undefined;
 }
 
 /** Runs one command and gives back what it wrote; the launcher gives the real one, tests a fake. */
@@ -620,7 +617,7 @@ export const claudeProfile: AgentProfile = {
   env: workerEnv,
   startPrompt: workerPrompt,
   resumePrompt,
-  sessionIdOf: (records) => sessionIdOf(records),
+  sessionIdOf,
   authProbe,
   trustProbe,
   digest,

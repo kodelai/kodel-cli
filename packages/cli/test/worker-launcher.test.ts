@@ -23,6 +23,7 @@ import {
   LocalPipelineHost,
   type LocalRun,
   loadConfig,
+  machineId,
   openTaskService,
   ownProcessGroup,
   PipesSessionAdapter,
@@ -308,19 +309,18 @@ describe("task_9pns the claude profile", () => {
     expect(spec.origin).toBe("cli");
   });
 
-  test("task_9pns_session_id_from_argv_then_tail", () => {
+  test("task_9pns_session_id_from_argv_never_from_the_tail", () => {
     const first = { name: `kw-${RUN}`, command: `claude -p prompt --session-id ${UUID} --verbose` };
     expect(sessionIdOf([first])).toBe(UUID);
-    // The tail wins when both exist and differ.
-    expect(sessionIdOf([first], `${INIT(OTHER)}\n${RESULT(OTHER)}`)).toBe(OTHER);
+    // What the agent printed is not an argument of the reader at all (T-45).
+    expect(sessionIdOf.length).toBe(1);
     // No `--session-id`: the newest `-d` record's `--resume`.
     const d4 = { name: `kw-${RUN}-d4`, command: `claude -p p --resume ${OTHER}`, decisionSeq: 4 };
     const d9 = { name: `kw-${RUN}-d9`, command: `claude -p p --resume ${UUID}`, decisionSeq: 9 };
     expect(sessionIdOf([{ name: `kw-${RUN}`, command: "claude -p p" }, d4, d9])).toBe(UUID);
-    // A mangled uuid falls through to the next source, then to the tail, then to none.
+    // A mangled uuid falls through to the next source, then to none.
     const mangled = { name: `kw-${RUN}`, command: "claude -p p --session-id [REDACTED:x]" };
     expect(sessionIdOf([mangled, d4])).toBe(OTHER);
-    expect(sessionIdOf([mangled], RESULT(UUID))).toBe(UUID);
     expect(sessionIdOf([mangled])).toBeUndefined();
     expect(sessionIdOf([])).toBeUndefined();
   });
@@ -2194,6 +2194,11 @@ describe("t45 the id of a worker's conversation", () => {
     const id = "a_0loyw3v28_0000";
     mkdirSync(place.dir, { recursive: true, mode: 0o700 });
     cpSync(fixture, join(place.dir, id), { recursive: true });
+    // The fixture's machine is masked; a record in flight is of this machine (one that has no id judges none).
+    const kept = join(place.dir, id, "session.json");
+    const { machine: _masked, ...session } = JSON.parse(readFileSync(kept, "utf8"));
+    const machine = machineId();
+    writeFileSync(kept, JSON.stringify(machine === undefined ? session : { ...session, machine }));
     const old = `kw-${RUN}`;
     const stored = new PipesSessionAdapter({
       base: stateBase,

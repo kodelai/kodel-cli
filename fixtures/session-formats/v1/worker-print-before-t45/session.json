@@ -7,29 +7,30 @@
     "argv": [
       "claude",
       "-p",
-      "Kodel run r_0mw53d7fj_o2lc exists for the task \"Add a flag --session-id 11111111-2222-4333-8444-555555555555\" and is yours to drive. Call pipeline_next_step with run_id r_0mw53d7fj_o2lc and do what each answer says; never call pipeline_start (it would make a second run). Work in /masked/project.",
+      "Kodel run r_0mw53d7fj_o2lc exists for the task \"Add a flag --session-id 11111111-2222-4333-8444-555555555555\" and is yours to drive. Call pipeline_next_step with run_id r_0mw53d7fj_o2lc and do what each answer says; never call pipeline_start (it would make a second run). Work in [REDACTED:high-entropy].",
       "--output-format",
       "stream-json",
       "--verbose",
       "--session-id",
       "7f3b2a9c-1d4e-4f6a-9b8c-0d1e2f3a4b5c",
       "--mcp-config",
-      "{\"mcpServers\":{\"kodel\":{\"command\":\"/masked/node\",\"args\":[\"/masked/kodel.js\",\"--root\",\"/masked/project\",\"mcp\",\"--no-decisions\",\"--no-wait-hint\"]}}}",
+      "{\"mcpServers\":{\"kodel\":{\"command\":\"/masked/node\",\"args\":[\"/masked/kodel.js\",\"--root\",\"[REDACTED:high-entropy]\",\"mcp\",\"--no-decisions\",\"--no-wait-hint\"]}}}",
       "--strict-mcp-config",
       "--permission-mode",
       "dontAsk",
       "--allowedTools",
       "mcp__kodel__pipeline_next_step,mcp__kodel__pipeline_complete_step,Read,Write,Edit,Glob,Grep,Bash,Agent",
       "--disallowedTools",
-      "mcp__kodel__pipeline_decide_gate,mcp__kodel__pipeline_accept_change"
+      "mcp__kodel__pipeline_decide_gate,mcp__kodel__pipeline_accept_change,Bash(*kodel* gate*),Bash(*kodel* ack*),Bash(*kodel* seal*),Bash(*kodel* resume*),Bash(*kodel* migrate*),Bash(*kodel* wait r_*),Bash(*kodel* pipeline changes apply*),Bash(*kodel* pipeline changes discard*),Bash(*kodel* pipeline changes restore*),Bash(*kodel* pipeline proposals apply*),Bash(*kodel* pipeline proposals discard*),Bash(*kodel* task approve*),Bash(*kodel* agent stop*),Bash(*kodel* agent rm*),Bash(*kodel* agent exec*),Bash(*kodel* agent forget-name*),Bash(*kodel* agent attach*),Bash(*main.ts* gate*),Bash(*main.ts* ack*),Bash(*main.ts* seal*),Bash(*main.ts* resume*),Bash(*main.ts* migrate*),Bash(*main.ts* wait r_*),Bash(*main.ts* pipeline changes apply*),Bash(*main.ts* pipeline changes discard*),Bash(*main.ts* pipeline changes restore*),Bash(*main.ts* pipeline proposals apply*),Bash(*main.ts* pipeline proposals discard*),Bash(*main.ts* task approve*),Bash(*main.ts* agent stop*),Bash(*main.ts* agent rm*),Bash(*main.ts* agent exec*),Bash(*main.ts* agent forget-name*),Bash(*main.ts* agent attach*),Bash(*kodel.js* gate*),Bash(*kodel.js* ack*),Bash(*kodel.js* seal*),Bash(*kodel.js* resume*),Bash(*kodel.js* migrate*),Bash(*kodel.js* wait r_*),Bash(*kodel.js* pipeline changes apply*),Bash(*kodel.js* pipeline changes discard*),Bash(*kodel.js* pipeline changes restore*),Bash(*kodel.js* pipeline proposals apply*),Bash(*kodel.js* pipeline proposals discard*),Bash(*kodel.js* task approve*),Bash(*kodel.js* agent stop*),Bash(*kodel.js* agent rm*),Bash(*kodel.js* agent exec*),Bash(*kodel.js* agent forget-name*),Bash(*kodel.js* agent attach*),Edit(.kodel/runs/**),Edit([REDACTED:high-entropy].kodel/runs/**),Write(.kodel/runs/**),Write([REDACTED:high-entropy].kodel/runs/**),Edit(.kodel/pipelines/**),Edit([REDACTED:high-entropy].kodel/pipelines/**),Write(.kodel/pipelines/**),Write([REDACTED:high-entropy].kodel/pipelines/**),Edit(.kodel/tasks/**),Edit([REDACTED:high-entropy].kodel/tasks/**),Write(.kodel/tasks/**),Write([REDACTED:high-entropy].kodel/tasks/**),Edit(.kodel/config.yaml),Edit([REDACTED:high-entropy].kodel/config.yaml),Write(.kodel/config.yaml),Write([REDACTED:high-entropy].kodel/config.yaml),Edit(.kodel/proposals/**),Edit([REDACTED:high-entropy].kodel/proposals/**),Write(.kodel/proposals/**),Write([REDACTED:high-entropy].kodel/proposals/**),Edit(.mcp.json),Edit([REDACTED:high-entropy].mcp.json),Write(.mcp.json),Write([REDACTED:high-entropy].mcp.json),Edit(.claude/settings*.json),Edit([REDACTED:high-entropy].claude/settings*.json),Write(.claude/settings*.json),Write([REDACTED:high-entropy].claude/settings*.json),Edit([REDACTED:high-entropy]**),Write([REDACTED:high-entropy]**)"
     ],
     "cwd": "/masked/project",
     "inheritEnv": false,
     "timeoutMs": 43200000,
     "name": "kw-r_0mw53d7fj_o2lc",
     "origin": "cli",
-    "envNames": ["HOME", "PATH"]
+    "envNames": ["PATH", "HOME"]
   },
   "started": 1700000000000,
-  "root": "/masked/project"
+  "root": "/masked/project",
+  "machine": "MASKED"
 }

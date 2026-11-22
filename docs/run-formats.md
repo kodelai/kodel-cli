@@ -176,8 +176,8 @@ No run format changes: the state, the journal and the kept pipelines are as befo
   build for the daemon, the TUI and the workers of a checkout.
 
 Fixtures: `fixtures/session-formats/v1/` (`agent-chosen.json`, `agent-resumed.json`, and
-`worker-print-before-t45/`, a print worker's record as it was written before this change, composed in the
-shape a real holder writes and not taken from an older build), `fixtures/serve-formats/v1/serve-alive.json`.
+`worker-print-before-t45/`, the record of a print worker taken from the launcher and the holder of the build
+before this change), `fixtures/serve-formats/v1/serve-alive.json`.
 
 ## A step that asks for a model (T-43)
 
