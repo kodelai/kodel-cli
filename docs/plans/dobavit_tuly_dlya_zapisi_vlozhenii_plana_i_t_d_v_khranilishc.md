@@ -373,13 +373,18 @@ Where the work differs from the plan:
   refusals of the other tools ("no event" in the criteria means no `attachment_written`).
 - **Tests.** `t45_limits_at_and_over_the_bound` is two tests (sizes and bytes; names and versions in
   `t45_limits_of_names_and_versions`). The end-to-end test runs the real MCP server in memory
-  (`packages/cli/test/attachment-mcp.test.ts`), since `tests/e2e` builds the binary; the test kit has one
+  (`packages/cli/test/run-attachment-mcp.test.ts`), since `tests/e2e` builds the binary; the test kit has one
   scenario of its own on the local engine. The new behaviour is in new test files, so of the files the plan
   listed as updated only these changed: `service.test.ts`, `format-codecs.test.ts`,
   `tool-calls-registry.test.ts`, `tui.test.ts`, `agent-log.test.ts`, `engine-steps.test.ts`,
   `history-tools.test.ts`, `cli/test/executor.test.ts`, `local/test/formats.test.ts` and
   `tests/agents/claude-code-worker.test.ts` (the served tool names). No real-agent scenario was added: it is
   in the manual part of the final gate.
+- **The test files are named `run-attachment*.test.ts`**, not `attachment*.test.ts` as the plan has them: a
+  test file whose name starts with `attach` is read as a session test, whose names must carry the session
+  decision's id (`session_test_names_carry_the_decision_id`). The TUI's is `tui-attachments.test.ts`.
+- **Two small commits follow the five**: the sample data of the TUI named a path under `.kodel/runs`
+  (`storage_no_hardcoded_runs_path`), and the rename of the test files above.
 - **Not done:** attachments in `history_run_details` and `kodel report`, the web UI, and the change of
   `.kodel/pipelines/dev.yaml` (follow-ups, as the plan says).
 
