@@ -2,8 +2,14 @@
  * `kodel serve` on a real host and tracker, with a fake clock and a launcher without processes
  * (TASK-G8KM, T-44). Process liveness is injected where a test needs a holder alive or gone; the tests
  * that use real processes are POSIX only.
+ *
+ * The clock is fake and nothing here sleeps or polls: the time of a test is the real host's `git`. A
+ * run that is started and driven to its gate costs about 60 `git` processes (its worktree, a snapshot
+ * of each step, the baseline of its diff), a second or so on a free machine and several times that when
+ * other test files spawn processes beside this one. Hence the bound below, as in the other files that
+ * work a real repository; it is a bound on the machine, not on a wait.
  */
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -32,6 +38,8 @@ import {
   type ServeTasksPort,
   serveTasksOf,
 } from "../src";
+
+setDefaultTimeout(60_000);
 
 const GATED = [
   "name: gated",
