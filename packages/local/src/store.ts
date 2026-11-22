@@ -8,6 +8,7 @@
  *   snapshots.json  working-tree snapshots by key (for `diff` baselines)
  *   reports/        result reports, redacted
  *   served/         what the agent was shown at each step
+ *   attachments/    files a step kept with the run (T-45): text redacted, images as given; one file per content
  *   agent_log/      the agent's conversation log, as redacted normalized events (display data, outside the seal)
  *   lock            held while one process changes the run
  *   agent_log.lock  held while one process copies the agent's log
@@ -30,9 +31,12 @@ import {
 } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
 import {
+  ATTACHMENT_LIMITS,
+  type AttachmentRecord,
   CURRENT_RECORD_VERSION,
   capabilitiesOf,
   decodeJournalRecord,
+  isAttachmentRef,
   isChangesRef,
   isRunId,
   isTreeId,
@@ -801,7 +805,7 @@ export class FileStore {
    * Create a file that must not exist yet, all or nothing: false if something is already there. The
    * content is written aside and linked into place, so a file that appears meanwhile is never replaced.
    */
-  async createFile(path: string, content: string): Promise<boolean> {
+  async createFile(path: string, content: string | Uint8Array): Promise<boolean> {
     this.writes += 1;
     const tmp = `${path}.tmp-${this.pid}-${this.writes}`;
     await rm(tmp, { force: true });
@@ -1040,6 +1044,18 @@ export class FileStore {
         if (isTreeId(r.tree)) redacted.tree = r.tree;
         // Nor does the path of a patch, and a record that points nowhere is of no use.
         if (isChangesRef(r.changes)) redacted.changes = r.changes;
+        // The hash and the place of an attachment are what a read verifies the file against: a rule
+        // that matches hex would leave every version "changed outside kodel". The name was refused
+        // before it got here if a rule matches it.
+        if (
+          r.event === "attachment_written" &&
+          typeof r.sha256 === "string" &&
+          typeof r.name === "string" &&
+          isAttachmentRef(r.ref, r.sha256, r.name)
+        ) {
+          redacted.sha256 = r.sha256;
+          redacted.ref = r.ref;
+        }
         return `${JSON.stringify(redacted)}\n`;
       })
       .join("");
@@ -1231,6 +1247,104 @@ export class FileStore {
   async readServed(runId: string, ref: string): Promise<unknown> {
     if (!SERVED_REF.test(ref)) return undefined;
     return this.readJson<unknown>(join(this.runDir(runId), ref));
+  }
+
+  // attachments
+
+  /** A text as it is stored for an attachment: redaction is here, with every other write path. */
+  attachmentText(text: string): string {
+    return redactText(text, this.rules);
+  }
+
+  /**
+   * The folder of a run's attachments, if it is a plain folder. The agent can write in the run's
+   * folder: a link in its place is never followed, for a read or for a write.
+   */
+  private async attachmentsDir(runId: string, create: boolean): Promise<string | undefined> {
+    const dir = join(this.runDir(runId), "attachments");
+    if (create) await mkdir(dir, { recursive: true, ...this.folderMode() });
+    try {
+      const info = await lstat(dir);
+      if (info.isSymbolicLink() || !info.isDirectory()) {
+        if (create) throw new KodelError("INVALID_ARGUMENTS", "attachments/ is not a plain folder");
+        return undefined;
+      }
+      return dir;
+    } catch (error) {
+      if (isMissing(error)) return undefined;
+      throw error;
+    }
+  }
+
+  /**
+   * Create the file of a version, exclusively: false if a file is already there. A record's file is
+   * never replaced. Call under the run's lock.
+   */
+  async createAttachment(runId: string, ref: string, bytes: Uint8Array): Promise<boolean> {
+    const dir = await this.attachmentsDir(runId, true);
+    const file = ref.slice("attachments/".length);
+    if (dir === undefined || !ref.startsWith("attachments/") || file.includes("/")) {
+      throw new KodelError("INVALID_ARGUMENTS", `"${ref}" is not an attachment file`);
+    }
+    try {
+      return await this.createFile(join(dir, file), bytes);
+    } catch (error) {
+      throw this.placeProblem(error);
+    }
+  }
+
+  /**
+   * The stored file of a version, checked against its record: `ok` only for a regular file of the
+   * recorded size whose bytes hash to the recorded `sha256`. Anything else has no content and no path.
+   */
+  async readAttachmentFile(
+    runId: string,
+    record: Pick<AttachmentRecord, "ref" | "sha256" | "name" | "bytes">,
+  ): Promise<{ state: "ok"; bytes: Buffer; path: string } | { state: "missing" | "changed" }> {
+    if (!isAttachmentRef(record.ref, record.sha256, record.name)) return { state: "missing" };
+    const dir = await this.attachmentsDir(runId, false).catch(() => undefined);
+    if (dir === undefined) return { state: "missing" };
+    const path = join(dir, record.ref.slice("attachments/".length));
+    try {
+      const info = await lstat(path);
+      if (info.isSymbolicLink() || !info.isFile()) return { state: "changed" };
+      if (info.size !== record.bytes || info.size > ATTACHMENT_LIMITS.imageBytes) {
+        return { state: "changed" };
+      }
+      const bytes = await readFile(path);
+      return sha256(bytes) === record.sha256 ? { state: "ok", bytes, path } : { state: "changed" };
+    } catch (error) {
+      return isMissing(error) ? { state: "missing" } : { state: "changed" };
+    }
+  }
+
+  /**
+   * Remove the files in `attachments/` that no record points to: what a crash between the file and
+   * its journal line, or a refused write, left behind. Call under the run's lock. Never throws.
+   */
+  async sweepAttachments(runId: string, referenced: ReadonlySet<string>): Promise<void> {
+    try {
+      const dir = await this.attachmentsDir(runId, false);
+      if (dir === undefined) return;
+      for (const name of await readdir(dir)) {
+        if (referenced.has(`attachments/${name}`)) continue;
+        await rm(join(dir, name), { recursive: true, force: true });
+      }
+    } catch {
+      // a leftover counts toward nothing and is tried again at the next write
+    }
+  }
+
+  /** Remove the file this process made for a write that was then refused. Never throws. */
+  async removeAttachment(runId: string, ref: string): Promise<void> {
+    try {
+      const dir = await this.attachmentsDir(runId, false);
+      const file = ref.slice("attachments/".length);
+      if (dir === undefined || !ref.startsWith("attachments/") || file.includes("/")) return;
+      await rm(join(dir, file), { force: true });
+    } catch {
+      // the next write sweeps it
+    }
   }
 
   // locking

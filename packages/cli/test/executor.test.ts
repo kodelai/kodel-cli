@@ -68,8 +68,8 @@ describe("the real server stamps who calls it", () => {
       record_version: 2,
       meta_version: 2,
       contract_version: CONTRACT_VERSION,
-      instructions_hash: sha256(serverInstructions()),
-      tools_hash: sha256(toolsFingerprint([...toolsFor(), ...HISTORY_TOOLS])),
+      instructions_hash: sha256(serverInstructions({ attachments: true })),
+      tools_hash: sha256(toolsFingerprint([...toolsFor({ attachments: true }), ...HISTORY_TOOLS])),
     });
     await Promise.all([client.close(), server.close()]);
   });

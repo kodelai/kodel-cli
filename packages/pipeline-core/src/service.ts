@@ -5,6 +5,14 @@
  * every host answers an agent the same way.
  */
 
+import {
+  ATTACHMENT_DATA_NOTE,
+  type AttachmentContent,
+  type AttachmentInfo,
+  type AttachmentWriteInput,
+  type AttachmentWritten,
+  NOT_SCANNED,
+} from "./attachments";
 import { docTopics } from "./docs";
 import { type ErrorCode, KodelError } from "./errors";
 import type { Caller } from "./executor";
@@ -173,6 +181,16 @@ export interface RunHandle {
    */
   proposeChange(input: { yaml: string; summary: string }): Promise<ProposeOutcome>;
   /**
+   * Keep a version of an attachment for an open agent step (T-45); throws `KodelError` for a refusal.
+   * A host that keeps no attachments leaves the three methods out, and offers neither the tools nor
+   * the check kind.
+   */
+  writeAttachment?(input: AttachmentWriteInput): Promise<AttachmentWritten>;
+  /** One version (the latest without `version`): its facts, and the text of a text version that verifies. */
+  readAttachment?(input: { name: string; version?: number }): Promise<AttachmentContent>;
+  /** The latest version of each name; with `name`, every version of it, oldest first. */
+  listAttachments?(input?: { name?: string }): Promise<AttachmentInfo[]>;
+  /**
    * Wait for the engine's work to come to rest, no longer than `ms`. With `node`, only the work that
    * is the caller's: the node's own (`step`), or the chain its branch leads into (`chain`, the
    * default; see `WaitScope`).
@@ -222,6 +240,8 @@ export interface StartOutcome {
 }
 
 export interface PipelineHost extends HistoryHost {
+  /** The runs of this host keep attachments (T-45): the tools and the check kind are offered. */
+  readonly attachments?: boolean;
   list(): Promise<{ pipelines: PipelineInfo[]; problems: PipelineProblem[] }>;
   resolve(name: string): Promise<PipelineSpec | undefined>;
   /** The pipeline as its file has it: the text a change starts from, and the hash of that text. */
@@ -294,6 +314,25 @@ async function guarded(work: () => Promise<ToolResult>): Promise<ToolResult> {
     }
     throw error;
   }
+}
+
+const NO_ATTACHMENTS = failure("INVALID_ARGUMENTS", "this server keeps no attachments");
+
+/** A version as a tool answers it: the facts of the record, and what an image is marked with. */
+export function attachmentAnswer(info: AttachmentInfo): Record<string, unknown> {
+  return {
+    name: info.name,
+    version: info.version,
+    type: info.type,
+    bytes: info.bytes,
+    ...(info.lines === undefined ? {} : { lines: info.lines }),
+    sha256: info.sha256,
+    written_by: { node_slug: info.node, attempt: info.attempt },
+    at: info.at,
+    ...(info.scanned ? {} : { scanned: false, mark: NOT_SCANNED }),
+    ...(info.redacted === true ? { redacted: true } : {}),
+    ...(info.state === "ok" ? {} : { state: info.state }),
+  };
 }
 
 /** The texts the agent reads when it connects: the instructions and a description of the tools. */
@@ -794,6 +833,88 @@ export class PipelineService {
           ...(input.claim_token === undefined ? {} : { worker: true }),
           serve: this.who(),
         }),
+      };
+    });
+  }
+
+  /** Keep a version of an attachment with the run. A host without attachments answers a failure, never throws. */
+  attachmentWrite(input: {
+    run_id: string;
+    node_slug: string;
+    attempt: number;
+    name: string;
+    content?: string;
+    path?: string;
+    claim_token?: string;
+  }): Promise<ToolResult> {
+    return guarded(async () => {
+      const run = await this.run(input.run_id);
+      if (!run.writeAttachment) return NO_ATTACHMENTS;
+      if ((input.content === undefined) === (input.path === undefined)) {
+        return failure("INVALID_ARGUMENTS", "give exactly one of `content` and `path`");
+      }
+      const written = await run.writeAttachment({
+        node: input.node_slug,
+        attempt: input.attempt,
+        name: input.name,
+        ...(input.content === undefined ? {} : { content: input.content }),
+        ...(input.path === undefined ? {} : { path: input.path }),
+        ...(input.claim_token === undefined ? {} : { claimToken: input.claim_token }),
+      });
+      return {
+        ok: true,
+        ...attachmentAnswer(written.attachment),
+        ...(written.unchanged === true
+          ? {
+              unchanged: true,
+              note: "The same bytes are already the latest version; nothing new was written.",
+            }
+          : {}),
+      };
+    });
+  }
+
+  /** One version of an attachment: text as data, an image by its facts only. */
+  attachmentRead(input: { run_id: string; name: string; version?: number }): Promise<ToolResult> {
+    return guarded(async () => {
+      const run = await this.run(input.run_id);
+      if (!run.readAttachment) return NO_ATTACHMENTS;
+      const found = await run.readAttachment({
+        name: input.name,
+        ...(input.version === undefined ? {} : { version: input.version }),
+      });
+      const facts = attachmentAnswer(found.attachment);
+      if (found.attachment.state !== "ok") {
+        return {
+          ok: true,
+          ...facts,
+          note:
+            found.attachment.state === "missing"
+              ? "The stored file of this version is missing; there is no content."
+              : "The stored file of this version was changed outside kodel; its content is not returned.",
+        };
+      }
+      if (found.content === undefined) {
+        return {
+          ok: true,
+          ...facts,
+          note: `An image is kept as it was given (${NOT_SCANNED}) and is never returned here; a person opens it from the run's files.`,
+        };
+      }
+      return { ok: true, ...facts, content: found.content, note: ATTACHMENT_DATA_NOTE };
+    });
+  }
+
+  /** The attachments of a run: the latest version of each name, or the history of one name. */
+  attachmentList(input: { run_id: string; name?: string }): Promise<ToolResult> {
+    return guarded(async () => {
+      const run = await this.run(input.run_id);
+      if (!run.listAttachments) return NO_ATTACHMENTS;
+      const found = await run.listAttachments(input.name === undefined ? {} : { name: input.name });
+      return {
+        ok: true,
+        ...(input.name === undefined ? {} : { name: input.name }),
+        [input.name === undefined ? "attachments" : "versions"]: found.map(attachmentAnswer),
       };
     });
   }

@@ -15,6 +15,20 @@ import {
   type AgentDecision,
   type AgentStep,
   type AgentsConfig,
+  ATTACHMENT_LIMITS,
+  type AttachmentContent,
+  type AttachmentInfo,
+  type AttachmentRecord,
+  type AttachmentWriteInput,
+  type AttachmentWritten,
+  attachmentHistory,
+  attachmentInfoOf,
+  attachmentLimitProblem,
+  attachmentNameProblem,
+  attachmentRecords,
+  attachmentRef,
+  attachmentsFingerprint,
+  attachmentTypeOfName,
   type Caller,
   type ChangeSet,
   type ChangesRef,
@@ -27,6 +41,7 @@ import {
   claimedStepsOpen,
   cleanExecutorText,
   clientOf,
+  countLines,
   DEFAULT_AGENTS,
   type Decision,
   decide,
@@ -55,6 +70,7 @@ import {
   isTreeId,
   type JournalRecord,
   KodelError,
+  latestAttachments,
   liveClaim,
   measurePatch,
   mergeReports,
@@ -97,11 +113,13 @@ import {
   TELL_CHANGES_NOTE,
   unknownReason,
   validateReport,
+  visitStartSeq,
   type WaitScope,
   type WorkerGoneReason,
 } from "@kodel-ai/pipeline-core";
 import { type AgentLogRun, AgentLogWriter } from "./agent-log";
 import type { AgentLogTickers } from "./agent-log-ticker";
+import { type AttachmentHooks, decodeText, readWorkdirFile, typeProblem } from "./attachments";
 import { type CommandOptions, type CommandResult, runCommand } from "./command";
 import { loadAgentHints, loadConfig, type WorktreeConfig } from "./config";
 import { configEngineResolver, launchHash, literalRules } from "./engines";
@@ -274,6 +292,8 @@ export interface HostOptions {
    * cannot start or look up a session, and an engine step it would start fails as such.
    */
   engineSessions?: EngineSessionFactory;
+  /** Tests step into a write of an attachment: after the named file is opened, after the stored file is made. */
+  attachmentHooks?: AttachmentHooks;
   /** The platform engine steps are judged for; this process's by default (tests inject another). */
   platform?: NodeJS.Platform;
   /** Why this host does not run engine steps, when the caller knows a reason beyond the build's flag. */
@@ -3943,6 +3963,230 @@ export class LocalRun {
       ...decision,
       warning: `the engine session ${open.id} of step "${open.node}" may still run on its own; stop it with kodel agent stop ${open.id}`,
     };
+  }
+
+  // attachments (T-45)
+
+  /** Every version the run's journal holds, oldest first. */
+  async attachmentRecords(): Promise<AttachmentRecord[]> {
+    return attachmentRecords(await this.host.store.readJournal(this.runId));
+  }
+
+  /** What a gate decision is held against (`attachmentsFingerprint`); `undefined` without attachments. */
+  async attachmentsFingerprint(): Promise<string | undefined> {
+    return attachmentsFingerprint(await this.attachmentRecords());
+  }
+
+  private async attachmentInfo(record: AttachmentRecord): Promise<AttachmentInfo> {
+    const file = await this.host.store.readAttachmentFile(this.runId, record);
+    return attachmentInfoOf(record, file.state);
+  }
+
+  /** The latest version of each name; with `name`, every version of it, oldest first. */
+  async listAttachments(input: { name?: string } = {}): Promise<AttachmentInfo[]> {
+    const records = await this.attachmentRecords();
+    const listed =
+      input.name === undefined
+        ? latestAttachments(records)
+        : attachmentHistory(records, input.name);
+    return Promise.all(listed.map((record) => this.attachmentInfo(record)));
+  }
+
+  /**
+   * One version, held against its record: the journal says what exists, never the folder. `path` is
+   * for a person's own terminal and the TUI only; no tool returns it.
+   */
+  async readAttachment(input: {
+    name: string;
+    version?: number;
+  }): Promise<AttachmentContent & { path?: string }> {
+    const history = attachmentHistory(await this.attachmentRecords(), input.name);
+    const record =
+      input.version === undefined
+        ? history.at(-1)
+        : history.find((r) => r.version === input.version);
+    if (record === undefined) {
+      throw new KodelError(
+        "INVALID_ARGUMENTS",
+        history.length === 0
+          ? `run ${this.runId} has no attachment "${String(input.name).slice(0, 64)}"`
+          : `attachment "${input.name}" has no version ${input.version} (it has ${history.length})`,
+      );
+    }
+    const file = await this.host.store.readAttachmentFile(this.runId, record);
+    const attachment = attachmentInfoOf(record, file.state);
+    if (file.state !== "ok") return { attachment };
+    if (record.type !== "text") return { attachment, path: file.path };
+    const content = decodeText(file.bytes);
+    // A stored text that does not decode was not written by kodel as text.
+    if (content === undefined) return { attachment: attachmentInfoOf(record, "changed") };
+    return { attachment, content, path: file.path };
+  }
+
+  /**
+   * Keep a version of an attachment for an open agent step. The type is found from the bytes, text is
+   * redacted before it is hashed and stored, and the whole write (the look at the journal, the limits,
+   * the file, the event) is under the run's lock. Throws `KodelError` for a refusal; nothing is left of
+   * a refused write.
+   */
+  async writeAttachment(input: AttachmentWriteInput): Promise<AttachmentWritten> {
+    await this.assertOurs();
+    try {
+      return await this.keepAttachment(input);
+    } catch (error) {
+      if (error instanceof KodelError) {
+        await this.recordRefusal("attachment_write", input.node, input.attempt, error);
+      }
+      throw error;
+    }
+  }
+
+  private async keepAttachment(input: AttachmentWriteInput): Promise<AttachmentWritten> {
+    const { store, rules, engine, clock } = this.host;
+    const hooks = this.host.options.attachmentHooks;
+    const refuse = (message: string) => new KodelError("INVALID_ARGUMENTS", message);
+    const problem = attachmentNameProblem(input.name);
+    if (problem !== undefined) throw refuse(`"${String(input.name).slice(0, 64)}": ${problem}`);
+    const { name } = input;
+    // The name goes into the journal and into a file name: it is not a place for a secret.
+    if (redactText(name, rules) !== name) {
+      throw refuse("the name looks like a secret to the project's redaction rules; choose another");
+    }
+    const type = attachmentTypeOfName(name);
+    if (type === undefined) throw refuse(`"${name}" has no type`);
+    if ((input.content === undefined) === (input.path === undefined)) {
+      throw refuse("give exactly one of `content` and `path`");
+    }
+    // Before any file is read or written: a format with no place for the event, a step that is not open.
+    const before = await this.state();
+    if (!capabilitiesOf(before.v).attachments) {
+      throw cannotHoldError(before.v, "an attachment", this.runId);
+    }
+    const cap = type === "text" ? ATTACHMENT_LIMITS.textBytes : ATTACHMENT_LIMITS.imageBytes;
+    let raw: Uint8Array;
+    if (input.content !== undefined) {
+      if (type !== "text") {
+        throw refuse(
+          "an image is given by `path` (a file in the run's working directory), not by `content`",
+        );
+      }
+      raw = Buffer.from(input.content, "utf8");
+      if (raw.length > cap) {
+        throw refuse(
+          `a text attachment is at most ${cap} bytes a version (this one is ${raw.length})`,
+        );
+      }
+    } else {
+      raw = await readWorkdirFile(await this.cwd(), input.path as string, cap, hooks);
+    }
+    const mismatch = typeProblem(type, raw);
+    if (mismatch !== undefined) throw refuse(mismatch);
+    let stored = raw;
+    let lines: number | undefined;
+    let redacted = false;
+    if (type === "text") {
+      const given = decodeText(raw) ?? "";
+      const text = store.attachmentText(given);
+      redacted = text !== given;
+      stored = Buffer.from(text, "utf8");
+      lines = countLines(text);
+    }
+    const sha = createHash("sha256").update(stored).digest("hex");
+    const event = (version: number, ref: string): RunEvent => ({
+      type: "attachment_written",
+      node: input.node,
+      attempt: input.attempt,
+      name,
+      version,
+      ref,
+      fileType: type,
+      bytes: stored.length,
+      ...(lines === undefined ? {} : { lines }),
+      sha256: sha,
+      scanned: type === "text",
+      ...(redacted ? { redacted: true } : {}),
+      ...(input.claimToken === undefined ? {} : { claimToken: hashSource(input.claimToken) }),
+    });
+    const step = this.queue
+      .catch(() => undefined)
+      .then(() =>
+        this.locked(async (): Promise<AttachmentWritten> => {
+          const journal = await store.readJournal(this.runId);
+          const records = attachmentRecords(journal);
+          const history = attachmentHistory(records, name);
+          const version = (history.at(-1)?.version ?? 0) + 1;
+          // The step and the format, decided on the state as it is under the lock, before any file:
+          // `decide` is pure, and nothing is written for a refusal.
+          const state = await this.state();
+          const dry = decide(
+            await this.specFor(state.specHash),
+            state,
+            event(version, attachmentRef(sha, name)),
+            clock(),
+            engine,
+          );
+          if (!dry.ok) throw dry.error;
+          await store.sweepAttachments(this.runId, new Set(records.map((r) => r.ref)));
+          // The file a verified record of these bytes already points to is used again.
+          let reuse: AttachmentRecord | undefined;
+          for (const record of records) {
+            if (record.name !== name || record.sha256 !== sha || record.ref === reuse?.ref)
+              continue;
+            if ((await store.readAttachmentFile(this.runId, record)).state === "ok") reuse = record;
+          }
+          // The same bytes again are nothing new only inside one visit of one step: a step entered
+          // again, another step, and a rewrite after the file was changed outside kodel get a record.
+          const latest = history.at(-1);
+          if (
+            reuse !== undefined &&
+            latest !== undefined &&
+            latest.ref === reuse.ref &&
+            latest.sha256 === sha &&
+            latest.node === input.node &&
+            latest.seq > visitStartSeq(journal, input.node)
+          ) {
+            return { attachment: attachmentInfoOf(latest, "ok"), unchanged: true };
+          }
+          const limit = attachmentLimitProblem(records, {
+            name,
+            type,
+            bytes: stored.length,
+            stored: reuse === undefined,
+          });
+          if (limit !== undefined) throw refuse(limit);
+          let ref = reuse?.ref;
+          let created = false;
+          for (let n = 0; ref === undefined; n += 1) {
+            if (n > 50) throw refuse(`too many files of "${name}" were changed outside kodel`);
+            const candidate = attachmentRef(sha, name, n);
+            // A file a record points to is never replaced: one changed outside kodel is written beside.
+            if (await store.createAttachment(this.runId, candidate, stored)) {
+              ref = candidate;
+              created = true;
+            }
+          }
+          let decision: Decision;
+          try {
+            await hooks?.afterFile?.(ref);
+            decision = await this.decideAndWrite(event(version, ref), false);
+          } catch (error) {
+            if (created) await store.removeAttachment(this.runId, ref);
+            throw error;
+          }
+          if (!decision.ok || decision.noop) {
+            if (created) await store.removeAttachment(this.runId, ref);
+            throw decision.ok
+              ? new KodelError("NODE_NOT_RUNNING", "the attachment was not recorded")
+              : decision.error;
+          }
+          const written = attachmentRecords(decision.journal).at(-1);
+          if (written === undefined)
+            throw new Error("an attachment was journaled without a record");
+          return { attachment: attachmentInfoOf(written, "ok") };
+        }),
+      );
+    this.queue = step;
+    return step;
   }
 
   async feedback(input: {

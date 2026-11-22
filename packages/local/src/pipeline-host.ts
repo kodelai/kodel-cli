@@ -195,6 +195,8 @@ export interface PipelineProposalView {
 }
 
 export class LocalPipelineHost implements PipelineHost {
+  /** Runs keep attachments in their own folder (T-45). */
+  readonly attachments = true;
   private readonly dir: string;
   private readonly store: FileStore;
   private readonly storeRoot: string;

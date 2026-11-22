@@ -32,6 +32,8 @@ export interface FormatCapabilities {
   sessionNames: boolean;
   /** The event that says a background worker of the run is gone (`worker_note`). Format 1 never wrote it. */
   workerNotes: boolean;
+  /** The event that says a version of an attachment was stored (`attachment_written`, T-45). */
+  attachments: boolean;
   /** The pipeline features a snapshot of this format can use. */
   pipelineFeatures: readonly PipelineFeature[];
 }

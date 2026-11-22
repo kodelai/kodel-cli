@@ -16,8 +16,9 @@ import {
 } from "./tool-calls-record";
 
 /**
- * The tools of the engine whose names start with `pipeline_` (the tool registry's, and the decision tools), by name: a
- * test in the MCP tests keeps this list equal to what the server registers. The `task_*` tools are not in it.
+ * Every tool whose name starts with `pipeline_` that a host may register (the tool registry's, the decision tools, and
+ * the attachment tools of a host that keeps attachments), by name: a test keeps every registered name in this list,
+ * and a host with everything on registering all of it. The `task_*` tools are not in it.
  */
 export const PIPELINE_TOOL_NAMES: readonly string[] = [
   "pipeline_list",
@@ -33,6 +34,9 @@ export const PIPELINE_TOOL_NAMES: readonly string[] = [
   "pipeline_propose_change",
   "pipeline_decide_gate",
   "pipeline_accept_change",
+  "pipeline_attachment_write",
+  "pipeline_attachment_read",
+  "pipeline_attachment_list",
 ];
 
 /**

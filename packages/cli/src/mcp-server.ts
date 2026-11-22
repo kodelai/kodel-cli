@@ -92,7 +92,14 @@ export function createServer(
   const dialog = humans !== undefined && options.dialog === true;
   // Without a host that can decide there is nothing for the agent's tools to do, so none is served.
   const agentDecisions = humans === undefined ? {} : (options.agentDecisions ?? {});
-  const base = serverInstructions({ ...options, dialog, decisions: agentDecisions });
+  // The attachment tools, and the rule about them, only on a host whose runs keep attachments.
+  const attachments = host.attachments === true;
+  const base = serverInstructions({
+    ...options,
+    dialog,
+    decisions: agentDecisions,
+    attachments,
+  });
   const instructions = tasks
     ? `${base}\n\n${taskInstructions(runLink?.mode ?? "disabled", runLink !== undefined)}`
     : base;
@@ -109,12 +116,17 @@ export function createServer(
     },
     surface: {
       instructions,
-      tools: toolsFingerprint([...toolsFor({ taskLink }), ...decisions, ...HISTORY_TOOLS]),
+      tools: toolsFingerprint([
+        ...toolsFor({ taskLink, attachments }),
+        ...decisions,
+        ...HISTORY_TOOLS,
+      ]),
       contract_version: CONTRACT_VERSION,
     },
   });
   registerPipelineTools(server, service, {
     taskLink,
+    attachments,
     ...(humans && dialog
       ? {
           afterTool: createElicitor(server.server, humans, service, {
