@@ -179,3 +179,7 @@ then rebuild the project at the same path (`EKAV_TOP`), and claude keeps trust b
 With these, every criterion but 7 and 9 holds, and 7 and 9 have answers: 1 yes; 2 yes; 3 yes with the trailing
 newline (step 4 changes, the person chose A); 4 yes; 5 yes (30 s; an hour pending); 6 yes on this machine; 7
 `idleWrites: false`; 8 yes (a long conversation not run); 9 yes both ways; 10 yes on macOS (Linux unknown); 11 yes.
+
+Criterion 5 after an hour (`sh trust.sh hour`, 2026-11-22): **yes**. The session started `kodel wait` in the
+background, wrote 0 bytes to its terminal during the hour, the waiter still ran, and after the decision the
+session went on by itself (called `pipeline_next_step`, no key typed).

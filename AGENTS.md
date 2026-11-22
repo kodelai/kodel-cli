@@ -55,7 +55,7 @@ This repository adds these rules:
   `agent_hints: { wait: false }` in the project config; then no answer mentions `kodel wait`, and you just
   end your turn and wait to be told.
 - A pipeline may fork: a `node` answer then lists every open step in `steps`, and `execution.mode` says how
-  this project works them. In `parallel` mode start one subagent (a worker) per step that has no `taken_by`
+  this project works them. In `parallel` mode start one subagent (a fork worker) per step that has no `taken_by`
   and give it these rules: call `pipeline_take_step` with the run id and its step's slug and keep the
   `claim_token`; if the answer is `taken` (another worker holds it), `queued` (the project's
   `agents.max_parallel` steps are already being worked) or `none` (no free step), stop and report that
@@ -68,6 +68,14 @@ This repository adds these rules:
   again with `subagents: {can: true}` to have them handed out to workers. When the workers are back, call `pipeline_next_step`
   yourself; what waits for a person (`also_waiting` names every gate and pause) is for you to tell them,
   with the command of each (`--node <slug>` when several wait).
+- Two things are called a worker; keep them apart. A **fork worker** is the subagent of a fork (the rules
+  above): it lives inside your session, reports to you and never starts `kodel wait`. A **background agent**
+  is the agent of a whole run that kodel itself started (`s` in `kodel tui`, `kodel serve`, `kodel agent start
+  --pipeline`), the session `kw-<run>` of `kodel agent ls`. If you are one, you are the driver of your run:
+  at a `waiting` answer you tell what waits, start the wait command exactly as the answer spells it (in the
+  background) and end your turn, whatever `agent_hints.wait` says for other agents, and you go on when it
+  reports. You cannot decide: your server serves no decision tool, and the person's commands refuse inside
+  your session (`docs/decisions.md`).
 
 Tasks (`docs/tasks.md`) are off unless `.kodel/config.yaml` has `tasks: { enabled: true }`; when they are on the
 server also offers the `task_*` tools. When the user asks you to "create a task" for something you should not
@@ -79,8 +87,10 @@ until a run stops waiting for a person (see above); the same
 binary has `gate`, `resume`, `ack`, `seal`, `migrate` (takes a run to the newest stored format, one way), and `pipeline changes` (`show`, `apply`, `discard`, `history`,
 `restore`) for a change of the pipeline of a run that is going, and `pipeline proposals` (`show`, `apply`,
 `discard`) for a pipeline the agent proposed outside a run, and `serve`, a daemon that starts matching tasks in
-background workers and resumes them after a decision, by the `serve` block of the project config
-(`docs/serve.md`; off by default). With `decisions: { dialog: true }` in the project
+background agents and resumes them after a decision, by the `serve` block of the project config
+(`docs/serve.md`; off by default). A background agent runs in a terminal of its own by default (`kodel agent attach kw-<run>`, or `o` in `kodel tui`, opens it and `Ctrl+\` leaves it running; the committed
+line `engines: { claude: { worker: print } }` keeps `claude -p`), and `agent start`, `agent prune` and `agent doctor` start one by hand, remove
+the finished ones and say whether one can start here. With `decisions: { dialog: true }` in the project
 config (off by default), a client that can show a form (MCP elicitation) is also asked there at a gate, a
 pause, a change of the pipeline of a run and a state changed outside kodel, and the person's answer in that
 dialog is the same decision as the command; the commands stay the way to decide when the dialog is off, the

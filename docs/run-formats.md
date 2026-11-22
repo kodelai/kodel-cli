@@ -151,6 +151,34 @@ already running when kodel was updated does not read the config again and does n
 makes (`docs/tasks.md`): restart the agents' sessions after the update. The four task keys the mark adds are
 optional and kept by an older kodel as they are.
 
+## Terminal workers (TASK-EKAV, T-45)
+
+No run format changes: the state, the journal and the kept pipelines are as before.
+
+- **The project config** gains `engines.<name>.worker` and `engines.<name>.terminal` (`docs/engines.md`), and a
+  profile's step `command` becomes optional; the config `version` is not bumped. Present configs load
+  unchanged. A kodel from before this change refuses a config that has the new keys (`unknown key: …`), as it
+  does for `serve`. With the key absent a worker is now a terminal session; `docs/changes.md` has the one line
+  that keeps print workers.
+- **The session records** (format 1, not frozen) gain a record file, `agent.json`, and the name marker of a
+  resumed session moves to the new record (`docs/session-formats.md`). No change of `v`: a build that does
+  not know the file derives the same status, lists and removes the session.
+- **The record of `kodel serve`** (format 1) gains the optional `counts.alive`; `counts.workers` keeps its
+  meaning, so an older TUI or `--status` reads it right. No change of `v`.
+- **A run in flight at the update.** A `claude -p` worker that is alive is listed and resumed by the old
+  rule. One that already exited at its gate has no `agent.json`: the id of its conversation is read from the
+  argv its record keeps (which the launcher wrote), so it is resumed after your decision and keeps its
+  `max_runs` place until then. The resumed session runs as the setting says now (`terminal` when the key is
+  absent; Claude Code continues a conversation across the two); where that cannot run the resume is refused
+  with the reason, makes no record and counts as a failed attempt.
+- **An older kodel beside a newer one.** An older daemon or TUI sees a terminal worker at a gate as a running
+  worker (it holds a `max_workers` place for it and may call it stalled) and a `lost` one as dead. Use one
+  build for the daemon, the TUI and the workers of a checkout.
+
+Fixtures: `fixtures/session-formats/v1/` (`agent-chosen.json`, `agent-resumed.json`, and
+`worker-print-before-t45/`, a print worker's record as it was written before this change, composed in the
+shape a real holder writes and not taken from an older build), `fixtures/serve-formats/v1/serve-alive.json`.
+
 ## A step that asks for a model (T-43)
 
 A node `model:` without `engine` asks the agent that drives the run to give the step to a subagent on that

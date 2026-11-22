@@ -61,6 +61,45 @@ lists the session without an agent and removes the folder whole. A session with 
 like any other file of the folder; one that cannot be read changes no status, and the session is listed without
 an agent. No change of `v`.
 
+**A worker of a run** (`kw-<run>`, `kw-<run>-d<seq>` for a resume after a decision) has the record whether it
+runs in a terminal or as a print process. The launcher takes the id of the conversation to continue from it,
+never from the screen or the tail. For a worker's record from before this file the id is read from the argv
+the record keeps (the last `--session-id`, else the last `--resume`), which the launcher wrote; nothing is
+written for such a record (fixture `worker-print-before-t45/`). A terminal record's argv is never read for an
+id: its prompt comes last, and a prompt is a person's text.
+
+### Continuing a finished agent: `kodel agent start --resume`
+
+`kodel agent start --resume <name|id>` starts a new terminal session that continues the stored conversation
+(`agent.json` of the new record has the same `session` and `resumes: <the old id>`) and **keeps the name**.
+`kodel agent ls` prints, under the table, `<name> can be continued: kodel agent start --resume <name>` for a
+session this holds for. It is refused, with the reason, for a session that runs, one whose process still runs
+without a holder, one whose id is not known or whose record does not name `claude`, a `kw-` or `ke-`
+session, a session a host started, and a session on pipes. The old record stays listed until `rm` or `prune`.
+
+**The name marker moves.** A marker is written once by `start`; a resume is the one case where it changes
+hands, and only from a finished session a person started (`origin: "cli"`) of the same name:
+
+1. a claim `<name>.json.take` is made exclusively: of two resumes of one name, one gets it;
+2. the new record is published (its folder renamed into place);
+3. the claim is renamed over the marker: the name now points at the new record, in one rename;
+4. if the start then fails, the old marker is written back by a rename.
+
+A crash before step 3 leaves the name with the old record; a claim whose session never began within 15 s, or
+is over, was left by a process that died and is taken away by the next resume. While a claim is in progress
+`rm` and `prune` refuse the old record (`STILL_RUNNING`, "is being resumed"), so a failed resume has a session
+to give the name back to; a plain `agent start --name` of that name answers `NAME_TAKEN` at every point. A
+host session's marker is never moved, and the marker of a session whose process still runs is not either.
+`rm` of the old record afterwards keeps the name with the new one.
+
+### `kodel agent prune`
+
+Removes finished records, after one question that names the count (`--dry-run` removes nothing,
+`--older-than <days>` keeps younger ones). It never removes a record that runs or whose process still runs,
+one that cannot be read, is of another machine or of a newer format, or a `kw-` or `ke-` record whose run is
+open or cannot be read. Each record is read again right before its removal, and `remove` itself refuses a
+live one. A person's name is freed with its record; a host session's marker stays.
+
 ## A holder that went away: "child still runs"
 
 A session whose holder is gone is `lost` (or `killed`, when a stop record is there), and `childAlive` ("child
@@ -113,6 +152,12 @@ that reaches one stream in pieces with the other stream writing in between can e
 `stderr.txt` hold each stream whole and are redacted whole.
 
 ## Terminal sessions (`mode: pty`)
+
+`kodel agent start [prompt]` (for a person) runs the coding agent of the `claude` profile in a terminal of its
+own, in the project root, and attaches unless `--bg`; it prints the argv and what a start nobody watches may
+meet. With `--pipeline <name>` the prompt is the task of a new run and the session is that run's worker
+(`kw-<run>`), started by the same launcher as `s` in the TUI (`docs/serve.md`). `kodel agent exec --pty --attach
+-- <command>` starts any command and attaches at once.
 
 `kodel agent exec --pty -- <command>` (hidden, for a person) runs the command in a terminal of its own, and
 `kodel agent attach <name|id>` (for a person; it asks for no confirmation) connects the person's terminal to it:
@@ -173,7 +218,17 @@ remove no socket and it cannot attach; nothing else differs.
   every client that connects. Only `tail.txt` is on disk: stripped of escape sequences, then redacted.
 - **The tail of a full-screen program is repaint fragments** (cursor moves between the pieces of a word), so a
   secret such a program draws may never be one string in `tail.txt`, and redaction finds less there than in the
-  output of a program that writes lines.
+  output of a program that writes lines. A secret printed as a line is caught
+  (`tA_terminal_tail_redacts_a_printed_secret`); one painted in pieces stays in the bounded tail until newer
+  output replaces it or `agent rm` or `prune` removes the record
+  (`tA_terminal_tail_painted_secret_is_the_known_limit` pins the limit, so a change of it is seen). Since a
+  background agent of a run is a terminal session by default (`docs/serve.md`), this limit holds for every
+  such worker; there is no retention rule beyond the tail's size. What the TUI's card shows of a tail is
+  stripped and redacted again.
+- **A session's own timeout signals its child only.** A worker's terminal session lives 7 days at most; when
+  the holder ends it by that timeout, a process the agent left in another process group (a background `kodel
+  wait`, say) lives on to its own end (the wait command is given the same 7 days). `agent stop`, and the stop
+  at the end of a run, reach the child's descendants and its group.
 - **After more than 1 MiB of output** the replay starts in the middle. The client is first given the modes the
   program had switched on by then (mouse, focus events, bracketed paste, the kitty keyboard, application keys, the
   alternate screen, the hidden cursor), not colours, the cursor's place, the scroll region or the screen's content:

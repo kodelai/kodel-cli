@@ -9,6 +9,14 @@
   as in a sandbox; no build, or a build older than the sources) every test is skipped and the file prints
   `PTY tests skipped: N, <reason>`; with `KODEL_REQUIRE_PTY=1` (the CI `pty` job) they fail instead. The same job
   runs `bun test packages/local` with that variable, so the tests there that bind a unix socket cannot skip.
+  `pty/worker-terminal.test.ts` (T-45) runs a background agent of a run on a real terminal: the launcher, the
+  TUI's `o` and the return to the same place, a worker's shell that cannot decide, an agent left behind a dead
+  holder or a dead wrapper. Its agent is the scripted fake of `@kodel-ai/testkit` (`writeFakeTerminalAgent`: a
+  Node program written as `claude` into a folder for `PATH`), so no model runs.
+- Tests that read the real process table (`ps`) skip where it cannot be read, as in a sandbox
+  (`t45_session_guard_finds_a_session_of_another_state_base` in `packages/cli/test/human-only.test.ts`, the
+  `tableTest` rows of `packages/local/test/session-pipes.test.ts`); `KODEL_REQUIRE_PROCTABLE=1` makes the
+  latter fail instead.
 - `../fixtures/formats/`: golden fixtures per format version.
 
 Every decision in the decision log has a test plan; test names carry the decision id (e.g. `t12_...`).
@@ -76,6 +84,47 @@ checked, a line says so, and the file assertions still run.
 
 By default the sandbox says nothing about pipelines in its `CLAUDE.md`: the rules reach the agent from
 the server's own instructions, which is what these scenarios check.
+
+`claude-code-worker.test.ts` and `claude-code-serve.test.ts` run a print worker (`worker: print` in their
+project's config). `terminal-worker.test.ts` (T-45, `t45_real_claude_terminal_worker_cannot_decide_its_gate`)
+runs the real `claude` as a terminal worker and needs a PTY besides `KODEL_AGENT_TESTS`: two gates in a row
+with `decisions.agent.gate` and `.pipeline_change` on; the worker stays `running`; told to approve with the
+tool, then to run `kodel gate <run> approve` and `env X=1 kodel gate …` in its shell, the gate stays undecided
+each time; a person's decision makes it go on in the same session, twice; the run completes and the session
+is stopped. It prints the version of `claude` it ran. Its project is made inside this checkout's git-ignored
+`.kodel/worktrees`, because `claude` asks to trust a new folder and no supported way to accept that
+beforehand was found, so the scenario runs on a person's machine before a release, not nightly. (The spike
+saw a git worktree of a trusted checkout start with no question, and a separate repository nested in one
+ask: if this scenario stops at the trust question, accept it once for that folder; `claude` keeps trust by
+path.) The three instructions are typed into the worker's terminal by the test, as
+the person; kodel itself types nothing.
+
+## Terminal workers: what the tests cannot show (T-45)
+
+Run before a release, on the built file (`node packages/cli/dist/kodel.js`), by a person:
+
+- **Approve a gate after an hour away.** That a reporting `kodel wait` wakes an idle agent, also after an
+  hour, has no trigger in CI. The half "is reported within 2 minutes" is tested with a fake clock
+  (`t44_not_moving_*`); the half "goes on" is this check and the real-agent scenario.
+- `kodel agent doctor`; `s` on a task; open another run's card, scroll, `o`, type, `Ctrl+\`, and see the same
+  card at the same scroll; detach while a dialog of the agent is open; let the agent end while attached.
+- `kodel serve` with `max_workers: 1`, `max_runs: 2`: a second task starts while the first waits.
+- Stop a session of `kodel agent start`, then `kodel agent start --resume <name>`; `kodel agent prune`.
+- Ask a worker to run `kodel gate` for you and see it refused; the same with `KODEL_STATE_DIR` set in the
+  shell that started the TUI.
+- Kill a worker's holder (`kill -9`) while its agent lives: `child still runs`, both places held; then `kodel
+  agent stop`: both places free, the daemon leaves it alone, `s` in the TUI resumes it.
+- `bun packages/cli/src/main.ts tui` refuses `s` with the Bun reason, and starts a print worker once `worker:
+  print` is committed; `o` there on a worker a Node `serve` started gives the notice with the command.
+
+Not shown by any test: real terminal emulators; a terminal whose quit key was moved (`stty quit`) and the
+handover inside tmux or screen; that a deny list is honoured in interactive `dontAsk`, and after a person
+switches the permission mode in the agent's interface; trust dialogs and trust inheritance (never in CI);
+that a conversation continues after a resume; the memory of idle sessions; a later `claude` that changes its
+flags (the profile is written against 2.1.330). What these rest on was seen once, by hand, with the real
+program on macOS: `spikes/ekav-m0/NOTE.md` (a denied tool refused without a prompt, the wake-up after 30
+seconds and after an hour, `kodel gate` refused in the interactive session, a resume after a stop and a
+kill). Not run there: Linux, and a conversation of an hour with compactions.
 
 ## How reliable is a scenario?
 

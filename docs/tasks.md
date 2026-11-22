@@ -245,13 +245,17 @@ edits `.kodel/tasks/*.yaml` with a shell, an MCP server of an older build, or ta
   is not drawn is refused (`Pipeline 7 is not visible: make the terminal taller`) and the window stays, and
   `y` counts only when the whole question is in view (the resume window too). The question is cancelled when the card
   moves to another task. It starts the task's run (the task text is the title, a blank line and the body; the task goes
-  to `progress`) and a detached `claude -p` session named `kw-<run id>`, in the run's working directory, that
-  drives the run through its own `kodel mcp --no-decisions --no-wait-hint`: a server that serves no decision
-  tool and shows no dialog, whatever the project config allows an agent, and never offers `kodel wait`. The
+  to `progress`) and a detached session named `kw-<run id>`, in the run's working directory: `claude` in a
+  terminal of its own (`engines.claude.worker: terminal`, the default) or `claude -p` (`worker: print`); see the
+  next two points and `docs/serve.md`. Either drives the run through its own `kodel mcp --no-decisions`: a
+  server that serves no decision tool and shows no dialog, whatever the project config allows an agent. A
+  terminal agent's server offers the wait command of this build at every wait (`--wait-command`); a print
+  agent's never offers `kodel wait` (`--no-wait-hint`). The
   agent runs with `--permission-mode dontAsk`, an allowlist (the kodel tools its server serves, `Read`, `Write`,
   `Edit`, `Glob`, `Grep`, `Bash`, `Agent`) and a deny list (the two decision tools; `Bash` patterns for `gate`,
-  `ack`, `seal`, `resume`, `migrate`, `wait r_*`, `pipeline changes apply|discard|restore`, `pipeline proposals
-  apply|discard` and `agent stop|rm|exec|forget-name` in the three spellings of the binary; `Edit`/`Write` of
+  `ack`, `seal`, `resume`, `migrate`, `pipeline changes apply|discard|restore`, `pipeline proposals
+  apply|discard`, `task approve` and `agent stop|rm|exec|forget-name|attach|start|prune` in the three spellings
+  of the binary, and `wait r_*` for a print agent; `Edit`/`Write` of
   `.kodel/runs`, `.kodel/pipelines`, `.kodel/tasks`, `.kodel/config.yaml`, `.kodel/proposals`, `.mcp.json` and
   `.claude/settings*.json`, relative and absolute, and of the state base). Both lists live in
   `packages/cli/src/claude-worker.ts`. A substring pattern can refuse an innocent command that names `kodel`
@@ -268,8 +272,33 @@ edits `.kodel/tasks/*.yaml` with a shell, an MCP server of an older build, or ta
   then **your decision**: the gate's question and the keys in words (`a Approve · r Reject`, or the command
   when the gate is decided with one). `kodel agent stop kw-<run>` ends the agent. `s` refuses, with the reason, on Windows, when `decisions.dialog` is on,
   when `claude` is not on PATH or not signed in, when the tracker cannot attach runs, when a project redaction
-  rule cannot be given to the agent and when no pipeline loads; `--demo` has no `s`.
-- **At a gate the agent exits; `s` resumes it after your decision.** With no `kodel wait` the agent writes what
+  rule cannot be given to the agent, when no pipeline loads, when the setting says `terminal` and no terminal
+  can run here (under Bun, say; the reason spells the line that keeps print agents) and when the `engines`
+  block is not as committed; `--demo` has no `s`. A refusal stays on the task's Backlog row as `cannot start:
+  <reason>` until a start of that task is let through.
+- **`o` opens a run's agent, and `Ctrl+\` brings you back to the same place.** On a run row or card whose
+  agent runs in a terminal, `o` leaves the screen and your terminal is the agent's (`kodel agent attach` of
+  the run's latest record, also `kw-<run>-d<seq>`). `Ctrl+\` detaches, the agent runs on, and the TUI is back
+  as you left it: the same screen and tab, the same selected run, the same open card and its scroll, the same
+  list scroll, filter and picked decision; only the data is fresh, and a notice carries the agent's last line
+  (`Back from kw-… · …`). The same holds when the agent ended while you were in it; the notice then says so
+  and names `kodel agent stop`. If the run you were on left the list meanwhile, the selection moves as on any
+  refresh. A print agent, Windows, or a child that cannot be started answers with a notice and the screen is
+  not left. A TUI that runs under Bun does not open an agent: the notice spells `node
+  packages/cli/dist/kodel.js agent attach <id>`. Keys typed during the handover are dropped for 150 ms after
+  the return.
+- **At a gate a terminal agent stays.** It tells what waits and starts its wait command in the background;
+  the row reads `◆ with you` and the card `agent waits with you`. After your decision it goes on within
+  seconds, with or without a TUI or a daemon; nothing is typed for you. If it has not gone on after 2 minutes
+  the row reads `◆ not moving` and the card `the agent has not gone on since your decision · o opens it`. A
+  terminal agent with a step open that printed nothing and called nothing for 30 minutes reads `◆ stalled`
+  (card: `agent stalled · o opens it`). One that ended at the wait (it quit, a reboot) is offered `s resumes`
+  after your decision, as below, or resumed by `kodel serve`; one that ended after it had gone on reads `agent
+  died after your decision`. One whose process still runs without a holder reads `agent lost (holder gone,
+  child still runs)` with `its process still runs without a holder; stop it: kodel agent stop <id>`, and no
+  resume is offered until you stop it. When the run is over, its terminal session is stopped (by `kodel serve`,
+  else by an open TUI at its next refresh).
+- **A print agent (`worker: print`) exits at a gate; `s` resumes it after your decision.** With no `kodel wait` the agent writes what
   you have to decide and ends its turn, so `claude -p` exits 0: the row reads `agent waiting for you`. Decide
   as usual (the TUI, `kodel gate|resume|pipeline changes`, a dialog of your own client): the card then reads
   `agent exited at your decision · s resumes`, and **nothing starts by itself**. The TUI cannot know whether

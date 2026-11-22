@@ -439,8 +439,9 @@ another run's card, scroll, `o`, type, `Ctrl+\`, and see the same card at the sa
 watch it go on; detach while a dialog of the agent is open; let the agent end while you are attached; `kodel
 serve` with `max_workers: 1`, `max_runs: 2`: a second task starts while the first waits; stop a session of
 `agent start`, then `agent start --resume <name>`; `agent prune`; ask a worker to run `kodel gate` for you and see it refused;
-kill a worker's holder (`kill -9`), see `child still runs` and both places held, then `kodel agent stop` and
-see it resumed after your decision; `o` in `bun packages/cli/src/main.ts tui` on a worker a Node `serve`
+kill a worker's holder (`kill -9`), see `child still runs` and both places held, then `kodel agent stop`, see
+both places freed and the daemon leave it alone after your decision (a worker you stopped is yours: `s` in the
+TUI resumes it); `o` in `bun packages/cli/src/main.ts tui` on a worker a Node `serve`
 started gives the notice with the command; `bun packages/cli/src/main.ts tui` refuses
 `s` with the Bun reason, and starts a `-p` worker after `worker: print` is committed; `worker: terminal` on a
 profile named `codex` is refused with the follow-up message.
@@ -910,3 +911,342 @@ run does not reopen, `daemon.ts:384-385`).
 - **Not verified here:** everything in step 1; that `run.inspect()` answers with a step for every fork that
   has work left; that `adapter.stop` reaches the descendants of a terminal session; a real terminal handed
   from the TUI to a child.
+
+## Implementation notes
+
+Steps 2 and 3 (the agent record, the group rule, the wait command):
+
+- **The flag "process table not read"** is a field of the status, `SessionStatus.group: "unread" | "stranger"`
+  (in `agent ls --json` too), set only for a record whose holder went away without recording its child's
+  end and whose recorded child is gone. Step 8 turns `unread` into the daemon's one environment line
+  (`t44_unreadable_process_table_is_logged_once` is that step's). `agent stop` prints why it signalled
+  nothing from the same field.
+- **The table is read with `ps -A -o pid=,pgid=,stat=,lstart=`** (one column more than the plan names), so
+  that a zombie is not counted as a process that runs.
+- **`agent stop` of a group-only orphan writes the stop record**, as the plan's test row says, so the record
+  then reads `stopped`. By the plan's own rule a worker a person stopped is not resumed by the daemon (the
+  TUI offers `s`), which is not what the hand check line "then `kodel agent stop` and see it resumed after
+  your decision" expects. Left as the test row has it; step 7 or the person decides which of the two holds.
+- **The wait command is put in by the service through a mark.** The host is asked for the answer with
+  `{kodel-wait-command}` in the command's place (`NextStepRequest.waitCommand`) and the service replaces it
+  after the host has kept what it keeps (`served/`), so the command and its paths reach no file of the run
+  and no rule of the project can change it. The host does not redact the answer it hands to the agent
+  today, and the project's rules are an option of the host, not of `kodel mcp`; the redaction test
+  (`t45_wait_command_is_not_changed_by_redaction`, `packages/local/test/wait-command.test.ts`) therefore
+  runs the real host with rules that match the command.
+- **Left to later steps because they need them:** the hint of `agent ls` for a stopped session that can be
+  resumed (the command it names, `agent start --resume`, is step 10's); the id of a conversation taken from
+  the `agent` record by the launcher, with the argv reader as the fallback and the fixture
+  `worker-print-before-t45/` (step 6; `sessionIdOf` is untouched, `parseEntry` now keeps `agent`); the
+  launcher's half of the wait command (the spec's environment, the preflight refusal through
+  `waitCommandProblem`, `workerDenylist(…, { terminal: true })`, step 6); the real-PTY rows
+  `t45_real_orphan_behind_a_wrapper_is_not_doubled` and `t45_real_stop_ends_an_agent_behind_a_dead_wrapper`
+  (`tests/pty/worker-terminal.test.ts`, steps 6 and 11; until then the same is shown on real processes of a
+  pipes session by `tA_real_group_orphan_is_seen_and_stopped`); `tA_terminal_tail_*` (step 11).
+- **`t45_wait_command_finds_the_run_under_a_state_dir`** builds the artifact itself, as the fork test of the
+  same folder does. It was written without being run on the built file (the implementation steps do not
+  build); its scenario was run once against the source entry.
+
+Steps 4 and 5 (the profile, the config):
+
+- **The flags `terminal.command` may add are listed in `packages/local`** (`WORKER_ENGINES` in `engines.ts`,
+  with `parseTerminalCommand`), not only in the profile: the grammar is checked when the config is read, and
+  the config's schema lives there. The `claude` entry takes its `terminalFlags` from that list, so there is
+  one list; the follow-up task adds a name to it and an entry to the table.
+- **The terminal argv has the prompt last** (`claude <flags> -- "<prompt>\n"`), as step 4 says after the
+  spike; the test row "prompt first" of `t45_claude_terminal_argv` is older than that and the test pins the
+  new order. One thing follows for step 6: the reader of an id from a record's argv (`sessionIdOf`) takes
+  the last `--session-id`, which was safe while the prompt (with the task's title) came before the flags.
+  A terminal record always has its `agent` record, so its argv must never be read for the id.
+- **The launcher is not moved onto the profile yet** (step 6): `worker-launcher-session.ts` still calls the
+  functions of `claude-worker.ts`. The entry (`claudeProfile`) wraps those same functions, and
+  `workerMechanismOf`, `workerProgramOf` and `profile.workerArgvProblem` (the read-back of
+  `t45_final_argv_is_checked`) are there for it. `DEFAULT_WORKER_MECHANISM` is `"print"`; step 8 turns it,
+  and `t45_absent_worker_key_is_print_until_the_serve_rule` (`cli/test/agent-profiles.test.ts`) is the test
+  to change with it.
+- **`t45_every_human_only_command_is_denied` is not written here:** it is a table from the registry of
+  human-only commands, which steps 6a and 10 make (today only the `agent` ones are a list). The two other
+  list rows are in `cli/test/agent-profiles.test.ts`.
+- **`Write(<path>)` deny rules are kept** (the print spec stays byte-equal to today's) and every one has its
+  `Edit(<path>)` twin, which is the rule claude 2.1.330 honours (`t45_every_denied_path_has_an_edit_rule`).
+  A terminal worker will print claude's warning for each `Write` rule above its prompt; dropping them for
+  the terminal list is a one-line change of `workerDenylist` if that is unwanted.
+- **The block as committed** is `enginesAgainstHead` (`packages/local/src/engines-head.ts`; one read of
+  `HEAD` a call), with `unattendedEngines` for the daemon and the TUI (the refusals and the one line for an
+  untracked config) and `enginesQuestion` for `agent start` (what differs; a value of `env` is never
+  printed). Calling it once per start inside the start lock is step 6's. "No git" is: no `.git` in the root
+  or above it; anything git then fails at is a failure, never "untracked". A config that is staged and was
+  never committed is held to a committed version with no block (refused until it is committed). A committed
+  config whose block cannot be read counts as a difference.
+- **"A schema without the keys answers `unknown key`"** is shown on the profile schema with the two keys
+  taken out (`t42_worker_and_terminal_keys_parse`); no older build is run.
+
+Steps 6, 6a, 7 and 8 (the launcher, the guard, the serve rule, the daemon):
+
+- **The hand check line about `kodel agent stop` is changed** (in "Acceptance criteria and tests"): a stop
+  writes a stop record, the worker then reads `stopped`, and a worker a person stopped is not resumed by the
+  daemon. The line now says: both places are freed, the daemon leaves it alone, `s` in the TUI resumes it.
+  The rule has a verdict of its own for it (`stopped`, in `RELEASES_RUN`); the TUI asks the rule with
+  `resumeStopped` and offers `s resumes`. A worker stopped outside a wait, and a stopped print worker, stay
+  `dead` as before (no note: a person's stop is never one).
+- **The real-PTY rows are not written here** (`tests/pty/worker-terminal.test.ts`:
+  `t45_real_worker_shell_cannot_decide`, `t45_real_orphan_is_not_doubled`,
+  `t45_real_holder_and_agent_gone_at_a_wait_is_resumed`, `t45_real_orphan_behind_a_wrapper_is_not_doubled`,
+  `t45_real_stop_ends_an_agent_behind_a_dead_wrapper`, `t45_real_terminal_worker_attach_detach_finish`):
+  they need the built artifact and the scripted fake terminal agent of step 11, and the implementation
+  steps do not build. Until then the same rules are shown offline (`t45_persons_commands_refuse_inside_a_session`
+  with the real probe on a fake table, `t44_child_alive_*`, `t44_worker_lost_at_a_gate_is_resumed_once_after_the_decision`,
+  `t45_finish_of_a_stopped_session_is_harmless`) and on real processes of a pipes session
+  (`t44_serve_real_adapter_notes_a_killed_holder`, now read against the revised rule: `child_alive` and no
+  note while the process runs, the note within one cycle of its end).
+- **Halves of rows that wait for step 10** (`kodel agent start` does not exist yet):
+  `t45_every_starter_builds_the_same_spec` compares the TUI's start with the daemon's port (the third
+  starter, `agent start --pipeline`, joins it there); `t45_engine_choice_is_not_built` pins
+  `serve.start[].engine` as an unknown key (`agent start --engine` comes with the command);
+  `t45_dialog_still_refuses_every_worker` covers the launcher's preflight, with and without a task
+  (`noTask`). `t45_every_human_only_command_is_denied` is written (`cli/test/agent-profiles.test.ts`) over
+  the registry `HUMAN_ONLY_COMMANDS` (`packages/cli/src/human-only.ts`); step 10 adds `agent start` and
+  `agent prune` to `AGENT_HUMAN_COMMANDS`, and the row of `cli/test/human-only.test.ts` then asks for
+  their arguments. `tui` asks for a person through the same `requireHuman` and is not in the registry: it
+  is a screen, not a decision, and no deny pattern is written against the word.
+- **The fixture `fixtures/session-formats/v1/worker-print-before-t45/` is composed, not taken from a
+  holder:** the two files have the shape the format-1 writer gives a pipes session (the shape of
+  `session.json` and `status-exited.json` beside it, which a real holder wrote) with the argv the launcher
+  gave a `claude -p` worker before this change, and no `agent.json`. No build from before the change was
+  run to write it. The test reads it with the real adapter (`PipesSessionAdapter.list`).
+- **The trust probe** (`trustProbe` in `claude-worker.ts`, reached through the profile) reads
+  `.claude.json` in `CLAUDE_CONFIG_DIR`, else in the home folder: `projects["<path>"].hasTrustDialogAccepted`
+  for the worktrees folder or any folder above it (trust is inherited, spike criterion 1). Anything else is
+  `unknown`. It is asked only for a terminal worker. The notice of a person's start (`PreflightResult.note`)
+  reaches the daemon's log; the TUI does not show it yet (step 9: `StartCheck` has no place for it).
+- **`HEAD` is read once in `launcher.start` and once in `launcher.resume`**, which the daemon and the TUI
+  call under the start lock; the preflight (asked before a run is made, cached a minute by the daemon)
+  reads it too. A block that changes between the preflight and the start refuses the start after the run
+  was made: that run is noted `not_started` (the daemon) or said to have no agent (the TUI), as any failed
+  launch.
+- **`launcher.resume` reads the records again itself** and refuses a resume while the run's latest record
+  is alive (`NAME_TAKEN`), while its process runs without a holder, and for an id the records do not name.
+  One existing test resumed two decisions with the first resumed session still running
+  (`task_9pns_status_progress_logs_and_stop`); it now ends that session first.
+- **`WorkerProgress.sessionId` is gone** (the reader of the tail): the TUI's `withProgress` no longer takes
+  an id from the screen. A terminal worker's progress is the last lines of its tail, redacted and stripped.
+- **The guard is asked only where the program's entry gives the probe** (`main.ts`); `runCli` without
+  `insideSession` keeps the two older guards, so the test suite does not depend on what session runs the
+  tests. The probe reads `ps -A -o pid=,ppid=,stat=,tty=` and matches the holder **or the process it
+  started** among the parents (the holder may be gone while the agent lives); the leader of a terminal's
+  session is the row with `s` in its state on the same terminal. With no running session of the state
+  base nothing is asked of the system.
+- **`stalled`, `not_moving` and `no_first_call` of a terminal worker need a journal read that is itself
+  late enough** (`ServeRunView.marksAt`): the daemon reads the journal of a run with a live worker at most
+  once a minute (and when the run's answer changes), so a line could otherwise be said on a read made
+  before the agent's call. They come up to a minute after their bound.
+- **`--status` lists a stalled worker by the quiet time the running daemon has watched** (the record's
+  `started`; with no daemon, the worker's own), through `ServeDaemonDeps.quietFrom`.
+- **`counts.alive`** counts a record that cannot be read too (it holds a worker place: fail closed), so
+  `alive` is never less than `workers`. The fixture `fixtures/serve-formats/v1/serve-alive.json` was
+  written by `acquireServeRecord` and `writeCycle`; `serve.json` stays as a record from before the field.
+- **`t45_no_resume_for_a_worker_that_went_on` is in `local/test/serve-daemon.test.ts`**, whose test names
+  must carry `t44`: its name has both.
+- **The default is `terminal` from the last commit.** The tests that build `claude -p` say `worker: print`
+  (the `deps` helper and the real-adapter rows of `cli/test/worker-launcher.test.ts`, the config and the
+  launcher of `cli/test/serve.test.ts`, `tests/agents/claude-code-worker.test.ts`,
+  `tests/agents/claude-code-serve.test.ts`). `cli/test/mcp-no-decisions.test.ts` builds the server's
+  arguments itself and needed nothing; `local/test/serve-daemon.test.ts` and `tests/e2e` drive a launcher
+  port or no worker at all. The two `tests/agents` files were changed without being run (no real agent
+  here). This repository's own `.kodel/config.yaml` is the person's: until `engines: { claude: { worker:
+  print } }` is committed there, `s` in `bun … tui` and a start by `bun … serve` are refused with the Bun
+  reason, as "Risky" (2) says.
+
+Step 9 (the TUI):
+
+- **The real-PTY rows of the TUI are written and were not run** (`tests/pty/worker-terminal.test.ts`:
+  `t45_real_tui_returns_to_the_same_place`, `t45_real_tui_returns_when_the_agent_ends`,
+  `t45_real_tui_survives_a_double_detach_chord`, `t45_real_tui_resize_while_attached_reaches_the_agent`):
+  they need the built artifact, and the implementation steps do not build. Here they skip with `no built
+  artifact`. The handover of a real terminal from the TUI to a child (the last line of "Not verified
+  here") is therefore still shown by nothing but these four; run them after a build, outside the sandbox.
+  The launcher's rows of that file listed under steps 6-8 are still not written (step 11).
+- **The row's words are shorter than the plan's, the card's are the plan's.** The tag column of a run row
+  is 13 columns at most, so the row reads `◆ with you`, `◆ stalled` and `◆ not moving`; the card reads
+  `agent waits with you`, `agent stalled · o opens it` and `the agent has not gone on since your decision ·
+  o opens it`. `cannot start: <reason>` is on the task's row of the Backlog, in front of its title, until a
+  start of that task is let through; it is set only for a refusal of the preflight.
+- **`stalled` on the screen uses the default of `serve.stalled_after_s`** (30 minutes, `STALLED_MS`): the
+  TUI does not read the `serve` block. It needs the journal quiet for that long (`Session.quietMs`) and,
+  unless the profile says `idleWrites`, no output for that long. The daemon's own line follows the config.
+- **The card of a worker whose process runs without a holder** keeps the line the test of step 7 pins
+  (`agent lost (holder gone, child still runs)`) and adds under it `its process still runs without a
+  holder; stop it: kodel agent stop <id>`.
+- **A run that cannot be read is answered before the rule is asked** (`resumeOffer`): its `why` is `the run
+  cannot be read`, where it was `the run is over`. `task_9pns_resume_offer_table` had `unreadable` in its
+  list of ended states and is changed to say so.
+- **The TUI's finish is a rule of its own file** (`finishOf` in `tui/worker-resume.ts`), with the same
+  conditions as the daemon's `finish` action and not the same function: the daemon's works on its own run
+  views. A daemon that is `silent` gives the finish back to the screen, as it does the resumes. The act
+  (`finishWorker` in `tui/worker-start.ts`) reads the run again under the start lock and stops nothing
+  unless it is a run of this checkout that has ended; a failed stop is told once and not tried again from
+  that screen; `STATE_LOCKED` is tried again at the next read.
+- **"The child can be spawned" is checked as "its program and its script can be read"** before the screen
+  is left (`access`), since a spawn tells `ENOENT` only after it was tried. A start that still fails
+  brings the screen back at once with the reason.
+- **Under Bun the notice spells the path of this repository's build**: `node packages/cli/dist/kodel.js
+  agent attach <id>` (`BUILT_KODEL`), the only place a TUI under Bun runs from.
+- **Signals while away.** `SIGQUIT` is taken from the moment the screen is left until the keys are the
+  screen's again (150 ms after the return). `SIGTSTP` is forwarded to the child and the TUI then stops
+  itself with `SIGSTOP`; `SIGCONT` is forwarded. An ending signal ends the child with `SIGTERM` (the
+  attach client: no session ends), and the terminal is not written to again, because the screen gave it
+  back when it left.
+- **The notice of the return is kodel's own words**, never the child's output: `Back from <name> · <the
+  last line of the tail, redacted>`, or that the agent ended while the person was in it, with the line
+  about `kodel agent stop`. It is worked out after the child is gone (one read of the records), so the
+  screen comes back a moment after the `[detached: …]` line.
+- **The preflight's note** (`PreflightResult.note`) is shown in the start question, under the task's name,
+  before the person answers.
+
+Steps 10 and 11 (the commands, the tests):
+
+- **Found, not fixed (step 6a's guard): with `KODEL_STATE_DIR` set in the starter's shell the session
+  guard says `outside` for a command of the agent.** A session's environment gets no `KODEL_*`
+  (`session-env.ts`), so a `kodel gate` the agent runs resolves the default state base
+  (`insideSessionOf(resolveBase(process.env))`, `main.ts`) and finds no record of the session it runs in,
+  which was written under the starter's `KODEL_STATE_DIR`. For a terminal worker of a person who uses
+  `KODEL_STATE_DIR`, `env -u KODEL_ENGINE kodel gate` on the agent's terminal is then stopped by the deny
+  list alone. The wait command carries the state dir for this very reason; the guard does not. The real-PTY
+  rows therefore use a home folder of the test's own and no `KODEL_STATE_DIR` (the common case), and no
+  test pins the gap. The person decides what closes it (the holder could give its child the base under
+  another name, or the guard could look at every base a record of the process tree names).
+- **The commands are three files beside `agent-commands.ts`** (`agent-start.ts`, `agent-prune.ts`,
+  `agent-doctor.ts`); the registrations, `attachSession`, the resume rule (`resumeProblem`) and the hint of
+  `agent ls` (`resumeHints`) are in `agent-commands.ts`. What they need of the project is one object the
+  CLI builds (`AgentProject`); the tests give the adapter, the attach client, the probes, the launcher and
+  the committed block through `CliEnv.agent`.
+- **`takeName` is an option of the local adapter's `start`** (`start(spec, { takeName: <old id> })`), not
+  of the `SessionAdapter` interface. The adapter itself checks the old session before anything is written
+  (a person's own, over, nothing of it running, the same name) and refuses with a reason. The move: a
+  claim `<name>.json.take` made exclusively (of two resumes one gets it), the new record published, the
+  claim renamed over the marker, and on a failed start the old marker written back by a rename. A claim
+  whose session never began within 15 s, or is over, was left by a process that died and is taken away by
+  the next resume. While a claim is in progress `rm` (and so `prune`) refuses the old record
+  (`STILL_RUNNING`, "is being resumed"), so a failed resume has a session to give the name back to; if the
+  old record was removed after the move and the resume then fails, the name is freed. `faults` names the
+  steps `take_claimed`, `take_published`, `take_moved`.
+- **`agent start --resume` of a session the engine started is refused by the adapter**, not by the
+  command: a listing does not say who started a session (`SessionListEntry` has no `origin`), and a `ke-`
+  or `kw-` name is refused by the command before that. A session with no name is resumed by its id and
+  stays without one. The resume starts under the committed `engines` block like a plain start (a
+  `terminal.command` that is not committed is shown and asked).
+- **A plain `agent start` takes its prompt as optional**: without one the agent starts with none.
+- **`agent doctor` prints ten lines for the seven checks** (the program is three lines: found, version,
+  signed in; the decisions are two). The verdict is the launcher's own preflight for a run with no task,
+  asked twice: for a start a person watches (the exit code) and for one nobody watches (a line `kodel
+  serve can start one: no (…)` when only that one is refused). The version is the first `N.N.N` of
+  `--version`, nothing else of a probe is printed.
+- **`agent prune` with no `--older-than` removes every finished record** that the rule lets go; the runs
+  are read once, and only when a record names one; a run that is not among them is "cannot be read".
+- **`agent exec -a`** is the short form of `--attach`. `exec` takes unknown options for the command it
+  runs, so a command that has an `-a` of its own is written after `--`.
+- **AGENTS.md is changed in step 10** (the two lists of the person's commands, and `agent doctor` among
+  what only reads), because `tA_agents_md_lists_attach` and the new
+  `t45_agents_md_lists_the_registrys_human_only_commands` hold it to the registry. The rest of step 12's
+  text is not written. **`t44_docs_carry_the_revised_text` and `t45_changes_doc_spells_the_migration_line`
+  are left to step 12**: they assert text that step writes (`docs/serve.md` still has the old line).
+- **`launchRun` is the launch half shared by `s` and `agent start --pipeline`** (`tui/worker-start.ts`). A
+  run with no task whose text is the text of a run that is going is not made twice: the command says so
+  (`a run with this very task is already going`).
+- **`t45_worker_server_serves_no_decision_tool` is written here** (`cli/test/mcp-no-decisions.test.ts`):
+  step 6 left it out.
+- **The step-9 pipeline of `tests/pty/worker-terminal.test.ts` did not load** (a human step with no edge
+  for `rejected`); the edge is added. Those four rows were never run, and are still not.
+- **Written and not run** (they need the built artifact, a PTY, or the real `claude`; typecheck only):
+  `tests/pty/worker-terminal.test.ts` (`t45_real_terminal_worker_attach_detach_finish`,
+  `t45_real_worker_shell_cannot_decide`, `t45_real_orphan_is_not_doubled`,
+  `t45_real_holder_and_agent_gone_at_a_wait_is_resumed`, `t45_real_orphan_behind_a_wrapper_is_not_doubled`,
+  `t45_real_stop_ends_an_agent_behind_a_dead_wrapper`), `tA_exec_attach_real_terminal`
+  (`tests/pty/pty-session.test.ts`) and `t45_real_claude_terminal_worker_cannot_decide_its_gate`
+  (`tests/agents/terminal-worker.test.ts`). Run them after `bun run build`, outside the sandbox. In the
+  real-PTY rows the resume after a decision is asked of the launcher (`launcher.resume`), which is what
+  the daemon and the TUI call under the start lock; the rule that decides to ask is tested offline
+  (`t44_*`).
+- **The scripted fake terminal agent** is `writeFakeTerminalAgent` (`packages/testkit/src/fake-terminal-agent.ts`):
+  a Node program written as `claude` into a folder for `PATH`, which answers the profile's probes, logs
+  each start (argv, conversation id, the marks of its environment) and acts on typed lines (`!command` on
+  its own terminal, `bg`, `quit`); options make it ignore the hangup, sit behind a wrapper, and switch
+  terminal modes on. Its offline test runs it without a terminal.
+- **The real-agent scenario makes its project inside this checkout's git-ignored `.kodel/worktrees`**
+  (trust is inherited from the checkout) and types the three instructions into the worker's terminal
+  with the adapter's `send`, as the person; kodel itself types nothing.
+
+The fix of the guard (step 6a), after steps 10 and 11:
+
+- **The gap found above is closed: the session guard knows a holder by its own command line.** Every
+  holder is started with `--kodel-session-holder` as the last word of its argv (`HOLDER_MARKER`,
+  `intermediateMain`), and nothing a session's child does can change the command line of its holder. The
+  probe (`packages/local/src/session-guard.ts`) reads one column more (`ps -A -ww -o
+  pid=,ppid=,stat=,tty=,args=`) and answers `inside` when a parent process of the command, up to the root,
+  is such a holder, or when the leader of the command's terminal session is the child of one, whatever
+  state base the session's record is under. The records of the state base the command resolves are still
+  read, and still name the process a holder started (an agent whose holder is gone). The other mechanisms
+  were weighed and left: a variable that names the base in the session's environment can be unset like the
+  mark; a second index of holders outside the state base would write to the home folder of a person who
+  moved the state on purpose.
+- **What follows from it.** The table is now read for every command of a person, also when the state base
+  holds no running session (one `ps` a command; `tA_inside_session_probe` asserted the opposite and is
+  changed). An unreadable table is still `unknown` and leaves the two older guards. A process that gives
+  itself the marker only gets its own descendants refused. `insideSessionOf` takes the table as an optional
+  third argument, for its test.
+- **The limit that is left** (said in `docs/decisions.md`): an agent whose holder is gone, in a session
+  started under a `KODEL_STATE_DIR` that its own environment does not have, is found by neither way (no
+  holder runs, its record is in another base). The mark, the deny list and the missing terminal of its
+  shell commands remain; Claude Code ends when its terminal hangs up (spike criterion 10).
+- **Tests:** `tA_inside_session_probe_knows_a_holder_of_another_state_base` (a fake table, no records; a
+  person's command that only names the marker in its own arguments is outside) and
+  `t45_session_guard_finds_a_session_of_another_state_base` (`cli/test/human-only.test.ts`: a real session
+  of the real adapter under a state base of its own, whose child runs `env -u KODEL_ENGINE <kodel> gate`
+  with a home folder that holds no state: refused with the session's words). The second reads the real
+  process table and is skipped where that cannot be read (a sandbox); it was run outside one and passed.
+
+Steps 12 and 13 (the docs, the follow-up):
+
+- **The docs describe what was built**, where that differs from the plan's first wording: the prompt last
+  and after `--`; a stopped worker left to the person; the row's short words and the card's long ones; ten
+  lines of `doctor`; a resume that runs as the setting says now (conversations cross modes); the lines of
+  `stalled`, `not_moving` and `no_first_call` up to a minute late.
+- **`docs/engines.md` is the page of engine steps**, which are off; the part about a background agent
+  (`worker`, `terminal`) is a section of its own there and says that it is on. `docs/changes.md` is the page
+  of the patches; the migration note of decision 1 is its last section, where the plan and
+  `t45_changes_doc_spells_the_migration_line` put it.
+- **`t44_docs_carry_the_revised_text`** reads the plan's row as: the section "Decision T-44" holds the
+  revised lines and none of the old ones; the section "T-44 as revised by T-45" keeps the old ones with what
+  replaced each and why; no other test file names an old line. A third docs test was added,
+  `t45_docs_name_the_guards_and_the_two_kinds_of_worker` (the refusal of the guard as printed, `kodel mcp`
+  by hand as accepted, a fork worker and a background agent in AGENTS.md).
+- **The decision log is the person's local note**: the entries T-45 and "T-44 as revised" are theirs to add;
+  `docs/decisions.md` and `docs/serve.md` hold the English text.
+- **No task was created or closed in the tracker** (the brief of this step says so). They are listed below
+  for the person.
+- **The agent help texts** (`kodel agent --help` and its commands) were written with the commands in step
+  10 and needed no change.
+- **One doubt about the real-agent scenario, not resolved:** its project is a repository of its own inside
+  `.kodel/worktrees`, and the signed-in run of the spike saw such a nested repository ask to be trusted
+  (only a git worktree of the trusted root did not). The scenario was never run; `tests/README.md` says to
+  accept trust once for that folder if it stops there.
+
+## Follow-up tasks (for the person to file; none is in the tracker)
+
+1. **Close TASK-K6MA** (`agent exec --pty --attach`; `tA_exec_attach_*`) **and TASK-DSKQ** (the stored id of
+   an agent's conversation, `agent ls`, `agent start --resume`; `tA_agent_record_*`,
+   `tA_agent_ls_lists_mode_and_agent`, `t45_resume_keeps_the_name_and_links_the_old_record`,
+   `t45_resume_refusals`, the marker tests) once this run is merged.
+2. **"Codex and opencode as engines (profiles, worker and agent start, their safety criteria)"**: the text
+   of step 13 above is the task's body, as it stands (profiles and lifting the refusal of decision 2; a
+   spike per engine with safety criteria; the rules that were codex's; an id that cannot be chosen and a
+   real `agent-observed.json` fixture before session format v1 is frozen; waiting in the foreground;
+   choosing the engine; the rest). About 4 working days by the estimate of attempt 3. `kodel serve` starts
+   nothing from it until `kodel task approve`.
+3. **An automatic wake-up** of a live worker that has not gone on after a decision (today: one log line and
+   the card's line; nothing is typed).
+4. **A group kill on a session's own timeout**: the holder's timeout signals the child only
+   (`session-pty.ts`), so a `kodel wait` of a session killed by its 7-day timeout lives on to its own end.
+5. **Before a release, by hand** (`tests/README.md`, "Terminal workers: what the tests cannot show"): the
+   real-PTY rows and the real-agent scenario that were written and not run, on the built file; Linux for
+   spike criterion 10; a long conversation with compactions for criterion 8.

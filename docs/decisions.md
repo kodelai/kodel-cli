@@ -87,3 +87,76 @@ this is a person's decision made once for a rule, not one the agent can make; a 
 and is not taken by a `required` rule may be taken by a later `any` rule
 (`t44_rule_approval_required_skips_and_any_takes_an_agents_task`,
 `t44_rule_with_approval_any_starts_an_agents_task_with_its_pipeline`).
+
+T-45 (below) revised T-44; `docs/serve.md`, "T-44 as revised by T-45", keeps the old lines and
+says why each was replaced.
+
+## A background agent in a terminal decides nothing either (T-45)
+
+*Every background agent of a run, whether the TUI, `kodel serve` or `kodel agent start --pipeline` started it,
+is started by one launcher from one profile, as a terminal session a person can open and leave
+(`engines.claude.worker: terminal`, the default) or as a print process (`print`); nothing switches between the
+two by itself. A terminal agent stays alive at a gate and goes on after the person's decision; it cannot
+decide. Kodel never types into a session.*
+
+What keeps such an agent from deciding:
+
+- **Its kodel server serves no decision tool.** The server of a background agent is `kodel mcp
+  --no-decisions`, whatever `decisions.agent` says, and it is the only MCP server of the session
+  (`--strict-mcp-config`). It shows no dialog; with `decisions.dialog` on, every background agent is refused
+  at its start.
+- **Its lists.** An allow list without the decision tools, and a deny list with them, with every command that
+  is a person's (in the spellings `kodel`, `main.ts` and `kodel.js`, also behind `env X=…`) and with the files
+  that are yours (`.kodel/config.yaml`, the pipelines, the runs, `.mcp.json`, `.claude/settings*.json`).
+  Patterns are substrings: a variable or a decoded string passes them.
+- **The three guards of a person's command.** `gate`, `resume`, `ack`, `seal`, `migrate`, `task approve`, the
+  `pipeline changes|proposals` decisions and the person's `agent` commands refuse:
+  1. **the mark**: with `KODEL_ENGINE` in the environment, which every process of an agent session has
+     (`this command is for a person; it will not run from a command the engine runs`). A program that unsets
+     it (`env -u`) passes this one;
+  2. **the session**: when one of the command's parent processes is the holder of a live kodel agent session
+     or the process that holder started, or when the command runs on the terminal of one (`this command is
+     for a person; it will not run inside a kodel agent session`), whatever its environment and its terminal
+     say. A holder is known by its own command line, so a session is found whatever state base its record
+     is under (a session's environment gets no `KODEL_STATE_DIR`); the records of the state base the command
+     resolves also name an agent whose holder is gone. Where the process table cannot be read (a sandbox)
+     this guard says nothing and the other two decide: a person there must still be able to decide;
+  3. **the terminal**: without a terminal on stdin and stdout (`this command is for a person at a terminal;
+     it will not run from a script or an agent`). The shell commands of Claude Code have no terminal.
+
+  With a print agent the third guard refused every command of the agent. An agent in a terminal of its own
+  has one, so the second guard was added: getting past needs what it needed before, a process that leaves its
+  session and gets itself a terminal of its own. **These are guards against mistakes, not a security
+  boundary**: a program run by the same user can arrange what each one looks at.
+
+What stays open, stated and not closed:
+
+- **`kodel mcp` by hand in a shell is accepted.** An agent with a shell can start a kodel server of its own
+  (`kodel mcp` with no `--no-decisions`) and speak to it; with `decisions.agent` on, that server serves the
+  decision tools. The person accepted this: the switches of `decisions.agent` are already "protection against
+  a mistake, not against an agent that ignores its instructions" (above), and with them off, as by default,
+  no server decides.
+- A process that left its session and has a pseudo-terminal of its own passes all three guards.
+- An agent whose holder is gone, in a session that was started under a `KODEL_STATE_DIR` its own environment
+  does not have, is not found by the second guard (no holder runs, and its record is in another state base);
+  the mark, the deny list and, for its shell commands, the missing terminal remain. Claude Code ends when
+  its terminal hangs up, so it does not outlive its holder.
+- A worker's shell can edit `.kodel/config.yaml`, which is why `engines` is used only as committed; an agent
+  that can commit to the checkout's branch still changes it.
+- The attach socket is no boundary (`docs/session-formats.md`): any process of the same user can type into a
+  session.
+- A person can switch a worker's permission mode in the agent's own interface; the lists then hold as that
+  mode says.
+- A plain `kodel agent start` (no `--pipeline`) is your own agent, not a worker: it uses the project's own
+  kodel server, which may decide when `decisions.agent` is on, and shows its dialogs in its own terminal. The
+  command says both.
+
+Test plan: the `t45_*` tests, the `tA_*` tests of the sessions and the real-terminal rows of
+`tests/pty/worker-terminal.test.ts`. What they cannot show is in `tests/README.md`. The decision is refuted
+if: with `worker: terminal`, a worker started by the TUI or the daemon is not attachable, or a `-p` worker is
+started instead; a worker decides its own gate; after a detach or an ended agent the TUI is not where it was,
+or the terminal is broken; kodel types into a session; a decided run with a live worker neither goes on nor
+is reported within 2 minutes; a run left at a gate by a reboot is not resumed after the decision; a resumed
+session loses its name or its conversation; a person's command decides when run by a process whose parents
+still include its session's holder; a session is held alive for good by a process that is not its own, or
+`kodel agent stop` cannot end one whose process runs.
