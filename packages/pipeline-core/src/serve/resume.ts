@@ -186,6 +186,14 @@ export interface ServeWorkerView {
   stopped?: boolean;
   /** The session is over while its process still runs without a holder (`kodel agent ls`: "child still runs"). */
   childAlive?: boolean;
+  /** A session in a terminal of its own: it stays alive at a wait, so its end at one is no death (T-45). */
+  terminal?: boolean;
+  /** How the record ended, as it says (`stopped`, `timeout`, `holder_error`, `holder_gone`, …). */
+  endedBy?: string;
+  /** The agent keeps writing to its terminal while idle: output is no sign of work, only engine calls are. */
+  idleWrites?: boolean;
+  /** The process table could not be read for this record: an agent left behind a dead wrapper would not be seen. */
+  groupUnread?: boolean;
 }
 
 /** What a resume needs to know of a run. */
@@ -211,7 +219,11 @@ export type ResumeNo =
   | "agent_decided"
   | "already_resumed"
   | "no_session_id"
-  | "moved";
+  | "moved"
+  /** The session is over and its process still runs without a holder: alive for every rule. */
+  | "child_alive"
+  /** A person stopped it at the wait: the daemon leaves the resume to them. */
+  | "stopped";
 
 export type ResumeVerdict =
   | { kind: "resume"; seq: number; decision: DecisionMark }
@@ -224,21 +236,36 @@ function exitedAtWait(worker: ServeWorkerView, wait: WaitMark): boolean {
   return wait.ts >= worker.started && (worker.since === undefined || worker.since >= wait.ts);
 }
 
+/** Ends of a terminal session that say nothing about its work: the agent may have been waiting when it came. */
+const ENDS_AT_A_WAIT: readonly string[] = ["stopped", "timeout", "holder_error"];
+
 /**
- * The rule. A worker is resumed when the run is going, the latest record `exited` at the last wait,
- * the person decided after that wait, no record of that decision exists in any state and a session
- * id is known. With `refuseMoved` an agent that was served a step since the decision also stops it;
- * the TUI passes `false` and words that case itself.
+ * Whether a worker that is `killed` or `lost` may have ended at a wait. A print worker never: its turn
+ * ends at a wait, so it exits there, and any other end is a death. A worker in a terminal stays alive
+ * at a wait, so a holder that went away, a timeout or a stop may have found it waiting.
  */
-export function resumeVerdict(
+function mayHaveWaited(worker: ServeWorkerView): boolean {
+  if (worker.terminal !== true) return false;
+  if (worker.state === "lost") return true;
+  return worker.endedBy !== undefined && ENDS_AT_A_WAIT.includes(worker.endedBy);
+}
+
+/**
+ * Whether a terminal worker ended after the decision. An end in the same instant counts as before it.
+ * The end of a `lost` record is only when the loss was noticed, an upper bound: such a worker ended
+ * after the decision only when it printed something after it.
+ */
+function endedAfter(worker: ServeWorkerView, decision: DecisionMark): boolean {
+  const end = worker.state === "lost" ? worker.lastOutputAt : worker.since;
+  return end !== undefined && end > decision.ts;
+}
+
+/** The rule for a worker whose session is over and whose end may have been at a wait. */
+function settledVerdict(
   run: ResumeRunView,
-  worker: ServeWorkerView | undefined,
+  worker: ServeWorkerView,
   opts: { refuseMoved: boolean },
 ): ResumeVerdict {
-  if (worker === undefined) return no("no_worker");
-  if (worker.state === "unknown") return no("unknown");
-  if (worker.state === "starting" || worker.state === "running") return no("active");
-  if (worker.state === "killed" || worker.state === "lost") return no("dead");
   if (run.status !== "running" && run.status !== "paused") return no("over");
   const lastWait = run.marks?.lastWait;
   const decision = run.marks?.decision;
@@ -266,7 +293,43 @@ export function resumeVerdict(
   if (decision === undefined || decision.seq <= lastWait.seq) return no("undecided");
   if (decision.byAgent) return no("agent_decided");
   if (worker.resumed.includes(decision.seq)) return no("already_resumed");
+  // `moved` is any agent's step, not this worker's. A terminal worker that was alive at the decision
+  // and ended after an agent went on is the one that went on: it died at work, not at the wait.
+  if (run.marks?.moved === true && worker.terminal === true && endedAfter(worker, decision)) {
+    return no("not_at_wait");
+  }
   if (worker.sessionId === undefined) return no("no_session_id");
   if (opts.refuseMoved && run.marks?.moved === true) return no("moved");
   return { kind: "resume", seq: decision.seq, decision };
+}
+
+/** What a person's stop leaves of a verdict: the waits stay waits, everything else is a session that is over. */
+const KEPT_WHEN_STOPPED: readonly ResumeNo[] = ["over", "waiting_person", "undecided", "moved"];
+
+/**
+ * The rule. A worker is resumed when the run is going, the latest record ended at the last wait (a
+ * print worker `exited` there; a worker in a terminal ended there in any way but a start that never
+ * came), the person decided after that wait, no record of that decision exists in any state and a
+ * session id is known. A record whose process still runs without a holder is alive for every rule
+ * (`child_alive`). With `refuseMoved` an agent that was served a step since the decision also stops
+ * it; the TUI passes `false` and words that case itself. A worker a person stopped at the wait is
+ * resumed only with `resumeStopped` (the TUI's offer); the daemon answers `stopped`.
+ */
+export function resumeVerdict(
+  run: ResumeRunView,
+  worker: ServeWorkerView | undefined,
+  opts: { refuseMoved: boolean; resumeStopped?: boolean },
+): ResumeVerdict {
+  if (worker === undefined) return no("no_worker");
+  if (worker.state === "unknown") return no("unknown");
+  if (worker.state === "starting" || worker.state === "running") return no("active");
+  const gone = worker.state === "killed" || worker.state === "lost";
+  if (gone && worker.childAlive === true) return no("child_alive");
+  if (gone && !mayHaveWaited(worker)) return no("dead");
+  const verdict = settledVerdict(run, worker, opts);
+  if (gone && worker.stopped === true) {
+    if (verdict.kind === "resume") return opts.resumeStopped === true ? verdict : no("stopped");
+    return KEPT_WHEN_STOPPED.includes(verdict.why) ? verdict : no("dead");
+  }
+  return verdict;
 }

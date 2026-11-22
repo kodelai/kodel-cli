@@ -76,6 +76,10 @@ export function serveWorkerOf(status: WorkerStatus): ServeWorkerView {
     ...(status.lastOutputAt === undefined ? {} : { lastOutputAt: status.lastOutputAt }),
     ...(status.stopped === true ? { stopped: true } : {}),
     ...(status.childAlive === true ? { childAlive: true } : {}),
+    ...(status.terminal === true ? { terminal: true } : {}),
+    ...(status.endedBy === undefined ? {} : { endedBy: status.endedBy }),
+    ...(status.idleWrites === true ? { idleWrites: true } : {}),
+    ...(status.groupUnread === true ? { groupUnread: true } : {}),
   };
 }
 

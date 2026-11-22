@@ -3,8 +3,9 @@
  * workers, the tasks and the daemon's memory in (`now` is an input), the actions and the new memory
  * out. The daemon acts only on what this returns; `kodel serve --status` shows it and acts on nothing.
  *
- * Nothing here decides anything about a run: the actions are a note that a worker is gone, a resume
- * after a decision a person made, a start of a task, a give-up comment on a task and a log line.
+ * Nothing here decides anything about a run: the actions are a note that a worker is gone, the end of
+ * the session of a run that is over, a resume after a decision a person made, a start of a task, a
+ * give-up comment on a task and a log line.
  */
 import type { RunStatus } from "../run";
 import { TASK_LIMITS, type TaskState } from "../tasks";
@@ -66,6 +67,15 @@ export interface ServeRunView {
   worker?: ServeWorkerView;
   /** Record ids that have a `gone` note. */
   noted: string[];
+  /**
+   * The run only waits for the person: its answer is a wait and no step is open for an agent. A live
+   * worker in a terminal of such a run is alive and not working (T-45).
+   */
+  idleAtWait?: boolean;
+  /** When an agent last called the engine for this run (served, claimed or completed a step), by the journal. */
+  lastAgentAt?: number;
+  /** When the journal behind `marks` and `lastAgentAt` was read; absent when it was not read. */
+  marksAt?: number;
 }
 
 export interface ServeMemory {
@@ -126,7 +136,11 @@ export type ServeLogProblem =
   | "queued"
   | "environment"
   | "paused"
-  | "resume_failed";
+  | "resume_failed"
+  | "child_alive"
+  | "not_moving"
+  | "no_first_call"
+  | "over_limit";
 
 export type ServeAction =
   | {
@@ -139,16 +153,36 @@ export type ServeAction =
       exit_code?: number;
       at?: number;
     }
+  /** The run is over and its worker's terminal session still runs: the session is ended. */
+  | { kind: "finish"; runId: string; worker: string; id: string }
   | { kind: "resume"; runId: string; seq: number; sessionId: string }
   | { kind: "start"; taskKey: string; pipeline: string }
   | { kind: "give_up"; taskKey: string; pipeline: string; reason: string }
   | { kind: "log"; mark: string; problem: ServeLogProblem; runId?: string; detail?: string };
 
 export interface ServePlan {
-  /** In order: notes, resumes, give-ups, starts, then log lines. */
+  /** In order: notes, at most one finish, resumes, give-ups, starts, then log lines. */
   actions: ServeAction[];
   memory: ServeMemory;
-  counts: { workers: number; max_workers: number; runs: string[]; max_runs: number };
+  /**
+   * `workers`: the worker places used, the agents that are working. `alive`: the live worker processes,
+   * those that only wait with the person among them.
+   */
+  counts: {
+    workers: number;
+    alive: number;
+    max_workers: number;
+    runs: string[];
+    max_runs: number;
+  };
+  /** Workers that are quiet for `stalled_after_s` now, with the places each holds; for `--status`. */
+  stalled: {
+    runId: string;
+    worker: string;
+    quietS: number;
+    holdsWorker: boolean;
+    holdsRun: boolean;
+  }[];
   waiting: { resumes: string[]; starts: string[] };
   /** Open runs with a task and no agent; for `--status` only, nothing acts on them. */
   orphans: string[];
@@ -176,6 +210,8 @@ export const START_ATTEMPTS = 3;
 export const START_RETRY_MS = 60_000;
 /** Workers in a row the daemon started that ended outside a wait before it starts nothing more (Decision 3a). */
 export const DEAD_IN_A_ROW = 3;
+/** How long a live worker may stay without a call of the engine, after its start or a decision, before it is said. */
+export const NOT_MOVING_MS = 120_000;
 
 const GIVE_UP_PREFIX = `kodel serve: not started after ${START_ATTEMPTS} attempts`;
 
@@ -206,11 +242,35 @@ const RELEASES_RUN: readonly ResumeNo[] = [
   "no_session_id",
   "agent_decided",
   "over",
+  // A person stopped it at the wait and resumes it themselves, or not.
+  "stopped",
 ];
 
-const holdsWorker = (worker: ServeWorkerView | undefined): boolean =>
-  worker !== undefined &&
-  (worker.state === "starting" || worker.state === "running" || worker.state === "unknown");
+/** Verdicts of a worker that ended outside a wait: noted as gone and counted as dead. */
+const DIED: readonly ResumeNo[] = ["dead", "not_at_wait", "wait_before_start"];
+
+const isLive = (worker: ServeWorkerView): boolean =>
+  worker.state === "starting" || worker.state === "running";
+
+/** The session is over and its process still runs without a holder: alive for every rule. */
+const isOrphan = (worker: ServeWorkerView): boolean =>
+  (worker.state === "lost" || worker.state === "killed") && worker.childAlive === true;
+
+/**
+ * Whether a worker holds a `max_workers` place: it is an agent that is working. A live worker in a
+ * terminal whose run only waits for the person is alive and holds none; everything that cannot be
+ * told (an unknown record, a run that cannot be read, a process left without a holder) holds one.
+ */
+function holdsWorker(worker: ServeWorkerView | undefined, run?: { idleAtWait?: boolean }): boolean {
+  if (worker === undefined) return false;
+  if (worker.state === "unknown" || isOrphan(worker)) return true;
+  if (!isLive(worker)) return false;
+  return !(worker.terminal === true && worker.state === "running" && run?.idleAtWait === true);
+}
+
+/** A worker process that is alive, working or not; a record that cannot be read counts (fail closed). */
+const isAlive = (worker: ServeWorkerView | undefined): boolean =>
+  worker !== undefined && (isLive(worker) || worker.state === "unknown" || isOrphan(worker));
 
 const verdictOf = (run: ServeRunView): ResumeVerdict =>
   resumeVerdict(run, run.worker, { refuseMoved: true });
@@ -223,7 +283,8 @@ function holdsRun(run: ServeRunView): boolean {
 
 /** A worker of an unreadable run holds its places unless it is gone for good: fail closed. */
 const unreadableHoldsRun = (run: ServeUnreadableRun): boolean =>
-  run.worker !== undefined && run.worker.state !== "lost" && run.worker.state !== "killed";
+  run.worker !== undefined &&
+  ((run.worker.state !== "lost" && run.worker.state !== "killed") || isOrphan(run.worker));
 
 /** The worker places and the `max_runs` places held now; every starter and resumer counts them this way. */
 export function servePlaces(
@@ -231,7 +292,7 @@ export function servePlaces(
   unreadable: readonly ServeUnreadableRun[] = [],
 ): { workers: number; runs: string[] } {
   const workers =
-    runs.filter((r) => holdsWorker(r.worker)).length +
+    runs.filter((r) => holdsWorker(r.worker, r)).length +
     unreadable.filter((r) => holdsWorker(r.worker)).length;
   const held = [
     ...runs.filter(holdsRun).map((r) => r.runId),
@@ -325,34 +386,32 @@ class Lines {
   }
 }
 
+const died = (verdict: ResumeVerdict): boolean =>
+  verdict.kind === "no" && DIED.includes(verdict.why);
+
 /** How a worker of the daemon's own runs ended, for the count of dead workers in a row. */
 function endOf(run: ServeRunView, verdict: ResumeVerdict): "dead" | "fine" | undefined {
   const worker = run.worker;
   if (worker === undefined || worker.stopped === true) return undefined;
-  if (worker.state === "lost" || worker.state === "killed") return "dead";
-  if (worker.state !== "exited") return undefined;
-  if (verdict.kind === "resume") return "fine";
-  if (verdict.why === "not_at_wait" || verdict.why === "wait_before_start") return "dead";
-  return "fine";
+  if (worker.state !== "lost" && worker.state !== "killed" && worker.state !== "exited") {
+    return undefined;
+  }
+  // Its process still runs: it has not ended.
+  if (verdict.kind === "no" && verdict.why === "child_alive") return undefined;
+  return died(verdict) ? "dead" : "fine";
 }
 
-/** The note for a worker that is gone, if it is one that is noted. */
+/** The note for a worker that is gone, if it is one that is noted: it ended outside a wait. */
 function goneReason(
   run: ServeRunView,
   verdict: ResumeVerdict,
 ): "lost" | "killed" | "exited" | undefined {
   const worker = run.worker;
   if (worker === undefined || worker.stopped === true || !isOpen(run)) return undefined;
-  if (worker.state === "lost") return "lost";
-  if (worker.state === "killed") return "killed";
-  if (
-    worker.state === "exited" &&
-    verdict.kind === "no" &&
-    (verdict.why === "not_at_wait" || verdict.why === "wait_before_start")
-  ) {
-    return "exited";
-  }
-  return undefined;
+  if (!died(verdict)) return undefined;
+  return worker.state === "lost" || worker.state === "killed" || worker.state === "exited"
+    ? worker.state
+    : undefined;
 }
 
 function priorityRank(priorities: readonly string[], priority: string | undefined): number {
@@ -381,6 +440,17 @@ export function planServe(input: ServeInput): ServePlan {
       problem: "unreadable",
       runId: run.runId,
       detail: run.detail,
+    });
+  }
+
+  // A process left without a holder: said once, and nothing is done about it but by the person.
+  for (const run of [...runs, ...input.unreadable]) {
+    const worker = run.worker;
+    if (worker === undefined || !isOrphan(worker)) continue;
+    lines.once(`child_alive:${worker.id}`, {
+      problem: "child_alive",
+      runId: run.runId,
+      detail: `${worker.name}: its process still runs without a holder; stop it: kodel agent stop ${worker.id}`,
     });
   }
 
@@ -483,22 +553,99 @@ export function planServe(input: ServeInput): ServePlan {
     lines.forget("paused");
   }
 
-  // Stalled: running, and quiet since the latest of its last output, its start and `quietFrom`.
-  if (rules.stalled_after_s > 0) {
+  // Stalled: running, and quiet for `stalled_after_s`. A print worker by its output. A worker in a
+  // terminal with a step open when it printed nothing and called the engine with nothing (by calls
+  // alone when its agent writes while idle); never while its run only waits for the person.
+  const stalled: ServePlan["stalled"] = [];
+  const stalledMs = rules.stalled_after_s * 1000;
+  if (stalledMs > 0) {
     for (const run of runs) {
       const worker = run.worker;
       if (worker === undefined || worker.state !== "running") continue;
-      const quietSince = Math.max(worker.lastOutputAt ?? 0, worker.started, input.quietFrom);
-      if (now - quietSince < rules.stalled_after_s * 1000) continue;
+      const terminal = worker.terminal === true;
+      if (terminal && (run.idleAtWait === true || !isOpen(run))) continue;
+      const signs = terminal
+        ? [worker.idleWrites === true ? 0 : (worker.lastOutputAt ?? 0), run.lastAgentAt ?? 0]
+        : [worker.lastOutputAt ?? 0];
+      const quietSince = Math.max(...signs, worker.started, input.quietFrom);
+      if (now - quietSince < stalledMs) continue;
+      // The calls are read from the journal, which is not read every cycle: only a read that is
+      // itself late enough shows that none came.
+      if (terminal && (run.marksAt === undefined || run.marksAt - quietSince < stalledMs)) continue;
+      const quietS = Math.floor((now - quietSince) / 1000);
+      stalled.push({
+        runId: run.runId,
+        worker: worker.name,
+        quietS,
+        holdsWorker: holdsWorker(worker, run),
+        holdsRun: holdsRun(run),
+      });
       lines.once(`stalled:${worker.id}:${quietSince}`, {
         problem: "stalled",
         runId: run.runId,
-        detail: `${worker.name} printed nothing for ${Math.floor((now - quietSince) / 1000)} s`,
+        detail: !terminal
+          ? `${worker.name} printed nothing for ${quietS} s`
+          : worker.idleWrites === true
+            ? `${worker.name}: no engine call for ${quietS} s (it may be a long step)`
+            : `${worker.name} printed nothing and called nothing for ${quietS} s`,
       });
     }
   }
 
+  // A live worker in a terminal that does not call the engine: after its start, and after a decision
+  // it was alive at. Said once; nothing is typed for the person. Not for a run that only waits again.
+  for (const run of runs) {
+    const worker = run.worker;
+    if (worker === undefined || worker.state !== "running" || worker.terminal !== true) continue;
+    if (!isOpen(run) || run.idleAtWait === true || run.marksAt === undefined) continue;
+    if ((run.lastAgentAt ?? 0) < worker.started && run.marksAt - worker.started >= NOT_MOVING_MS) {
+      lines.once(`no_first_call:${worker.id}`, {
+        problem: "no_first_call",
+        runId: run.runId,
+        detail: `${worker.name} has not called the engine ${Math.floor((now - worker.started) / 1000)} s after its start; open it: kodel agent attach ${worker.id}`,
+      });
+    }
+    const decision = run.marks?.decision;
+    const lastWait = run.marks?.lastWait;
+    if (
+      decision !== undefined &&
+      !decision.byAgent &&
+      (lastWait === undefined || decision.seq > lastWait.seq) &&
+      run.marks?.moved !== true &&
+      decision.ts >= worker.started &&
+      run.marksAt - decision.ts >= NOT_MOVING_MS
+    ) {
+      lines.once(`not_moving:${run.runId}:${decision.seq}`, {
+        problem: "not_moving",
+        runId: run.runId,
+        detail: `${worker.name} has not gone on since your decision (${Math.floor((now - decision.ts) / 1000)} s); nothing is typed for you, open it: kodel agent attach ${worker.id}`,
+      });
+    }
+  }
+
+  // The run is over and its worker's terminal session still runs: one is ended a cycle (a stop may
+  // take seconds under the start lock, and a start that waits for the lock must be served).
+  const finishes: ServeAction[] = runs
+    .filter(
+      (r): r is ServeRunView & { worker: ServeWorkerView } =>
+        !isOpen(r) && r.worker !== undefined && isLive(r.worker) && r.worker.terminal === true,
+    )
+    .sort((x, y) => x.runId.localeCompare(y.runId))
+    .slice(0, 1)
+    .map((r) => ({ kind: "finish", runId: r.runId, worker: r.worker.name, id: r.worker.id }));
+
   const before = servePlaces(runs, input.unreadable);
+  // More agents work than the limit: a person's decisions woke workers that waited. Nothing is done
+  // against them; nothing is started or resumed while the count is over (the checks below).
+  const over = before.workers - rules.max_workers;
+  if (over > 0) {
+    lines.once("over_limit", {
+      problem: "over_limit",
+      detail: `over the limit by ${over} after your decisions; nothing is started or resumed until an agent reaches a wait or ends`,
+    });
+  } else {
+    lines.forget("over_limit");
+  }
   let workers = before.workers;
   const heldRuns = [...before.runs];
 
@@ -626,14 +773,20 @@ export function planServe(input: ServeInput): ServePlan {
 
   // Off: the daemon is idle and acts on nothing; the rest is what `--status` shows.
   return {
-    actions: rules.enabled ? [...notes, ...resumes, ...giveUps, ...starts, ...lines.actions] : [],
+    actions: rules.enabled
+      ? [...notes, ...finishes, ...resumes, ...giveUps, ...starts, ...lines.actions]
+      : [],
     memory: rules.enabled ? memory : structuredClone(input.memory),
     counts: {
       workers: before.workers,
+      alive:
+        runs.filter((r) => isAlive(r.worker)).length +
+        input.unreadable.filter((r) => isAlive(r.worker)).length,
       max_workers: rules.max_workers,
       runs: before.runs,
       max_runs: rules.max_runs,
     },
+    stalled,
     waiting: { resumes: waitingResumes, starts: waitingStarts },
     orphans: runs
       .filter((r) => isOpen(r) && r.taskKey !== undefined && r.worker === undefined)

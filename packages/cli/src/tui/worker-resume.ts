@@ -44,10 +44,23 @@ const sessionWord = (worker: WorkerStatus) =>
 const exitWord = (worker: WorkerStatus) =>
   worker.exitCode === undefined ? "agent exited" : `agent exited (${worker.exitCode})`;
 
-const notAtGate = (session: Session, worker: WorkerStatus): ResumeOffer => ({
-  line: `${exitWord(worker)}, not at a gate`,
-  why: `the agent exited, not at a gate; any agent continues the run with pipeline_next_step ${session.id}`,
-});
+const notAtGate = (session: Session, worker: WorkerStatus): ResumeOffer => {
+  // A worker in a terminal that was alive at the decision, went on and then ended: it died at work.
+  if (worker.terminal === true && session.decision !== undefined && session.moved === true) {
+    return {
+      line: "agent died after your decision",
+      why: `the agent went on after your decision and then ended (${worker.label}); any agent continues the run with pipeline_next_step ${session.id}`,
+    };
+  }
+  return {
+    line: `${exitWord(worker)}, not at a gate`,
+    why: `the agent exited, not at a gate; any agent continues the run with pipeline_next_step ${session.id}`,
+  };
+};
+
+/** How a worker that ended at a wait reads: a print worker exited there; one in a terminal ended in its own way. */
+const endedWord = (worker: WorkerStatus) =>
+  worker.state === "exited" ? "agent exited" : `agent ${worker.label}`;
 
 /** The run as the rule sees it: an unreadable run is over, a run that waits for the person is going. */
 function runView(session: Session): ResumeRunView {
@@ -73,8 +86,10 @@ function runView(session: Session): ResumeRunView {
 
 /**
  * The rule (`resumeVerdict`) in the card's words. Offered when the run is `running`, the latest
- * record `exited` at the last wait, the person decided after that wait, no record of that decision
- * exists in any state, a session id is known and the TUI's own decision work is not pending.
+ * record ended at the last wait (a worker the person stopped there among them: the daemon leaves that
+ * one to the person), the person decided after that wait, no record of that decision exists in any
+ * state, a session id is known and the TUI's own decision work is not pending. Never while the
+ * record's process still runs without a holder.
  */
 export function resumeOffer(
   session: Session,
@@ -82,7 +97,10 @@ export function resumeOffer(
   pending: boolean,
 ): ResumeOffer {
   if (worker === undefined) return { line: "", why: "no agent of the TUI on this run" };
-  const verdict = resumeVerdict(runView(session), worker, { refuseMoved: false });
+  const verdict = resumeVerdict(runView(session), worker, {
+    refuseMoved: false,
+    resumeStopped: true,
+  });
   if (verdict.kind === "resume") {
     if (pending) {
       return {
@@ -93,7 +111,7 @@ export function resumeOffer(
     const moved = session.moved === true;
     return {
       offer: { seq: verdict.seq, decision: verdict.decision, moved },
-      line: `agent exited at your decision · s resumes${moved ? " · an agent was served a step since" : ""}`,
+      line: `${endedWord(worker)} at your decision · s resumes${moved ? " · an agent was served a step since" : ""}`,
     };
   }
   switch (verdict.why) {
@@ -155,5 +173,16 @@ export function resumeOffer(
     case "moved":
       // not asked for: the TUI offers the resume and says an agent moved
       return { line: "", why: "an agent was served a step since" };
+    case "child_alive": {
+      // Its process still runs: a second agent would work the same run beside it.
+      const line = `agent ${worker.label}`;
+      return {
+        line,
+        why: `${worker.name}: its process still runs without a holder; stop it: kodel agent stop ${worker.id}`,
+      };
+    }
+    case "stopped":
+      // not asked for: the TUI resumes a worker the person stopped
+      return { line: "agent stopped", why: "you stopped the agent" };
   }
 }
