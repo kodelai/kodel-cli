@@ -171,7 +171,7 @@ describe("t45 an attachment opened", () => {
     expect(out).toMatch(/type\s+png/);
     expect(out).toMatch(/size\s+47\.1 KB/);
     expect(out).toContain(NOT_SCANNED);
-    expect(out).toMatch(/file\s+\.kodel\/runs\/r_0mvo6g4mi\/attachments\/sample-status-table\.png/);
+    expect(out).toMatch(/file\s+\/sample\/run\/attachments\/sample-status-table\.png/);
     // a stored file that was changed, or is gone, shows no path and nothing to open
     const damaged = (state: "changed" | "missing"): GateDetail => {
       const d = detail();

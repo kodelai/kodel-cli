@@ -594,7 +594,8 @@ export function demoGateDetail(runId: string, now: number = Date.now()): GateDet
             at: now - 40 * 60_000,
             scanned: false,
             state: "ok",
-            path: ".kodel/runs/r_0mvo6g4mi/attachments/sample-status-table.png",
+            // (sample data: not a path that is opened)
+            path: "/sample/run/attachments/sample-status-table.png",
           },
         ],
       },
