@@ -102,7 +102,9 @@ with them and with every command that is a person's. The prompt always ends with
 subcommand. A resume is `--resume <id>`. The server is given the wait command of this very build and state
 base, and every waiting answer spells it (`… wait <run> --timeout 604800`, prefixed with `env
 KODEL_STATE_DIR=…` when the starter has one), whatever `agent_hints.wait` says: that setting is for your own
-agents. The profile is written against claude 2.1.330; `kodel agent doctor` prints the version it finds.
+agents. The profile is written against claude 2.1.330; `kodel agent doctor` prints the version it finds. It
+runs a program that `terminal.command` names only when the `engines` block is the committed one, and says so
+otherwise: a person's check must not run what an agent wrote into the config.
 
 An older kodel refuses a config with these keys (`unknown key: …`), see `docs/run-formats.md`.
 

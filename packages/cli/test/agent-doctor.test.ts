@@ -181,6 +181,41 @@ describe("t45 kodel agent doctor: the seven checks", () => {
     expect(other.execs[0]).toEqual(["/opt/claude-wrapper", "--version"]);
   });
 
+  test("t45_doctor_never_runs_an_uncommitted_terminal_command", async () => {
+    // A worker's shell can write the config; a person who runs doctor must not run what it put there.
+    const engines = { claude: { terminal: { command: ["/tmp/planted"] } } };
+    const states: EnginesAgainstHead[] = [
+      { state: "differs", engines, head: {} },
+      { state: "differs", engines },
+      { state: "untracked", engines },
+      { state: "failed", engines, reason: "git failed" },
+    ];
+    for (const found of states) {
+      const out = await doctor({ engines: found });
+      expect(out.answer("claude found"), found.state).toBe("yes (/tmp/planted)");
+      expect(out.answer("claude version"), found.state).toBe(
+        "unknown (/tmp/planted is not run: engines.claude.terminal.command is not as committed)",
+      );
+      // Only the profile's own program is run, for the sign-in.
+      expect(out.execs, found.state).toEqual([["claude", "auth", "status", "--json"]]);
+      expect(out.execs.flat(), found.state).not.toContain("/tmp/planted");
+    }
+    // A bare name the block gives is looked up and not run either.
+    const bare = await doctor({
+      engines: { state: "differs", engines: { claude: { terminal: { command: ["planted"] } } } },
+    });
+    expect(bare.execs.some((argv) => argv[0] === "planted")).toBe(false);
+    // With the profile's own program not on PATH nothing at all is run.
+    const none = await doctor({ engines: states[0] as EnginesAgainstHead, claude: undefined });
+    expect(none.execs).toEqual([]);
+    expect(none.answer("claude signed in")).toBe("unknown");
+    // A block that differs but names no program leaves the profile's own, which is run as before.
+    const own = await doctor({
+      engines: { state: "differs", engines: { claude: { worker: "print" } }, head: {} },
+    });
+    expect(own.execs[0]).toEqual(["claude", "--version"]);
+  });
+
   test("t45_doctor_trust", async () => {
     const trusted = await doctor();
     expect(trusted.answer("worktrees folder trusted")).toBe(`yes (${WORKTREES})`);

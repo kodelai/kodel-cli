@@ -1,6 +1,7 @@
 /**
  * `kodel agent doctor` (T-45): whether a background agent can start here, and why not. Seven checks: the
- * platform; can a terminal run; the agent's program (found, its version, signed in); trust of the folder
+ * platform; can a terminal run; the agent's program (found, its version, signed in; a program the
+ * `engines` block names is run only when the block is the committed one); trust of the folder
  * the worktrees are made in; `decisions.dialog` and `decisions.agent`; the `engines` block against the
  * committed one; and the verdict, which is the launcher's own preflight.
  *
@@ -62,7 +63,26 @@ export async function runAgentDoctor(input: AgentDoctorInput): Promise<boolean> 
   const exec = ctx.exec ?? execChild;
   const at = program.includes("/") ? program : await which(program);
   say(`${profile.name} found`, at === undefined ? "no" : "yes", at ?? `${program} is not on PATH`);
-  if (at !== undefined) {
+  // A worker's shell can write the config, and a person runs this command: a program the block names is
+  // run only when the block is the committed one. The profile's own program is not the block's choice.
+  const own = program === profile.program;
+  if (at !== undefined && !own && found.state !== "committed") {
+    say(
+      `${profile.name} version`,
+      "unknown",
+      `${program} is not run: engines.${profile.name}.terminal.command is not as committed`,
+    );
+    // The sign-in probe is the profile's own program, never the block's.
+    const auth =
+      (await which(profile.program)) === undefined
+        ? undefined
+        : await profile.authProbe(exec, ctx.now ?? Date.now);
+    say(
+      `${profile.name} signed in`,
+      auth === undefined || !auth.known ? "unknown" : auth.loggedIn ? "yes" : "no",
+      auth?.known === true && !auth.loggedIn ? "run claude auth login" : undefined,
+    );
+  } else if (at !== undefined) {
     const printed = await exec(program, ["--version"], { timeoutMs: VERSION_TIMEOUT_MS }).then(
       (result) => VERSION.exec(result.stdout)?.[0],
       () => undefined,
