@@ -157,11 +157,12 @@ describe("kodel agent", () => {
     expect(listed.sort()).toEqual(AGENT_HUMAN_COMMANDS.map((c) => c.replace("agent ", "")).sort());
     // `exec` and `attach` ask for none, `start` only about a block that is not the committed one; the
     // instruction says so by name.
-    expect(rule).toContain("all but three ask for a confirmation every time");
-    expect(rule).toMatch(/asks only when the\s+`engines` block is\s+not the committed one/);
+    expect(rule).toMatch(/all but three ask for a confirmation\s+before they change anything/);
+    expect(rule).toMatch(/asks\s+only when the\s+`engines` block is\s+not the committed one/);
     expect(rule).toMatch(
-      /`agent exec`[\s\S]*`agent attach`[\s\S]*ask\s+for none[\s\S]*`agent start`/,
+      /`agent\s+exec`[\s\S]*`agent attach`[\s\S]*ask\s+for none[\s\S]*`agent start`/,
     );
+    expect(rule).toMatch(/`agent prune` asks nothing when it removes nothing/);
     // What only reads is the agent's, `doctor` among it.
     for (const command of AGENT_READ_COMMANDS) expect(rule).toContain(`\`${command}\``);
   });
