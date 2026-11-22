@@ -255,3 +255,24 @@ run was taken with `node scripts/take-format-fixture.mjs v2-model <run dir>`.
 - `r_0mwplbn3u_f9l6` (finished): `plan`, then `review` (asks for `sonnet`) and `build` (asks for `opus`) at once, each taken with a
   claim token and handed in by its worker (`worker_models` `claude-sonnet-5-5` and `claude-opus-4-8`), then the join `merge`.
 
+
+## `v2-attachment/`
+
+One run of run-state format 2 that keeps attachments (T-45). Format 2 gained the journal event `attachment_written`
+for it and no field of the state: an engine that skips the event decides every step the same, and the state has
+nothing to drop when it is written back (see `docs/run-formats.md` and `docs/attachments.md`). The run was made by
+`bun scripts/take-v2-attachment-fixture.mjs`, which drives `LocalPipelineHost` with nothing replaced and plays the
+agent (`writeAttachment`, `completeStep`) and the person (`decideHuman` at the gate), and was taken with
+`node scripts/take-format-fixture.mjs v2-attachment <run dir>`. As in the other directories, the workdir is the
+placeholder and there is no `seal.json`.
+
+- `r_0mwrset3s_actm` (finished): the step `plan` has the check `{ kind: attachment, name: plan.md, min_lines: 3 }`.
+  It kept a plan of two lines (`plan.md` version 1) and handed in; the check failed (`check_finished` with
+  `has 2 lines, at least 3 required`) and the step was tried again in the same visit. It then kept version 2 and a
+  PNG given by its path in the working directory (`shot.png`, `scanned: false`), and the check passed. The gate
+  `approval` listed both attachments and was approved; `impl` read the plan and finished the run. `attachments/`
+  holds the three stored files, each named by the sha256 of its bytes, which is the `sha256` of its record.
+
+The tests read every version back against its record, check that the codec writes the records as it read them
+and that the report of the run is the same with the three records left out, and open the run with `status` and
+`report` without changing a byte.

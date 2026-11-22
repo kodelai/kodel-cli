@@ -38,7 +38,10 @@ beforeEach(async () => {
   );
   await writeFile(join(dir, ".kodel", "config.yaml"), "worktree:\n  mode: off\n");
 });
-afterEach(() => rm(dir, { recursive: true, force: true }));
+afterEach(async () => {
+  await rm(dir, { recursive: true, force: true });
+  await rm(`${dir}-integrity`, { recursive: true, force: true });
+});
 
 async function connect(host: StoppableHost) {
   const server = createServer(host, "1.2.3");
@@ -57,7 +60,7 @@ describe("t45 the tools on the server", () => {
     const host = new LocalPipelineHost({
       root: dir,
       heartbeatMs: 0,
-      integrityDir: join(dir, ".integrity"),
+      integrityDir: `${dir}-integrity`,
       environment: {},
     });
     const { client, call, close } = await connect(host);
@@ -102,5 +105,101 @@ describe("t45 the tools on the server", () => {
     for (const name of ATTACHMENT_NAMES) expect(served).not.toContain(name);
     expect(client.getInstructions()).not.toContain("pipeline_attachment");
     await close();
+  });
+});
+
+describe("t45 a plan kept with the run, end to end", () => {
+  test("t45_e2e_plan_written_checked_and_read", async () => {
+    // A scripted agent works a pipeline through the tools alone: the step that asks for a plan is not
+    // done until the plan is kept, the person sees it at the gate, and the next step reads it.
+    await writeFile(
+      join(dir, ".kodel", "pipelines", "planned.yaml"),
+      [
+        "name: planned",
+        "nodes:",
+        "  - slug: plan",
+        "    kind: agent",
+        "    prompt: Write the plan.",
+        "    checks:",
+        "      - { kind: attachment, name: plan.md, min_lines: 2 }",
+        "  - { slug: approval, kind: human, prompt: Is the plan right? }",
+        "  - { slug: impl, kind: agent, prompt: Do what the plan says. }",
+        "edges:",
+        "  - { from: plan, to: approval }",
+        "  - { from: approval, to: impl, when: approved }",
+        "  - { from: approval, to: plan, when: rejected }",
+        "",
+      ].join("\n"),
+    );
+    const host = new LocalPipelineHost({
+      root: dir,
+      heartbeatMs: 0,
+      integrityDir: `${dir}-integrity`,
+      environment: {},
+    });
+    const { call, close } = await connect(host);
+    // the reference the agent reads before it writes a pipeline lists the kind
+    expect((await call("pipeline_docs", { topic: "checks" })).text).toContain(
+      "Check kind `attachment`",
+    );
+    const started = await call("pipeline_start", { task: "plan it", pipeline: "planned" });
+    const run_id = started.run_id as string;
+    // the step says what to keep and how
+    expect(started.next.node.prompt).toContain("pipeline_attachment_write");
+    expect(started.next.node.prompt).toContain('"plan.md"');
+
+    // handed in without the plan: the engine's check says no, whatever the agent says
+    const early = await call("pipeline_complete_step", { run_id, node_slug: "plan", attempt: 1 });
+    expect(early).toMatchObject({ ok: true, advanced: false });
+    expect(early.failed_check).toMatchObject({ kind: "attachment" });
+    expect(early.failed_check.reason).toContain('kept no attachment "plan.md"');
+    expect(early.next.node).toMatchObject({ slug: "plan", attempt: 2 });
+
+    const plan = "# Plan\n\n1. Read the code.\n2. Change it.\n";
+    expect(
+      await call("pipeline_attachment_write", {
+        run_id,
+        node_slug: "plan",
+        attempt: 2,
+        name: "plan.md",
+        content: plan,
+      }),
+    ).toMatchObject({ ok: true, version: 1, lines: 4 });
+    const done = await call("pipeline_complete_step", { run_id, node_slug: "plan", attempt: 2 });
+    expect(done).toMatchObject({ ok: true, advanced: true });
+    // the gate shows the plan to the person, apart from the project files
+    expect(done.next.waiting).toMatchObject({ reason: "gate", node_slug: "approval" });
+    expect(done.next.waiting.attachments).toMatchObject([
+      { name: "plan.md", version: 1, written_by: { node_slug: "plan", attempt: 2 } },
+    ]);
+    expect(Object.keys(done.next.waiting.changes ?? {})).toEqual([]);
+
+    // the person approves; the next step reads what the gate showed
+    const run = await host.open(run_id);
+    expect((await run?.decideHuman("approval", "approved"))?.ok).toBe(true);
+    await run?.settle();
+    const next = await call("pipeline_next_step", { run_id });
+    expect(next.node).toMatchObject({ slug: "impl", attempt: 1 });
+    const read = await call("pipeline_attachment_read", { run_id, name: "plan.md" });
+    expect(read).toMatchObject({
+      ok: true,
+      content: plan,
+      version: 1,
+      sha256: done.next.waiting.attachments[0].sha256,
+    });
+    expect(
+      await call("pipeline_complete_step", { run_id, node_slug: "impl", attempt: 1 }),
+    ).toMatchObject({
+      ok: true,
+      next: { done: true, run_status: "completed" },
+    });
+    // nothing of it is in the project's files
+    const status = execFileSync("git", ["status", "--porcelain", "--", ":!.kodel"], {
+      cwd: dir,
+      encoding: "utf8",
+    });
+    expect(status.trim()).toBe("");
+    await close();
+    await host.stop();
   });
 });

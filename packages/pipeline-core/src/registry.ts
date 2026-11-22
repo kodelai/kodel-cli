@@ -4,7 +4,9 @@
  * The built-in kinds below are registered the same way a plugin kind would be.
  */
 import { z } from "zod";
+import { attachmentNameProblem, attachmentTypeOfName } from "./attachments";
 import type { EngineLaunchRequest } from "./engine-launch";
+import type { PipelineFeature } from "./formats/types";
 import { MODEL_ID } from "./model-id";
 
 /** The part of a parsed check the handlers need to know about. */
@@ -138,6 +140,16 @@ export interface CheckHandler {
   instruction?(params: Record<string, unknown>): string | undefined;
   /** Whether the check's parameters are shown to the agent as the `result_spec`. */
   exposeSpec?: boolean;
+  /**
+   * Only an agent that works the step through the tools can feed the check: the parser refuses it on
+   * a node the engine runs itself (a command, a step with `engine:`), where it could never pass.
+   */
+  agentFed?: boolean;
+  /**
+   * The pipeline feature a run's stored format must list (`pipelineFeatures`) to hold a pipeline
+   * with this check: what the check reads is something an older format has no place for.
+   */
+  feature?: PipelineFeature;
 }
 
 export class Registry {
@@ -491,6 +503,59 @@ const resultCheck: CheckHandler = {
     return problems;
   },
 };
+
+/**
+ * Passes only when the step itself kept a version of the named attachment in its current visit
+ * (T-45). Not one of the built-in kinds: a host that keeps attachments registers it, with a runner,
+ * and on any other host a pipeline that names it is an unknown kind, refused where it is read.
+ */
+export const attachmentCheck: CheckHandler = {
+  kind: "attachment",
+  agentFed: true,
+  feature: "attachment",
+  shape: {
+    name: nonEmpty.describe(
+      "The attachment the step must keep with the run (pipeline_attachment_write), such as plan.md.",
+    ),
+    min_lines: positiveInt
+      .optional()
+      .describe("Fewest lines the stored text must have; only for a text attachment."),
+  },
+  validate: (p) => {
+    const problem = attachmentNameProblem(p.name);
+    if (problem !== undefined) return [`name: ${problem}`];
+    return p.min_lines !== undefined && attachmentTypeOfName(String(p.name)) !== "text"
+      ? ["min_lines is only for a text attachment"]
+      : [];
+  },
+  instruction: (p) =>
+    `Before you complete this step, keep "${String(p.name)}" with the run: call ` +
+    `pipeline_attachment_write with this step's node_slug and attempt and the name "${String(p.name)}"` +
+    (typeof p.min_lines === "number" ? ` (at least ${p.min_lines} lines)` : "") +
+    ". It is kept with the run, not in the project's files. A version written in an earlier visit of " +
+    "the step, or by another step, does not count; if you took the step with pipeline_take_step, pass " +
+    "your claim_token.",
+};
+
+/** The same registry with the kinds of a host that keeps attachments. */
+export function withAttachmentKinds(registry: Registry): Registry {
+  return registry.registerCheck(attachmentCheck);
+}
+
+/** The pipeline features the checks of a set of nodes need of a run's stored format. */
+export function checkFeaturesOf(
+  registry: Registry,
+  nodes: readonly { checks: readonly CheckInfo[] }[],
+): PipelineFeature[] {
+  const found = new Set<PipelineFeature>();
+  for (const node of nodes) {
+    for (const check of node.checks) {
+      const feature = registry.check(check.kind)?.feature;
+      if (feature !== undefined) found.add(feature);
+    }
+  }
+  return [...found];
+}
 
 /** A registry with the built-in kinds. Hosts may register more on top of it. */
 export function defaultRegistry(): Registry {

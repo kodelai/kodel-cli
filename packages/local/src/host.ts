@@ -33,6 +33,7 @@ import {
   type Caller,
   type ChangeSet,
   type ChangesRef,
+  type CheckHandler,
   type CheckVerdict,
   CURRENT_RECORD_VERSION,
   cannotHoldError,
@@ -58,6 +59,7 @@ import {
   type ExecutorRecord,
   effectsOf,
   engineOutcome,
+  evaluateAttachment,
   evaluateCommand,
   evaluateDiff,
   evaluateResult,
@@ -83,6 +85,7 @@ import {
   type NextStepRequest,
   nextStep,
   type OutputRef,
+  onlyForeignInVisit,
   type PendingChange,
   type PipelineChange,
   type PipelineSpec,
@@ -90,6 +93,7 @@ import {
   parsePipeline,
   type RecordVersion,
   type RedactRule,
+  type Registry,
   type ResultReport,
   type RunEvent,
   type RunFacts,
@@ -115,11 +119,14 @@ import {
   type TakeOutcome,
   TELL_ATTACHMENTS,
   TELL_CHANGES_NOTE,
+  unheldCheckFeature,
   unknownReason,
   validateReport,
+  versionOfVisit,
   visitStartSeq,
   type WaitScope,
   type WorkerGoneReason,
+  withAttachmentKinds,
 } from "@kodel-ai/pipeline-core";
 import { type AgentLogRun, AgentLogWriter } from "./agent-log";
 import type { AgentLogTickers } from "./agent-log-ticker";
@@ -595,6 +602,23 @@ function writerOf(
   return (node) => !gates.has(node);
 }
 
+/**
+ * The kinds of the local host: the built-in ones and the `attachment` check, which only a host that
+ * keeps attachments has (T-45). A new registry each time: nobody registers into a shared one.
+ */
+export function localRegistry(): Registry {
+  return withAttachmentKinds(defaultRegistry());
+}
+
+/** The check kinds a registry has beyond the built-in ones: what a kept pipeline is read with besides. */
+export function extraChecksOf(registry: Registry): CheckHandler[] {
+  const builtin = defaultRegistry();
+  return registry
+    .checkKinds()
+    .filter((kind) => builtin.check(kind) === undefined)
+    .flatMap((kind) => registry.check(kind) ?? []);
+}
+
 export class LocalHost {
   readonly store: FileStore;
   readonly snapshotter: GitSnapshotter;
@@ -652,9 +676,11 @@ export class LocalHost {
   ) {
     this.rules = options.rules ?? [];
     const storeRoot = options.storeRoot ?? `${options.root}/.kodel`;
+    const registry = options.engine?.registry ?? localRegistry();
     this.store = new FileStore({
       root: storeRoot,
       rules: this.rules,
+      extraChecks: extraChecksOf(registry),
       ...(options.storage === undefined ? {} : { place: options.storage }),
     });
     this.agentLog =
@@ -698,6 +724,7 @@ export class LocalHost {
     this.engine = {
       fingerprint: hashSource,
       ...options.engine,
+      registry,
       // The host that starts a session waits for it; the visit names it, so another process joins
       // only once it is gone.
       ...(steps === undefined ? {} : { engineSteps: { owner: this.ownerId, ...steps } }),
@@ -1048,6 +1075,11 @@ export class LocalRun {
     private readonly host: LocalHost,
     readonly runId: string,
   ) {}
+
+  /** The kinds this host knows: every pipeline text of the run is read with them. */
+  private get registry(): Registry {
+    return this.host.engine.registry ?? localRegistry();
+  }
 
   /** The run's folder when the history is kept under `~/.kodel` (`storage: home`); none in the project. */
   homeFolder(): string | undefined {
@@ -1406,7 +1438,7 @@ export class LocalRun {
     if (hash === now.specHash) return undefined;
     let spec: PipelineSpec;
     try {
-      spec = parsePipeline(text);
+      spec = parsePipeline(text, { registry: this.registry });
     } catch (error) {
       if (error instanceof KodelError) return undefined;
       throw error;
@@ -1505,7 +1537,7 @@ export class LocalRun {
     }
     let spec: PipelineSpec;
     try {
-      spec = parsePipeline(input.yaml);
+      spec = parsePipeline(input.yaml, { registry: this.registry });
     } catch (error) {
       if (error instanceof KodelError) {
         return { ok: false, code: error.code, message: error.message };
@@ -1574,6 +1606,9 @@ export class LocalRun {
     ) {
       return cannotHoldError(state.v, "a pipeline with a step that asks for a model", this.runId);
     }
+    // A check that reads what the run's format has no record of (an `attachment` check in format 1).
+    const lacking = unheldCheckFeature(spec, registry, capabilitiesOf(state.v));
+    if (lacking !== undefined) return cannotHoldError(state.v, lacking, this.runId);
     if (hasEngineSteps(spec, registry)) {
       const refusal = this.host.engineRefusal(spec);
       if (refusal) return refusal;
@@ -1614,7 +1649,7 @@ export class LocalRun {
     const to = hashSource(input.text);
     let proposed: PipelineSpec;
     try {
-      proposed = parsePipeline(input.text);
+      proposed = parsePipeline(input.text, { registry: this.registry });
     } catch (error) {
       if (error instanceof KodelError) return { ok: false, error };
       throw error;
@@ -4485,6 +4520,36 @@ function builtinCheckRunners(host: LocalHost): Record<string, CheckRunner> {
             result,
           );
       return { ...verdict, command: redactText(command, host.rules), ...kept };
+    },
+
+    // Judged on the journal and the stored file as they are now, never on the agent's word: the
+    // version this step kept in its current visit, whose file still hashes to what was recorded.
+    async attachment(effect, context) {
+      const name = String(effect.params.name);
+      let journal: JournalRecord[];
+      try {
+        journal = await context.store.readJournal(context.runId);
+      } catch {
+        return { passed: false, reason: "the journal of the run cannot be read" };
+      }
+      const version = versionOfVisit(journal, effect.node, name);
+      if (version === undefined) {
+        return evaluateAttachment(
+          { foreign: onlyForeignInVisit(journal, effect.node, name) },
+          effect.params,
+        );
+      }
+      const file = await context.store.readAttachmentFile(context.runId, version);
+      const text =
+        file.state === "ok" && version.type === "text" ? decodeText(file.bytes) : undefined;
+      return evaluateAttachment(
+        {
+          version,
+          state: file.state,
+          ...(text === undefined ? {} : { lines: countLines(text) }),
+        },
+        effect.params,
+      );
     },
 
     async result(effect, context) {

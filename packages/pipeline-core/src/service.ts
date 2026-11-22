@@ -37,7 +37,7 @@ import {
 } from "./next-step";
 import type { PipelineSpec } from "./pipeline";
 import type { NodeDiff } from "./pipeline-diff";
-import { defaultRegistry, type Registry } from "./registry";
+import { defaultRegistry, Registry } from "./registry";
 import { renderTemplate } from "./render";
 import type { Decision, RunState } from "./run";
 import { runSlug, validateTitle } from "./slug";
@@ -242,6 +242,8 @@ export interface StartOutcome {
 export interface PipelineHost extends HistoryHost {
   /** The runs of this host keep attachments (T-45): the tools and the check kind are offered. */
   readonly attachments?: boolean;
+  /** The node and check kinds of this host, when it has more than the built-in ones. */
+  readonly registry?: Registry;
   list(): Promise<{ pipelines: PipelineInfo[]; problems: PipelineProblem[] }>;
   resolve(name: string): Promise<PipelineSpec | undefined>;
   /** The pipeline as its file has it: the text a change starts from, and the hash of that text. */
@@ -368,7 +370,9 @@ export class PipelineService {
     options: ServiceOptions = {},
   ) {
     this.budget = options.waitBudgetMs ?? DEFAULT_WAIT_BUDGET_MS;
-    this.registry = options.registry ?? defaultRegistry();
+    // Only a registry counts: a host that is a stand-in may answer anything for a property.
+    const own = host.registry instanceof Registry ? host.registry : undefined;
+    this.registry = options.registry ?? own ?? defaultRegistry();
     this.engineVersion = options.engineVersion ?? "unknown";
     this.caller = options.caller ?? (() => undefined);
     this.surface = options.surface;

@@ -9,6 +9,7 @@
  * a trusted hash), so a forged line with its file reads as an attachment: an accepted limit, stated in
  * `docs/attachments.md`.
  */
+import type { CheckVerdict } from "./checks";
 import type { JournalRecord } from "./run";
 
 /** The bounds of a run's attachments. They are never reset: a refused write spends none of them. */
@@ -390,3 +391,59 @@ export interface GateAttachments {
 /** Added by the host to a gate's `tell_the_person` when the answer carries `attachments`. */
 export const TELL_ATTACHMENTS =
   " The run keeps attachments (`attachments`): name each to the person with its type and size, say which are marked `new` (written since the run stopped here), and say that they are kept with the run and not in the project's files. An image is marked as not scanned for secrets: say so. If `attachments_omitted` is there, say that more are kept than are listed. A location of the form `attachment:<name>@<version>:<line>` in a comment or a finding points at a line of an attachment, not at a project file.";
+
+/**
+ * The verdict of an `attachment` check, from the facts a host gathers. `version` is the one that
+ * counts for the step (`versionOfVisit`); `state` and `lines` are of its stored file, as it is now.
+ * Fails closed: no version, a file that does not verify, or too few lines never pass.
+ */
+export function evaluateAttachment(
+  facts: {
+    version?: AttachmentRecord;
+    /** The step wrote the name in this visit, but only across another worker's claim. */
+    foreign?: boolean;
+    state?: AttachmentInfo["state"];
+    /** The lines of the stored (redacted) text. */
+    lines?: number;
+  },
+  params: Record<string, unknown>,
+): CheckVerdict {
+  const name = String(params.name);
+  const fail = (reason: string): CheckVerdict => ({ passed: false, reason });
+  if (facts.version === undefined) {
+    return fail(
+      facts.foreign === true
+        ? `the attachment "${name}" was written without the claim token of the worker that holds this step; write it again with pipeline_attachment_write and your claim_token`
+        : `this step kept no attachment "${name}" in this visit; write it with pipeline_attachment_write, then complete the step again`,
+    );
+  }
+  if (facts.state !== "ok") {
+    return fail(
+      facts.state === "changed"
+        ? `the stored file of the attachment "${name}" was changed outside kodel; write it again with pipeline_attachment_write`
+        : `the stored file of the attachment "${name}" is missing; write it again with pipeline_attachment_write`,
+    );
+  }
+  const min = params.min_lines;
+  if (typeof min === "number") {
+    if (facts.version.type !== "text" || facts.lines === undefined) {
+      return fail(`the attachment "${name}" is not a text, and min_lines is for a text`);
+    }
+    if (facts.lines < min) {
+      return fail(`the attachment "${name}" has ${facts.lines} lines, at least ${min} required`);
+    }
+  }
+  return { passed: true, reason: "" };
+}
+
+/** Whether the node wrote `name` in its current visit only across another worker's claim. */
+export function onlyForeignInVisit(
+  journal: readonly JournalRecord[],
+  node: string,
+  name: string,
+): boolean {
+  const start = visitStartSeq(journal, node);
+  return attachmentRecords(journal).some(
+    (r) => r.name === name && r.node === node && r.seq > start && r.claim === "foreign",
+  );
+}

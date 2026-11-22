@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "node": "plan",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "1056d1c57e49ccf21ba968660b90003f0e3d1d8bb67ce2c9e1b78f863173b37d",
+  "answer": {
+    "slug": "plan",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "Write the plan for keep a plan and keep it with the run.\n\nBefore you complete this step, keep \"plan.md\" with the run: call pipeline_attachment_write with this step's node_slug and attempt and the name \"plan.md\" (at least 3 lines). It is kept with the run, not in the project's files. A version written in an earlier visit of the step, or by another step, does not count; if you took the step with pipeline_take_step, pass your claim_token."
+  }
+}

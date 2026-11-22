@@ -33,6 +33,7 @@ import { dirname, join, sep } from "node:path";
 import {
   ATTACHMENT_LIMITS,
   type AttachmentRecord,
+  type CheckHandler,
   CURRENT_RECORD_VERSION,
   capabilitiesOf,
   decodeJournalRecord,
@@ -88,6 +89,11 @@ export interface RunMeta {
 }
 
 export interface StoreOptions {
+  /**
+   * The check kinds the host has beyond the built-in ones: a kept pipeline that names one is read
+   * with it. Without them such a copy reads as written by a newer kodel.
+   */
+  extraChecks?: readonly CheckHandler[];
   /** The `.kodel` directory. */
   root: string;
   /**
@@ -624,6 +630,12 @@ export class FileStore {
     }
   }
 
+  /** The kinds a kept pipeline is read with beyond the built-in ones. */
+  private kinds(): { extraChecks?: readonly CheckHandler[] } {
+    const extra = this.options.extraChecks;
+    return extra === undefined || extra.length === 0 ? {} : { extraChecks: extra };
+  }
+
   private async parseKeptAs(
     runId: string,
     hash: string,
@@ -632,13 +644,14 @@ export class FileStore {
   ): Promise<PipelineSpec> {
     const formats = await this.snapshotFormats(runId, hash);
     if (formats === undefined) {
-      if (options.introducing) return parseSnapshot(text);
+      if (options.introducing) return parseSnapshot(text, this.kinds());
       // The state is protected and names the pipeline the run is on: a crash between the write of the
       // state and the append of the line that names the version leaves exactly this. It is read by the
       // rules of the state's own format, and the run opens.
       const state = await this.readState(runId);
       if (state && state.specHash === hash) {
         return parseSnapshot(text, {
+          ...this.kinds(),
           firstDuplicateEdgeWins: capabilitiesOf(state.v).firstDuplicateEdgeWins,
         });
       }
@@ -649,6 +662,7 @@ export class FileStore {
     }
     try {
       return parseSnapshot(text, {
+        ...this.kinds(),
         firstDuplicateEdgeWins: capabilitiesOf(formats.format).firstDuplicateEdgeWins,
       });
     } catch (error) {
@@ -658,6 +672,7 @@ export class FileStore {
       // `v` cannot change how a valid pipeline of the current format is read.
       if (formats.claimed === undefined || !(error instanceof KodelError)) throw error;
       return parseSnapshot(text, {
+        ...this.kinds(),
         firstDuplicateEdgeWins: capabilitiesOf(formats.claimed).firstDuplicateEdgeWins,
       });
     }

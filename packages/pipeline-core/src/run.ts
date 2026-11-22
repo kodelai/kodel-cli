@@ -36,6 +36,7 @@ import type { NodeSpec, PipelineSpec } from "./pipeline";
 import { type AcceptEffect, diffPipelines, standingOf } from "./pipeline-diff";
 import {
   beginsAsSession,
+  checkFeaturesOf,
   defaultRegistry,
   labelsOf,
   RESTART_FAILED,
@@ -124,6 +125,21 @@ export function cleanWorkerModels(models: readonly unknown[]): string[] {
  */
 export function hasModelSteps(spec: PipelineSpec, registry: Registry = defaultRegistry()): boolean {
   return spec.nodes.some((node) => requestedModelOf(registry, node) !== undefined);
+}
+
+/**
+ * What a pipeline's checks need that a stored format cannot hold, in words for the refusal (a check
+ * that reads the run's attachments, in a format with no record of them); `undefined` when it holds all.
+ */
+export function unheldCheckFeature(
+  spec: PipelineSpec,
+  registry: Registry,
+  caps: FormatCapabilities,
+): string | undefined {
+  const lacking = checkFeaturesOf(registry, spec.nodes).find(
+    (feature) => !caps.pipelineFeatures.includes(feature),
+  );
+  return lacking === undefined ? undefined : `a pipeline with a check of kind "${lacking}"`;
 }
 
 /** Whether an active visit is the work of an engine step: by its phase and its node, never by a record. */
@@ -2929,6 +2945,8 @@ class Machine {
     if (hasModelSteps(this.spec, this.registry) && !this.caps.pipelineFeatures.includes("model")) {
       throw cannotHoldError(this.s.v, "a pipeline with a step that asks for a model", this.s.runId);
     }
+    const lacking = unheldCheckFeature(this.spec, this.registry, this.caps);
+    if (lacking !== undefined) throw cannotHoldError(this.s.v, lacking, this.s.runId);
     // An unknown outcome waits for a person's resume, which looks the session up first; a change
     // would enter the step again past it.
     const open = this.s.engineSession;

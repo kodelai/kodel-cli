@@ -1,0 +1,14 @@
+name: attach
+description: a plan kept with the run, checked, shown at a gate and read by a later step
+nodes:
+  - slug: plan
+    kind: agent
+    prompt: Write the plan for {{task}} and keep it with the run.
+    checks:
+      - { kind: attachment, name: plan.md, min_lines: 3 }
+  - { slug: approval, kind: human, prompt: Is the plan right? }
+  - { slug: impl, kind: agent, prompt: Do what the plan says. }
+edges:
+  - { from: plan, to: approval }
+  - { from: approval, to: impl, when: approved }
+  - { from: approval, to: plan, when: rejected }
