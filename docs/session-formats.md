@@ -52,8 +52,15 @@ is done. `SessionSpec.agent` (`{ engine, session?, resumes? }`) is how a starter
 `session.json` does not repeat it.
 
 It is a file of its own, and not a field of `session.json`, because `session.json` is written once and an
-engine's id may be known only later. `kodel agent ls` shows it in the `AGENT` column (`claude <id>`, `-` when
-there is none) beside `MODE` (`pipes` or `pty`); `--json` has `mode` and `agent`.
+engine's id may be known only later. `kodel agent ls` shows it in two columns beside `MODE` (`pipes` or `pty`):
+`AGENT` is the engine (`claude`) and `CONVERSATION` the id of its conversation (`-` when there is none; an id
+longer than a UUID is cut). The table is `ID NAME STATE MODE AGENT CONVERSATION`; the command a session runs is
+not a column, `--json` has it whole, with `mode` and `agent`.
+
+`kodel agent stop`, `rm` and `logs` take a name or an id, as `attach` does: of the sessions that used a name
+the one that runs is meant, then the newest. `stop` and `rm` find the session before they ask, so an unknown
+name fails at once (`NOT_FOUND: no agent "<name>"`) and the question names the session found (`Stop agent
+<name> (<id>)?`).
 
 **Builds of different age.** A build from before this record never reads the file: it derives the same status,
 lists the session without an agent and removes the folder whole. A session with no `agent.json` is an older one

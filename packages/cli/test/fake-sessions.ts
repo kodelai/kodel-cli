@@ -35,6 +35,8 @@ export class FakeSessions implements AgentSessions {
   readonly options: StartOptions[] = [];
   readonly removed: string[] = [];
   readonly attached: string[] = [];
+  readonly stopped: string[] = [];
+  readonly tailed: string[] = [];
   /** Everything asked of the adapter, in order. */
   readonly calls: string[] = [];
   failStart: SessionError | undefined;
@@ -94,12 +96,15 @@ export class FakeSessions implements AgentSessions {
     return this.status(id);
   }
 
-  async tail(): Promise<TailResult> {
-    return { text: "", complete: true };
+  async tail(id: string): Promise<TailResult> {
+    this.get(id);
+    this.tailed.push(id);
+    return { text: `output of ${id}\n`, complete: true };
   }
 
   async stop(id: string): Promise<SessionStatus> {
     const row = this.get(id);
+    this.stopped.push(id);
     row.status = { state: "killed", reason: "stopped" };
     return { ...row.status };
   }

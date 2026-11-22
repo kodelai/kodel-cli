@@ -13,6 +13,7 @@ import {
 import {
   type Caller,
   foldSessionName,
+  isLocalSessionId,
   isSessionName,
   isTerminalState,
   type RedactRule,
@@ -131,6 +132,8 @@ export interface AgentContext {
   readText?: (path: string) => Promise<string | undefined>;
   uuid?: () => string;
   now?: () => number;
+  /** Whether `out` is a terminal: `doctor` colours its marks only there (and not under `NO_COLOR`). */
+  outIsTerminal?: boolean;
   /** Whether this process runs under Bun (`doctor` says so); the real answer by default. */
   bun?: boolean;
 }
@@ -187,13 +190,23 @@ export const stateLabel = (entry: SessionListEntry): string => {
   return detail.length > 0 ? `${word} (${detail.join(", ")})` : word;
 };
 
-/** The `AGENT` column: the engine and the id of its conversation, as the `agent` record names them. */
-export const agentLabel = (entry: SessionListEntry): string =>
-  entry.agent === undefined
-    ? "-"
-    : entry.agent.session === undefined
-      ? entry.agent.engine
-      : `${entry.agent.engine} ${entry.agent.session}`;
+/** The `AGENT` column: the engine, as the `agent` record names it. */
+export const agentLabel = (entry: SessionListEntry): string => entry.agent?.engine ?? "-";
+
+const CONVERSATION_WIDTH = 36;
+
+/**
+ * The `CONVERSATION` column: the id of the agent's own conversation. An id of the usual form (a UUID)
+ * is whole; a longer one is cut, and `--json` has all of it.
+ */
+export const conversationLabel = (entry: SessionListEntry): string => {
+  const id = entry.agent?.session;
+  if (id === undefined || id === "") return "-";
+  const chars = [...id];
+  return chars.length > CONVERSATION_WIDTH
+    ? `${chars.slice(0, CONVERSATION_WIDTH - 1).join("")}…`
+    : id;
+};
 
 /** Why a `stop` signalled nothing of a process group it could not call the session's, or nothing to say. */
 export const groupNote = (group: SessionListEntry["status"]["group"]): string | undefined =>
@@ -269,13 +282,6 @@ export function resumeHints(rows: readonly SessionListEntry[]): string[] {
     });
 }
 
-/** A command cut to a width for the table; the full text is in `--json`. */
-const shorten = (text: string, width = 48): string => {
-  const flat = text.replace(/\s+/g, " ").trim();
-  const chars = [...flat];
-  return chars.length > width ? `${chars.slice(0, width - 1).join("")}…` : flat;
-};
-
 /**
  * The local session adapter as the CLI builds it: the holder is this program (`session-holder`), and the
  * base is the state base of the environment. One place, for `kodel agent` and for engine steps.
@@ -343,6 +349,25 @@ export async function resolveSession(
   }
   return { id: found.id, ...(found.name !== undefined ? { name: found.name } : {}) };
 }
+
+/**
+ * The session `stop`, `rm` and `logs` act on: a name or an id, as `attach` takes them. An id that is
+ * listed is taken as it is, also when its records cannot be judged: the adapter answers for those itself.
+ */
+export async function resolveTarget(
+  adapter: SessionAdapter,
+  ref: string,
+): Promise<{ id: string; name?: string }> {
+  const exact = (await adapter.list()).find((row) => row.id === ref);
+  if (exact !== undefined) {
+    return { id: exact.id, ...(exact.name !== undefined ? { name: exact.name } : {}) };
+  }
+  return resolveSession(adapter, ref);
+}
+
+/** How a question or an answer names the session found: its name with its id, or the id alone. */
+export const targetLabel = (target: { id: string; name?: string }): string =>
+  target.name === undefined ? target.id : `${target.name} (${target.id})`;
 
 /**
  * Connects a terminal to the session a person named and stays until they detach or it ends. The one way a
@@ -453,10 +478,11 @@ export function registerAgentCommands(
         plain(stateLabel(r)),
         plain(r.mode ?? "-"),
         plain(agentLabel(r)),
-        plain(shorten(r.command ?? "")),
+        plain(conversationLabel(r)),
       ]);
+      // The command a session runs is in `--json`: in the table it was cut short and said little.
       for (const line of formatTable(
-        ["ID", "NAME", "STATE", "MODE", "AGENT", "COMMAND"],
+        ["ID", "NAME", "STATE", "MODE", "AGENT", "CONVERSATION"],
         table,
         opts.headers !== false,
       )) {
@@ -466,13 +492,17 @@ export function registerAgentCommands(
     });
 
   agent
-    .command("stop <id>")
-    .description("Stop an agent and the processes it started")
-    .action(async (id: string) => {
+    .command("stop <agent>")
+    .description("Stop an agent and the processes it started, by name or id")
+    .action(async (ref: string) => {
       platform();
       ctx.requireHuman();
-      await ctx.mustConfirm(`Stop agent ${plain(id)}?`);
-      const status = await guard(async () => (await sessions()).stop(id));
+      const all = await sessions();
+      // Before the question: an unknown name fails at once, and the question names the session found.
+      const target = await guard(() => resolveTarget(all, ref));
+      const id = target.id;
+      await ctx.mustConfirm(`Stop agent ${plain(targetLabel(target))}?`);
+      const status = await guard(() => all.stop(id));
       const label =
         status.state === "killed" && status.reason === "stopped"
           ? "stopped"
@@ -483,19 +513,22 @@ export function registerAgentCommands(
     });
 
   agent
-    .command("logs <id>")
-    .description("Print the end of what an agent wrote (secrets are redacted)")
+    .command("logs <agent>")
+    .description("Print the end of what an agent wrote, by name or id (secrets are redacted)")
     .option("--stdout", "only standard output")
     .option("--stderr", "only standard error")
     .option("--bytes <n>", "how many bytes at most (default 65536)", (v) => Number.parseInt(v, 10))
-    .action(async (id: string, opts: { stdout?: boolean; stderr?: boolean; bytes?: number }) => {
+    .action(async (ref: string, opts: { stdout?: boolean; stderr?: boolean; bytes?: number }) => {
       platform();
       if (opts.stdout && opts.stderr) ctx.fail("give --stdout or --stderr, not both");
       if (opts.bytes !== undefined && !(Number.isInteger(opts.bytes) && opts.bytes > 0)) {
         ctx.fail("--bytes is a positive whole number");
       }
       const stream = opts.stdout ? "stdout" : opts.stderr ? "stderr" : "both";
-      const tail = await guard(async () => (await sessions()).tail(id, opts.bytes, stream));
+      const all = await sessions();
+      const tail = await guard(async () =>
+        all.tail((await resolveTarget(all, ref)).id, opts.bytes, stream),
+      );
       // line by line: what an agent printed must not move the cursor or fake a line in the person's terminal
       ctx.out(
         `${tail.text.replace(/\r/g, "").split("\n").map(plain).join("\n")}${tail.text.endsWith("\n") ? "" : "\n"}`,
@@ -504,13 +537,25 @@ export function registerAgentCommands(
     });
 
   agent
-    .command("rm <id>")
-    .description("Remove a finished agent")
-    .action(async (id: string) => {
+    .command("rm <agent>")
+    .description("Remove a finished agent, by name or id")
+    .action(async (ref: string) => {
       platform();
       ctx.requireHuman();
-      await ctx.mustConfirm(`Remove agent ${plain(id)}?`);
-      await guard(async () => (await sessions()).remove(id));
+      const all = await sessions();
+      const target = await guard(async () => {
+        try {
+          return await resolveTarget(all, ref);
+        } catch (error) {
+          // A folder with no record is not listed; its id still removes it, as before.
+          if (error instanceof SessionError && error.code === "NOT_FOUND" && isLocalSessionId(ref))
+            return { id: ref };
+          throw error;
+        }
+      });
+      const id = target.id;
+      await ctx.mustConfirm(`Remove agent ${plain(targetLabel(target))}?`);
+      await guard(() => all.remove(id));
       ctx.out(`${plain(id)}: removed\n`);
     });
 

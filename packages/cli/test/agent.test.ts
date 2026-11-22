@@ -9,6 +9,7 @@ import {
   AGENT_HUMAN_COMMANDS,
   AGENT_READ_COMMANDS,
   agentLabel,
+  conversationLabel,
   groupNote,
   pipesAdapter,
   resolveSession,
@@ -56,6 +57,8 @@ interface Opts {
   size?: () => { cols: number; rows: number } | undefined;
   /** The session adapter and the attach client, in place of the machine's own. */
   agent?: CliEnv["agent"];
+  /** Every question a command asked, in order. */
+  asked?: string[];
 }
 
 async function cli(opts: Opts, ...args: string[]) {
@@ -71,7 +74,10 @@ async function cli(opts: Opts, ...args: string[]) {
     },
     interactive: opts.interactive,
     environment: { KODEL_STATE_DIR: state, ...(opts.engine ? { KODEL_ENGINE: "1" } : {}) },
-    confirm: async () => opts.confirm ?? true,
+    confirm: async (question) => {
+      opts.asked?.push(question);
+      return opts.confirm ?? true;
+    },
     select: async () => [],
     sessionLauncher: launcher,
     ...(opts.pty ? { ptyProbe: () => opts.pty as NonNullable<Opts["pty"]> } : {}),
@@ -183,8 +189,13 @@ describe("kodel agent", () => {
       const refusedRm = await cli({ interactive: true }, "agent", "rm", id);
       expect(refusedRm.code).toBe(1);
       expect(refusedRm.err).toContain("STILL_RUNNING");
-      expect(listed.out).toContain("COMMAND");
-      expect(listed.out).toContain("sleep 60");
+      // The command is not a column: it was cut short there. `--json` has it whole.
+      expect(listed.out).not.toContain("COMMAND");
+      expect(listed.out).not.toContain("sleep 60");
+      const asJson = JSON.parse(
+        (await cli({ interactive: false }, "agent", "ls", "--json")).out,
+      ) as SessionListEntry[];
+      expect(asJson.find((r) => r.id === id)?.command).toBe("sleep 60");
       const stopped = await cli({ interactive: true }, "agent", "stop", id);
       expect(stopped.out).toContain(`${id}: stopped`);
       const afterStop = await cli({ interactive: false }, "agent", "ls");
@@ -511,16 +522,19 @@ describe("kodel agent", () => {
       const listed = await cli({ interactive: false, engine: true }, "agent", "ls");
       expect(listed.code, listed.err).toBe(0);
       const lines = listed.out.trimEnd().split("\n");
-      expect(lines[0]).toMatch(/^ID\s+NAME\s+STATE\s+MODE\s+AGENT\s+COMMAND$/);
+      expect(lines[0]).toMatch(/^ID\s+NAME\s+STATE\s+MODE\s+AGENT\s+CONVERSATION$/);
       const rowOf = (id: string) => (lines.find((l) => l.startsWith(id)) ?? "").split(/\s{2,}/);
-      expect(rowOf(withAgent.id).slice(1, 5)).toEqual([
+      // the engine and the id of its conversation are two columns, each under a header of its own
+      expect(rowOf(withAgent.id).slice(1)).toEqual([
         "with-agent",
         "exited (0)",
         "pipes",
-        `claude ${conversation}`,
+        "claude",
+        conversation,
       ]);
-      // a session with no agent record (an older one, or a plain command) has an empty AGENT
-      expect(rowOf(older.id).slice(1, 5)).toEqual(["-", "exited (0)", "pipes", "-"]);
+      // a session with no agent record (an older one, or a plain command) has neither
+      expect(rowOf(older.id).slice(1)).toEqual(["-", "exited (0)", "pipes", "-", "-"]);
+      expect(listed.out).not.toContain("PINEAPPLE");
 
       const json = JSON.parse(
         (await cli({ interactive: false }, "agent", "ls", "--json")).out,
@@ -540,7 +554,17 @@ describe("kodel agent", () => {
       });
       expect(agentLabel(entry())).toBe("-");
       expect(agentLabel(entry({ engine: "claude" }))).toBe("claude");
-      expect(agentLabel(entry({ engine: "claude", session: "abc" }))).toBe("claude abc");
+      expect(agentLabel(entry({ engine: "claude", session: "abc" }))).toBe("claude");
+      expect(conversationLabel(entry())).toBe("-");
+      expect(conversationLabel(entry({ engine: "claude" }))).toBe("-");
+      expect(conversationLabel(entry({ engine: "claude", session: "abc" }))).toBe("abc");
+      expect(conversationLabel(entry({ engine: "claude", session: conversation }))).toBe(
+        conversation,
+      );
+      // an id longer than a UUID is cut to the column; `--json` has all of it
+      const long = conversationLabel(entry({ engine: "x", session: "s".repeat(60) }));
+      expect([...long].length).toBe(36);
+      expect(long.endsWith("…")).toBe(true);
       // what `agent stop` adds when it signalled nothing of a group it could not call the session's
       expect(groupNote(undefined)).toBeUndefined();
       expect(groupNote("unread")).toContain("process table could not be read");
@@ -562,7 +586,9 @@ describe("kodel agent", () => {
         await new Promise((r) => setTimeout(r, 100));
       }
       const listed = await cli({ interactive: false }, "agent", "ls");
-      expect(listed.out.split("\n")[0]).toMatch(/^ID\s+NAME\s+STATE\s+MODE\s+AGENT\s+COMMAND$/);
+      expect(listed.out.split("\n")[0]).toMatch(
+        /^ID\s+NAME\s+STATE\s+MODE\s+AGENT\s+CONVERSATION$/,
+      );
       expect(listed.out).not.toContain("DETAIL");
       expect(listed.out).toContain("exited (3)");
       let asked = "";
@@ -783,6 +809,158 @@ describe("kodel agent exec --pty --attach (TASK-K6MA)", () => {
     expect(gone.out).toContain("[killed: cc]\n");
   });
 
+  describe("a name or an id, resolved before the question", () => {
+    const fixture = () => {
+      const sessions = new FakeSessions();
+      // Two sessions used the name over time: the one that runs is meant.
+      sessions.add({
+        id: "a_000000001_old0",
+        name: "sh1",
+        mode: "pty",
+        status: { state: "exited" },
+      });
+      sessions.add({
+        id: "a_000000002_live",
+        name: "sh1",
+        mode: "pty",
+        status: { state: "running" },
+      });
+      sessions.add({
+        id: "a_000000003_done",
+        name: "done",
+        status: { state: "exited", exitCode: 0 },
+      });
+      sessions.add({ id: "a_000000004_anon", status: { state: "running" } });
+      sessions.add({
+        id: "a_000000005_bad0",
+        name: "broken",
+        status: { state: "lost" },
+        problem: "CANNOT_READ",
+      });
+      return { sessions, seam: { agent: { sessions: async () => sessions } } };
+    };
+
+    test("tA_agent_stop_takes_a_name_or_an_id", async () => {
+      for (const ref of ["sh1", "SH1", "a_000000002_live"]) {
+        const { sessions, seam } = fixture();
+        const asked: string[] = [];
+        const r = await cli({ interactive: true, asked, ...seam }, "agent", "stop", ref);
+        expect(r.code, r.err).toBe(0);
+        // The question names the session found, by its name and its id.
+        expect(asked, ref).toEqual(["Stop agent sh1 (a_000000002_live)?"]);
+        expect(sessions.stopped, ref).toEqual(["a_000000002_live"]);
+        expect(r.out, ref).toBe("a_000000002_live: stopped\n");
+      }
+      // A session with no name is asked about by its id alone.
+      const anon = fixture();
+      const asked: string[] = [];
+      await cli({ interactive: true, asked, ...anon.seam }, "agent", "stop", "a_000000004_anon");
+      expect(asked).toEqual(["Stop agent a_000000004_anon?"]);
+      expect(anon.sessions.stopped).toEqual(["a_000000004_anon"]);
+    });
+
+    test("tA_agent_stop_of_an_unknown_name_fails_before_the_question", async () => {
+      for (const command of ["stop", "rm"]) {
+        for (const [ref, code] of [
+          ["nobody", 'NOT_FOUND: no agent "nobody"'],
+          ["../x", "NOT_FOUND"],
+          // a name whose records cannot be judged: the reason, not a question
+          ["broken", "CANNOT_READ"],
+        ] as const) {
+          const { sessions, seam } = fixture();
+          const asked: string[] = [];
+          const r = await cli({ interactive: true, asked, ...seam }, "agent", command, ref);
+          expect(r.code, `${command} ${ref}`).toBe(1);
+          expect(r.err, `${command} ${ref}`).toContain(code);
+          expect(asked, `${command} ${ref}`).toEqual([]);
+          expect(sessions.stopped).toEqual([]);
+          expect(sessions.removed).toEqual([]);
+        }
+      }
+      // An answer of "no" leaves the session found alone.
+      const { sessions, seam } = fixture();
+      const no = await cli({ interactive: true, confirm: false, ...seam }, "agent", "stop", "sh1");
+      expect(no.code).toBe(1);
+      expect(sessions.stopped).toEqual([]);
+    });
+
+    test("tA_agent_rm_takes_a_name_or_an_id", async () => {
+      for (const ref of ["done", "Done", "a_000000003_done"]) {
+        const { sessions, seam } = fixture();
+        const asked: string[] = [];
+        const r = await cli({ interactive: true, asked, ...seam }, "agent", "rm", ref);
+        expect(r.code, r.err).toBe(0);
+        expect(asked, ref).toEqual(["Remove agent done (a_000000003_done)?"]);
+        expect(sessions.removed, ref).toEqual(["a_000000003_done"]);
+        expect(r.out, ref).toBe("a_000000003_done: removed\n");
+      }
+      // The name of a session that runs: the question names it, and the adapter's refusal is the answer.
+      const { sessions, seam } = fixture();
+      const asked: string[] = [];
+      const live = await cli({ interactive: true, asked, ...seam }, "agent", "rm", "sh1");
+      expect(asked).toEqual(["Remove agent sh1 (a_000000002_live)?"]);
+      expect(live.code).toBe(1);
+      expect(live.err).toContain("STILL_RUNNING");
+      expect(sessions.removed).toEqual([]);
+    });
+
+    test("tA_agent_logs_takes_a_name_or_an_id", async () => {
+      for (const ref of ["sh1", "a_000000002_live"]) {
+        const { sessions, seam } = fixture();
+        // a read: an engine may run it, with no terminal and no question
+        const r = await cli({ interactive: false, engine: true, ...seam }, "agent", "logs", ref);
+        expect(r.code, r.err).toBe(0);
+        expect(sessions.tailed, ref).toEqual(["a_000000002_live"]);
+        expect(r.out, ref).toBe("output of a_000000002_live\n");
+      }
+      const { sessions, seam } = fixture();
+      const none = await cli({ interactive: false, ...seam }, "agent", "logs", "nobody");
+      expect(none.code).toBe(1);
+      expect(none.err).toContain('NOT_FOUND: no agent "nobody"');
+      expect(sessions.tailed).toEqual([]);
+    });
+
+    tableTest(
+      "tA_agent_stop_and_rm_by_name_on_a_real_session",
+      async () => {
+        const started = await cli(
+          { interactive: true },
+          "agent",
+          "exec",
+          "--name",
+          "sh1",
+          "--",
+          "sh",
+          "-c",
+          "echo from-sh1; sleep 60",
+        );
+        const id = /started (a_\S+)/.exec(started.out)?.[1] as string;
+        for (
+          let i = 0;
+          i < 80 &&
+          !(await cli({ interactive: false }, "agent", "logs", "sh1")).out.includes("from");
+          i++
+        ) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        expect((await cli({ interactive: false }, "agent", "logs", "sh1")).out).toContain(
+          "from-sh1",
+        );
+        const asked: string[] = [];
+        const stopped = await cli({ interactive: true, asked }, "agent", "stop", "sh1");
+        expect(stopped.code, stopped.err).toBe(0);
+        expect(asked).toEqual([`Stop agent sh1 (${id})?`]);
+        expect(stopped.out).toContain(`${id}: stopped`);
+        const removed = await cli({ interactive: true, asked }, "agent", "rm", "sh1");
+        expect(removed.out).toBe(`${id}: removed\n`);
+        const again = await cli({ interactive: true }, "agent", "stop", "sh1");
+        expect(again.code).toBe(1);
+        expect(again.err).toContain('NOT_FOUND: no agent "sh1"');
+      },
+      30_000,
+    );
+  });
+
   test("tA_agent_ls_hints_the_resume_of_a_finished_agent", async () => {
     const sessions = new FakeSessions();
     const agent = { engine: "claude", session: "0f4b1c2d-0000-4000-8000-000000000001" };
@@ -817,7 +995,7 @@ describe("kodel agent exec --pty --attach (TASK-K6MA)", () => {
     ]);
     expect(lines.at(-1)).toBe("cc can be continued: kodel agent start --resume cc");
     expect(lines.find((line) => line.startsWith("a_000000001_stop"))).toMatch(
-      /cc\s+stopped\s+pty\s+claude 0f4b1c2d/,
+      /cc\s+stopped\s+pty\s+claude\s+0f4b1c2d-0000-4000-8000-000000000001$/,
     );
     // The JSON is the list and nothing else.
     const json = await cli({ interactive: false, ...seam }, "agent", "ls", "--json");
