@@ -3,8 +3,14 @@
  * An agent in a terminal of its own has a terminal, which a print worker never had, so "is there a
  * terminal" no longer tells an agent's command from a person's. This asks the process table instead:
  * the command is inside when one of its parent processes, up to the root, is the holder of a live
- * session of this state base or the process that holder started, or when the leader of the command's
- * terminal session is the process a holder started.
+ * session or the process that holder started, or when the leader of the command's terminal session is
+ * the process a holder started.
+ *
+ * A holder is known in two ways. By its own command line, which always ends with `HOLDER_MARKER`: this
+ * finds a session whatever state base its record was written under (a session's environment gets no
+ * `KODEL_*`, so a command inside one resolves the default base, not the `KODEL_STATE_DIR` of the shell
+ * that started it). And by the records of the state base the command resolves, which also name the
+ * process a holder started: this finds an agent whose holder is gone.
  *
  * A guard against mistakes, not a boundary: a process that leaves its session and gets itself a
  * terminal of its own passes, as it did before. Where the table cannot be read the answer is `unknown`
@@ -14,6 +20,7 @@ import { spawnSync } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { type ProcessIdentity, processIdentity, sameIdentity } from "./process-table";
+import { HOLDER_MARKER } from "./session-holder";
 import { readStatus } from "./session-records";
 
 export type InsideSession = "inside" | "outside" | "unknown";
@@ -26,6 +33,8 @@ export interface GuardRow {
   state: string;
   /** The terminal as `ps` names it; `?` or `??` for none. */
   tty: string;
+  /** The command line as `ps` prints it; absent when the table has none for the process. */
+  args?: string;
 }
 
 export interface GuardView {
@@ -49,20 +58,25 @@ export interface GuardSession {
 export const parseGuardRows = (table: string): GuardRow[] => {
   const rows: GuardRow[] = [];
   for (const line of table.split("\n")) {
-    const [pid, ppid, state, tty] = line.trim().split(/\s+/);
-    const p = Number(pid);
-    const pp = Number(ppid);
-    if (!Number.isInteger(p) || !Number.isInteger(pp) || state === undefined || tty === undefined) {
-      continue;
-    }
-    rows.push({ pid: p, ppid: pp, state, tty });
+    const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S+)(?:\s+(.*\S))?\s*$/.exec(line);
+    if (match === null) continue;
+    const [, pid, ppid, state, tty, args] = match;
+    if (state === undefined || tty === undefined) continue;
+    rows.push({
+      pid: Number(pid),
+      ppid: Number(ppid),
+      state,
+      tty,
+      ...(args === undefined ? {} : { args }),
+    });
   }
   return rows;
 };
 
 export const systemGuardView: GuardView = {
   rows() {
-    const result = spawnSync("ps", ["-A", "-o", "pid=,ppid=,stat=,tty="], {
+    // `-ww`: a command line is never cut to a width, so its last word is the real one.
+    const result = spawnSync("ps", ["-A", "-ww", "-o", "pid=,ppid=,stat=,tty=,args="], {
       encoding: "utf8",
       timeout: 2_000,
       env: { ...process.env, LC_ALL: "C" },
@@ -111,16 +125,24 @@ export function runningSessions(base: string, uid?: number): GuardSession[] {
 const NO_TERMINAL = ["?", "??", "-", ""];
 
 /**
- * The answer for the process `pid`. With no running session nothing is asked of the system: the answer
- * is `outside`. A pid that is a record's but whose identity differs is another process that got the
- * number; one whose identity cannot be read now counts as the record's (the guard refuses on a doubt).
+ * A process that runs as the holder of a session: the last word of its command line is the marker the
+ * intermediate process gives every holder. Nothing a session's child does can change the command line of
+ * its holder; a process that gives itself the marker only gets its own descendants refused.
+ */
+export const isHolderRow = (row: GuardRow | undefined): boolean =>
+  row?.args !== undefined && row.args.split(/\s+/).at(-1) === HOLDER_MARKER;
+
+/**
+ * The answer for the process `pid`. The table is read whether or not `sessions` names anybody: a holder
+ * is known by its command line too, so a session of another state base is found. A pid that is a
+ * record's but whose identity differs is another process that got the number; one whose identity cannot
+ * be read now counts as the record's (the guard refuses on a doubt).
  */
 export function insideSession(input: {
   pid: number;
   sessions: readonly GuardSession[];
   view?: GuardView;
 }): InsideSession {
-  if (input.sessions.length === 0) return "outside";
   const view = input.view ?? systemGuardView;
   const rows = view.rows();
   if (rows === undefined) return "unknown";
@@ -139,8 +161,9 @@ export function insideSession(input: {
   while (at > 1 && !seen.has(at)) {
     seen.add(at);
     const parent = at;
-    if (input.sessions.some((s) => is(s.holder, parent) || is(s.child, parent))) return "inside";
     const row = byPid.get(parent);
+    if (isHolderRow(row)) return "inside";
+    if (input.sessions.some((s) => is(s.holder, parent) || is(s.child, parent))) return "inside";
     if (row === undefined) break;
     at = row.ppid;
   }
@@ -148,16 +171,24 @@ export function insideSession(input: {
   if (!NO_TERMINAL.includes(self.tty)) {
     const leaders = rows.filter((row) => row.tty === self.tty && row.state.includes("s"));
     for (const leader of leaders) {
+      if (isHolderRow(byPid.get(leader.ppid))) return "inside";
       if (input.sessions.some((s) => is(s.child, leader.pid))) return "inside";
     }
   }
   return "outside";
 }
 
-/** The guard as the CLI asks it: for this process, against the sessions of the state base. Never throws. */
-export function insideSessionOf(base: string, pid: number = process.pid): InsideSession {
+/**
+ * The guard as the CLI asks it: for this process, against the holders that run on this machine and the
+ * sessions of the state base. Never throws.
+ */
+export function insideSessionOf(
+  base: string,
+  pid: number = process.pid,
+  view?: GuardView,
+): InsideSession {
   try {
-    return insideSession({ pid, sessions: runningSessions(base) });
+    return insideSession({ pid, sessions: runningSessions(base), ...(view ? { view } : {}) });
   } catch {
     return "unknown";
   }

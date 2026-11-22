@@ -406,7 +406,8 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
    *    session, has `KODEL_ENGINE` in its environment and is refused whatever its terminal is. A program
    *    that unsets it passes this one.
    * 2. The session: a command whose parent processes include the holder of a live kodel agent session,
-   *    or that runs on the terminal of one, is refused whatever its environment says. An agent in a
+   *    or that runs on the terminal of one, is refused whatever its environment says (a holder is known
+   *    by its own command line, so also when its record is under another `KODEL_STATE_DIR`). An agent in a
    *    terminal of its own has a terminal, so without this guard only the mark would stand between it
    *    and `kodel gate`. Where the process table cannot be read it says nothing and the other two decide.
    * 3. The terminal: no terminal on stdin and stdout, no decision. A script, and a command an agent runs

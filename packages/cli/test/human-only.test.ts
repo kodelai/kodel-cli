@@ -8,7 +8,13 @@ import { readdirSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type GuardView, insideSession } from "@kodel-ai/local";
+import {
+  type GuardView,
+  insideSession,
+  PipesSessionAdapter,
+  processIdentity,
+  systemGuardView,
+} from "@kodel-ai/local";
 import { AGENT_HUMAN_COMMANDS } from "../src/agent-commands";
 import { runCli } from "../src/cli";
 import { HUMAN_ONLY_COMMANDS, INSIDE_SESSION_REFUSAL } from "../src/human-only";
@@ -136,6 +142,54 @@ describe("t45 a person's commands inside an agent session", () => {
       expect(result.asked, command).toBe(0);
     }
   });
+
+  // Real processes and the real process table; skipped where the table cannot be read (a sandbox).
+  test.skipIf(processIdentity(process.pid) === undefined || systemGuardView.rows() === undefined)(
+    "t45_session_guard_finds_a_session_of_another_state_base",
+    async () => {
+      // The person uses `KODEL_STATE_DIR`: the session's record is written there. A session's
+      // environment gets no `KODEL_*`, so a `kodel gate` its agent runs resolves the default state base
+      // (under a home folder of this test's own), which holds no session at all. The mark is taken off
+      // (`env -u KODEL_ENGINE`), so only the session guard can speak of a session.
+      const main = join(import.meta.dir, "../src/main.ts");
+      const home = await realpath(await mkdtemp(join(tmpdir(), "kodel-human-home-")));
+      const adapter = new PipesSessionAdapter({
+        base: state,
+        root: dir,
+        holder: { exec: process.execPath, args: [main, "session-holder", "holder"] },
+        intermediate: { exec: process.execPath, args: [main, "session-holder"] },
+        pollMs: 50,
+      });
+      try {
+        const { id } = await adapter.start({
+          argv: [
+            "/usr/bin/env",
+            "-u",
+            "KODEL_ENGINE",
+            process.execPath,
+            main,
+            "--root",
+            dir,
+            ...(ARGS.gate ?? []),
+          ],
+          cwd: dir,
+          env: { HOME: home, PATH: process.env.PATH ?? "/usr/bin:/bin" },
+          inheritEnv: false,
+          timeoutMs: 60_000,
+        });
+        const done = await adapter.wait(id, { timeoutMs: 45_000 });
+        const { text } = await adapter.tail(id);
+        expect(text).toContain(INSIDE_SESSION_REFUSAL);
+        expect(text).not.toContain("the engine runs");
+        expect(done).toMatchObject({ state: "exited", exitCode: 1 });
+        // The default state base of that home holds no session: the record was not what refused.
+        expect(readdirSync(home)).not.toContain(".kodel");
+      } finally {
+        await rm(home, { recursive: true, force: true });
+      }
+    },
+    60_000,
+  );
 
   test("t45_session_guard_lets_a_person_through", async () => {
     // No session among the parents: each command goes on to what it did before (here: there is no such

@@ -12,10 +12,13 @@ import {
   type GuardView,
   insideSession,
   insideSessionOf,
+  isHolderRow,
   type ProcessIdentity,
   parseGuardRows,
   runningSessions,
 } from "../src";
+
+const HOLDER_MARKER = "--kodel-session-holder";
 
 const id = (value: string): ProcessIdentity => ({ method: "ps-lstart", value });
 
@@ -90,13 +93,50 @@ describe("the session guard's probe", () => {
       },
       identity: () => undefined,
     };
+    // With no record of a session the table is read all the same: a holder is known by its command line.
     expect(insideSession({ pid: 701, sessions: [], view: counting })).toBe("outside");
-    expect(asked).toBe(0);
+    expect(asked).toBe(1);
     // The table cannot be read, or does not hold the command itself: nothing is said.
     expect(insideSession({ pid: 701, sessions: [SESSION], view: view(undefined) })).toBe("unknown");
     expect(insideSession({ pid: 999, sessions: [SESSION], view: view(person, IDS) })).toBe(
       "unknown",
     );
+  });
+
+  test("tA_inside_session_probe_knows_a_holder_of_another_state_base", () => {
+    // The session was started under `KODEL_STATE_DIR`; its child's environment has no `KODEL_*`, so the
+    // command resolves the default state base, which has no record of it. The holder among its parents
+    // is known by the last word of its own command line.
+    const holder = `/usr/bin/node /opt/kodel/dist/kodel.js session-holder holder ${HOLDER_MARKER}`;
+    const rows: GuardRow[] = [
+      { pid: 1, ppid: 0, state: "Ss", tty: "??", args: "/sbin/launchd" },
+      { pid: HOLDER, ppid: 1, state: "S", tty: "??", args: holder },
+      { pid: AGENT, ppid: HOLDER, state: "Ss+", tty: "ttys009", args: "claude --session-id x" },
+      { pid: 600, ppid: AGENT, state: "S", tty: "??", args: "zsh -c kodel gate approve r_1" },
+      { pid: 601, ppid: 600, state: "S", tty: "??", args: "node kodel.js gate approve r_1" },
+      // A command that left its parents but runs on the session's terminal.
+      { pid: 800, ppid: 1, state: "S+", tty: "ttys009", args: "node kodel.js gate approve r_1" },
+      // A person's shell, and a person's command that only names the marker in its arguments.
+      { pid: 700, ppid: 1, state: "Ss", tty: "ttys001", args: "-zsh" },
+      { pid: 701, ppid: 700, state: "S+", tty: "ttys001", args: "node kodel.js gate approve r_1" },
+      { pid: 702, ppid: 700, state: "S+", tty: "ttys001", args: `grep -r -- ${HOLDER_MARKER} src` },
+      { pid: 703, ppid: 702, state: "S+", tty: "ttys001", args: "node kodel.js gate approve r_1" },
+    ];
+    const ask = (pid: number) => insideSession({ pid, sessions: [], view: view(rows) });
+    expect(ask(600)).toBe("inside");
+    expect(ask(601)).toBe("inside");
+    expect(ask(800)).toBe("inside");
+    expect(ask(701)).toBe("outside");
+    expect(ask(703)).toBe("outside");
+    // A table without command lines (the older shape) knows a holder by the records alone.
+    const bare = rows.map(({ args: _args, ...row }) => row);
+    expect(insideSession({ pid: 601, sessions: [], view: view(bare) })).toBe("outside");
+    expect(insideSession({ pid: 601, sessions: [SESSION], view: view(bare, IDS) })).toBe("inside");
+    // Still nothing is said where the table cannot be read.
+    expect(insideSession({ pid: 601, sessions: [], view: view(undefined) })).toBe("unknown");
+    expect(isHolderRow({ pid: 2, ppid: 1, state: "S", tty: "??", args: HOLDER_MARKER })).toBe(true);
+    expect(isHolderRow({ pid: 2, ppid: 1, state: "S", tty: "??" })).toBe(false);
+    expect(isHolderRow(undefined)).toBe(false);
   });
 
   test("tA_inside_session_probe_reads_the_terminal_session", () => {
@@ -187,11 +227,24 @@ describe("the session guard's probe", () => {
     expect(found.map((s) => s.child?.pid).sort()).toEqual([AGENT, 530]);
     // A state base with no sessions, and one that is not there: nobody.
     expect(runningSessions(join(base, "none"))).toEqual([]);
-    // This test's own process is in none of them.
-    expect(insideSessionOf(join(base, "none"))).toBe("outside");
-    expect(parseGuardRows("  12   1 Ss   ttys001\n 13 12 S+ ??\nnot a row\n")).toEqual([
+    // A person's command is in none of them; a command under the recorded holder is, by the files.
+    const rows = table([
+      [1, 0, "Ss", "??"],
+      [HOLDER, 1, "S", "??"],
+      [600, HOLDER, "S", "??"],
+      [700, 1, "Ss", "ttys001"],
+    ]);
+    expect(insideSessionOf(join(base, "none"), 700, view(rows, IDS))).toBe("outside");
+    expect(insideSessionOf(base, 700, view(rows, IDS))).toBe("outside");
+    expect(insideSessionOf(base, 600, view(rows, IDS))).toBe("inside");
+    expect(insideSessionOf(join(base, "none"), 600, view(rows, IDS))).toBe("outside");
+    expect(
+      parseGuardRows(
+        "  12   1 Ss   ttys001\n 13 12 S+ ??   node  a b  --kodel-session-holder \nnot a row\n",
+      ),
+    ).toEqual([
       { pid: 12, ppid: 1, state: "Ss", tty: "ttys001" },
-      { pid: 13, ppid: 12, state: "S+", tty: "??" },
+      { pid: 13, ppid: 12, state: "S+", tty: "??", args: "node  a b  --kodel-session-holder" },
     ]);
   });
 });
