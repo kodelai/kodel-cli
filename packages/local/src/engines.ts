@@ -56,6 +56,71 @@ const envName = z
     if (why !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: why });
   });
 
+/** How a background worker of a run is started: in a terminal of its own, or as a print process that ends at a wait. */
+export const WORKER_MECHANISMS = ["terminal", "print"] as const;
+export type WorkerMechanism = (typeof WORKER_MECHANISMS)[number];
+
+/**
+ * The engines that can be a worker (T-45), and the flags the person's `terminal.command` may add for each.
+ * Everything else on that command is refused: it is an argv kodel starts unattended, with its own flags
+ * (the permission mode, the tool lists, the one MCP server) beside it.
+ */
+export const WORKER_ENGINES: Readonly<Record<string, { terminalFlags: readonly string[] }>> = {
+  claude: { terminalFlags: ["--model", "--effort", "--fallback-model"] },
+};
+
+/** What a profile says about a worker: the two keys only a worker engine may carry. */
+export interface WorkerSettings {
+  worker?: WorkerMechanism;
+  terminal?: { command?: readonly string[] };
+}
+
+export interface TerminalCommand {
+  program: string;
+  pairs: { flag: string; value: string }[];
+}
+
+/**
+ * Reads a `terminal.command`: the program, then pairs of an allowed flag and its value (`--flag value`
+ * or `--flag=value`). A bare word, a value that begins with `-`, and any other flag (a short form too)
+ * are refused by name.
+ */
+export function parseTerminalCommand(
+  command: readonly string[],
+  allowed: readonly string[],
+): { ok: true; command: TerminalCommand } | { ok: false; problem: string } {
+  const refuse = (problem: string) => ({ ok: false as const, problem });
+  const program = command[0];
+  if (program === undefined || program === "") return refuse("the program is missing");
+  if (program.startsWith("-")) {
+    return refuse(`the first element is the program, and "${program}" is a flag`);
+  }
+  const may = `it may add ${allowed.length === 0 ? "no flag" : allowed.join(", ")}`;
+  const pairs: TerminalCommand["pairs"] = [];
+  for (let i = 1; i < command.length; i += 1) {
+    const element = command[i] ?? "";
+    if (!element.startsWith("-")) {
+      return refuse(`"${element}" is a bare word: only a flag and its value follow the program`);
+    }
+    const eq = element.startsWith("--") ? element.indexOf("=") : -1;
+    const flag = eq < 0 ? element : element.slice(0, eq);
+    if (!allowed.includes(flag)) return refuse(`the flag "${flag}" is not allowed (${may})`);
+    let value: string | undefined;
+    if (eq < 0) {
+      i += 1;
+      value = command[i];
+    } else {
+      value = element.slice(eq + 1);
+    }
+    if (value === undefined || value === "") return refuse(`the flag "${flag}" has no value`);
+    if (value.startsWith("-")) {
+      return refuse(`the value of "${flag}" ("${value}") begins with -`);
+    }
+    pairs.push({ flag, value });
+  }
+  return { ok: true, command: { program, pairs } };
+}
+
 export const engineProfileSchema = z
   .object({
     /** The program and its fixed arguments; the prompt comes last, as one argument after `--`. */

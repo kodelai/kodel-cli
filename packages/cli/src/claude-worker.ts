@@ -3,15 +3,23 @@
  * (`--session-id` for the first session, `--resume` for the one after a decision), the shape of the
  * `--mcp-config` that points it at its own `kodel mcp --no-decisions --no-wait-hint` (or, for a worker
  * that stays alive at a wait, `--wait-command <the command it watches its run with>`), the two tool
- * lists Claude Code enforces, the auth probe, the two prompts and the environment markers. To put
- * another agent behind the TUI, replace this file and `claude-stream.ts`; `WorkerLauncher`, the TUI
- * and `kodel mcp`'s two flags do not know which agent runs.
+ * lists Claude Code enforces, the auth probe, the two prompts and the environment markers. In a terminal
+ * of its own (T-45) the same program runs without `-p`, its prompt last. All of it is reached through
+ * `claudeProfile`, the `claude` entry of `agent-profiles.ts`; another agent is another entry there, and
+ * `WorkerLauncher`, the TUI and `kodel mcp`'s flags do not know which agent runs.
  */
 import { sep } from "node:path";
-import { projectPlace, sessionEnv } from "@kodel-ai/local";
+import {
+  parseTerminalCommand,
+  projectPlace,
+  sessionEnv,
+  WORKER_ENGINES,
+  type WorkerMechanism,
+} from "@kodel-ai/local";
 import { type RedactRule, redactText, validateSpec } from "@kodel-ai/pipeline-core";
 import { AGENT_HUMAN_COMMANDS } from "./agent-commands";
-import { sessionIdOf as tailSessionId } from "./claude-stream";
+import type { AgentProfile, ProfileSessionArgv, ProfileWorkerArgv } from "./agent-profiles";
+import { digest, sessionIdOf as tailSessionId } from "./claude-stream";
 import { plain } from "./plain";
 import { WORKER_TERMINAL_TIMEOUT_MS, type WorkerDecision } from "./worker-launcher";
 
@@ -252,6 +260,146 @@ export function workerArgv(input: ArgvInput): string[] {
   ];
 }
 
+const CLAUDE = "claude";
+const TERMINAL_FLAGS: readonly string[] = WORKER_ENGINES[CLAUDE]?.terminalFlags ?? [];
+
+/**
+ * A prompt as an interactive `claude` takes it: with a newline at its end. A one-word prompt that names a
+ * subcommand (`doctor`, `mcp`) is otherwise run as that subcommand, also after `--` (claude 2.1.330).
+ */
+const promptArgument = (prompt: string) => (prompt.endsWith("\n") ? prompt : `${prompt}\n`);
+
+/** A `terminal.command` as it was written (the program, the person's flags); throws on one the profile does not take. */
+function terminalCommand(command: readonly string[] | undefined): string[] {
+  if (command === undefined) return [CLAUDE];
+  const parsed = parseTerminalCommand(command, TERMINAL_FLAGS);
+  if (!parsed.ok) throw new Error(`terminal.command: ${parsed.problem}`);
+  return [...command];
+}
+
+const conversation = (input: { sessionId?: string; resume?: string }): string[] =>
+  input.resume !== undefined
+    ? ["--resume", input.resume]
+    : input.sessionId !== undefined
+      ? ["--session-id", input.sessionId]
+      : [];
+
+/**
+ * The argv of a worker in a terminal of its own: interactive (no `-p`), the same server and lists as the
+ * print worker, the person's flags, and the prompt last, after `--`.
+ */
+export function terminalWorkerArgv(input: Omit<ProfileWorkerArgv, "mechanism">): string[] {
+  const [program = CLAUDE, ...flags] = terminalCommand(input.command);
+  return [
+    program,
+    ...conversation(input),
+    "--mcp-config",
+    input.mcpConfig,
+    "--strict-mcp-config",
+    "--permission-mode",
+    "dontAsk",
+    "--allowedTools",
+    input.allowed.join(","),
+    "--disallowedTools",
+    input.denied.join(","),
+    ...flags,
+    "--",
+    promptArgument(input.prompt),
+  ];
+}
+
+/** The argv of a session a person starts for themselves: the program, the conversation, the prompt. */
+export function sessionArgv(input: ProfileSessionArgv): string[] {
+  return [
+    ...terminalCommand(input.command),
+    ...conversation(input),
+    ...(input.prompt === undefined ? [] : ["--", promptArgument(input.prompt)]),
+  ];
+}
+
+/** kodel's own elements of a worker argv: how many values follow, the one value allowed, and whose it is. */
+const FIXED: Readonly<
+  Record<string, { values: 0 | 1; only?: string | RegExp; mechanism?: WorkerMechanism }>
+> = {
+  "-p": { values: 1, mechanism: "print" },
+  "--output-format": { values: 1, only: "stream-json", mechanism: "print" },
+  "--verbose": { values: 0, mechanism: "print" },
+  "--session-id": { values: 1, only: UUID },
+  "--resume": { values: 1, only: UUID },
+  "--mcp-config": { values: 1 },
+  "--strict-mcp-config": { values: 0 },
+  "--permission-mode": { values: 1, only: "dontAsk" },
+  "--allowedTools": { values: 1 },
+  "--disallowedTools": { values: 1 },
+};
+
+/** What every worker argv holds, whatever else it has: without one of these the lists do not hold. */
+const REQUIRED = ["--mcp-config", "--strict-mcp-config", "--permission-mode", "--disallowedTools"];
+
+/**
+ * Reads a built worker argv back, before the start: why it must not be started, or nothing. Every
+ * element is the program, one of kodel's own fixed elements with its value, or (in a terminal) a flag
+ * `terminal.command` may add with its value, and the prompt alone after `--`.
+ */
+export function workerArgvProblem(
+  argv: readonly string[],
+  expected: { mechanism: WorkerMechanism; program: string },
+): string | undefined {
+  const at = (i: number) => `element ${i} ("${argv[i] ?? ""}")`;
+  if (argv[0] !== expected.program) return `${at(0)} is not the program ${expected.program}`;
+  const seen = new Set<string>();
+  let prompt = false;
+  let i = 1;
+  while (i < argv.length) {
+    const element = argv[i] ?? "";
+    if (element === "--") {
+      if (expected.mechanism !== "terminal") return `${at(i)} belongs to a terminal worker`;
+      const last = argv[i + 1];
+      if (last === undefined || i + 2 !== argv.length) {
+        return "exactly one element, the prompt, follows --";
+      }
+      if (!last.endsWith("\n")) return "the prompt does not end with a newline";
+      prompt = true;
+      break;
+    }
+    const fixed = Object.hasOwn(FIXED, element) ? FIXED[element] : undefined;
+    if (fixed !== undefined) {
+      if (fixed.mechanism !== undefined && fixed.mechanism !== expected.mechanism) {
+        return `${at(i)} belongs to a ${fixed.mechanism} worker`;
+      }
+      if (seen.has(element)) return `${at(i)} is there twice`;
+      seen.add(element);
+      if (fixed.values === 1) {
+        const value = argv[i + 1];
+        if (value === undefined) return `${at(i)} has no value`;
+        const fits =
+          fixed.only === undefined ||
+          (typeof fixed.only === "string" ? value === fixed.only : fixed.only.test(value));
+        if (!fits) return `${at(i + 1)} is not a value kodel gives ${element}`;
+        if (element === "-p") prompt = true;
+      }
+      i += 1 + fixed.values;
+      continue;
+    }
+    if (expected.mechanism === "terminal") {
+      // One pair at a time, by the grammar of the config: the rule that let it in reads it back.
+      const eq = element.startsWith("--") ? element.indexOf("=") : -1;
+      const pair = eq < 0 ? argv.slice(i, i + 2) : [element];
+      if (parseTerminalCommand([expected.program, ...pair], TERMINAL_FLAGS).ok) {
+        i += pair.length;
+        continue;
+      }
+    }
+    return `${at(i)} is not the program, an element of kodel's own, or an allowed flag with its value`;
+  }
+  if (!prompt) return "the prompt is missing";
+  if (seen.has("--session-id") && seen.has("--resume")) {
+    return "both --session-id and --resume are there";
+  }
+  const missing = REQUIRED.find((flag) => !seen.has(flag));
+  return missing === undefined ? undefined : `${missing} is missing`;
+}
+
 /** The first prompt: the run, the title and where to work. The run holds the task text, so the body is never argv. */
 export function workerPrompt(runId: string, title: string, workdir: string): string {
   const name = plain(redactText(title)).replace(/\s+/g, " ").trim();
@@ -403,3 +551,30 @@ export async function authProbe(
     return { known: false };
   }
 }
+
+/** The `claude` entry of the profile table (`agent-profiles.ts`), written against claude 2.1.330. */
+export const claudeProfile: AgentProfile = {
+  name: CLAUDE,
+  program: CLAUDE,
+  terminalFlags: TERMINAL_FLAGS,
+  // An idle session, and one stopped at a dialog of its own, write nothing (spike criterion 7).
+  idleWrites: false,
+  // `--resume` continues a print conversation in a terminal and the reverse (spike criterion 9).
+  resumeAcrossModes: true,
+  wait: "background",
+  workerArgv: ({ mechanism, ...input }) =>
+    mechanism === "terminal" ? terminalWorkerArgv(input) : workerArgv(input),
+  sessionArgv,
+  workerArgvProblem,
+  mcpConfig: workerMcpConfig,
+  waitCommand: workerWaitCommand,
+  waitCommandProblem,
+  allowlist: workerAllowlist,
+  denylist: workerDenylist,
+  env: workerEnv,
+  startPrompt: workerPrompt,
+  resumePrompt,
+  sessionIdOf: (records) => sessionIdOf(records),
+  authProbe,
+  digest,
+};
