@@ -20,8 +20,16 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, join } from "node:path";
 import { agentProfile } from "../../packages/cli/src/agent-profiles";
 import { workerNameOf } from "../../packages/cli/src/worker-launcher";
 import {
@@ -82,9 +90,9 @@ const CONFIG = [
   "",
 ].join("\n");
 
+const PROJECT_NAME = "terminal-worker-project";
 const PROJECT =
-  process.env.KODEL_AGENT_TRUSTED_DIR ??
-  join(REPO_ROOT, ".kodel", "worktrees", "terminal-worker-project");
+  process.env.KODEL_AGENT_TRUSTED_DIR ?? join(REPO_ROOT, ".kodel", "worktrees", PROJECT_NAME);
 /** The question `claude` asks in a folder it does not trust, as a terminal's tail holds it (no spaces kept). */
 const TRUST_QUESTION = /trust\s*this\s*folder/i;
 
@@ -98,6 +106,18 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 async function setup() {
   // A fixed path a person trusted once, built anew; a state base of its own, short enough for a socket.
   const dir = PROJECT;
+  // The folder is removed whole: never one that is not this test's (a `KODEL_AGENT_TRUSTED_DIR` that
+  // names something else by mistake).
+  if (
+    existsSync(dir) &&
+    readdirSync(dir).length > 0 &&
+    basename(dir) !== PROJECT_NAME &&
+    !existsSync(join(dir, ".kodel", "pipelines", "twogates.yaml"))
+  ) {
+    throw new Error(
+      `KODEL_AGENT_TRUSTED_DIR (${dir}) is not a folder of this test: name it ${PROJECT_NAME}, or give an empty or absent path`,
+    );
+  }
   rmSync(dir, { recursive: true, force: true });
   const stateDir = shortDir("kd-tw-");
   mkdirSync(join(dir, ".kodel", "pipelines"), { recursive: true });

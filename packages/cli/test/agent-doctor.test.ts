@@ -60,6 +60,7 @@ const CHECK_LINE = /^( *)([✓✗?]) (.*?)(?: {2,}(.*))?$/;
 async function doctor(setup: Setup = {}) {
   let out = "";
   const execs: string[][] = [];
+  const lookups: string[] = [];
   const reads: string[] = [];
   const preflights: PreflightInput[] = [];
   const exec: Exec = async (file, args) => {
@@ -94,7 +95,10 @@ async function doctor(setup: Setup = {}) {
     },
     platform: setup.platform ?? "darwin",
     ptyProbe: () => setup.pty ?? { ok: true },
-    which: async () => ("claude" in setup ? setup.claude : "/usr/bin/claude"),
+    which: async (name) => {
+      lookups.push(name);
+      return "claude" in setup ? setup.claude : "/usr/bin/claude";
+    },
     exec,
     readText: async (path) => {
       reads.push(path);
@@ -155,7 +159,7 @@ async function doctor(setup: Setup = {}) {
     return found.value === undefined ? found.answer : `${found.answer} (${found.value})`;
   };
   const fix = (check: string) => row(check)?.fix;
-  return { ok, out, lines, checks, row, answer, fix, execs, reads, preflights };
+  return { ok, out, lines, checks, row, answer, fix, execs, lookups, reads, preflights };
 }
 
 describe("t45 kodel agent doctor: the seven checks", () => {
@@ -243,7 +247,11 @@ describe("t45 kodel agent doctor: the seven checks", () => {
     const bare = await doctor({
       engines: { state: "differs", engines: { claude: { terminal: { command: ["planted"] } } } },
     });
-    expect(bare.execs.some((argv) => argv[0] === "planted")).toBe(false);
+    expect(bare.lookups).toContain("planted");
+    expect(bare.execs.some((argv) => argv[0] === "planted" || argv[0] === "/usr/bin/planted")).toBe(
+      false,
+    );
+    expect(bare.execs.flat()).not.toContain("planted");
     // With the profile's own program not on PATH nothing at all is run.
     const none = await doctor({ engines: states[0] as EnginesAgainstHead, claude: undefined });
     expect(none.execs).toEqual([]);

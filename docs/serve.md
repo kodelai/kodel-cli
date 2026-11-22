@@ -273,6 +273,11 @@ its next refresh, for a run of this checkout whose state it read as ended; with 
 its 7-day timeout. A print worker is left to print its last line and exit. An open run, and a run that cannot
 be read, are never finished.
 
+An agent that died can leave a process behind in its group, most often the `kodel wait` it started in the
+background. While one is there the session counts as having a live process (`child_alive`, and `agent ls`
+says so): the run is not noted as left by its agent and nothing resumes it, until you run `kodel agent stop
+kw-<run>` or the process ends by itself (a worker's `kodel wait` gives up at its 7-day timeout).
+
 ## Tasks an agent made or changed
 
 A task an agent made with `task_create`, or whose title, body, status, priority or parent an agent changed

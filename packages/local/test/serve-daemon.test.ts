@@ -2392,7 +2392,10 @@ describe("kodel serve with workers that stay alive at a wait (T-45)", () => {
     expect(said[0]).toContain("nothing is typed for you");
     expect(resumes(launcher)).toEqual([]);
     expect(finishes(launcher)).toEqual([]);
-    expect(launcher.calls.map((c) => c.kind)).not.toContain("stop");
+    // Besides its looks at the records the daemon did one thing in all: the start.
+    expect(
+      launcher.calls.map((c) => c.kind).filter((k) => k !== "statuses" && k !== "preflight"),
+    ).toEqual(["start"]);
     // It goes on at last.
     await launcher.wake(runId);
     expect((await w.state(runId)).status).toBe("completed");

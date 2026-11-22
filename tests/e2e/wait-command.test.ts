@@ -182,7 +182,8 @@ describe("t45 the wait command on the built binary", () => {
         encoding: "utf8",
         timeout: 30_000,
       });
-      expect(bare.status).not.toBe(0);
+      expect(bare.status).toBe(1);
+      expect(bare.stderr).toContain(`there is no run "${runId}"`);
       expect(`${bare.stdout}${bare.stderr}`).not.toContain("Call pipeline_next_step");
 
       const watching = spawn("sh", ["-c", spelled as string], { cwd: root, env: agentEnv });

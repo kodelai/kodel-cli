@@ -298,7 +298,7 @@ most `max_runs`); the probes read a file of another product (`~/.claude.json`): 
 server reaches a live worker only when it is stopped and resumed (said in `docs/serve.md`; neither `doctor`
 nor `--status` shows a worker's build); the process table is read once for a listing, not once for a
 record, and only when the listing holds a record whose holder went away without recording its child's end
-(one `ps -A -o pid=,pgid=,lstart=`, the
+(one `ps -A -o pid=,pgid=,stat=,lstart=`, the
 way `descendantsOf` reads the table on macOS and Linux today); `finish` waits for the session's end under
 the start lock (about 8 s at most, `KILL_GRACE_MS + 3 s`, against a waiter's 15 s), so the daemon and the
 TUI plan one `finish` a cycle and the rest follow in the next ones.
@@ -319,7 +319,7 @@ The mechanism and the profiles (`cli/test/worker-launcher.test.ts`, `cli/test/ag
 | `worker:` or `terminal:` on a profile not named `claude` is refused when the config is read, and the message names the follow-up task; a step profile of another name with neither key loads as today | `t45_only_claude_is_a_worker` (`local/test/config-engines.test.ts`) |
 | A machine where `claude -p` works today and no terminal runs: the refusal names the line to commit (`engines: { claude: { worker: print } }`), and with it the start is today's | `t45_refusal_spells_the_migration_line` |
 | `decisions.dialog` on refuses a terminal worker and `agent start --pipeline` | `t45_dialog_still_refuses_every_worker` |
-| Claude terminal argv: prompt first, no `-p`, `--session-id`, `--mcp-config` + `--strict-mcp-config`, `dontAsk`, both lists | `t45_claude_terminal_argv` |
+| Claude terminal argv: prompt last, after `--`, no `-p`, `--session-id`, `--mcp-config` + `--strict-mcp-config`, `dontAsk`, both lists | `t45_claude_terminal_argv` |
 | No decision tool allowed, both denied; every command the CLI marks human-only (read from its registry, the new `agent start`, `agent prune`, `exec --attach` among them) is covered by a deny pattern in plain and `env X=…` spellings; no pattern matches an `mcp__kodel__*` tool or `git commit -m 'fix mcp'` in a worktree path | `t45_worker_lists_refuse_decisions`, `t45_every_human_only_command_is_denied` (a table from the registry), `t45_deny_list_refuses_no_honest_command` |
 | A `kodel mcp` started with the claude profile's exact server arguments, `decisions.agent.gate` on, refuses both decision tools | `t45_worker_server_serves_no_decision_tool` (`cli/test/mcp-no-decisions.test.ts`) |
 | The specs from the TUI path, the daemon path and `agent start --pipeline` are deep-equal for one run; each takes the `claude` profile by name from the one table; no other caller of `adapter.start` for a `kw-` name exists; `serve.start[].engine` is an unknown key and `agent start --engine` an unknown flag | `t45_every_starter_builds_the_same_spec`, `t45_one_caller_starts_workers`, `t45_engine_choice_is_not_built` |
@@ -527,7 +527,7 @@ there, else on your machine before a release (`tests/README.md`).
    `process-table.ts` (`groupMembers(pgid, since)`, the table injected for tests):
    - only for a record whose holder is gone and did not record its child's end; a holder that recorded the
      end (an exit, a stop, its own timeout) answers as today;
-   - the table is read once for a listing (`ps -A -o pid=,pgid=,lstart=` on macOS and Linux), and only when
+   - the table is read once for a listing (`ps -A -o pid=,pgid=,stat=,lstart=` on macOS and Linux), and only when
      such a record is in it; a table that cannot be read gives "not known", which is today's rule (the
      recorded child alone) and a flag on the listing that the daemon logs once;
    - no member counts when the machine's boot time is later than the record's start (Linux `/proc/stat`
@@ -724,15 +724,18 @@ there, else on your machine before a release (`tests/README.md`).
 `packages/cli/src/claude-worker.ts`, `agent-profiles.ts` (new),
 `worker-launcher.ts`, `worker-launcher-session.ts`, `worker-factory.ts`, `agent-commands.ts`, `cli.ts` (the
 `mcp` flag, wiring), `mcp-server.ts`, `serve-command.ts`, `tui/view.ts`, `tui/run.ts`, `tui/worker-start.ts`,
-`tui/worker-resume.ts`, `tui/tabs.ts`; `packages/pipeline-core/src/session.ts`, `sessions/records.ts`,
+`tui/worker-resume.ts`, `tui/worker-open.ts` (new), `tui/tasks.ts`, `agent-start.ts` (new), `agent-prune.ts`
+(new), `agent-doctor.ts` (new), `human-only.ts`, `main.ts`, `attach-client.ts`;
+`packages/pipeline-core/src/session.ts`, `sessions/records.ts`, `service.ts`,
 `serve/resume.ts`, `serve/plan.ts`, `serve/record.ts`, `next-step.ts`, `mcp/tools.ts`; `fixtures/serve-formats/`; `packages/local/src/session-pipes.ts`
 (`stop`, `list`), `session-records.ts` (the `agent` file, `list`, `takeName`), `process-table.ts` (the group,
-the boot time), `session-guard.ts` (new), `serve/daemon.ts`, `engines.ts`; `cli/test/human-only.test.ts`,
+the boot time), `session-guard.ts` (new), `serve/daemon.ts`, `engines.ts`, `engines-head.ts` (new), `host.ts`;
+`cli/test/human-only.test.ts`,
 `cli/test/docs.test.ts` (new);
 `packages/testkit/src/`; `scripts/take-session-fixtures.mjs`, `fixtures/session-formats/v1/`; the tests named;
 `spikes/ekav-m0/`; the docs of step 12, `AGENTS.md`.
 
-Not touched: `session-holder.ts`, `session-pty.ts`, `attach-server.ts`, `attach-client.ts`, the run codecs,
+Not touched: `session-holder.ts`, `session-pty.ts`, `attach-server.ts`, `tui/tabs.ts`, the run codecs,
 `init/agents.ts`, the `serve` block's schema (`local/src/config.ts`), `.mcp.json`, `.claude/settings*.json`,
 `.kodel/pipelines/`.
 

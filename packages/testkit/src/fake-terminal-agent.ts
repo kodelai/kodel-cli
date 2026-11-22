@@ -35,8 +35,9 @@ export interface FakeTerminalAgentOptions {
   /** It ignores the hangup of its terminal and lives on when its holder is killed. */
   ignoreHangup?: boolean;
   /**
-   * The program is a shell that starts the agent behind it, in its own process group, and waits: the
-   * holder's child is the wrapper, and the agent has no terminal to read.
+   * The program is a shell that starts the agent behind it and waits: the holder's child is the wrapper,
+   * and the agent, a background job of a shell without job control, stays in the wrapper's process group
+   * and does not read the terminal.
    */
   wrapper?: boolean;
   /** It enters the alternate screen and turns bracketed paste on at its start, and leaves both at `quit`. */

@@ -3041,6 +3041,28 @@ describe("t45 the o key, the words of a terminal worker and the TUI's own finish
       "Could not stop the agent of r_1 (the run is over): the holder does not answer",
     );
     await bad.quit();
+    // A finish that ends nothing and fails with nothing (the lock was held) does not hold up the others:
+    // every other ended run has its turn before that one is asked again.
+    const stuck = new FakeLauncher();
+    for (const id of ["r_1", "r_2", "r_3"]) stuck.statusMap.set(id, terminal(id));
+    const asked: string[] = [];
+    const held = loop(
+      ["r_1", "r_2", "r_3"].map((id) => session(id, "done")),
+      stuck,
+      {
+        finishWorker: async (runId) => {
+          asked.push(runId);
+          if (runId !== "r_1") await stuck.finish(runId);
+        },
+      },
+    );
+    await wait(500);
+    expect([...stuck.finished].sort()).toEqual(["r_2", "r_3"]);
+    expect(asked.slice(0, 3)).toEqual(["r_1", "r_2", "r_3"]);
+    // it is asked again later, and nothing is said of it
+    expect(asked.filter((id) => id === "r_1").length).toBeGreaterThan(1);
+    expect(held.t.last()).not.toContain("Could not stop the agent");
+    await held.quit();
   });
 
   test("t45_tui_never_finishes_an_unreadable_or_foreign_run", async () => {

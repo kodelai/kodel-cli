@@ -255,9 +255,11 @@ edits `.kodel/tasks/*.yaml` with a shell, an MCP server of an older build, or ta
   `Edit`, `Glob`, `Grep`, `Bash`, `Agent`) and a deny list (the two decision tools; `Bash` patterns for `gate`,
   `ack`, `seal`, `resume`, `migrate`, `pipeline changes apply|discard|restore`, `pipeline proposals
   apply|discard`, `task approve` and `agent stop|rm|exec|forget-name|attach|start|prune` in the three spellings
-  of the binary, and `wait r_*` for a print agent; `Edit`/`Write` of
+  of the binary, and `wait r_*` for a print agent; `Edit` of
   `.kodel/runs`, `.kodel/pipelines`, `.kodel/tasks`, `.kodel/config.yaml`, `.kodel/proposals`, `.mcp.json` and
-  `.claude/settings*.json`, relative and absolute, and of the state base). Both lists live in
+  `.claude/settings*.json`, relative and absolute, and of the state base: a terminal agent gets the `Edit(...)`
+  rules alone, which cover every file-editing tool, and a print agent the same paths as `Write(...)` rules
+  besides). Both lists live in
   `packages/cli/src/claude-worker.ts`. A substring pattern can refuse an innocent command that names `kodel`
   and a verb (`grep gate_decided` after a `cd` into a worktree), as the repository's own settings do. The
   agent acts with **your** git and GitHub identity (`git commit -s` in your name, `gh` with your credentials)

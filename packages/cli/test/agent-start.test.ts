@@ -504,6 +504,38 @@ describe("t45 kodel agent start --pipeline", () => {
     // The launcher was given the block the command read (here: the committed one).
     expect(seen.engines.every((e) => e?.ok === true)).toBe(true);
 
+    // A worker whose holder still opens its terminal is asked again, not given up on at the first answer.
+    const slow = new AttachableScripted();
+    const real = sessionLauncher(slow, "terminal");
+    let asks = 0;
+    const late = await start(
+      {
+        sessions: slow,
+        launcher: (engines) => {
+          const base = real(engines);
+          return {
+            ...base,
+            statuses: async (ids) => {
+              const map = await base.statuses(ids);
+              if (asks < 3) for (const [id, w] of map) map.set(id, { ...w, state: "starting" });
+              return map;
+            },
+            attachable: async (runId) =>
+              ++asks < 3
+                ? { ok: false, reason: "its terminal is not open yet" }
+                : base.attachable(runId),
+          };
+        },
+      },
+      "--pipeline",
+      "one",
+      "Add slowly",
+    );
+    expect(late.code, late.err).toBe(0);
+    expect(asks).toBe(3);
+    expect(late.out).not.toContain("not attached");
+    expect(slow.attached).toEqual([slow.only().id]);
+
     const bg = new AttachableScripted();
     const detached = await start(
       { sessions: bg, launcher: sessionLauncher(bg, "terminal") },

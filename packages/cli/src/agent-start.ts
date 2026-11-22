@@ -47,6 +47,10 @@ export interface AgentStartInput {
   attachStarted(sessions: SessionAdapter, started: StartResult): Promise<void>;
 }
 
+/** How long a worker that is still `starting` is asked again whether a terminal can be connected to it. */
+const ATTACH_TRIES = 30;
+const ATTACH_RETRY_MS = 100;
+
 /** How many characters of a prompt name its run to the agent. */
 const TITLE_CHARS = 80;
 
@@ -299,7 +303,14 @@ async function startForPipeline(
   if (!result.ok || result.runId === undefined) ctx.fail(result.message);
   ctx.out(`${plain(result.message)}\n`);
   const name = result.agent ?? `kw-${result.runId}`;
-  const open = await launcher.attachable(result.runId);
+  let open = await launcher.attachable(result.runId);
+  // A holder that still opens its terminal reads `starting` and cannot be reached yet: asked again for a moment.
+  for (let i = 0; !open.ok && i < ATTACH_TRIES; i++) {
+    const status = (await launcher.statuses([result.runId])).get(result.runId);
+    if (status?.state !== "starting") break;
+    await new Promise((resolve) => setTimeout(resolve, ATTACH_RETRY_MS));
+    open = await launcher.attachable(result.runId);
+  }
   if (!open.ok) {
     // A print worker has no terminal; nothing is attached and the reason says where its output is.
     ctx.out(`not attached: ${plain(open.reason)}\n`);

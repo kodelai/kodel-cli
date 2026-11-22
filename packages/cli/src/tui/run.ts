@@ -384,21 +384,37 @@ export async function runTui(
   // failure told once and not tried again from here.
   let finishing = false;
   const finishFailed = new Set<string>();
+  // A finish may end nothing without failing (the start lock was held, the state read again was not
+  // an ended one): the run stands aside until every other ended run had its turn, so it blocks none.
+  const finishAsked = new Set<string>();
   const finishEnded = () => {
     const end = options.finishWorker;
     if (!end || finishing || isAway) return;
-    const known = Object.fromEntries(
-      Object.entries(model.workers).filter(([runId]) => !finishFailed.has(runId)),
-    );
-    const runId = finishOf(model.sessions, known, model.serve);
+    const pick = () =>
+      finishOf(
+        model.sessions,
+        Object.fromEntries(
+          Object.entries(model.workers).filter(
+            ([runId]) => !finishFailed.has(runId) && !finishAsked.has(runId),
+          ),
+        ),
+        model.serve,
+      );
+    let runId = pick();
+    if (runId === undefined && finishAsked.size > 0) {
+      finishAsked.clear();
+      runId = pick();
+    }
     if (runId === undefined) return;
+    const asked = runId;
     finishing = true;
-    end(runId)
+    finishAsked.add(asked);
+    end(asked)
       .catch((error: unknown) => {
-        finishFailed.add(runId);
+        finishFailed.add(asked);
         model = {
           ...model,
-          notice: `Could not stop the agent of ${runId} (the run is over): ${plain(messageOf(error))}`,
+          notice: `Could not stop the agent of ${asked} (the run is over): ${plain(messageOf(error))}`,
         };
         draw();
       })
