@@ -1,4 +1,5 @@
 /** Sample sessions for `kodel tui --demo`. Nothing here is read from a project. */
+import { parseAttachmentKey } from "./attachments";
 import { demoPipelines } from "./demo-pipelines";
 import type { Loaded } from "./load";
 import type {
@@ -293,6 +294,18 @@ export async function demoDeleteComment(runId: string, index: number): Promise<v
 }
 
 export async function demoDiff(path: string): Promise<DiffState> {
+  // A version of the sample attachment: the second as the diff from the first.
+  const version = parseAttachmentKey(path);
+  if (version !== undefined) {
+    return {
+      kind: "text",
+      text:
+        version.version === 1
+          ? "@@ -0,0 +1,3 @@\n+# Plan\n+\n+1. Read the status command.\n"
+          : "@@ -1,3 +1,4 @@\n # Plan\n \n-1. Read the status command.\n+1. Read the status command and its table.\n+2. Add the age column.\n",
+      truncated: false,
+    };
+  }
   return path.endsWith("format.ts")
     ? { kind: "text", text: SAMPLE_DIFF, truncated: false }
     : {
@@ -541,6 +554,51 @@ export function demoGateDetail(runId: string, now: number = Date.now()): GateDet
       totalLines: 379,
     },
     changedAfterChecks: [],
+    attachments: [
+      {
+        name: "plan.md",
+        versions: [
+          {
+            version: 1,
+            type: "text",
+            bytes: 38,
+            lines: 3,
+            node: "plan",
+            attempt: 1,
+            at: now - 90 * 60_000,
+            scanned: true,
+            state: "ok",
+          },
+          {
+            version: 2,
+            type: "text",
+            bytes: 74,
+            lines: 4,
+            node: "plan",
+            attempt: 2,
+            at: now - 70 * 60_000,
+            scanned: true,
+            state: "ok",
+          },
+        ],
+      },
+      {
+        name: "status-table.png",
+        versions: [
+          {
+            version: 1,
+            type: "png",
+            bytes: 48_213,
+            node: "impl",
+            attempt: 1,
+            at: now - 40 * 60_000,
+            scanned: false,
+            state: "ok",
+            path: ".kodel/runs/r_0mvo6g4mi/attachments/sample-status-table.png",
+          },
+        ],
+      },
+    ],
     comments: made.get(runId) ?? [],
     agentLog,
     metrics: {

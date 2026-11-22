@@ -210,6 +210,22 @@ describe("t45 the gate answer", () => {
   });
 });
 
+describe("t45 the gate tells the agent how a comment points at an attachment", () => {
+  test("t45_gate_instruction_explains_attachment_locations", async () => {
+    gitInit();
+    const run = await atGate();
+    const waiting = gate(await run.nextStep());
+    // the form a comment or a finding uses for a line of an attachment, and that it is no project file
+    expect(waiting.tell_the_person).toContain("attachment:<name>@<version>:<line>");
+    expect(waiting.tell_the_person).toContain("not at a project file");
+    // only where there are attachments to point at
+    const bare = await start(yaml(["name: bare", ...SINGLE.split("\n").slice(1, -1)]));
+    await bare.completeStep("plan", 1);
+    await bare.settle();
+    expect(gate(await bare.nextStep()).tell_the_person).not.toContain("attachment:");
+  });
+});
+
 describe("t45 what the gate showed is what is read", () => {
   test("t45_what_the_gate_showed_is_what_is_read", async () => {
     gitInit();

@@ -3,16 +3,30 @@
  * working directory, and finding the type of some bytes. The agent's `path` is untrusted: the file is
  * opened once and everything is judged on that handle, so what is checked is what is read.
  */
+import { execFile } from "node:child_process";
 import { constants } from "node:fs";
-import { type FileHandle, open, realpath, stat } from "node:fs/promises";
+import {
+  type FileHandle,
+  mkdir,
+  mkdtemp,
+  open,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { devNull, tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { type AttachmentImageType, type AttachmentType, KodelError } from "@kodel-ai/pipeline-core";
+import { NO_HOOKS, SAFE_CONFIG } from "./git";
 
 /** Tests step in between the open and the checks, where a swap of the file would happen. */
 export interface AttachmentHooks {
   afterOpen?(path: string): void | Promise<void>;
   /** After the file of a version was created and before its event is decided. */
   afterFile?(ref: string): void | Promise<void>;
+  /** The git program the diff of two versions is made with (a test names one that is not there). */
+  git?: string;
 }
 
 const refuse = (message: string) => new KodelError("INVALID_ARGUMENTS", message);
@@ -168,4 +182,106 @@ export function typeProblem(type: AttachmentType, bytes: Uint8Array): string | u
   return found === undefined
     ? `the file is not a ${type.toUpperCase()} image, though the name says it is`
     : `the file is a ${found.toUpperCase()} image, though the name says ${type.toUpperCase()}`;
+}
+
+// ── the diff of two versions ────────────────────────────────────────────────
+
+/** The most of a version diff that is shown; the texts themselves are bounded by the limits. */
+const MAX_VERSION_DIFF_BYTES = 1024 * 1024;
+
+const linesOf = (text: string): string[] => {
+  const lines = text.split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+};
+
+/** A text as a diff with every line added (a first version) or every line unchanged (the same text again). */
+function wholeText(text: string, mark: "+" | " "): string {
+  const lines = linesOf(text);
+  if (lines.length === 0) return "";
+  const head =
+    mark === "+" ? `@@ -0,0 +1,${lines.length} @@` : `@@ -1,${lines.length} +1,${lines.length} @@`;
+  return `${head}\n${lines.map((line) => `${mark}${line}`).join("\n")}\n`;
+}
+
+function runDiff(program: string, cwd: string, name: string): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    const child = execFile(
+      program,
+      [
+        ...SAFE_CONFIG,
+        ...NO_HOOKS,
+        "diff",
+        "--no-index",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--no-renames",
+        "-U3",
+        "--",
+        `a/${name}`,
+        `b/${name}`,
+      ],
+      {
+        cwd,
+        // No configuration of the machine, the user or a repository above: only what is said here.
+        env: {
+          PATH: process.env.PATH ?? "",
+          HOME: cwd,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: devNull,
+          GIT_ATTR_NOSYSTEM: "1",
+          GIT_CEILING_DIRECTORIES: dirname(cwd),
+          GIT_TERMINAL_PROMPT: "0",
+        },
+        maxBuffer: 64 * 1024 * 1024,
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 20_000,
+        killSignal: "SIGKILL",
+      },
+      (error, stdout) => {
+        // 0: the texts are the same. 1: they differ, and the diff is on stdout. Anything else (no
+        // git, a failure): no diff.
+        const code = error === null ? 0 : (error as { code?: unknown }).code;
+        resolve(code === 0 || code === 1 ? stdout : undefined);
+      },
+    );
+    child.stdin?.on("error", () => undefined);
+    child.stdin?.end();
+  });
+}
+
+/**
+ * The unified diff from one stored text to the next. The two texts are written to a folder of their
+ * own outside every repository and compared there with git told to use no external program, no text
+ * conversion, no hooks and no configuration but its own defaults: nothing the agent can write (a
+ * `.gitattributes`, a config, an environment variable of the diff) is read. Without git, or when it
+ * fails, the whole text is shown as added; a first version is shown the same way.
+ */
+export async function diffTexts(
+  before: string | undefined,
+  after: string,
+  options: { name: string; git?: string },
+): Promise<{ text: string; truncated: boolean }> {
+  const cut = (text: string) =>
+    text.length > MAX_VERSION_DIFF_BYTES
+      ? { text: text.slice(0, MAX_VERSION_DIFF_BYTES), truncated: true }
+      : { text, truncated: false };
+  if (before === undefined) return cut(wholeText(after, "+"));
+  if (before === after) return cut(wholeText(after, " "));
+  let dir: string | undefined;
+  try {
+    dir = await realpath(await mkdtemp(join(tmpdir(), "kodel-attachment-diff-")));
+    await mkdir(join(dir, "a"));
+    await mkdir(join(dir, "b"));
+    await writeFile(join(dir, "a", options.name), before);
+    await writeFile(join(dir, "b", options.name), after);
+    const out = await runDiff(options.git ?? "git", dir, options.name);
+    return cut(out === undefined || out === "" ? wholeText(after, "+") : out);
+  } catch {
+    return cut(wholeText(after, "+"));
+  } finally {
+    if (dir !== undefined) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
 }

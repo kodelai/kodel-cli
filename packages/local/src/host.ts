@@ -123,7 +123,13 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { type AgentLogRun, AgentLogWriter } from "./agent-log";
 import type { AgentLogTickers } from "./agent-log-ticker";
-import { type AttachmentHooks, decodeText, readWorkdirFile, typeProblem } from "./attachments";
+import {
+  type AttachmentHooks,
+  decodeText,
+  diffTexts,
+  readWorkdirFile,
+  typeProblem,
+} from "./attachments";
 import { type CommandOptions, type CommandResult, runCommand } from "./command";
 import { loadAgentHints, loadConfig, type WorktreeConfig } from "./config";
 import { configEngineResolver, launchHash, literalRules } from "./engines";
@@ -3187,12 +3193,10 @@ export class LocalRun {
       const attached = await this.gateAttachments(step.waiting.node_slug);
       if (attached.list.length > 0) {
         const fresh = new Set(attached.newSince);
-        step.waiting.attachments = attached.list
-          .slice(0, MAX_ATTACHMENTS_SHOWN)
-          .map((info) => ({
-            ...attachmentAnswer(info),
-            ...(fresh.has(info.name) ? { new: true } : {}),
-          }));
+        step.waiting.attachments = attached.list.slice(0, MAX_ATTACHMENTS_SHOWN).map((info) => ({
+          ...attachmentAnswer(info),
+          ...(fresh.has(info.name) ? { new: true } : {}),
+        }));
         if (attached.list.length > MAX_ATTACHMENTS_SHOWN) {
           step.waiting.attachments_omitted = attached.list.length - MAX_ATTACHMENTS_SHOWN;
         }
@@ -4063,6 +4067,34 @@ export class LocalRun {
     // A stored text that does not decode was not written by kodel as text.
     if (content === undefined) return { attachment: attachmentInfoOf(record, "changed") };
     return { attachment, content, path: file.path };
+  }
+
+  /**
+   * A text version as the diff from the version before it (the whole text for a first version, or when
+   * the one before does not verify). `undefined` for an image, a version that is not there, and one
+   * whose stored file does not verify. Read-only; the texts are stored redacted already.
+   */
+  async attachmentDiff(
+    name: string,
+    version?: number,
+  ): Promise<{ text: string; truncated: boolean } | undefined> {
+    const history = attachmentHistory(await this.attachmentRecords(), name);
+    const at =
+      version === undefined ? history.length - 1 : history.findIndex((r) => r.version === version);
+    const record = history[at];
+    if (record === undefined || record.type !== "text") return undefined;
+    const verified = async (of: AttachmentRecord | undefined): Promise<string | undefined> => {
+      if (of === undefined || of.type !== "text") return undefined;
+      const file = await this.host.store.readAttachmentFile(this.runId, of);
+      return file.state === "ok" ? decodeText(file.bytes) : undefined;
+    };
+    const now = await verified(record);
+    if (now === undefined) return undefined;
+    const git = this.host.options.attachmentHooks?.git;
+    return diffTexts(await verified(history[at - 1]), now, {
+      name,
+      ...(git === undefined ? {} : { git }),
+    });
   }
 
   /**

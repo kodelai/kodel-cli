@@ -16,6 +16,7 @@ import {
   countLines,
   decide,
   encodeRunState,
+  formatAttachmentLocation,
   isAttachmentRef,
   type JournalRecord,
   KodelError,
@@ -23,6 +24,7 @@ import {
   type PipelineHost,
   PipelineService,
   type PipelineSpec,
+  parseAttachmentLocation,
   parsePipeline,
   type RunEvent,
   type RunHandle,
@@ -64,16 +66,6 @@ function apply(spec: PipelineSpec, state: RunState | undefined, event: RunEvent,
   const decision = decide(spec, state, event, now);
   if (!decision.ok) throw decision.error;
   return decision;
-}
-
-function refusal(fn: () => unknown): KodelError {
-  try {
-    fn();
-  } catch (error) {
-    if (error instanceof KodelError) return error;
-    throw error;
-  }
-  throw new Error("expected a refusal");
 }
 
 const written = (over: Partial<Extract<RunEvent, { type: "attachment_written" }>> = {}) =>
@@ -481,5 +473,50 @@ describe("t45 the tools of a host with attachments", () => {
       await invokeTool(service, "pipeline_attachment_write", { ...base, content: "x" }, tools),
     ).toMatchObject({ ok: false, code: "NODE_NOT_RUNNING" });
     expect(calls).toEqual([{ node: "a", attempt: 1, name: "a.md", content: "x" }]);
+  });
+});
+
+describe("t45 the location of a comment on an attachment", () => {
+  test("t45_attachment_location_table", () => {
+    // with a line
+    expect(parseAttachmentLocation("attachment:plan.md@3:12")).toEqual({
+      name: "plan.md",
+      version: 3,
+      line: 12,
+    });
+    // without a line: the version as a whole (an image takes only this form)
+    expect(parseAttachmentLocation("attachment:shot.png@1")).toEqual({
+      name: "shot.png",
+      version: 1,
+    });
+    for (const location of [
+      { name: "plan.md", version: 3, line: 12 },
+      { name: "shot.png", version: 1 },
+    ]) {
+      expect(parseAttachmentLocation(formatAttachmentLocation(location))).toEqual(location);
+    }
+    // anything else is a project path, or plain text
+    for (const bad of [
+      "plan.md:12",
+      "attachment:plan.md",
+      "attachment:plan.md:12",
+      "attachment:plan.md@0:1",
+      "attachment:plan.md@1:0",
+      "attachment:plan.md@x",
+      "attachment:plan.md@1:2:3",
+      "attachment:PLAN.md@1",
+      "attachment:plan@1",
+      "attachment:../plan.md@1",
+      "attachment:a/b.md@1",
+      "./attachment:plan.md@1:2",
+      "attachments/plan.md:1",
+      "attachment",
+      "attachment:7",
+      " attachment:plan.md@1",
+      "attachment:plan.md@1 (removed line)",
+      "",
+    ]) {
+      expect(parseAttachmentLocation(bad), bad).toBeUndefined();
+    }
   });
 });

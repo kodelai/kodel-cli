@@ -1,5 +1,7 @@
 /** Reads what the card of a run waiting at a human step shows, and writes the comments a person makes there. */
 import type {
+  AttachmentInfo,
+  GateAttachments,
   JournalRecord,
   NextStep,
   PipelineSpec,
@@ -7,9 +9,11 @@ import type {
   RunState,
   UsageReport,
 } from "@kodel-ai/pipeline-core";
+import { ATTACHMENT_KEY, parseAttachmentKey } from "./attachments";
 import { logLines } from "./load";
 import type {
   AgentWords,
+  AttachmentView,
   Attempt,
   ChangeSummary,
   CheckLine,
@@ -45,6 +49,17 @@ export interface GateRun {
   report?(): Promise<{ usage: UsageReport }>;
   agentLog?(): Promise<LogEntry[] | undefined>;
   diffOf?(path: string): Promise<{ text: string; truncated: boolean } | undefined>;
+  /** The attachments of the run, on a host that keeps them (T-45). */
+  gateAttachments?(node: string): Promise<GateAttachments>;
+  listAttachments?(input?: { name?: string }): Promise<AttachmentInfo[]>;
+  readAttachment?(input: {
+    name: string;
+    version?: number;
+  }): Promise<{ attachment: AttachmentInfo; path?: string }>;
+  attachmentDiff?(
+    name: string,
+    version?: number,
+  ): Promise<{ text: string; truncated: boolean } | undefined>;
   reportResult?(
     node: string,
     attempt: number,
@@ -121,20 +136,22 @@ async function build(
   const attempt = gate?.attempt ?? active?.attempt ?? 1;
   const since = journal.findLast((r) => r.event === "gate_waiting" && r.node === node)?.ts;
 
-  const [changed, afterGate, comments, reports, said, tokens, spoken] = await Promise.all([
-    run.changesSinceStart().catch((e: unknown) => unavailable(e)),
-    waiting
-      ? run.changesSinceGate(node).catch((e: unknown) => unavailable(e))
-      : { kind: "changes" as const, files: {} },
-    gate ? run.resultsOf(node, attempt).catch(() => undefined) : undefined,
-    readReports(run, journal),
-    waiting ? run.agentReport?.(since ?? state.startedAt).catch(() => undefined) : undefined,
-    run
-      .report?.()
-      .then((r) => tokensOf(r.usage))
-      .catch(() => undefined),
-    run.agentLog?.().catch(() => undefined),
-  ]);
+  const [changed, afterGate, comments, reports, said, tokens, spoken, attachments] =
+    await Promise.all([
+      run.changesSinceStart().catch((e: unknown) => unavailable(e)),
+      waiting
+        ? run.changesSinceGate(node).catch((e: unknown) => unavailable(e))
+        : { kind: "changes" as const, files: {} },
+      gate ? run.resultsOf(node, attempt).catch(() => undefined) : undefined,
+      readReports(run, journal),
+      waiting ? run.agentReport?.(since ?? state.startedAt).catch(() => undefined) : undefined,
+      run
+        .report?.()
+        .then((r) => tokensOf(r.usage))
+        .catch(() => undefined),
+      run.agentLog?.().catch(() => undefined),
+      readAttachments(run, node).catch(() => undefined),
+    ]);
   const visits = visitsOf(spec, journal, reports, node, gate ? attempt : undefined, now);
   const metrics = metricsOf(visits, state, now, tokens);
   return {
@@ -149,11 +166,52 @@ async function build(
     checks: latestChecks(visits),
     changes: summarize(changed),
     changedAfterChecks: afterGate.kind === "changes" ? Object.keys(afterGate.files) : [],
+    ...(attachments && attachments.length > 0 ? { attachments } : {}),
     comments: (comments?.rows ?? []).map(commentOf),
     metrics,
     ...(spoken && spoken.length > 0 ? { agentLog: spoken } : {}),
     journal: logLines(journal, now, journal.length),
   };
+}
+
+/**
+ * The attachments of the run, every version of each name. The path of a stored file is read only for
+ * an image that verifies: that is what the person opens; a text is shown here as its diff.
+ */
+async function readAttachments(run: GateRun, node: string): Promise<AttachmentView[] | undefined> {
+  if (!run.gateAttachments || !run.listAttachments) return undefined;
+  const { list, newSince } = await run.gateAttachments(node);
+  const fresh = new Set(newSince);
+  const out: AttachmentView[] = [];
+  for (const latest of list) {
+    const history = await run.listAttachments({ name: latest.name });
+    const versions = await Promise.all(
+      history.map(async (info) => {
+        const path =
+          info.type !== "text" && info.state === "ok"
+            ? await run
+                .readAttachment?.({ name: info.name, version: info.version })
+                .then((found) => (found.attachment.state === "ok" ? found.path : undefined))
+                .catch(() => undefined)
+            : undefined;
+        return {
+          version: info.version,
+          type: info.type,
+          bytes: info.bytes,
+          ...(info.lines === undefined ? {} : { lines: info.lines }),
+          node: info.node,
+          attempt: info.attempt,
+          at: info.at,
+          scanned: info.scanned,
+          state: info.state,
+          ...(path === undefined ? {} : { path }),
+        };
+      }),
+    );
+    if (versions.length === 0) continue;
+    out.push({ name: latest.name, versions, ...(fresh.has(latest.name) ? { fresh: true } : {}) });
+  }
+  return out;
 }
 
 function unavailable(error: unknown): Changes {
@@ -430,7 +488,11 @@ export async function loadDiff(
 ): Promise<DiffState> {
   try {
     const run = await source.open(runId);
-    const found = await run?.diffOf?.(path);
+    // A version of an attachment is asked for under a key no project path can be (`ATTACHMENT_KEY`).
+    const version = path.startsWith(ATTACHMENT_KEY) ? parseAttachmentKey(path) : undefined;
+    const found = path.startsWith(ATTACHMENT_KEY)
+      ? version && (await run?.attachmentDiff?.(version.name, version.version))
+      : await run?.diffOf?.(path);
     return found
       ? { kind: "text", text: found.text, truncated: found.truncated }
       : { kind: "missing" };
