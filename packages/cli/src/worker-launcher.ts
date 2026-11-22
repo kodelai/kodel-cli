@@ -57,6 +57,11 @@ export interface WorkerStatus {
   lastOutputAt?: number;
   /** A person stopped the latest record (`kodel agent stop`): it is not a worker that died. */
   stopped?: true;
+  /**
+   * The latest record's session is over (`lost` or `killed`) while its process still runs without a holder: the
+   * worker is alive for every rule, and only the person's `kodel agent stop` ends it.
+   */
+  childAlive?: true;
 }
 
 export interface WorkerProgress {

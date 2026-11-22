@@ -6,6 +6,7 @@
  * Session errors have their own code set, outside the MCP `ERROR_CODES` (which stay pinned).
  */
 
+import { ENGINE_PROFILE_NAME } from "./registry";
 import type { AttachStream } from "./session-frames";
 import { isTerminalSize } from "./session-frames";
 
@@ -57,6 +58,45 @@ export type SessionMode = "pipes" | "pty";
 export type SessionLifetime = "detached" | "with-starter";
 export type SessionOrigin = "cli" | "host";
 
+/**
+ * The coding agent a session runs, as its starter knows it: the engine's profile name, the id of the agent's own
+ * conversation (chosen by the starter, never read from what the agent prints) and the session whose conversation
+ * this one continues. It names which conversation to continue, never whether anything is done.
+ */
+export interface SessionAgent {
+  engine: string;
+  session?: string;
+  resumes?: string;
+}
+
+/** An engine's profile name, as the `engines` block spells it. */
+export const AGENT_ENGINE_PATTERN = ENGINE_PROFILE_NAME;
+/** The id of an agent's conversation: one word an argv can carry, never a flag. */
+export const AGENT_SESSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+/** Why an `agent` is refused, or `undefined`. Shared by the spec and by the record that stores it. */
+export const agentProblem = (agent: unknown): string | undefined => {
+  if (typeof agent !== "object" || agent === null || Array.isArray(agent)) {
+    return "agent is not an object";
+  }
+  const { engine, session, resumes, ...rest } = agent as Record<string, unknown>;
+  const unknown = Object.keys(rest)[0];
+  if (unknown !== undefined) return `agent.${unknown} is not known`;
+  if (typeof engine !== "string" || !AGENT_ENGINE_PATTERN.test(engine)) {
+    return "agent.engine is not a profile name";
+  }
+  if (
+    session !== undefined &&
+    (typeof session !== "string" || !AGENT_SESSION_PATTERN.test(session))
+  ) {
+    return "agent.session is not valid";
+  }
+  if (resumes !== undefined && (typeof resumes !== "string" || !isSessionId(resumes))) {
+    return "agent.resumes is not a session id";
+  }
+  return undefined;
+};
+
 export interface SessionSpec {
   /** One of `command` (run through a shell) or `argv` (no shell). */
   command?: string;
@@ -75,6 +115,8 @@ export interface SessionSpec {
   lifetime?: SessionLifetime;
   origin?: SessionOrigin;
   parent?: string;
+  /** Kept in a record of its own (`agent.json`), never in the stored spec. */
+  agent?: SessionAgent;
 }
 
 /** The longest timer a process can set (Node fires at once above it). */
@@ -112,6 +154,10 @@ export const validateSpec = (spec: SessionSpec): string | undefined => {
   if (spec.input !== undefined && typeof spec.input !== "boolean") return "input must be a boolean";
   if (spec.name !== undefined && !isSessionName(spec.name)) return "name is not valid";
   if (spec.parent !== undefined && !isSessionId(spec.parent)) return "parent is not a session id";
+  if (spec.agent !== undefined) {
+    const problem = agentProblem(spec.agent);
+    if (problem !== undefined) return problem;
+  }
   if (spec.mode !== undefined && spec.mode !== "pipes" && spec.mode !== "pty")
     return "mode is not valid";
   if (spec.size !== undefined) {
@@ -153,6 +199,13 @@ export interface SessionStatus {
   childAlive?: boolean;
   lastOutputAt?: number;
   since?: number;
+  /**
+   * Only for a session whose holder went away without recording its child's end, with the recorded child gone:
+   * what is left of the child's process group could not be looked at (`unread`: the process table or the boot
+   * time; `childAlive` is then about the recorded child alone), or the group's number belongs to another
+   * process now (`stranger`: nothing of the session is left). Absent when the group was looked at, or need not be.
+   */
+  group?: "unread" | "stranger";
 }
 
 /** What an adapter hands to `deriveStatus`: facts only, read once. */
@@ -343,6 +396,10 @@ export interface SessionListEntry {
   /** The command as the starter gave it, redacted (a shell command, or the argv joined by spaces). */
   command?: string;
   status: SessionStatus;
+  /** `pipes` or `pty`, as the record says; absent for an entry that could not be read. */
+  mode?: SessionMode;
+  /** The session's `agent` record, when it has one (an older session has none). Never a prompt or an argv. */
+  agent?: SessionAgent & { source?: "chosen" | "observed" };
   /** The entry could not be read (`CANNOT_READ`), was written by a newer kodel (`NEWER_FORMAT`) or by another machine (`FOREIGN`); its status is not real. */
   problem?: "CANNOT_READ" | "NEWER_FORMAT" | "FOREIGN";
 }

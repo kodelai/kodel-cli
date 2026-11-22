@@ -8,6 +8,9 @@ import type { SessionAdapter, SessionListEntry } from "@kodel-ai/pipeline-core";
 import {
   AGENT_HUMAN_COMMANDS,
   AGENT_READ_COMMANDS,
+  agentLabel,
+  groupNote,
+  pipesAdapter,
   resolveSession,
   stateLabel,
 } from "../src/agent-commands";
@@ -453,6 +456,69 @@ describe("kodel agent", () => {
     expect(stateLabel(row({ state: "lost" }, "CANNOT_READ"))).toBe("unknown (cannot be read)");
   });
 
+  unixTest(
+    "tA_agent_ls_lists_mode_and_agent",
+    async () => {
+      const conversation = "0f4b1c2d-0000-4000-8000-000000000001";
+      const prompt = "Drive the run and keep the word PINEAPPLE to yourself";
+      // The starter of an agent session is the launcher (and `agent start`); here it is the adapter the CLI builds.
+      const adapter = pipesAdapter({
+        root: dir,
+        environment: { KODEL_STATE_DIR: state },
+        launcher,
+      });
+      const withAgent = await adapter.start({
+        argv: ["sh", "-c", "exit 0", prompt],
+        cwd: dir,
+        name: "with-agent",
+        origin: "cli",
+        agent: { engine: "claude", session: conversation },
+      });
+      const older = await adapter.start({ argv: ["sh", "-c", "exit 0"], cwd: dir, origin: "cli" });
+      await adapter.wait(withAgent.id, { timeoutMs: 15_000 });
+      await adapter.wait(older.id, { timeoutMs: 15_000 });
+
+      const listed = await cli({ interactive: false, engine: true }, "agent", "ls");
+      expect(listed.code, listed.err).toBe(0);
+      const lines = listed.out.trimEnd().split("\n");
+      expect(lines[0]).toMatch(/^ID\s+NAME\s+STATE\s+MODE\s+AGENT\s+COMMAND$/);
+      const rowOf = (id: string) => (lines.find((l) => l.startsWith(id)) ?? "").split(/\s{2,}/);
+      expect(rowOf(withAgent.id).slice(1, 5)).toEqual([
+        "with-agent",
+        "exited (0)",
+        "pipes",
+        `claude ${conversation}`,
+      ]);
+      // a session with no agent record (an older one, or a plain command) has an empty AGENT
+      expect(rowOf(older.id).slice(1, 5)).toEqual(["-", "exited (0)", "pipes", "-"]);
+
+      const json = JSON.parse(
+        (await cli({ interactive: false }, "agent", "ls", "--json")).out,
+      ) as SessionListEntry[];
+      const first = json.find((r) => r.id === withAgent.id);
+      expect(first?.mode).toBe("pipes");
+      expect(first?.agent).toEqual({ engine: "claude", session: conversation, source: "chosen" });
+      expect(JSON.stringify(first?.agent)).not.toContain("PINEAPPLE");
+      const second = json.find((r) => r.id === older.id);
+      expect(second?.mode).toBe("pipes");
+      expect(second && "agent" in second).toBe(false);
+
+      const entry = (agent?: SessionListEntry["agent"]): SessionListEntry => ({
+        id: "a_000000000_0001",
+        status: { state: "exited" },
+        ...(agent ? { agent } : {}),
+      });
+      expect(agentLabel(entry())).toBe("-");
+      expect(agentLabel(entry({ engine: "claude" }))).toBe("claude");
+      expect(agentLabel(entry({ engine: "claude", session: "abc" }))).toBe("claude abc");
+      // what `agent stop` adds when it signalled nothing of a group it could not call the session's
+      expect(groupNote(undefined)).toBeUndefined();
+      expect(groupNote("unread")).toContain("process table could not be read");
+      expect(groupNote("stranger")).toContain("belongs to another process");
+    },
+    30_000,
+  );
+
   tableTest(
     "tA_ls_has_no_detail_column_and_rm_asks_a_plain_question",
     async () => {
@@ -466,7 +532,7 @@ describe("kodel agent", () => {
         await new Promise((r) => setTimeout(r, 100));
       }
       const listed = await cli({ interactive: false }, "agent", "ls");
-      expect(listed.out.split("\n")[0]).toMatch(/^ID\s+NAME\s+STATE\s+COMMAND$/);
+      expect(listed.out.split("\n")[0]).toMatch(/^ID\s+NAME\s+STATE\s+MODE\s+AGENT\s+COMMAND$/);
       expect(listed.out).not.toContain("DETAIL");
       expect(listed.out).toContain("exited (3)");
       let asked = "";

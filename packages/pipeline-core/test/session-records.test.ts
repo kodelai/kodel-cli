@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  agentRecordSchema,
   decodeRecord,
   deriveStatus,
   encodeRecord,
@@ -22,6 +23,7 @@ const kindOf = (name: string): RecordKind => {
   if (file === "session.json") return "session";
   if (file === "stop.json") return "stop";
   if (file === "name.json") return "name";
+  if (file.startsWith("agent-")) return "agent";
   if (file.startsWith("status-")) return "status";
   throw new Error(`fixture ${file} has no kind`);
 };
@@ -32,6 +34,8 @@ const load = (file: string): Record<string, unknown> =>
 describe("session record codec (format v1)", () => {
   test("tA_session_fixture_directory_is_complete", () => {
     expect(files.sort()).toEqual([
+      "agent-chosen.json",
+      "agent-resumed.json",
       "name.json",
       "session-pty.json",
       "session.json",
@@ -49,6 +53,8 @@ describe("session record codec (format v1)", () => {
 
   test("tA_pipes_goldens_byte_identical: taking the goldens of a terminal session left the others as they were", () => {
     const pinned: Record<string, string> = {
+      "agent-chosen.json": "ef9050e23423fdb74573f925b45df875a298ec7623793d7253404c488ae605a2",
+      "agent-resumed.json": "3ac2a95675ff10090885e674007b2be30d56989ec99304a26fbc80bbd5ffa1b9",
       "name.json": "2441458cc350458109119d2e638c0ac982fb64dbce0f7f6b5e4a4ac33f45b9b0",
       "session.json": "48b370024b29c1510b79a85cc17ba20976945a1f0f07d9692b97ebce5e69cf42",
       "status-exited.json": "cb53c8b844ac8ce1eeccc19884382a3f6175de94639dcb5908abe3e911fec106",
@@ -109,6 +115,7 @@ describe("session record codec (format v1)", () => {
       ...shape(statusRecordSchema, "status"),
       ...shape(stopRecordSchema, "stop"),
       ...shape(nameMarkerSchema, "name"),
+      ...shape(agentRecordSchema, "agent"),
     ];
     for (const key of topLevel) {
       const name = key.replace(/^(\w+):/, "$1:");
@@ -172,6 +179,48 @@ describe("session record codec (format v1)", () => {
     expect(() => encodeRecord("status", { ...decoded.record, extra: 1 } as never)).toThrow();
     const { since: _since, ...missing } = decoded.record;
     expect(() => encodeRecord("status", missing as never)).toThrow();
+  });
+
+  test("tA_agent_record_round_trips", () => {
+    // The two goldens a real starter wrote, and a record this run never writes: another engine, whose id was
+    // read after the start. The schema holds it now so that such an engine needs no change of the format.
+    const observed = { v: 1, engine: "codex", session: "thread_0a1b:2", source: "observed" };
+    for (const raw of [load("agent-chosen.json"), load("agent-resumed.json"), observed]) {
+      const decoded = decodeRecord("agent", raw);
+      expect(decoded.ok).toBe(true);
+      if (!decoded.ok) continue;
+      expect(JSON.parse(encodeRecord("agent", decoded.record))).toEqual(raw);
+    }
+    expect(load("agent-chosen.json")).toMatchObject({ engine: "claude", source: "chosen" });
+    expect(load("agent-resumed.json").resumes).toBe("a_000000000_0000");
+    // an engine alone is a record: the id may not be known
+    expect(decodeRecord("agent", { v: 1, engine: "claude" }).ok).toBe(true);
+    // tolerant on read, strict on write
+    const future = decodeRecord("agent", { ...observed, futureField: 1 });
+    expect(future.ok && "futureField" in future.record).toBe(false);
+    expect(() => encodeRecord("agent", { ...observed, prompt: "do it" } as never)).toThrow();
+    expect(() => encodeRecord("agent", { v: 1 } as never)).toThrow();
+    for (const bad of [
+      { v: 1, engine: "Claude Code" },
+      { v: 1, engine: "claude", session: "--resume x" },
+      { v: 1, engine: "claude", session: "a b" },
+      { v: 1, engine: "claude", session: "id", source: "guessed" },
+      { v: 1, engine: "claude", resumes: "../x" },
+    ]) {
+      expect(decodeRecord("agent", bad), JSON.stringify(bad)).toMatchObject({
+        ok: false,
+        code: "CANNOT_READ",
+      });
+    }
+    expect(SESSION_RECORD_CAPABILITIES[1].kinds).toContain("agent");
+    expect(SESSION_RECORD_CAPABILITIES[1].agent).toBe(true);
+  });
+
+  test("tA_agent_record_newer_format_is_refused", () => {
+    for (const file of ["agent-chosen.json", "agent-resumed.json"]) {
+      const newer = { ...load(file), v: SESSION_FORMAT_VERSION + 1 };
+      expect(decodeRecord("agent", newer)).toMatchObject({ ok: false, code: "NEWER_FORMAT" });
+    }
   });
 
   const SOCK = "/masked/run/a_000000000_0000-00000000.sock";

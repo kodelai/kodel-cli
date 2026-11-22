@@ -9,7 +9,7 @@ import { execFile } from "node:child_process";
 import { access, constants } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import type { SessionAdapter, SessionListEntry, SessionState } from "@kodel-ai/pipeline-core";
-import { type RedactRule, SessionError } from "@kodel-ai/pipeline-core";
+import { agentProblem, type RedactRule, SessionError } from "@kodel-ai/pipeline-core";
 import { stateLabel } from "./agent-commands";
 import { DIGEST_TAIL_BYTES, digest } from "./claude-stream";
 import {
@@ -117,8 +117,22 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 
 const STATES: readonly SessionState[] = ["starting", "running", "exited", "killed", "lost"];
 
+/** The `agent` of an entry, if it is one the starter could have written; else nothing. */
+function parseAgent(raw: unknown): SessionListEntry["agent"] {
+  if (!isObject(raw)) return undefined;
+  const { source, ...agent } = raw;
+  if (agentProblem(agent) !== undefined) return undefined;
+  if (source !== undefined && source !== "chosen" && source !== "observed") return undefined;
+  return {
+    engine: agent.engine as string,
+    ...(typeof agent.session === "string" ? { session: agent.session } : {}),
+    ...(source === undefined ? {} : { source }),
+    ...(typeof agent.resumes === "string" ? { resumes: agent.resumes } : {}),
+  };
+}
+
 /** One entry of `kodel agent ls --json`, if it has the shape; the output of a child is not trusted. */
-function parseEntry(raw: unknown): SessionListEntry | undefined {
+export function parseEntry(raw: unknown): SessionListEntry | undefined {
   if (!isObject(raw) || typeof raw.id !== "string" || !isObject(raw.status)) return undefined;
   const state = raw.status.state;
   if (typeof state !== "string" || !(STATES as readonly string[]).includes(state)) return undefined;
@@ -131,9 +145,15 @@ function parseEntry(raw: unknown): SessionListEntry | undefined {
   if (raw.status.childAlive === true) status.childAlive = true;
   if (typeof raw.status.since === "number") status.since = raw.status.since;
   if (typeof raw.status.lastOutputAt === "number") status.lastOutputAt = raw.status.lastOutputAt;
+  if (raw.status.group === "unread" || raw.status.group === "stranger") {
+    status.group = raw.status.group;
+  }
   const entry: SessionListEntry = { id: raw.id, status };
   if (typeof raw.name === "string") entry.name = raw.name;
   if (typeof raw.command === "string") entry.command = raw.command;
+  if (raw.mode === "pipes" || raw.mode === "pty") entry.mode = raw.mode;
+  const agent = parseAgent(raw.agent);
+  if (agent !== undefined) entry.agent = agent;
   if (
     raw.problem === "CANNOT_READ" ||
     raw.problem === "NEWER_FORMAT" ||
@@ -196,6 +216,7 @@ export function workerStatusOf(entries: readonly SessionListEntry[]): WorkerStat
       ? {}
       : { lastOutputAt: entry.status.lastOutputAt }),
     ...(!unknown && entry.status.reason === "stopped" ? { stopped: true as const } : {}),
+    ...(!unknown && entry.status.childAlive === true ? { childAlive: true as const } : {}),
   };
 }
 

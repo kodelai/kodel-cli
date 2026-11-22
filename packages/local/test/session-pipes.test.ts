@@ -7,15 +7,24 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { encodeRecord, SessionError } from "@kodel-ai/pipeline-core";
-import { liveProcess, machineId, processIdentity } from "../src/process-table";
+import { deriveStatus, encodeRecord, SessionError } from "@kodel-ai/pipeline-core";
+import {
+  groupMembers,
+  liveProcess,
+  machineId,
+  type ProcessIdentity,
+  type ProcessRow,
+  type ProcessView,
+  processIdentity,
+} from "../src/process-table";
 import { ensurePrivateDir } from "../src/session-paths";
 import { PipesSessionAdapter } from "../src/session-pipes";
-import { publishSession, replaceRecord } from "../src/session-records";
+import { publishSession, replaceRecord, snapshotOf } from "../src/session-records";
 
 const entry = join(import.meta.dir, "../src/session-holder-entry.ts");
 const tableAvailable = processIdentity(process.pid) !== undefined;
@@ -579,4 +588,508 @@ describe("pipes adapter, real processes", () => {
       "reader",
     );
   });
+});
+
+describe("the agent record", () => {
+  const CONVERSATION = "0f4b1c2d-0000-4000-8000-000000000001";
+  const agentFile = (id: string) => join(adapter.place.dir, id, "agent.json");
+
+  test("tA_agent_record_is_written_once", async () => {
+    // By the time the folder is a session (it is published in one rename), the agent record is in it.
+    let atPublish: string | undefined;
+    const watching = make({
+      testHooks: {
+        afterPublish(id) {
+          if (atPublish !== undefined) return;
+          atPublish = readFileSync(agentFile(id), "utf8");
+          expect(existsSync(join(adapter.place.dir, id, "session.json"))).toBe(true);
+        },
+      },
+    });
+    const { id } = await watching.start(
+      sh("sleep 60", { agent: { engine: "claude", session: CONVERSATION } }),
+    );
+    const written = readFileSync(agentFile(id), "utf8");
+    expect(atPublish).toBe(written);
+    expect(JSON.parse(written)).toEqual({
+      v: 1,
+      engine: "claude",
+      session: CONVERSATION,
+      source: "chosen",
+    });
+    // the stored spec does not repeat it
+    const session = JSON.parse(readFileSync(join(adapter.place.dir, id, "session.json"), "utf8"));
+    expect(session.spec).not.toHaveProperty("agent");
+    const before = statSync(agentFile(id));
+    // nothing rewrites it: not a listing, not the holder's records, not a stop
+    await watching.list();
+    await watching.status(id);
+    await watching.stop(id).catch(() => {});
+    await watching.list();
+    const after = statSync(agentFile(id));
+    expect(readFileSync(agentFile(id), "utf8")).toBe(written);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    expect(after.ino).toBe(before.ino);
+
+    // a session that continues another names it; one without an id has no source
+    const next = await watching.start(
+      sh("exit 0", { agent: { engine: "claude", session: CONVERSATION, resumes: id } }),
+    );
+    expect(JSON.parse(readFileSync(agentFile(next.id), "utf8"))).toMatchObject({ resumes: id });
+    const bare = await watching.start(sh("exit 0", { agent: { engine: "claude" } }));
+    expect(JSON.parse(readFileSync(agentFile(bare.id), "utf8"))).toEqual({
+      v: 1,
+      engine: "claude",
+    });
+    // a session that runs no agent has no such file
+    const plainOne = await watching.start(sh("exit 0"));
+    expect(existsSync(agentFile(plainOne.id))).toBe(false);
+
+    const rows = await watching.list();
+    expect(rows.find((r) => r.id === id)).toMatchObject({
+      mode: "pipes",
+      agent: { engine: "claude", session: CONVERSATION, source: "chosen" },
+    });
+    expect(rows.find((r) => r.id === next.id)?.agent?.resumes).toBe(id);
+    const older = rows.find((r) => r.id === plainOne.id);
+    expect(older?.mode).toBe("pipes");
+    expect(older && "agent" in older).toBe(false);
+
+    await expect(
+      watching.start(sh("exit 0", { agent: { engine: "claude", session: "--resume" } })),
+    ).rejects.toMatchObject({ code: "SPEC_INVALID" });
+  });
+
+  test("tA_older_reader_ignores_the_agent_record", async () => {
+    const { id } = await adapter.start(
+      sh("exit 0", { name: "old-reader", origin: "cli", agent: { engine: "claude" } }),
+    );
+    await adapter.wait(id, { timeoutMs: 15_000 });
+    const dir = join(adapter.place.dir, id);
+    // A build from before the record reads `session.json`, `status.json` and `stop.json` and nothing else: what it
+    // derives is what this build derives, and the listing differs by the `agent` alone.
+    const withFile = deriveStatus(snapshotOf(dir), Date.now());
+    const [listedWith] = await adapter.list({ name: "old-reader" });
+    const kept = readFileSync(agentFile(id), "utf8");
+    rmSync(agentFile(id));
+    expect(deriveStatus(snapshotOf(dir), Date.now())).toEqual(withFile);
+    const [listedWithout] = await adapter.list({ name: "old-reader" });
+    const { agent: _agent, ...rest } = listedWith as NonNullable<typeof listedWith>;
+    expect(listedWithout).toEqual(rest);
+    // Such a build removes the folder whole, the file it does not know with it, and frees the name.
+    writeFileSync(agentFile(id), kept);
+    await adapter.remove(id);
+    expect(existsSync(dir)).toBe(false);
+    expect(readdirSync(adapter.place.namesDir)).toEqual([]);
+    // A record of a newer format is "upgrade kodel", wherever in the folder it is.
+    const again = await adapter.start(sh("exit 0", { agent: { engine: "claude" } }));
+    await adapter.wait(again.id, { timeoutMs: 15_000 });
+    writeFileSync(agentFile(again.id), JSON.stringify({ v: 2, engine: "claude" }));
+    await expect(adapter.status(again.id)).rejects.toMatchObject({ code: "NEWER_FORMAT" });
+    // One that cannot be read changes no status: the session is listed without an agent.
+    writeFileSync(agentFile(again.id), "{ not json");
+    expect(await adapter.status(again.id)).toMatchObject({ state: "exited" });
+    const [unread] = (await adapter.list()).filter((r) => r.id === again.id);
+    expect(unread && "agent" in unread).toBe(false);
+  });
+
+  test("tA_agent_record_holds_no_prompt", async () => {
+    const prompt = "Drive the kodel run r_0abc_1234 and never tell anyone the word PINEAPPLE";
+    const spec = {
+      argv: ["sh", "-c", "exit 0", prompt, "--session-id", CONVERSATION],
+      cwd: root,
+      timeoutMs: 20_000,
+      env: { MINE: "PINEAPPLE-ENV" },
+      agent: { engine: "claude", session: CONVERSATION },
+    };
+    const seen: string[] = [];
+    const watching = make({
+      // A terminal session cannot run under Bun: its record is read when the folder is published.
+      ptyProbe: () => ({ ok: true }),
+      bootTimeoutMs: 3_000,
+      testHooks: {
+        afterPublish(id) {
+          seen.push(readFileSync(agentFile(id), "utf8"));
+        },
+      },
+    });
+    const { id } = await watching.start(spec);
+    await watching.wait(id, { timeoutMs: 15_000 });
+    await watching.start({ ...spec, mode: "pty" }).catch(() => {});
+    expect(seen).toHaveLength(2);
+    for (const text of seen) {
+      expect(text).not.toContain("PINEAPPLE");
+      expect(text).not.toContain("Drive the kodel run");
+      expect(text).not.toContain("sh");
+      expect(Object.keys(JSON.parse(text)).sort()).toEqual(["engine", "session", "source", "v"]);
+    }
+    const [row] = await watching.list();
+    expect(row?.agent).toEqual({ engine: "claude", session: CONVERSATION, source: "chosen" });
+    expect(JSON.stringify(row?.agent)).not.toContain("PINEAPPLE");
+  });
+});
+
+describe("a holder that went away: the child's process group", () => {
+  /** Above every pid a kernel gives out (99999 on macOS, 4194304 on Linux): never a live process. */
+  const GONE = 2 ** 22 + 4321;
+  const HOLDER = GONE + 1;
+  const LEADER: ProcessIdentity = { method: "ps-lstart", value: "Mon Jan  1 00:00:00 2024" };
+  const STARTED = 1_700_000_000_000;
+  const member = (pid: number, over: Partial<ProcessRow> = {}): ProcessRow => ({
+    pid,
+    pgid: GONE,
+    state: "S",
+    started: `Mon Jan  1 00:00:${String(pid % 60).padStart(2, "0")} 2024`,
+    ...over,
+  });
+
+  interface FakeTable extends ProcessView {
+    reads: number;
+    boots: number;
+    signals: [number, string][];
+    table: ProcessRow[] | undefined;
+  }
+  const fakeTable = (
+    rows: ProcessRow[] | undefined,
+    over: {
+      boot?: number | undefined;
+      identity?: (pid: number) => ProcessIdentity | undefined;
+      onSignal?: (fake: FakeTable, pid: number, signal: string) => void;
+    } = {},
+  ): FakeTable => {
+    const fake: FakeTable = {
+      reads: 0,
+      boots: 0,
+      signals: [],
+      table: rows,
+      rows() {
+        fake.reads++;
+        return fake.table?.map((row) => ({ ...row }));
+      },
+      bootTime() {
+        fake.boots++;
+        return "boot" in over ? over.boot : STARTED - 86_400_000;
+      },
+      identity: over.identity ?? (() => undefined),
+      signal(pid, signal) {
+        fake.signals.push([pid, signal]);
+        over.onSignal?.(fake, pid, signal);
+      },
+    };
+    return fake;
+  };
+
+  /** A session folder as a holder left it: what `state` says, a holder and a child that are not there any more. */
+  const record = (
+    id: string,
+    status: Record<string, unknown> = {},
+    session: Record<string, unknown> = {},
+  ): string => {
+    ensurePrivateDir(adapter.place.runDir);
+    ensurePrivateDir(adapter.place.dir);
+    const dir = join(adapter.place.dir, id);
+    publishSession(dir, {
+      v: 1,
+      id,
+      mode: "pty",
+      spec: { cwd: root, envNames: [] },
+      started: STARTED,
+      root,
+      ...session,
+    } as Parameters<typeof publishSession>[1]);
+    replaceRecord(
+      join(dir, "status.json"),
+      encodeRecord("status", {
+        v: 1,
+        state: "running",
+        by: "holder",
+        holder: { pid: HOLDER },
+        child: { pid: GONE, identity: LEADER },
+        since: STARTED + 1_000,
+        ...status,
+      } as Parameters<typeof encodeRecord<"status">>[1]),
+    );
+    return dir;
+  };
+
+  test("tA_child_alive_looks_at_the_process_group", async () => {
+    // The wrapper the holder started is gone, the agent behind it runs on in the wrapper's group.
+    record("a_000000000_0010");
+    const table = fakeTable([member(700), member(900, { pgid: 900 })]);
+    const seeing = make({ processes: table });
+    expect(await seeing.status("a_000000000_0010")).toEqual({
+      state: "lost",
+      reason: "holder_gone",
+      childAlive: true,
+    });
+    await expect(seeing.remove("a_000000000_0010")).rejects.toMatchObject({
+      code: "STILL_RUNNING",
+    });
+    // the group empty: the session is over
+    table.table = [member(900, { pgid: 900 })];
+    expect((await seeing.status("a_000000000_0010")).childAlive).toBe(false);
+    // a zombie nobody reaped is not a process that runs
+    table.table = [member(700, { state: "Z" })];
+    expect((await seeing.status("a_000000000_0010")).childAlive).toBe(false);
+
+    // A holder that recorded the end answers for its child: what the child left in its group (a `kodel wait`
+    // that outlived the session's timeout, say) is not looked at, so the session can be resumed.
+    const ends: [string, Record<string, unknown>][] = [
+      ["a_000000000_0011", { state: "exited", exitCode: 0 }],
+      ["a_000000000_0012", { state: "killed", reason: "stopped" }],
+      ["a_000000000_0013", { state: "killed", reason: "timeout", signal: "SIGTERM" }],
+    ];
+    const left = fakeTable([member(700)]);
+    const afterAnEnd = make({ processes: left });
+    for (const [id, status] of ends) {
+      record(id, status);
+      const now = await afterAnEnd.status(id);
+      expect(now.state as string, id).toBe(status.state as string);
+      expect(now.childAlive, id).toBeUndefined();
+      expect(now.group, id).toBeUndefined();
+    }
+    expect(left.reads).toBe(0);
+  });
+
+  test("tA_child_alive_pgid_reuse", async () => {
+    record("a_000000000_0020");
+    // The group's number is the pid of a live process that is not the recorded child: the kernel gave the number
+    // out again, which it does only once the group is empty, so everything in that group is a stranger's.
+    const stranger = fakeTable([member(GONE, { pgid: GONE }), member(701)], {
+      identity: () => ({ method: "ps-lstart", value: "Tue Feb  2 02:02:02 2025" }),
+    });
+    const status = await make({ processes: stranger }).status("a_000000000_0020");
+    expect(status).toEqual({
+      state: "lost",
+      reason: "holder_gone",
+      childAlive: false,
+      group: "stranger",
+    });
+    // the same when the stranger sits in another group, or its identity cannot be read or compared
+    const elsewhere = [member(GONE, { pgid: 12 }), member(701)];
+    expect(groupMembers(GONE, STARTED, LEADER, stranger)).toMatchObject({ stranger: true });
+    for (const identity of [
+      () => undefined,
+      () => ({ method: "proc-ticks", value: "1" }) as ProcessIdentity,
+      () => ({ method: "ps-lstart", value: "another start" }) as ProcessIdentity,
+    ]) {
+      expect(groupMembers(GONE, STARTED, LEADER, fakeTable(elsewhere, { identity }))).toEqual({
+        known: true,
+        stranger: true,
+        members: [],
+      });
+    }
+    // The number held by the recorded child itself (the same identity) is no stranger: its group is the session's.
+    const ours = groupMembers(
+      GONE,
+      STARTED,
+      LEADER,
+      fakeTable(elsewhere, { identity: () => LEADER }),
+    );
+    expect(ours).toMatchObject({ known: true, stranger: false });
+    expect(ours.known && ours.members.map((m) => m.pid)).toEqual([701]);
+    // a leader that is a zombie holds the number and is nobody's process: the members are ours
+    const defunct = fakeTable([member(GONE, { state: "Z" }), member(701)]);
+    expect(groupMembers(GONE, STARTED, LEADER, defunct)).toMatchObject({
+      stranger: false,
+      members: [{ pid: 701 }],
+    });
+  });
+
+  test("tA_child_alive_after_a_restart", async () => {
+    record("a_000000000_0030");
+    // The machine was started after the session began: every number was given out anew.
+    const rebooted = fakeTable([member(700)], { boot: STARTED + 60_000 });
+    const status = await make({ processes: rebooted }).status("a_000000000_0030");
+    expect(status).toEqual({ state: "lost", reason: "holder_gone", childAlive: false });
+    expect(status.group).toBeUndefined();
+    // then nothing keeps the record: it is removed like any ended session
+    await make({ processes: rebooted }).remove("a_000000000_0030");
+    expect(existsSync(join(adapter.place.dir, "a_000000000_0030"))).toBe(false);
+    // started before the session: the members count
+    record("a_000000000_0031");
+    const same = fakeTable([member(700)], { boot: STARTED - 1 });
+    expect((await make({ processes: same }).status("a_000000000_0031")).childAlive).toBe(true);
+  });
+
+  test("tA_child_alive_unreadable_group", async () => {
+    record("a_000000000_0040");
+    // The table cannot be read (a sandbox): the group is not looked at, the recorded child alone decides, as
+    // before the group rule, and the status says that nothing is known of the group.
+    const hidden = fakeTable(undefined);
+    const blind = make({ processes: hidden });
+    expect(await blind.status("a_000000000_0040")).toEqual({
+      state: "lost",
+      reason: "holder_gone",
+      childAlive: false,
+      group: "unread",
+    });
+    const [row] = await blind.list();
+    expect(row?.status.group).toBe("unread");
+    // nothing is held for good: the record can be removed
+    // the boot time alone unreadable, with members there: not known either
+    const noBoot = fakeTable([member(700)], { boot: undefined });
+    expect((await make({ processes: noBoot }).status("a_000000000_0040")).group).toBe("unread");
+    // no member at all needs no boot time: known, and empty
+    const empty = fakeTable([], { boot: undefined });
+    const none = await make({ processes: empty }).status("a_000000000_0040");
+    expect(none.group).toBeUndefined();
+    expect(empty.boots).toBe(0);
+    await blind.remove("a_000000000_0040");
+    expect(existsSync(join(adapter.place.dir, "a_000000000_0040"))).toBe(false);
+  });
+
+  test("tA_group_table_is_read_once_per_listing", async () => {
+    for (const n of [50, 51, 52, 53]) record(`a_000000000_00${n}`);
+    record("a_000000000_0054", { state: "exited", exitCode: 0 });
+    const table = fakeTable([member(700)]);
+    const rows = await make({ processes: table }).list();
+    expect(rows).toHaveLength(5);
+    expect(rows.filter((r) => r.status.childAlive).length).toBe(4);
+    expect(table.reads).toBe(1);
+    expect(table.boots).toBe(1);
+
+    // a listing with no record whose holder went away without a word reads no table at all
+    for (const n of [50, 51, 52, 53]) {
+      rmSync(join(adapter.place.dir, `a_000000000_00${n}`), { recursive: true });
+    }
+    const { id } = await adapter.start(sh("exit 0"));
+    await adapter.wait(id, { timeoutMs: 15_000 });
+    const quiet = fakeTable([member(700)]);
+    expect(await make({ processes: quiet }).list()).toHaveLength(2);
+    expect(quiet.reads).toBe(0);
+    expect(quiet.boots).toBe(0);
+  });
+
+  test("tA_stop_ends_a_group_only_orphan", async () => {
+    const dir = record("a_000000000_0060");
+    // 700 ends at SIGTERM; 701 ignores it and ends at SIGKILL; the pid 702 is taken by another process between
+    // the listing and the signal (another start time): that one is never signalled.
+    let listings = 0;
+    const table = fakeTable([member(700), member(701), member(702)], {
+      onSignal(fake, pid, signal) {
+        if (pid === 700 || signal === "SIGKILL") {
+          fake.table = (fake.table ?? []).filter((row) => row.pid !== pid);
+        }
+      },
+    });
+    const rows = table.rows.bind(table);
+    table.rows = () => {
+      // the first two reads are the status and the listing of the members; then 702 changes hands
+      if (++listings === 3) {
+        table.table = (table.table ?? []).map((row) =>
+          row.pid === 702 ? { ...row, pgid: 702, started: "Wed Mar  3 03:03:03 2026" } : row,
+        );
+      }
+      return rows();
+    };
+    const stopping = make({ processes: table });
+    expect((await stopping.status("a_000000000_0060")).childAlive).toBe(true);
+    listings = 1;
+    const stopped = await stopping.stop("a_000000000_0060");
+    expect(table.signals).toEqual([
+      [700, "SIGTERM"],
+      [701, "SIGTERM"],
+      [701, "SIGKILL"],
+    ]);
+    // a stop record was written, by the stop and before any signal could matter
+    expect(JSON.parse(readFileSync(join(dir, "stop.json"), "utf8"))).toMatchObject({
+      v: 1,
+      by: "stop",
+    });
+    expect(stopped).toEqual({ state: "killed", reason: "stopped", childAlive: false });
+    // the holder's own record was not touched
+    expect(JSON.parse(readFileSync(join(dir, "status.json"), "utf8")).state).toBe("running");
+  }, 20_000);
+
+  test("tA_stop_never_signals_a_stranger_group", async () => {
+    const dir = record("a_000000000_0070");
+    const stranger = fakeTable([member(GONE, { pgid: GONE }), member(701)], {
+      identity: () => ({ method: "ps-lstart", value: "Tue Feb  2 02:02:02 2025" }),
+    });
+    const status = await make({ processes: stranger }).stop("a_000000000_0070");
+    expect(status).toMatchObject({ state: "lost", childAlive: false, group: "stranger" });
+    expect(stranger.signals).toEqual([]);
+    expect(existsSync(join(dir, "stop.json"))).toBe(false);
+
+    // nor a group that cannot be looked at, nor one of a machine that was restarted since
+    const hidden = fakeTable(undefined);
+    expect(await make({ processes: hidden }).stop("a_000000000_0070")).toMatchObject({
+      state: "lost",
+      group: "unread",
+    });
+    const rebooted = fakeTable([member(700)], { boot: STARTED + 1 });
+    expect((await make({ processes: rebooted }).stop("a_000000000_0070")).state).toBe("lost");
+    expect([...hidden.signals, ...rebooted.signals]).toEqual([]);
+    expect(existsSync(join(dir, "stop.json"))).toBe(false);
+
+    // A group that was the session's at the status and a stranger's at the stop: read again, not signalled.
+    const turning = fakeTable([member(700)]);
+    const late = make({ processes: turning });
+    expect((await late.status("a_000000000_0070")).childAlive).toBe(true);
+    turning.table = [member(GONE, { pgid: 5 }), member(700)];
+    expect(await late.stop("a_000000000_0070")).toMatchObject({ group: "stranger" });
+    expect(turning.signals).toEqual([]);
+  });
+
+  test("tA_rm_after_the_group_is_stopped", async () => {
+    const dir = record(
+      "a_000000000_0080",
+      {},
+      { name: "orphan", spec: { cwd: root, envNames: [], name: "orphan", origin: "cli" } },
+    );
+    const table = fakeTable([member(700)], {
+      onSignal(fake, pid) {
+        fake.table = (fake.table ?? []).filter((row) => row.pid !== pid);
+      },
+    });
+    const person = make({ processes: table });
+    await expect(person.remove("a_000000000_0080")).rejects.toMatchObject({
+      code: "STILL_RUNNING",
+    });
+    expect(existsSync(dir)).toBe(true);
+    const stopped = await person.stop("a_000000000_0080");
+    expect(stopped).toMatchObject({ state: "killed", reason: "stopped", childAlive: false });
+    const [row] = await person.list();
+    expect(row?.status).toMatchObject({ state: "killed", reason: "stopped" });
+    expect(row?.status.childAlive).toBeFalsy();
+    await person.remove("a_000000000_0080");
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  tableTest(
+    "tA_real_group_orphan_is_seen_and_stopped",
+    async () => {
+      // Real processes: a wrapper (`sh`) that the holder starts and an agent (`sleep`) behind it, in its group.
+      const pidFile = join(root, "agent.pid");
+      const { id } = await adapter.start(sh(`sleep 300 & echo $! > ${pidFile}; wait`));
+      await eventually(() => existsSync(pidFile) && readFileSync(pidFile, "utf8").trim() !== "");
+      const agentPid = Number(readFileSync(pidFile, "utf8").trim());
+      const stored = JSON.parse(readFileSync(join(adapter.place.dir, id, "status.json"), "utf8"));
+      try {
+        process.kill(stored.holder.pid, "SIGKILL");
+        process.kill(stored.child.pid, "SIGKILL");
+        await eventually(() => !liveProcess(stored.holder.pid) && !liveProcess(stored.child.pid));
+        expect(liveProcess(agentPid)).toBe(true);
+        expect(await adapter.status(id)).toMatchObject({
+          state: "lost",
+          reason: "holder_gone",
+          childAlive: true,
+        });
+        await expect(adapter.remove(id)).rejects.toMatchObject({ code: "STILL_RUNNING" });
+        const stopped = await adapter.stop(id);
+        expect(stopped).toMatchObject({ state: "killed", reason: "stopped", childAlive: false });
+        await eventually(() => !liveProcess(agentPid), 6_000);
+        await adapter.remove(id);
+        expect(existsSync(join(adapter.place.dir, id))).toBe(false);
+      } finally {
+        try {
+          process.kill(agentPid, "SIGKILL");
+        } catch {
+          // gone
+        }
+      }
+    },
+    30_000,
+  );
 });

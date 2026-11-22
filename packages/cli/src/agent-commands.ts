@@ -111,6 +111,22 @@ export const stateLabel = (entry: SessionListEntry): string => {
   return detail.length > 0 ? `${word} (${detail.join(", ")})` : word;
 };
 
+/** The `AGENT` column: the engine and the id of its conversation, as the `agent` record names them. */
+export const agentLabel = (entry: SessionListEntry): string =>
+  entry.agent === undefined
+    ? "-"
+    : entry.agent.session === undefined
+      ? entry.agent.engine
+      : `${entry.agent.engine} ${entry.agent.session}`;
+
+/** Why a `stop` signalled nothing of a process group it could not call the session's, or nothing to say. */
+export const groupNote = (group: SessionListEntry["status"]["group"]): string | undefined =>
+  group === "unread"
+    ? "the process table could not be read: a process this agent left behind a wrapper that died would not be seen, and none was signalled"
+    : group === "stranger"
+      ? "the number of its process group belongs to another process now: nothing of this agent is left, and nothing was signalled"
+      : undefined;
+
 /** A command cut to a width for the table; the full text is in `--json`. */
 const shorten = (text: string, width = 48): string => {
   const flat = text.replace(/\s+/g, " ").trim();
@@ -239,10 +255,12 @@ export function registerAgentCommands(
         plain(r.id),
         plain(r.name ?? "-"),
         plain(stateLabel(r)),
+        plain(r.mode ?? "-"),
+        plain(agentLabel(r)),
         plain(shorten(r.command ?? "")),
       ]);
       for (const line of formatTable(
-        ["ID", "NAME", "STATE", "COMMAND"],
+        ["ID", "NAME", "STATE", "MODE", "AGENT", "COMMAND"],
         table,
         opts.headers !== false,
       )) {
@@ -263,6 +281,8 @@ export function registerAgentCommands(
           ? "stopped"
           : `${status.state}${status.reason ? ` (${status.reason})` : ""}`;
       ctx.out(`${plain(id)}: ${label}\n`);
+      const note = groupNote(status.group);
+      if (note !== undefined) ctx.out(`${plain(id)}: ${note}\n`);
     });
 
   agent

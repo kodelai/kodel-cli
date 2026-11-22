@@ -132,6 +132,40 @@ describe("validateSpec", () => {
   });
 });
 
+describe("validateSpec, the agent of a session", () => {
+  test("tA_spec_agent_is_validated", () => {
+    const id = "0f4b1c2d-0000-4000-8000-000000000001";
+    expect(validateSpec({ ...base, agent: { engine: "claude" } })).toBeUndefined();
+    expect(validateSpec({ ...base, agent: { engine: "claude", session: id } })).toBeUndefined();
+    expect(
+      validateSpec({
+        ...base,
+        agent: { engine: "claude", session: id, resumes: "a_000000000_0001" },
+      }),
+    ).toBeUndefined();
+    const refused: [string, unknown][] = [
+      ["not an object", "claude"],
+      ["a list", ["claude"]],
+      ["no engine", { session: id }],
+      ["an engine that is not a profile name", { engine: "Claude Code" }],
+      ["an empty engine", { engine: "" }],
+      ["a session with a space", { engine: "claude", session: "a b" }],
+      ["a session that reads as a flag", { engine: "claude", session: "--resume" }],
+      ["an empty session", { engine: "claude", session: "" }],
+      ["a session that is not a string", { engine: "claude", session: 7 }],
+      ["a session longer than an id", { engine: "claude", session: "a".repeat(200) }],
+      ["resumes that is a path", { engine: "claude", resumes: "../other" }],
+      ["a prompt", { engine: "claude", prompt: "do the task" }],
+      ["a source (the starter's to write)", { engine: "claude", session: id, source: "chosen" }],
+    ];
+    for (const [label, agent] of refused) {
+      const problem = validateSpec({ ...base, agent: agent as never });
+      expect(problem, label).toBeTypeOf("string");
+      expect(problem, label).toContain("agent");
+    }
+  });
+});
+
 describe("validateSpec, rules added after review", () => {
   test("tA_validate_spec_lifetime_origin_and_host_timeout", () => {
     expect(validateSpec({ ...base, lifetime: "forever" as never })).toBeTypeOf("string");

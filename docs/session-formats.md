@@ -7,6 +7,7 @@ The state base is `KODEL_STATE_DIR` or `~/.kodel`. A session folder holds:
 | File | Written by | When |
 |------|------------|------|
 | `session.json` | the starter | once, in a temporary folder that is renamed into place |
+| `agent.json` | the starter | once, before `session.json` in the same temporary folder; only for a session that runs a coding agent (see "The agent record" below) |
 | `status.json` | the holder (or once, as a `lost` tombstone, by the first reader that finds no holder) | at start, when the child runs, at the end |
 | `stop.json` | `agent stop` | before the child is signalled |
 | `tail.txt`, `stdout.txt`, `stderr.txt` | the holder | redacted output tails (interleaved, and each stream alone), replaced while output arrives; `kodel agent logs <id> [--stdout\|--stderr]` prints them. A terminal session (`mode: pty`) has `tail.txt` only: a terminal has one stream, and `--stdout` and `--stderr` answer `UNSUPPORTED` |
@@ -32,6 +33,67 @@ different thing and is not touched here.
 (follow-up "Free finished `ke-` records"). The record format does not change.
 
 Golden fixtures: `fixtures/session-formats/v1/` (`scripts/take-session-fixtures.mjs`).
+
+## The agent record (`agent.json`)
+
+A session that runs a coding agent says which one in a record of its own:
+`{ v, engine, session?, source?, resumes? }`.
+
+- `engine` is the name of the engine's profile (`claude`).
+- `session` is the id of the agent's own conversation, and `source` says who named it: `chosen` (the starter chose
+  it and gave it to the program) or `observed` (read from the engine's own files after the start; no build writes
+  that yet, the schema holds it so that such an engine needs no change of the format).
+- `resumes` is the id of the session whose conversation this one continues.
+
+The starter writes it once, before `session.json`, and both appear with the folder in one rename, so no session
+exists without the id of its conversation. Nothing rewrites it. It holds validated shapes only: never a prompt,
+never an argv, and nothing the agent printed. The id says which conversation to continue, never whether anything
+is done. `SessionSpec.agent` (`{ engine, session?, resumes? }`) is how a starter gives it; the stored `spec` of
+`session.json` does not repeat it.
+
+It is a file of its own, and not a field of `session.json`, because `session.json` is written once and an
+engine's id may be known only later. `kodel agent ls` shows it in the `AGENT` column (`claude <id>`, `-` when
+there is none) beside `MODE` (`pipes` or `pty`); `--json` has `mode` and `agent`.
+
+**Builds of different age.** A build from before this record never reads the file: it derives the same status,
+lists the session without an agent and removes the folder whole. A session with no `agent.json` is an older one
+(or runs no agent) and is listed with `AGENT` empty. A record with a newer `v` makes the session `NEWER_FORMAT`
+like any other file of the folder; one that cannot be read changes no status, and the session is listed without
+an agent. No change of `v`.
+
+## A holder that went away: "child still runs"
+
+A session whose holder is gone is `lost` (or `killed`, when a stop record is there), and `childAlive` ("child
+still runs" in `kodel agent ls`) says that its process is not: a consumer must not take it for finished, and
+`agent rm` refuses it (`STILL_RUNNING`). "Still runs" is the process the holder started, told by its recorded
+identity, **or a process left in that child's process group**: an agent behind a wrapper that died is seen.
+
+The group is looked at only for a record whose holder went away without recording its child's end. A holder that
+recorded the end (an exit, a stop, its own timeout) answers for its child, and what the child left behind is not
+looked at. A member of the group counts only when all of this holds:
+
+- the process table was read (`ps -A -o pid=,pgid=,stat=,lstart=`, once for a listing, and only when the listing
+  holds such a record);
+- the machine was not restarted after the session began (Linux `/proc/stat` `btime`, macOS `sysctl
+  kern.boottime`): after a restart every number is given out anew;
+- no live process that is not the recorded child has the group's number as its pid: the kernel gives a group's
+  number to a new process only once the group is empty, so with such a process every member is a stranger's.
+
+Where the table or the boot time cannot be read (a sandbox), the group is not looked at and the recorded child
+alone decides, as before this rule: nothing is held for good, and the stated limit is that an agent behind a dead
+wrapper is not seen there. The status then carries `group: "unread"`; `group: "stranger"` says that the number
+changed hands.
+
+`kodel agent stop <id>` ends such a group: it writes the stop record, then signals each member by its pid
+(`SIGTERM`, the grace, `SIGKILL`), after reading the member's start time again, so a pid that changed hands since
+the listing is not signalled. It never signals the group as a whole for this case, and never a group that is
+unread or a stranger's (the command says which). After it the session is `stopped` with no process left, and
+`agent rm` removes it.
+
+**Limits.** A zombie is not a process that runs. A process that left the group (its own `setsid`, as the shell
+commands of Claude Code do) is not a member: it is neither seen nor ended this way; `stop` of a session whose
+recorded child lives reaches the child's descendants as before. On macOS the boot time moves with the wall
+clock, so a clock set forward by more than the time between the boot and the session's start reads as a restart.
 
 **Refutation.** The record format is wrong if a reader of the same `v` must change to read a record a later compatible build
 writes, if a run in flight is refused, orphaned or changed by an update of kodel, or if `stop` ever signals a process

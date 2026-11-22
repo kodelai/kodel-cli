@@ -113,6 +113,24 @@ async function pipesPart() {
   put("status-killed.json", mask(read(live.id, "status.json")));
   put("stop.json", mask(read(live.id, "stop.json")));
 
+  // The `agent` record: written by the starter before `session.json`, once. The conversation id is the starter's
+  // choice (a fixed one here); a session that continues another's conversation names it in `resumes`.
+  const conversation = "00000000-0000-4000-8000-000000000000";
+  const chosen = await adapter.start({
+    argv: ["sh", "-c", "exit 0"],
+    cwd: root,
+    agent: { engine: "claude", session: conversation },
+  });
+  await adapter.wait(chosen.id, { timeoutMs: 15000 });
+  put("agent-chosen.json", mask(read(chosen.id, "agent.json")));
+  const resumed = await adapter.start({
+    argv: ["sh", "-c", "exit 0"],
+    cwd: root,
+    agent: { engine: "claude", session: conversation, resumes: chosen.id },
+  });
+  await adapter.wait(resumed.id, { timeoutMs: 15000 });
+  put("agent-resumed.json", mask(read(resumed.id, "agent.json")));
+
   const { statusRecordSchema } = await import("../packages/pipeline-core/src/index.ts");
   // The tombstone a reader writes when no holder ever answered: the same record, written by a reader.
   put(

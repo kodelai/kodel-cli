@@ -46,6 +46,7 @@ import {
 } from "../src/worker-launcher";
 import {
   createSessionWorkerLauncher,
+  parseEntry,
   type SessionLauncherDeps,
   startedOf,
 } from "../src/worker-launcher-session";
@@ -1124,6 +1125,76 @@ describe("t44 the launcher for kodel serve", () => {
     const timedOut = (await serveLauncherOf(launcher).statuses([RUN])).get(RUN);
     expect(timedOut?.stopped).toBeUndefined();
     expect(timedOut?.lastOutputAt).toBeUndefined();
+  });
+
+  test("t45_list_entry_keeps_mode_and_agent", () => {
+    const raw = {
+      id: "a_000000000_0001",
+      name: `kw-${RUN}`,
+      command: "claude -p",
+      mode: "pty",
+      agent: { engine: "claude", session: UUID, source: "chosen", resumes: "a_000000000_0000" },
+      status: { state: "lost", reason: "holder_gone", childAlive: true, group: "unread" },
+    };
+    expect(parseEntry(raw)).toEqual(raw as SessionListEntry);
+    // an entry from before the record: neither field, and nothing is made up
+    const older = parseEntry({ id: raw.id, status: { state: "exited", exitCode: 0 } });
+    expect(older).toEqual({ id: raw.id, status: { state: "exited", exitCode: 0 } });
+    // The output of a child is not trusted: a mode or an agent that the starter could not have written is dropped.
+    const dropped: [string, Record<string, unknown>][] = [
+      ["a mode that is none", { mode: "screen" }],
+      ["an agent that is a string", { agent: "claude" }],
+      ["an engine that is no profile name", { agent: { engine: "rm -rf" } }],
+      ["a session that reads as a flag", { agent: { engine: "claude", session: "--resume" } }],
+      ["a prompt beside the engine", { agent: { engine: "claude", prompt: "do it" } }],
+      ["a source that is none", { agent: { engine: "claude", session: UUID, source: "seen" } }],
+      ["a group that is none", { status: { state: "lost", group: "mine" } }],
+    ];
+    for (const [label, over] of dropped) {
+      const entry = parseEntry({ id: raw.id, status: { state: "lost" }, ...over });
+      expect(entry, label).toEqual({ id: raw.id, status: { state: "lost" } });
+    }
+  });
+
+  test("t45_child_alive_reaches_the_rule", async () => {
+    const adapter = new ScriptedSessionAdapter();
+    const launcher = createSessionWorkerLauncher(deps(adapter));
+    const { serveLauncherOf, serveWorkerOf } = await import("../src/worker-factory");
+    await launcher.start({ runId: RUN, workdir: ROOT, title: "t" });
+    const first = adapter.only(`kw-${RUN}`);
+    const viewOf = async () => (await serveLauncherOf(launcher).statuses([RUN])).get(RUN);
+    // a running worker says nothing of it
+    expect("childAlive" in ((await launcher.statuses([RUN])).get(RUN) ?? {})).toBe(false);
+    expect("childAlive" in ((await viewOf()) ?? {})).toBe(false);
+    // The holder is gone and the agent's process still runs: `agent ls --json` says so, and every layer up to
+    // the view the serve rule reads keeps it.
+    for (const status of [
+      { state: "lost", reason: "holder_gone", childAlive: true },
+      { state: "killed", reason: "stopped", childAlive: true },
+      { state: "killed", reason: "timeout", childAlive: true },
+    ] as const) {
+      adapter.finish(first.id, { ...status });
+      const worker = (await launcher.statuses([RUN])).get(RUN);
+      expect(worker, status.reason).toMatchObject({ state: status.state, childAlive: true });
+      expect(worker?.label).toContain("child still runs");
+      expect(await viewOf(), status.reason).toMatchObject({
+        state: status.state,
+        childAlive: true,
+      });
+    }
+    // after the person's stop the process is gone, and so is the mark
+    adapter.finish(first.id, { state: "killed", reason: "stopped" });
+    const stopped = (await launcher.statuses([RUN])).get(RUN);
+    expect(stopped?.stopped).toBe(true);
+    expect("childAlive" in (stopped ?? {})).toBe(false);
+    expect("childAlive" in ((await viewOf()) ?? {})).toBe(false);
+    // `childAlive: false`, as a record whose holder is gone spells it, is not the mark either
+    adapter.finish(first.id, { state: "lost", reason: "holder_gone", childAlive: false });
+    expect("childAlive" in ((await viewOf()) ?? {})).toBe(false);
+    // a record that cannot be read is `unknown`, whatever its placeholder status says
+    const status = (await launcher.statuses([RUN])).get(RUN);
+    if (!status) throw new Error("no status");
+    expect(serveWorkerOf({ ...status, childAlive: true }).childAlive).toBe(true);
   });
 
   test("t44_tui_start_takes_the_start_lock", async () => {

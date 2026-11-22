@@ -64,6 +64,7 @@ export function serveWorkerOf(status: WorkerStatus): ServeWorkerView {
     ...(status.decisionSeq === undefined ? {} : { decisionSeq: status.decisionSeq }),
     ...(status.lastOutputAt === undefined ? {} : { lastOutputAt: status.lastOutputAt }),
     ...(status.stopped === true ? { stopped: true } : {}),
+    ...(status.childAlive === true ? { childAlive: true } : {}),
   };
 }
 

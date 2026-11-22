@@ -184,6 +184,8 @@ export interface ServeWorkerView {
   lastOutputAt?: number;
   /** A person stopped it (`kodel agent stop`): it is not a worker that died. */
   stopped?: boolean;
+  /** The session is over while its process still runs without a holder (`kodel agent ls`: "child still runs"). */
+  childAlive?: boolean;
 }
 
 /** What a resume needs to know of a run. */

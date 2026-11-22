@@ -42,11 +42,15 @@ import {
 import { KILL_GRACE_MS, killTree } from "./command";
 import {
   descendantsOf,
+  groupMembers,
   liveProcess,
   machineId,
+  type ProcessView,
   processIdentity,
+  readOnce,
   sameIdentity,
   sameProcess,
+  systemProcesses,
 } from "./process-table";
 import { sessionEnv } from "./session-env";
 import {
@@ -65,9 +69,11 @@ import {
   sessionPlace,
 } from "./session-paths";
 import {
+  type AgentRecord,
   createExclusive,
   type NameMarker,
   publishSession,
+  readAgent,
   readMarker,
   readSession,
   readStatus,
@@ -117,6 +123,8 @@ export interface PipesAdapterOptions {
    * that throws stands for a process that dies there (nothing is rolled back). Inert when absent.
    */
   testHooks?: { afterPublish?(id: string): void };
+  /** Tests only: the process table, the boot time and the signals the group rule uses. The system's by default. */
+  processes?: ProcessView;
 }
 
 /** The command a person typed, for `ls`: a shell command, or the argv joined (already redacted in the record). */
@@ -130,6 +138,7 @@ export class PipesSessionAdapter implements SessionAdapter {
   private readonly now: () => number;
   private readonly graceMs: number;
   private readonly poll: number;
+  private readonly processes: ProcessView;
 
   constructor(private readonly opts: PipesAdapterOptions) {
     this.place = sessionPlace({
@@ -140,6 +149,7 @@ export class PipesSessionAdapter implements SessionAdapter {
     this.now = opts.now ?? Date.now;
     this.graceMs = opts.graceMs ?? DEFAULT_START_GRACE_MS;
     this.poll = opts.pollMs ?? 100;
+    this.processes = opts.processes ?? systemProcesses;
   }
 
   /** `streams` is about the adapter: its pipes sessions have two; a terminal session has one (`tail` says so). */
@@ -254,7 +264,19 @@ export class PipesSessionAdapter implements SessionAdapter {
     };
 
     // `env` holds secrets, and the size is the attached terminal's from the first resize on: neither is stored.
-    const { env: _env, size, command, ...safeSpec } = spec;
+    // The agent goes into a record of its own, written before `session.json`.
+    const { env: _env, size, command, agent, ...safeSpec } = spec;
+    const agentRecord: AgentRecord | undefined =
+      agent === undefined
+        ? undefined
+        : {
+            v: SESSION_FORMAT_VERSION,
+            engine: agent.engine,
+            ...(agent.session !== undefined
+              ? { session: agent.session, source: "chosen" as const }
+              : {}),
+            ...(agent.resumes !== undefined ? { resumes: agent.resumes } : {}),
+          };
     const record: SessionRecord = {
       v: SESSION_FORMAT_VERSION,
       id,
@@ -273,7 +295,7 @@ export class PipesSessionAdapter implements SessionAdapter {
       ...(machineId() ? { machine: machineId() as string } : {}),
     };
     try {
-      publishSession(dir, record);
+      publishSession(dir, record, agentRecord);
       published = true;
     } catch (error) {
       await rollback();
@@ -375,10 +397,20 @@ export class PipesSessionAdapter implements SessionAdapter {
     }
   }
 
-  /** Read-only: never writes a tombstone. */
-  private read(id: string): SessionStatus {
+  /**
+   * Read-only: never writes a tombstone. `view` is the process table of one listing: it is read at most once,
+   * and only for a record whose holder went away without recording its child's end.
+   */
+  private read(id: string, view: ProcessView = readOnce(this.processes)): SessionStatus {
     const dir = sessionDirOf(this.place, id);
-    const result = deriveStatus(snapshotOf(dir), this.now(), this.graceMs);
+    let group: SessionStatus["group"];
+    const snapshot = snapshotOf(dir, (child, since) => {
+      const answer = groupMembers(child.pid, since, child.identity, view);
+      if (!answer.known) group = "unread";
+      else if (answer.stranger) group = "stranger";
+      return answer.known && answer.members.length > 0;
+    });
+    const result = deriveStatus(snapshot, this.now(), this.graceMs);
     if (!result.ok) {
       throw new SessionError(
         result.code === "UNKNOWN" ? "NOT_FOUND" : result.code,
@@ -390,6 +422,7 @@ export class PipesSessionAdapter implements SessionAdapter {
     if (typeof recorded !== "string" && recorded.lastOutputAt !== undefined) {
       status.lastOutputAt = recorded.lastOutputAt;
     }
+    if (group !== undefined && isTerminalState(status.state)) status.group = group;
     return status;
   }
 
@@ -502,7 +535,7 @@ export class PipesSessionAdapter implements SessionAdapter {
     const child = recorded.child;
     if (before.state !== "running" && !(before.childAlive && child)) return before;
     if (!child) return before;
-    if (!liveProcess(child.pid)) return this.settle(id);
+    if (!liveProcess(child.pid)) return this.stopGroup(id, child);
 
     // The recorded identity must be the live process. Without a recorded identity, or when it cannot be read or
     // compared now, nothing is signalled: a pid may have been taken by a stranger.
@@ -519,7 +552,8 @@ export class PipesSessionAdapter implements SessionAdapter {
     if (same === undefined) {
       throw new SessionError("IDENTITY_UNKNOWN", `cannot compare the identity of ${child.pid}`);
     }
-    if (!same) return this.settle(id); // another process has the pid now: the session's child is gone
+    // Another process has the pid now: the session's child is gone (the group rule then finds a stranger).
+    if (!same) return this.stopGroup(id, child);
     if (!existsSync(join(dir, STOP_FILE))) {
       replaceRecord(
         join(dir, STOP_FILE),
@@ -568,6 +602,57 @@ export class PipesSessionAdapter implements SessionAdapter {
     } catch {
       // the group is gone
     }
+    return this.settle(id);
+  }
+
+  /**
+   * The recorded child is gone. If its holder went away without recording that, and processes of the child's
+   * group are still there by the group rule (`groupMembers`), they are the session's and are ended: a stop record,
+   * then each member by its pid, after its start time was read again (never `kill(-pgid)`: the leader is gone and
+   * the number could change hands between the listing and the signal). A group that could not be looked at, or
+   * that is a stranger's, is not signalled; the status says which (`group`).
+   */
+  private async stopGroup(
+    id: string,
+    child: NonNullable<StatusRecord["child"]>,
+  ): Promise<SessionStatus> {
+    const dir = sessionDirOf(this.place, id);
+    const status = this.settle(id);
+    if (!isTerminalState(status.state) || !status.childAlive) return status;
+    const record = readSession(dir);
+    if (typeof record === "string") return status;
+    const answer = groupMembers(child.pid, record.started, child.identity, this.processes);
+    if (!answer.known || answer.stranger || answer.members.length === 0) return this.settle(id);
+    const members = answer.members;
+    if (!existsSync(join(dir, STOP_FILE))) {
+      replaceRecord(
+        join(dir, STOP_FILE),
+        encodeRecord("stop", { v: SESSION_FORMAT_VERSION, by: "stop", at: this.now() }),
+      );
+    }
+    /** The members that are still the processes of the listing: the same pid, group and start time. */
+    const left = () => {
+      const rows = this.processes.rows();
+      if (rows === undefined) return [];
+      return members.filter((member) =>
+        rows.some(
+          (row) =>
+            row.pid === member.pid &&
+            row.pgid === member.pgid &&
+            row.started === member.started &&
+            !row.state.startsWith("Z"),
+        ),
+      );
+    };
+    for (const member of left()) this.processes.signal(member.pid, "SIGTERM");
+    const limit = this.now() + KILL_GRACE_MS;
+    let remaining = left();
+    while (remaining.length > 0 && this.now() < limit) {
+      await sleep(this.poll);
+      remaining = left();
+    }
+    for (const member of remaining) this.processes.signal(member.pid, "SIGKILL");
+    for (let i = 0; i < 20 && remaining.length > 0 && left().length > 0; i++) await sleep(50);
     return this.settle(id);
   }
 
@@ -790,9 +875,19 @@ export class PipesSessionAdapter implements SessionAdapter {
     removeDir(dir);
   }
 
+  /** The `agent` record as a listing shows it; nothing for a session without one, or one that cannot be read. */
+  private agentOf(dir: string): Pick<SessionListEntry, "agent"> {
+    const stored = readAgent(dir);
+    if (typeof stored === "string") return {};
+    const { v: _v, ...agent } = stored;
+    return { agent };
+  }
+
   async list(filter?: { name?: string }): Promise<SessionListEntry[]> {
     if (!existsSync(this.place.dir)) return [];
     const entries: SessionListEntry[] = [];
+    // One read of the process table for the whole listing, and none when no record needs it.
+    const view = readOnce(this.processes);
     const wanted = filter?.name === undefined ? undefined : foldSessionName(filter.name);
     for (const entry of readdirSync(this.place.dir)) {
       if (!isLocalSessionId(entry)) continue;
@@ -823,7 +918,9 @@ export class PipesSessionAdapter implements SessionAdapter {
           id: entry,
           ...(record.name !== undefined ? { name: record.name } : {}),
           command: commandOf(record),
-          status: this.read(entry),
+          mode: record.mode,
+          ...this.agentOf(join(this.place.dir, entry)),
+          status: this.read(entry, view),
         });
       } catch (error) {
         entries.push({

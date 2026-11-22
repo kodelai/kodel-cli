@@ -5,7 +5,12 @@
  * is dropped without notice. `SESSION_RECORD_CAPABILITIES` says what a `v` can hold.
  */
 import { z } from "zod";
-import { SESSION_FORMAT_VERSION } from "../session";
+import {
+  AGENT_ENGINE_PATTERN,
+  AGENT_SESSION_PATTERN,
+  SESSION_FORMAT_VERSION,
+  SESSION_ID_PATTERN,
+} from "../session";
 
 const identity = z
   .object({
@@ -84,19 +89,38 @@ export const nameMarkerSchema = z
   .object({ v: z.number().int(), name: z.string(), id: z.string(), started: z.number() })
   .strict();
 
+/**
+ * `agent.json`: the coding agent a session runs. A file of its own beside the write-once `session.json`, so an
+ * engine whose conversation id is known only after the start (`observed`) needs no change of the format. It holds
+ * validated shapes only: never a prompt, never an argv.
+ */
+export const agentRecordSchema = z
+  .object({
+    v: z.number().int(),
+    engine: z.string().regex(AGENT_ENGINE_PATTERN),
+    session: z.string().regex(AGENT_SESSION_PATTERN).optional(),
+    /** Who named `session`: the starter chose it, or it was read from the engine's own files after the start. */
+    source: z.enum(["chosen", "observed"]).optional(),
+    /** The session whose conversation this one continues. */
+    resumes: z.string().regex(SESSION_ID_PATTERN).optional(),
+  })
+  .strict();
+
 export type SessionRecord = z.infer<typeof sessionRecordSchema>;
 export type StatusRecord = z.infer<typeof statusRecordSchema>;
 export type StopRecord = z.infer<typeof stopRecordSchema>;
 export type NameMarker = z.infer<typeof nameMarkerSchema>;
+export type AgentRecord = z.infer<typeof agentRecordSchema>;
 export type ProcessIdentity = z.infer<typeof identity>;
 
-export type RecordKind = "session" | "status" | "stop" | "name";
+export type RecordKind = "session" | "status" | "stop" | "name" | "agent";
 
 const schemas = {
   session: sessionRecordSchema,
   status: statusRecordSchema,
   stop: stopRecordSchema,
   name: nameMarkerSchema,
+  agent: agentRecordSchema,
 } as const;
 
 type ModelOf = {
@@ -104,6 +128,7 @@ type ModelOf = {
   status: StatusRecord;
   stop: StopRecord;
   name: NameMarker;
+  agent: AgentRecord;
 };
 
 export type DecodeResult<K extends RecordKind> =
@@ -113,7 +138,9 @@ export type DecodeResult<K extends RecordKind> =
 /** What a stored `v` can hold; a field outside it needs a new `v`. */
 export const SESSION_RECORD_CAPABILITIES = {
   1: {
-    kinds: ["session", "status", "stop", "name"] as RecordKind[],
+    kinds: ["session", "status", "stop", "name", "agent"] as RecordKind[],
+    /** `agent.json`: a file a build that does not know it never reads; it derives the same status without it. */
+    agent: true,
     pty: true,
     /** `status.sock`: an optional field a build that does not know it drops without changing any status. */
     sock: true,
