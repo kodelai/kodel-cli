@@ -865,15 +865,13 @@ describe("a holder that went away: the child's process group", () => {
       childAlive: false,
       group: "stranger",
     });
-    // the same when the stranger sits in another group, or its identity cannot be read or compared
+    // the same when the stranger sits in another group, or no identity of the leader was recorded
     const elsewhere = [member(GONE, { pgid: 12 }), member(701)];
     expect(groupMembers(GONE, STARTED, LEADER, stranger)).toMatchObject({ stranger: true });
-    for (const identity of [
-      () => undefined,
-      () => ({ method: "proc-ticks", value: "1" }) as ProcessIdentity,
-      () => ({ method: "ps-lstart", value: "another start" }) as ProcessIdentity,
-    ]) {
-      expect(groupMembers(GONE, STARTED, LEADER, fakeTable(elsewhere, { identity }))).toEqual({
+    const another = () => ({ method: "ps-lstart", value: "another start" }) as ProcessIdentity;
+    for (const leader of [LEADER, undefined]) {
+      const table = fakeTable(elsewhere, { identity: another });
+      expect(groupMembers(GONE, STARTED, leader, table)).toEqual({
         known: true,
         stranger: true,
         members: [],
@@ -888,6 +886,21 @@ describe("a holder that went away: the child's process group", () => {
     );
     expect(ours).toMatchObject({ known: true, stranger: false });
     expect(ours.known && ours.members.map((m) => m.pid)).toEqual([701]);
+    // An identity that cannot be read now, or cannot be compared with the recorded one, says nothing: the process
+    // is not called a stranger on a guess, and the status says the group was not read.
+    for (const identity of [
+      () => undefined,
+      () => ({ method: "proc-ticks", value: "1" }) as ProcessIdentity,
+    ]) {
+      const table = fakeTable(elsewhere, { identity });
+      expect(groupMembers(GONE, STARTED, LEADER, table)).toEqual({ known: false });
+      expect(await make({ processes: table }).status("a_000000000_0020")).toEqual({
+        state: "lost",
+        reason: "holder_gone",
+        childAlive: false,
+        group: "unread",
+      });
+    }
     // a leader that is a zombie holds the number and is nobody's process: the members are ours
     const defunct = fakeTable([member(GONE, { state: "Z" }), member(701)]);
     expect(groupMembers(GONE, STARTED, LEADER, defunct)).toMatchObject({
@@ -1024,12 +1037,24 @@ describe("a holder that went away: the child's process group", () => {
     expect(existsSync(join(dir, "stop.json"))).toBe(false);
 
     // A group that was the session's at the status and a stranger's at the stop: read again, not signalled.
-    const turning = fakeTable([member(700)]);
+    const turning = fakeTable([member(700)], {
+      identity: () => ({ method: "ps-lstart", value: "Tue Feb  2 02:02:02 2025" }),
+    });
     const late = make({ processes: turning });
     expect((await late.status("a_000000000_0070")).childAlive).toBe(true);
     turning.table = [member(GONE, { pgid: 5 }), member(700)];
     expect(await late.stop("a_000000000_0070")).toMatchObject({ group: "stranger" });
     expect(turning.signals).toEqual([]);
+
+    // The same, when the process that got the number cannot be told from the recorded child: not known, so
+    // not signalled either, and the status says the group was not read.
+    const unsure = fakeTable([member(700)]);
+    const doubt = make({ processes: unsure });
+    expect((await doubt.status("a_000000000_0070")).childAlive).toBe(true);
+    unsure.table = [member(GONE, { pgid: 5 }), member(700)];
+    expect(await doubt.stop("a_000000000_0070")).toMatchObject({ state: "lost", group: "unread" });
+    expect(unsure.signals).toEqual([]);
+    expect(existsSync(join(dir, "stop.json"))).toBe(false);
   });
 
   test("tA_rm_after_the_group_is_stopped", async () => {

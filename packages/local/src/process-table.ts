@@ -206,7 +206,10 @@ export const readOnce = (view: ProcessView): ProcessView => {
 };
 
 export type GroupAnswer =
-  /** The process table or the boot time could not be read: nothing is said about the group. */
+  /**
+   * The process table or the boot time could not be read, or the process that has the group's number as its pid
+   * could not be told from the recorded leader: nothing is said about the group.
+   */
   | { known: false }
   /** `stranger`: the group's number is the pid of a process that is not the recorded leader. */
   | { known: true; stranger: boolean; members: ProcessRow[] };
@@ -236,9 +239,13 @@ export const groupMembers = (
   // Whatever group that process is in now: it got the number, so the group was empty when it did.
   const head = rows.find((row) => row.pid === pgid && !row.state.startsWith("Z"));
   if (head !== undefined) {
+    if (leader === undefined) return { known: true, stranger: true, members: [] };
     const now = view.identity(head.pid);
-    const ours = leader !== undefined && now !== undefined && sameIdentity(leader, now) === true;
-    if (!ours) return { known: true, stranger: true, members: [] };
+    // An identity that cannot be read or compared now says nothing (as `sameProcess` and the guard take it):
+    // the process is not called a stranger on a guess.
+    const same = now === undefined ? undefined : sameIdentity(leader, now);
+    if (same === undefined) return { known: false };
+    if (!same) return { known: true, stranger: true, members: [] };
   }
   return { known: true, stranger: false, members };
 };

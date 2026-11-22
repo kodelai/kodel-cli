@@ -256,11 +256,58 @@ describe("t45 kodel agent prune: how it removes", () => {
     expect(sessions.removed).toEqual(["a_000000001_done"]);
     expect(seen.out).toContain("a_000000002_wake: kept (runs)\n");
     expect(seen.out).toContain("removed 1 of 3\n");
-    // A listing before every removal: one for the question, one for each record.
-    expect(sessions.calls.filter((c) => c === "list").length).toBe(4);
+    // One listing, for the question; then each record alone, by its id, before its removal.
+    expect(sessions.calls.filter((c) => c === "list").length).toBe(1);
+    expect(sessions.calls.filter((c) => c.startsWith("status"))).toEqual([
+      "status a_000000001_done",
+      "status a_000000002_wake",
+      "status a_000000003_gone",
+    ]);
     expect(sessions.calls.filter((c) => c.startsWith("remove"))).toEqual([
       "remove a_000000001_done",
     ]);
+  });
+
+  test("t45_prune_says_which_conversations_could_be_continued", async () => {
+    const sessions = new FakeSessions();
+    const claude = { engine: "claude", session: "0f4b1c2d-0000-4000-8000-000000000001" };
+    sessions.add(done("a_000000001_conv", { name: "cc", mode: "pty", agent: claude }));
+    sessions.add(done("a_000000002_conv", { mode: "pty", agent: claude }));
+    // No terminal, no conversation id, the agent of a run: nothing `--resume` could continue.
+    sessions.add(done("a_000000003_pipe", { name: "pp", agent: claude }));
+    sessions.add(
+      done("a_000000004_noid", { name: "nn", mode: "pty", agent: { engine: "claude" } }),
+    );
+    sessions.add(done("a_000000005_kw00", { name: `kw-${RUN}`, mode: "pty", agent: claude }));
+    const warning =
+      "kodel agent start --resume could still continue the conversation of cc, a_000000002_conv; not once their records are removed\n";
+    const dry = world(sessions, { runs: { [RUN]: "completed" } });
+    await dry.prune({ dryRun: true });
+    expect(dry.seen.out).toContain(warning);
+    const yes = world(sessions, { runs: { [RUN]: "completed" } });
+    await yes.prune();
+    expect(yes.seen.out).toContain(warning);
+    expect(yes.seen.asked).toEqual([
+      "Remove 5 finished agents (2 with a conversation that could be continued)?",
+    ]);
+    expect(sessions.removed.length).toBe(5);
+    // One of them, and none: the words fit, and the question is the plain one.
+    const one = new FakeSessions();
+    one.add(done("a_000000001_conv", { name: "cc", mode: "pty", agent: claude }));
+    const single = world(one);
+    await single.prune();
+    expect(single.seen.out).toContain(
+      "could still continue the conversation of cc; not once its record is removed\n",
+    );
+    expect(single.seen.asked).toEqual([
+      "Remove 1 finished agent (1 with a conversation that could be continued)?",
+    ]);
+    const none = new FakeSessions();
+    none.add(done("a_000000003_pipe", { name: "pp", agent: claude }));
+    const plainOne = world(none);
+    await plainOne.prune();
+    expect(plainOne.seen.out).not.toContain("--resume");
+    expect(plainOne.seen.asked).toEqual(["Remove 1 finished agent?"]);
   });
 });
 
@@ -309,12 +356,13 @@ describe("t45 kodel agent prune on the real adapter", () => {
     const live = await adapter.start(sh("sleep 30", { name: "live", origin: "cli" }));
     const over = await adapter.start(sh("exit 0", { name: "over", origin: "cli" }));
     await adapter.wait(over.id, { timeoutMs: 15_000 });
-    // The listing the command reads says the live one is finished (it went live after the read):
+    // What the command reads says the live one is finished (it went live after the last read):
     // `remove` itself is what refuses it.
     const stale: AgentSessions = {
       capabilities: () => adapter.capabilities(),
       start: (spec: SessionSpec, options?: StartOptions) => adapter.start(spec, options),
-      status: (id) => adapter.status(id),
+      status: async (id) =>
+        id === live.id ? { state: "exited" as const, exitCode: 0 } : adapter.status(id),
       wait: (id, opts) => adapter.wait(id, opts),
       tail: (id, bytes, stream) => adapter.tail(id, bytes, stream),
       stop: (id) => adapter.stop(id),

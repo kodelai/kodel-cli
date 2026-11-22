@@ -201,8 +201,8 @@ export interface SessionStatus {
   since?: number;
   /**
    * Only for a session whose holder went away without recording its child's end, with the recorded child gone:
-   * what is left of the child's process group could not be looked at (`unread`: the process table or the boot
-   * time; `childAlive` is then about the recorded child alone), or the group's number belongs to another
+   * what is left of the child's process group could not be looked at (`unread`: the process table, the boot
+   * time, or whether the process that has the group's number is the recorded child; `childAlive` is then about the recorded child alone), or the group's number belongs to another
    * process now (`stranger`: nothing of the session is left). Absent when the group was looked at, or need not be.
    */
   group?: "unread" | "stranger";

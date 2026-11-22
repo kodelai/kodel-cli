@@ -1,12 +1,13 @@
 /**
  * `kodel agent prune` (T-45): removes the finished agents in one go. It never removes a record that runs,
  * one whose process still runs without a holder, one that cannot be read, nor the agent of a run that is
- * open or cannot be read (its record is what a resume after a decision needs). Each record is read again
- * right before it is removed, and the adapter's own `remove` refuses a live one.
+ * open or cannot be read (its record is what a resume after a decision needs). Each record is read again,
+ * by its id, right before it is removed, and the adapter's own `remove` refuses a live one. The question
+ * says so when a record that goes holds a conversation `kodel agent start --resume` could continue.
  */
 import { isTerminalState, SessionError, type SessionListEntry } from "@kodel-ai/pipeline-core";
 import type { AgentContext, AgentProject, AgentSessions } from "./agent-commands";
-import { stateLabel } from "./agent-commands";
+import { resumeProblem, stateLabel } from "./agent-commands";
 import { plain } from "./plain";
 import { startedOf } from "./worker-launcher-session";
 
@@ -94,16 +95,38 @@ export async function runAgentPrune(
     ctx.out(`${plain(entry.id)}  ${plain(entry.name ?? "-")}  ${plain(stateLabel(entry))}\n`);
   }
   const count = `${goes.length} finished agent${goes.length === 1 ? "" : "s"}`;
+  const resumable = goes.filter((entry) => resumeProblem(entry) === undefined);
+  if (resumable.length > 0) {
+    const refs = resumable.map((entry) => plain(entry.name ?? entry.id)).join(", ");
+    ctx.out(
+      `kodel agent start --resume could still continue the conversation of ${refs}; not once ${
+        resumable.length === 1 ? "its record is" : "their records are"
+      } removed\n`,
+    );
+  }
   if (flags.dryRun) {
     ctx.out(`would remove ${count}; nothing was removed\n`);
     return;
   }
-  await ctx.mustConfirm(`Remove ${count}?`);
+  await ctx.mustConfirm(
+    resumable.length === 0
+      ? `Remove ${count}?`
+      : `Remove ${count} (${resumable.length} with a conversation that could be continued)?`,
+  );
   let removed = 0;
   for (const entry of goes) {
-    // Read again: the list may have stood at the question for a while, and a record can come alive.
-    const again = (await sessions.list()).find((row) => row.id === entry.id);
-    if (again === undefined) continue;
+    // Read again, this record alone: the list may have stood at the question for a while, and a record can
+    // come alive or be removed by somebody else.
+    let again: SessionListEntry;
+    try {
+      again = { ...entry, status: await sessions.status(entry.id) };
+    } catch (error) {
+      if (!(error instanceof SessionError)) throw error;
+      if (error.code !== "NOT_FOUND") {
+        ctx.out(`${plain(entry.id)}: kept (${error.code}: ${plain(error.message)})\n`);
+      }
+      continue;
+    }
     const kept = pruneKeeps(again, rule);
     if (kept !== undefined) {
       ctx.out(`${plain(entry.id)}: kept (${plain(kept)})\n`);

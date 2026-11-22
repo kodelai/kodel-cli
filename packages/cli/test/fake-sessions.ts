@@ -89,6 +89,7 @@ export class FakeSessions implements AgentSessions {
   }
 
   async status(id: string): Promise<SessionStatus> {
+    this.calls.push(`status ${id}`);
     return { ...this.get(id).status };
   }
 

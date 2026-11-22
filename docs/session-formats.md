@@ -104,8 +104,11 @@ host session's marker is never moved, and the marker of a session whose process 
 Removes finished records, after one question that names the count (`--dry-run` removes nothing,
 `--older-than <days>` keeps younger ones). It never removes a record that runs or whose process still runs,
 one that cannot be read, is of another machine or of a newer format, or a `kw-` or `ke-` record whose run is
-open or cannot be read. Each record is read again right before its removal, and `remove` itself refuses a
-live one. A person's name is freed with its record; a host session's marker stays.
+open or cannot be read. Each record is read again, by its id, right before its removal, and `remove` itself
+refuses a live one. A person's name is freed with its record; a host session's marker stays. When a record
+that goes holds a conversation `kodel agent start --resume` could still continue, a line before the question
+names it and the question counts it: the conversation cannot be continued through kodel once its record is
+removed.
 
 ## A holder that went away: "child still runs"
 
@@ -125,7 +128,8 @@ looked at. A member of the group counts only when all of this holds:
 - no live process that is not the recorded child has the group's number as its pid: the kernel gives a group's
   number to a new process only once the group is empty, so with such a process every member is a stranger's.
 
-Where the table or the boot time cannot be read (a sandbox), the group is not looked at and the recorded child
+Where the table or the boot time cannot be read (a sandbox), or the process that has the group's number as
+its pid cannot be told from the recorded child (its start time cannot be read now), the group is not looked at and the recorded child
 alone decides, as before this rule: nothing is held for good, and the stated limit is that an agent behind a dead
 wrapper is not seen there. The status then carries `group: "unread"`; `group: "stranger"` says that the number
 changed hands.
