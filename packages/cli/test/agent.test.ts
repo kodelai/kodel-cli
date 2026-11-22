@@ -157,8 +157,8 @@ describe("kodel agent", () => {
     expect(listed.sort()).toEqual(AGENT_HUMAN_COMMANDS.map((c) => c.replace("agent ", "")).sort());
     // `exec` and `attach` ask for none, `start` only about a block that is not the committed one; the
     // instruction says so by name.
-    expect(rule).toContain("all but two ask for a confirmation");
-    expect(rule).toContain("asks when the `engines` block is\n  not the committed one");
+    expect(rule).toContain("all but three ask for a confirmation every time");
+    expect(rule).toMatch(/asks only when the\s+`engines` block is\s+not the committed one/);
     expect(rule).toMatch(
       /`agent exec`[\s\S]*`agent attach`[\s\S]*ask\s+for none[\s\S]*`agent start`/,
     );

@@ -1145,8 +1145,9 @@ describe("t44 a worker that stays alive at a wait (T-45)", () => {
     // No action against the worker, no start, no resume: one line.
     expect(first.actions.filter((action) => action.kind !== "log")).toEqual([]);
     expect(logsOf(first.actions).map((line) => line.problem)).toEqual(["over_limit", "queued"]);
-    expect(logsOf(first.actions, "over_limit")[0]?.detail).toContain(
-      "over the limit by 1 after your decisions",
+    // The line counts and names no cause: a decision is one way over the limit, not the only one.
+    expect(logsOf(first.actions, "over_limit")[0]?.detail).toBe(
+      "2 agents work, over the limit of 1 by 1; nothing is started or resumed until an agent reaches a wait or ends",
     );
     expect(first.waiting).toEqual({ resumes: ["r_c"], starts: ["T-NEW"] });
     expect(first.memory.dead_in_a_row).toBe(0);

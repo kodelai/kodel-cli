@@ -33,10 +33,10 @@
 
 ## Decisions needed
 
-1. **The follow-up task (codex and opencode) is not in your tracker** (scope-10). I recommend that I create
-   it with `task_create` in step 12, from the text of step 13, and tell you its key; `kodel serve` starts
-   nothing from it until you run `kodel task approve`. **If you do not answer: I create it in step 12.** Say
-   "no" and step 13 stays a text for you to file.
+1. **The follow-up task (codex and opencode) is not in your tracker** (scope-10). I recommended creating it
+   with `task_create` in step 12, from the text of step 13. **It was not created:** the session that did
+   step 12 had no task tools. Step 13 stays a text for you to file; once it is a task, `kodel serve` starts
+   nothing from it until you run `kodel task approve`.
 
 Decided (your answers, not reopened):
 
@@ -118,7 +118,8 @@ only; kodel makes the run itself; test id T-45; `kodel mcp` by hand in `Bash` re
   reviews pile up, how many agent processes are alive). `max_workers`: agents that are working. A worker
   whose run only waits for you holds no `max_workers` place; in a fork with a step left for the agent it
   holds one. A worker your decision wakes while the limit is full goes on; while the count is over, the
-  daemon starts and resumes nothing and says once `over the limit by N after your decisions`.
+  daemon starts and resumes nothing and says once `W agents work, over the limit of M by N` (no cause is named: a hand start or a lowered limit
+  gets there too).
 - **If it does not go on** within 2 minutes of your decision, the daemon logs it once and the card says `the
   agent has not gone on since your decision · o opens it`. Nothing is typed for you. No such line when the
   run already waits for you again (two gates in a row). This line is also the only sign of a worker whose
@@ -675,8 +676,8 @@ there, else on your machine before a release (`tests/README.md`).
     `docs/tasks.md`, `tests/README.md`, AGENTS.md (the new human-only
     commands; `agent doctor` is the agent's; `engines` is the person's; a **fork worker**, the subagent of a
     fork that never starts `kodel wait`, kept apart from a **background agent**, the `kw-` session of a run
-    that does). Close TASK-K6MA and TASK-DSKQ; new tasks: the one of step 13 (created here with
-    `task_create` unless you said no, "Decisions needed" 1), the automatic wake-up, a group
+    that does). Close TASK-K6MA and TASK-DSKQ; new tasks: the one of step 13 (not created here: the
+    session had no task tools, so it is for you to file, "Decisions needed" 1), the automatic wake-up, a group
     kill on a session's timeout (until then a `kodel wait` of a session killed by its 7-day timeout lives on
     to its own end). `docs/changes.md` gets the migration note of decision 1; `docs/serve.md` the section
     "T-44 as revised by T-45", what `stalled` means for a terminal worker, and that a live worker keeps the
@@ -684,7 +685,7 @@ there, else on your machine before a release (`tests/README.md`).
     what stays open. Each step ends with its own tests green before the next begins; steps 2-5 gate 6;
     6, 6a, 7 and 8 land together (the default changes last, step 8) and gate 9 and 10.
 13. **The follow-up task: "codex and opencode as engines (profiles, worker and agent start, their safety
-    criteria)".** Not in the tracker yet; created in step 12 ("Decisions needed" 1). What this plan moved into it, about 4 working days by the estimate of attempt 3:
+    criteria)".** Not in the tracker: step 12 did not create it (the session had no task tools), so it is for you to file ("Decisions needed" 1). What this plan moved into it, about 4 working days by the estimate of attempt 3:
     - **Profiles** `codex` and `opencode` in the table of step 4, and lifting the refusal of decision 2 for
       them. What their `--help` showed (codex-cli 0.165.0 and the opencode installed here; the captures are
       to be taken again): codex `--no-daemon -a never -s workspace-write -c mcp_servers.kodel.command/args/env
@@ -962,7 +963,7 @@ Steps 4 and 5 (the profile, the config):
   functions of `claude-worker.ts`. The entry (`claudeProfile`) wraps those same functions, and
   `workerMechanismOf`, `workerProgramOf` and `profile.workerArgvProblem` (the read-back of
   `t45_final_argv_is_checked`) are there for it. `DEFAULT_WORKER_MECHANISM` is `"print"`; step 8 turns it,
-  and `t45_absent_worker_key_is_print_until_the_serve_rule` (`cli/test/agent-profiles.test.ts`) is the test
+  and `t45_default_is_terminal_only_after_the_rule` (`cli/test/worker-launcher.test.ts`) is the test
   to change with it.
 - **`t45_every_human_only_command_is_denied` is not written here:** it is a table from the registry of
   human-only commands, which steps 6a and 10 make (today only the `agent` ones are a list). The two other

@@ -635,13 +635,14 @@ export function planServe(input: ServeInput): ServePlan {
     .map((r) => ({ kind: "finish", runId: r.runId, worker: r.worker.name, id: r.worker.id }));
 
   const before = servePlaces(runs, input.unreadable);
-  // More agents work than the limit: a person's decisions woke workers that waited. Nothing is done
-  // against them; nothing is started or resumed while the count is over (the checks below).
+  // More agents work than the limit: a person's decisions woke workers that waited, a person started
+  // one by hand, or the limit was lowered. The line names no cause, since the plan cannot tell which.
+  // Nothing is done against them; nothing is started or resumed while the count is over (the checks below).
   const over = before.workers - rules.max_workers;
   if (over > 0) {
     lines.once("over_limit", {
       problem: "over_limit",
-      detail: `over the limit by ${over} after your decisions; nothing is started or resumed until an agent reaches a wait or ends`,
+      detail: `${before.workers} agents work, over the limit of ${rules.max_workers} by ${over}; nothing is started or resumed until an agent reaches a wait or ends`,
     });
   } else {
     lines.forget("over_limit");

@@ -161,10 +161,11 @@ may be alive), `max_workers` is how many agents work at once.
   each hold one. So with `max_workers: 1` and `max_runs: 3` a second task starts while the first waits at
   its gate, and with three open runs none does.
 
-**A worker your decision wakes goes on even when `max_workers` is full**: nothing is done against it. While
-more agents work than the limit, the daemon starts and resumes nothing and says once `over the limit by N
-after your decisions; nothing is started or resumed until an agent reaches a wait or ends`. When the count
-falls, the waiting resumes and starts follow.
+**A worker your decision wakes goes on even when `max_workers` is full**: nothing is done against it. The
+count also goes over the limit when you start an agent by hand, or lower `max_workers` while agents work.
+While more agents work than the limit, whatever the cause, the daemon starts and resumes nothing and says
+once `W agents work, over the limit of M by N; nothing is started or resumed until an agent reaches a wait
+or ends`. When the count falls, the waiting resumes and starts follow.
 
 **A worker whose process still runs without a holder** (its record says `lost` or `killed` with "child still
 runs", `docs/session-formats.md`) holds both places and is never resumed, finished or noted as gone: a
