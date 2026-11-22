@@ -173,7 +173,7 @@ report is built.
 
 A step can keep files with the run (`docs/attachments.md`). Each stored version is one journal event,
 `attachment_written` (`node`, `attempt`, `name`, `version`, `ref`, `type`, `bytes`, `lines?`, `sha256`,
-`scanned`, `claim?`); the files are in the run's `attachments/` folder. The state has no new field: like
+`scanned`, `redacted?`, `claim?`, and the fork fields of the visit when the step is in a fork); the files are in the run's `attachments/` folder. The state has no new field: like
 every event, a write advances `state.seq` and nothing else, and the bounds and the history of a name are
 read from the journal.
 

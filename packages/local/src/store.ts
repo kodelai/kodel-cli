@@ -1335,7 +1335,7 @@ export class FileStore {
 
   /**
    * Remove what is known to be a leftover in `attachments/`: the temporary file of a write that did
-   * not finish, and a stored file (`<sha256>-<name>`) whose hash no line of the journal names: what a
+   * not finish (a name that ends in `.tmp-<pid>-<n>` and that no journal line names as a ref), and a stored file (`<sha256>-<name>`) whose hash no line of the journal names: what a
    * crash between the file and its journal line, or a refused write, left behind. The journal is
    * looked at as text, not as parsed records, so the file of a record this kodel cannot read (a newer
    * build's, one a rule altered) is never taken away; any other file is not ours and is left alone.
@@ -1349,10 +1349,11 @@ export class FileStore {
       for (const name of await readdir(dir)) {
         const stored = /^([0-9a-f]{64})(?:~[0-9]+)?-/.exec(name);
         if (stored === null) continue;
-        if (!name.includes(".tmp-")) {
-          journal ??= await readFile(join(this.runDir(runId), "journal.jsonl"), "utf8");
-          if (journal.includes(stored[1] as string)) continue;
-        }
+        journal ??= await readFile(join(this.runDir(runId), "journal.jsonl"), "utf8");
+        // A journaled file is never a leftover, whatever its name (a name may itself hold ".tmp-").
+        if (journal.includes(`attachments/${name}"`)) continue;
+        const temporary = /\.tmp-[0-9]+-[0-9]+$/.test(name);
+        if (!temporary && journal.includes(stored[1] as string)) continue;
         await rm(join(dir, name), { force: true });
       }
     } catch {

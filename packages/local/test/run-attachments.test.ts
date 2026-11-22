@@ -502,6 +502,19 @@ describe("t45 the bounds of a run", () => {
     expect(after.filter((f) => f.endsWith("-plan.md") || f.endsWith("-notes.md"))).toHaveLength(2);
   });
 
+  test("t45_sweep_keeps_a_journaled_file_whose_name_holds_tmp", async () => {
+    const run = await started();
+    await text(run, "notes.tmp-1.md", "kept\n");
+    await text(run, "log.tmp-1-2.md", "kept too\n");
+    await text(run, "other.md", "next\n");
+    const listed = await run.listAttachments();
+    expect(listed.map((a) => [a.name, a.state])).toEqual([
+      ["log.tmp-1-2.md", "ok"],
+      ["notes.tmp-1.md", "ok"],
+      ["other.md", "ok"],
+    ]);
+  });
+
   test("t45_sweep_keeps_the_file_of_a_record_it_cannot_read", async () => {
     // A line this kodel does not read as a version (a newer build's record with a field it does not
     // know the meaning of, a record a rule altered) still names its file: the file is not a leftover.
