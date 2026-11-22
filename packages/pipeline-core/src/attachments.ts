@@ -373,3 +373,20 @@ export function versionOfVisit(
     .filter((r) => r.name === name && r.node === node && r.seq > start && r.claim !== "foreign")
     .at(-1);
 }
+
+/** The most attachments a gate answer lists; the rest are only counted. */
+export const MAX_ATTACHMENTS_SHOWN = 20;
+
+/** What a gate shows of a run's attachments, and what an approval is held against. */
+export interface GateAttachments {
+  /** The latest version of each name. */
+  list: AttachmentInfo[];
+  /** `attachmentsFingerprint` of the run when the list was made; `undefined` without attachments. */
+  fingerprint: string | undefined;
+  /** The names with a version written since the run stopped at the step. */
+  newSince: string[];
+}
+
+/** Added by the host to a gate's `tell_the_person` when the answer carries `attachments`. */
+export const TELL_ATTACHMENTS =
+  " The run keeps attachments (`attachments`): name each to the person with its type and size, say which are marked `new` (written since the run stopped here), and say that they are kept with the run and not in the project's files. An image is marked as not scanned for secrets: say so. If `attachments_omitted` is there, say that more are kept than are listed. A location of the form `attachment:<name>@<version>:<line>` in a comment or a finding points at a line of an attachment, not at a project file.";

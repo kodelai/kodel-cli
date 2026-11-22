@@ -21,6 +21,7 @@ import {
   type AttachmentRecord,
   type AttachmentWriteInput,
   type AttachmentWritten,
+  attachmentAnswer,
   attachmentHistory,
   attachmentInfoOf,
   attachmentLimitProblem,
@@ -61,6 +62,7 @@ import {
   evaluateDiff,
   evaluateResult,
   foldSessionName,
+  type GateAttachments,
   type HistoryConfig,
   hasEngineSteps,
   hasModelSteps,
@@ -72,6 +74,7 @@ import {
   KodelError,
   latestAttachments,
   liveClaim,
+  MAX_ATTACHMENTS_SHOWN,
   measurePatch,
   mergeReports,
   modelMarks,
@@ -110,6 +113,7 @@ import {
   standingOf,
   summarizeRun,
   type TakeOutcome,
+  TELL_ATTACHMENTS,
   TELL_CHANGES_NOTE,
   unknownReason,
   validateReport,
@@ -3179,6 +3183,24 @@ export class LocalRun {
         step.waiting.changes_note = SHARED_TREE_NOTE;
         if (!worker) step.waiting.tell_the_person += TELL_CHANGES_NOTE;
       }
+      // The attachments are their own group, whatever could be told about the files.
+      const attached = await this.gateAttachments(step.waiting.node_slug);
+      if (attached.list.length > 0) {
+        const fresh = new Set(attached.newSince);
+        step.waiting.attachments = attached.list
+          .slice(0, MAX_ATTACHMENTS_SHOWN)
+          .map((info) => ({
+            ...attachmentAnswer(info),
+            ...(fresh.has(info.name) ? { new: true } : {}),
+          }));
+        if (attached.list.length > MAX_ATTACHMENTS_SHOWN) {
+          step.waiting.attachments_omitted = attached.list.length - MAX_ATTACHMENTS_SHOWN;
+        }
+        if (attached.fingerprint !== undefined) {
+          step.waiting.attachments_fingerprint = attached.fingerprint;
+        }
+        if (!worker) step.waiting.tell_the_person += TELL_ATTACHMENTS;
+      }
     }
     if (options.serve !== undefined && "node" in step) {
       // Every step handed out is recorded, each on its own: what a step says does not depend on its
@@ -3975,6 +3997,26 @@ export class LocalRun {
   /** What a gate decision is held against (`attachmentsFingerprint`); `undefined` without attachments. */
   async attachmentsFingerprint(): Promise<string | undefined> {
     return attachmentsFingerprint(await this.attachmentRecords());
+  }
+
+  /**
+   * What a gate shows of the attachments: the latest version of each name, the names with a version
+   * written since the run stopped at `node`, and the fingerprint an approval is held against. One read
+   * of the journal, so the list and the fingerprint are of the same moment.
+   */
+  async gateAttachments(node: string): Promise<GateAttachments> {
+    const journal = await this.host.store.readJournal(this.runId);
+    const records = attachmentRecords(journal);
+    let stopped = 0;
+    for (const record of journal) {
+      if (record.event === "gate_waiting" && record.node === node) stopped = record.seq;
+    }
+    const latest = latestAttachments(records);
+    return {
+      list: await Promise.all(latest.map((record) => this.attachmentInfo(record))),
+      fingerprint: attachmentsFingerprint(records),
+      newSince: latest.filter((record) => record.seq > stopped).map((record) => record.name),
+    };
   }
 
   private async attachmentInfo(record: AttachmentRecord): Promise<AttachmentInfo> {

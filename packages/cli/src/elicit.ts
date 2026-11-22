@@ -14,6 +14,7 @@ import type { ChangeReport, PendingFound } from "@kodel-ai/local";
 import type {
   AgentDecision,
   Decision,
+  GateAttachments,
   PipelineService,
   PipelineSpec,
   RunState,
@@ -29,6 +30,7 @@ import {
 import {
   changesFingerprint,
   describePendingChange,
+  gateAttachmentsText,
   gateChangesText,
   gateCommentsText,
 } from "./decide-text";
@@ -45,6 +47,8 @@ export interface HumanRun {
   pendingChange(state?: RunState, only?: "file" | "proposal"): Promise<PendingFound | undefined>;
   changesSinceGate(node: string): Promise<ChangeReport>;
   gateResults(node: string): Promise<{ csv: string; count: number } | undefined>;
+  /** The attachments the run keeps, on a host that keeps them (T-45). */
+  gateAttachments?(node: string): Promise<GateAttachments>;
   decideHuman(
     node: string,
     decision: "approved" | "rejected",
@@ -455,6 +459,7 @@ async function gateQuestion(
   if (!visit) return undefined;
   const found = await run.changesSinceGate(node);
   const comments = await run.gateResults(node);
+  const attachments = await run.gateAttachments?.(node);
   const unverified = found.kind === "unavailable";
   const properties: Schema["properties"] = {
     decision: {
@@ -491,6 +496,7 @@ async function gateQuestion(
           `the step "${plain(node)}" waits for your decision.`,
           prompt ? `Asked of you (step text): ${plain(prompt)}` : undefined,
           gateChangesText(found),
+          gateAttachmentsText(attachments, runId),
           comments
             ? `${gateCommentsText(boundedComments(comments))}\n(The agent recorded these in your name: its wording.)`
             : undefined,
@@ -538,6 +544,14 @@ async function gateQuestion(
       const moved = changesFingerprint(now) !== changesFingerprint(found);
       if (!shared(now) && !shared(found) && moved) {
         return stale("the files changed while the dialog was open");
+      }
+      // An attachment has a writer and a number, so this is not relaxed for a shared tree: a version
+      // written while the dialog was open is something the person has not seen.
+      if (decision === "approve" && run.gateAttachments) {
+        const fresh = await run.gateAttachments(node);
+        if (fresh.fingerprint !== attachments?.fingerprint) {
+          return stale("an attachment was written while the dialog was open");
+        }
       }
       const done = await run.decideHuman(
         node,

@@ -43,11 +43,11 @@ import {
   type TaskSummary,
   type ToolResult,
 } from "@kodel-ai/pipeline-core";
-import { Command, CommanderError } from "commander";
+import { Command, CommanderError, Option } from "commander";
 import pkg from "../package.json" with { type: "json" };
 import { registerAgentCommands } from "./agent-commands";
 import { BUILD } from "./build-info";
-import { describePendingChange } from "./decide-text";
+import { attachmentLine, describePendingChange } from "./decide-text";
 import { engineHostOptions } from "./engine-steps";
 import {
   FEEDBACK_ENDPOINT,
@@ -227,6 +227,27 @@ function failIfRefused(decision: Decision): void {
   if (!decision.ok) {
     throw new UserError(`${decision.error.code}: ${plain(decision.error.message)}`);
   }
+}
+
+/**
+ * `kodel attachment show <run> <name> --version <n>`: `--version` is the program's own flag (it prints
+ * the version of kodel wherever it stands), so after `attachment show` it is passed on under another
+ * name, and there it names a version of the attachment.
+ */
+function attachmentShowArgs(argv: string[]): string[] {
+  const at = argv.findIndex(
+    (arg, i) => arg === "show" && (argv[i - 1] === "attachment" || argv[i - 1] === "attachments"),
+  );
+  if (at < 0) return argv;
+  return argv.map((arg, i) =>
+    i <= at
+      ? arg
+      : arg === "--version"
+        ? "--attachment-version"
+        : arg.startsWith("--version=")
+          ? `--attachment-version=${arg.slice("--version=".length)}`
+          : arg,
+  );
 }
 
 export async function runCli(argv: string[], env: CliEnv): Promise<number> {
@@ -1090,7 +1111,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           }),
         );
         for (const question of prepared.questions) await mustConfirm(question);
-        failIfRefused(await commitGateDecision(run, prepared, opts.reason));
+        failIfRefused(await refusing(() => commitGateDecision(run, prepared, opts.reason)));
         const node = prepared.node;
         // What the decision led into is in the decided node's branch (a rejection sends the branch
         // back, an approval goes on in it or into the join): a sibling branch is not waited for,
@@ -1450,6 +1471,77 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       );
     });
 
+  const attachment = withPlural(program.command("attachment")).description(
+    "The files a run keeps besides the project's: plans, notes, screenshots (read-only)",
+  );
+
+  attachment
+    .command("ls <run> [name]")
+    .description("The attachments of a run, or every version of one name")
+    .action(async (runId: string, name: string | undefined) => {
+      const run = await openRun(await host(), runId);
+      const listed = await run.listAttachments(name === undefined ? {} : { name });
+      if (listed.length === 0) {
+        if (name !== undefined) {
+          throw new UserError(`run ${plain(runId)} has no attachment "${plain(name)}"`);
+        }
+        env.out(`run ${plain(runId)} keeps no attachments\n`);
+        return;
+      }
+      for (const info of listed) {
+        const when = new Date(info.at).toISOString().replace("T", " ").slice(0, 19);
+        env.out(`${attachmentLine(info)}, ${when}, sha256 ${plain(info.sha256.slice(0, 12))}\n`);
+      }
+    });
+
+  attachment
+    .command("show <run> <name>")
+    .description("Print a text attachment, or say where an image is kept")
+    .option("--version <n>", "the version (the latest if none)")
+    // What `--version` is read as (`attachmentShowArgs`): the flag itself is the program's own.
+    .addOption(new Option("--attachment-version <n>").hideHelp())
+    .action(async (runId: string, name: string, opts: { attachmentVersion?: string }) => {
+      let version: number | undefined;
+      if (opts.attachmentVersion !== undefined) {
+        version = Number(opts.attachmentVersion);
+        if (!Number.isSafeInteger(version) || version < 1) {
+          throw new UserError(
+            `--version takes a number from 1, not "${plain(opts.attachmentVersion)}"`,
+          );
+        }
+      }
+      const run = await openRun(await host(), runId);
+      const found = await run
+        .readAttachment({ name, ...(version === undefined ? {} : { version }) })
+        .catch((error: unknown) => {
+          if (error instanceof KodelError) throw new UserError(plain(error.message));
+          throw error;
+        });
+      const info = found.attachment;
+      // What follows was written by an agent: every line goes through `plain`, and the facts go to
+      // stderr so that stdout is the text and nothing else.
+      env.err(`${attachmentLine(info)}\n`);
+      if (info.state !== "ok") {
+        throw new UserError(
+          info.state === "missing"
+            ? "the stored file of this version is missing"
+            : "the stored file of this version was changed outside kodel; it is not shown",
+        );
+      }
+      if (found.content !== undefined) {
+        const text = found.content.split("\n").map(plain).join("\n");
+        env.out(text.endsWith("\n") || text === "" ? text : `${text}\n`);
+        return;
+      }
+      // An image: a person at a terminal is told where the stored file is. The path is a run file,
+      // so a command the engine or an agent runs gets the facts only.
+      if (env.interactive && env.environment?.KODEL_ENGINE === undefined && found.path) {
+        env.out(`${plain(found.path)}\n`);
+      } else {
+        env.out("an image is not printed; a person at a terminal is told where it is kept\n");
+      }
+    });
+
   program
     .command("seal <run>")
     .description("Accept the files of a finished run after a deliberate change")
@@ -1797,7 +1889,7 @@ Examples:
     });
 
   try {
-    await program.parseAsync(argv, { from: "user" });
+    await program.parseAsync(attachmentShowArgs(argv), { from: "user" });
     return exitCode;
   } catch (error) {
     if (error instanceof CommanderError) return error.exitCode;
