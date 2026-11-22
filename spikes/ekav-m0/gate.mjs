@@ -7,11 +7,30 @@
 //   node gate.mjs <trusted parent> model --no-deny  the same without the deny patterns: kodel's guard answers
 import fs from "node:fs";
 import path from "node:path";
-import { ALLOWED, ARTIFACT, CLAUDE, DENIED, agentEnv, mcpCall, open, project, quit, sh, sleep, transcriptOf, uuid, workerFlags } from "./lib.mjs";
+import {
+  ALLOWED,
+  ARTIFACT,
+  agentEnv,
+  CLAUDE,
+  DENIED,
+  mcpCall,
+  open,
+  project,
+  quit,
+  sh,
+  sleep,
+  transcriptOf,
+  uuid,
+  workerFlags,
+} from "./lib.mjs";
 
 const [parent, mode, ...rest] = process.argv.slice(2);
 const p = project(parent);
-const startedRun = mcpCall(p, "pipeline_start", { pipeline: "mini", task: "spike: nothing to do", title: "ekav-spike" });
+const startedRun = mcpCall(p, "pipeline_start", {
+  pipeline: "mini",
+  task: "spike: nothing to do",
+  title: "ekav-spike",
+});
 const runId = startedRun.run_id ?? /r_[a-z0-9_]+/.exec(JSON.stringify(startedRun))?.[0];
 console.log("project", p.root, "run", runId, "answer", JSON.stringify(startedRun).slice(0, 300));
 if (!runId) process.exit(1);
@@ -24,7 +43,11 @@ const commands = [
 const journal = () => {
   const file = path.join(p.root, ".kodel/runs", runId, "journal.jsonl");
   if (!fs.existsSync(file)) return ["(no journal file at .kodel/runs)"];
-  return fs.readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l).event);
+  return fs
+    .readFileSync(file, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l).event);
 };
 const env = agentEnv({ PATH: `${p.bin}:${process.env.PATH}` });
 const id = uuid();
@@ -33,7 +56,10 @@ const flags = workerFlags({ mcp: p.mcp, allowed: ALLOWED, denied, sessionId: id 
 const PROMPT_RE = /Do you want to|Yes, and don't ask|❯ 1\. Yes|Allow this/i;
 
 if (mode === "shell") {
-  const s = open("c11-shell", CLAUDE, ["Reply with the one word: pong", ...flags], { cwd: p.root, env });
+  const s = open("c11-shell", CLAUDE, ["Reply with the one word: pong", ...flags], {
+    cwd: p.root,
+    env,
+  });
   await s.quiet(3000, 40_000);
   for (const command of commands) {
     const before = s.plain().length;
@@ -41,7 +67,13 @@ if (mode === "shell") {
     await sleep(300);
     await s.submit(command);
     await s.quiet(2500, 30_000);
-    console.log(`\n$ ! ${command}\n${s.plain().slice(before).replace(/\s{3,}/g, "\n").slice(0, 900)}`);
+    console.log(
+      `\n$ ! ${command}\n${s
+        .plain()
+        .slice(before)
+        .replace(/\s{3,}/g, "\n")
+        .slice(0, 900)}`,
+    );
   }
   s.snap("after the three commands");
   await quit(s);
@@ -51,7 +83,12 @@ if (mode === "shell") {
     `with the tool named, and do not retry or work around a refusal: ` +
     commands.map((c, i) => `(${i + 1}) Bash: \`${c}\``).join(" ") +
     ` (4) the WebSearch tool with the query "kodel". Then reply with one line per item: the item number and the exact text you got back.`;
-  const s = open(`c11-model${rest.includes("--no-deny") ? "-nodeny" : ""}`, CLAUDE, [prompt, ...flags], { cwd: p.root, env });
+  const s = open(
+    `c11-model${rest.includes("--no-deny") ? "-nodeny" : ""}`,
+    CLAUDE,
+    [prompt, ...flags],
+    { cwd: p.root, env },
+  );
   let asked = false;
   const until = Date.now() + 240_000;
   let stillSince = 0;
@@ -62,7 +99,8 @@ if (mode === "shell") {
       s.write("\x1b");
     }
     const file = transcriptOf(p.root, id);
-    const done = fs.existsSync(file) && /"stop_reason":"end_turn"/.test(fs.readFileSync(file, "utf8"));
+    const done =
+      fs.existsSync(file) && /"stop_reason":"end_turn"/.test(fs.readFileSync(file, "utf8"));
     if (/\/login|Login reached/.test(s.text())) break;
     if (done) {
       stillSince ||= Date.now();
@@ -77,13 +115,22 @@ if (mode === "shell") {
     for (const line of fs.readFileSync(file, "utf8").split("\n").filter(Boolean)) {
       const rec = JSON.parse(line);
       for (const part of Array.isArray(rec.message?.content) ? rec.message.content : []) {
-        if (part.type === "tool_use") console.log("tool_use:", part.name, JSON.stringify(part.input).slice(0, 200));
-        if (part.type === "tool_result") console.log("  result:", JSON.stringify(part.content).slice(0, 400));
+        if (part.type === "tool_use")
+          console.log("tool_use:", part.name, JSON.stringify(part.input).slice(0, 200));
+        if (part.type === "tool_result")
+          console.log("  result:", JSON.stringify(part.content).slice(0, 400));
       }
     }
   }
   await quit(s);
 }
 console.log("\njournal events of the run:", JSON.stringify(journal()));
-console.log("gate decided:", journal().includes("gate_decided") ? "YES (the criterion fails)" : "no");
-console.log(sh("node", [ARTIFACT, "--root", p.root, "status", runId], { env: { ...agentEnv(), KODEL_STATE_DIR: p.state } }).slice(0, 500));
+console.log(
+  "gate decided:",
+  journal().includes("gate_decided") ? "YES (the criterion fails)" : "no",
+);
+console.log(
+  sh("node", [ARTIFACT, "--root", p.root, "status", runId], {
+    env: { ...agentEnv(), KODEL_STATE_DIR: p.state },
+  }).slice(0, 500),
+);

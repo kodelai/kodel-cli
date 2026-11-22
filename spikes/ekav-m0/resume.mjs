@@ -10,13 +10,31 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { ALLOWED, CLAUDE, DENIED, MODEL, agentEnv, open, quit, sleep, transcriptOf, turnsOf, uuid, workerFlags } from "./lib.mjs";
+import {
+  ALLOWED,
+  agentEnv,
+  CLAUDE,
+  DENIED,
+  MODEL,
+  open,
+  quit,
+  sleep,
+  transcriptOf,
+  turnsOf,
+  uuid,
+  workerFlags,
+} from "./lib.mjs";
 
 const cwd = fs.realpathSync(process.argv[2]);
-const compactN = process.argv.includes("--compact") ? Number(process.argv[process.argv.indexOf("--compact") + 1]) : 0;
-const mcp = JSON.stringify({ mcpServers: { kodel: { command: "node", args: ["-e", "setInterval(()=>{},1e9)"] } } });
+const compactN = process.argv.includes("--compact")
+  ? Number(process.argv[process.argv.indexOf("--compact") + 1])
+  : 0;
+const mcp = JSON.stringify({
+  mcpServers: { kodel: { command: "node", args: ["-e", "setInterval(()=>{},1e9)"] } },
+});
 const flags = (extra) => workerFlags({ mcp, allowed: ALLOWED, denied: DENIED, ...extra });
-const QUESTION = /Resume from summary|Resume full session|Do you want|\(y\/n\)|❯ 1\.|Enter to confirm|Select|Choose/i;
+const QUESTION =
+  /Resume from summary|Resume full session|Do you want|\(y\/n\)|❯ 1\.|Enter to confirm|Select|Choose/i;
 const files = () => {
   const dir = path.dirname(transcriptOf(cwd, "x"));
   return fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith(".jsonl")).length : 0;
@@ -50,7 +68,12 @@ async function chain(label, end) {
   const file = transcriptOf(cwd, id);
   const before = files();
   console.log(`\n=== ${label}: conversation ${id}`);
-  const a = open(`c8-${label}-a`, CLAUDE, ["Remember the word alpha. Reply with the one word: ok", ...flags({ sessionId: id })], { cwd });
+  const a = open(
+    `c8-${label}-a`,
+    CLAUDE,
+    ["Remember the word alpha. Reply with the one word: ok", ...flags({ sessionId: id })],
+    { cwd },
+  );
   await a.quiet(4000, 120_000);
   for (let i = 0; i < compactN; i++) {
     await a.submit("/compact");
@@ -64,13 +87,27 @@ async function chain(label, end) {
     a.kill("SIGTERM");
     if ((await a.end(8000)) === undefined) a.kill("SIGKILL");
   }
-  console.log(`first session ended (${end}): ${JSON.stringify(await a.end(5000))}; transcript: ${JSON.stringify(turnsOf(file))}`);
+  console.log(
+    `first session ended (${end}): ${JSON.stringify(await a.end(5000))}; transcript: ${JSON.stringify(turnsOf(file))}`,
+  );
 
-  const b = await session(`c8-${label}-b`, flags({ resume: id }), { typed: "Remember also the word beta. Which word did I ask you to remember first? One word.", end });
-  console.log(`first resume shows the first turn: ${/alpha/.test(b.first)}; transcript: ${JSON.stringify(turnsOf(file))}`);
-  const c = await session(`c8-${label}-c`, flags({ resume: id }), { typed: "Which two words did I ask you to remember? Two words.", end: "quit" });
-  console.log(`second resume shows the turn of the first resumed session (beta): ${/beta/.test(c.first)}; transcript: ${JSON.stringify(turnsOf(file))}`);
-  console.log(`transcript files made for this conversation: ${files() - before} (1 = the id stayed one)`);
+  const b = await session(`c8-${label}-b`, flags({ resume: id }), {
+    typed: "Remember also the word beta. Which word did I ask you to remember first? One word.",
+    end,
+  });
+  console.log(
+    `first resume shows the first turn: ${/alpha/.test(b.first)}; transcript: ${JSON.stringify(turnsOf(file))}`,
+  );
+  const c = await session(`c8-${label}-c`, flags({ resume: id }), {
+    typed: "Which two words did I ask you to remember? Two words.",
+    end: "quit",
+  });
+  console.log(
+    `second resume shows the turn of the first resumed session (beta): ${/beta/.test(c.first)}; transcript: ${JSON.stringify(turnsOf(file))}`,
+  );
+  console.log(
+    `transcript files made for this conversation: ${files() - before} (1 = the id stayed one)`,
+  );
   console.log(`a resume asked a question at its start: ${b.asks || c.asks}`);
   return id;
 }
@@ -81,14 +118,30 @@ await chain("sigkill", "kill");
 // Criterion 9: across modes.
 const env = agentEnv();
 const print = (args) => {
-  const r = spawnSync(CLAUDE, ["-p", ...args, "--model", MODEL, "--permission-mode", "dontAsk"], { cwd, env, encoding: "utf8", timeout: 120_000 });
+  const r = spawnSync(CLAUDE, ["-p", ...args, "--model", MODEL, "--permission-mode", "dontAsk"], {
+    cwd,
+    env,
+    encoding: "utf8",
+    timeout: 120_000,
+  });
   return `${(r.stdout + r.stderr).trim().slice(0, 300)} (exit ${r.status})`;
 };
 console.log("\n=== interactive -> print");
-console.log("claude -p --resume <interactive id>:", print(["Which words did I ask you to remember? Words only.", "--resume", stopped]));
+console.log(
+  "claude -p --resume <interactive id>:",
+  print(["Which words did I ask you to remember? Words only.", "--resume", stopped]),
+);
 console.log("transcript:", JSON.stringify(turnsOf(transcriptOf(cwd, stopped))));
 console.log("\n=== print -> interactive");
 const pid = uuid();
-console.log("claude -p --session-id <new id>:", print(["Remember the word gamma. Reply with the one word: ok", "--session-id", pid]));
-const d = await session("c9-print-to-tty", flags({ resume: pid }), { typed: "Which word did I ask you to remember? One word.", end: "quit" });
-console.log(`interactive resume of a print conversation: asked ${d.asks}; shows its turn: ${/gamma/.test(d.first)}; transcript: ${JSON.stringify(turnsOf(transcriptOf(cwd, pid)))}`);
+console.log(
+  "claude -p --session-id <new id>:",
+  print(["Remember the word gamma. Reply with the one word: ok", "--session-id", pid]),
+);
+const d = await session("c9-print-to-tty", flags({ resume: pid }), {
+  typed: "Which word did I ask you to remember? One word.",
+  end: "quit",
+});
+console.log(
+  `interactive resume of a print conversation: asked ${d.asks}; shows its turn: ${/gamma/.test(d.first)}; transcript: ${JSON.stringify(turnsOf(transcriptOf(cwd, pid)))}`,
+);

@@ -10,7 +10,9 @@ import { join } from "node:path";
 
 const MAIN = process.env.EKAV_MAIN ?? "/Users/tyurin23/Code/KodelAI/etude";
 const ARTIFACT = join(MAIN, "packages/cli/dist/kodel.js");
-const { PipesSessionAdapter, sessionDirOf } = await import(join(MAIN, "packages/local/src/index.ts"));
+const { PipesSessionAdapter, sessionDirOf } = await import(
+  join(MAIN, "packages/local/src/index.ts")
+);
 const { agentEnv, uuid } = await import("./lib.mjs");
 const { TestClient } = await import(join(MAIN, "packages/local/test/helpers/attach-fakes.ts"));
 
@@ -44,19 +46,21 @@ const mcp = JSON.stringify({
 // --stand-in: a child that ignores the hangup of its terminal, to see the record of a child that outlives its holder.
 const standIn = process.argv.includes("--stand-in");
 const started = await adapter.start({
-  argv: standIn ? ["sh", "-c", "trap '' HUP; while :; do sleep 5; done"] : [
-    "claude",
-    "Reply with the one word: pong",
-    "--session-id",
-    uuid(),
-    "--mcp-config",
-    mcp,
-    "--strict-mcp-config",
-    "--permission-mode",
-    "dontAsk",
-    "--model",
-    "haiku",
-  ],
+  argv: standIn
+    ? ["sh", "-c", "trap '' HUP; while :; do sleep 5; done"]
+    : [
+        "claude",
+        "Reply with the one word: pong",
+        "--session-id",
+        uuid(),
+        "--mcp-config",
+        mcp,
+        "--strict-mcp-config",
+        "--permission-mode",
+        "dontAsk",
+        "--model",
+        "haiku",
+      ],
   cwd,
   env: Object.fromEntries(Object.entries(agentEnv()).filter(([k]) => k !== "KODEL_ENGINE")), // the adapter forces it
   inheritEnv: false,
@@ -72,7 +76,10 @@ const status = JSON.parse(readFileSync(join(dir, "status.json"), "utf8"));
 const child: number = status.child?.pid;
 const holder: number = status.holder?.pid ?? status.holder;
 console.log("status.json:", JSON.stringify(status));
-console.log("the child:\n", ps("-o", "pid=,ppid=,pgid=,sess=,tty=,command=", "-p", String(child)).slice(0, 300));
+console.log(
+  "the child:\n",
+  ps("-o", "pid=,ppid=,pgid=,sess=,tty=,command=", "-p", String(child)).slice(0, 300),
+);
 console.log("the group of the child (pid ppid pgid sess tty lstart command):");
 for (const line of group(child)) console.log("  ", line);
 
