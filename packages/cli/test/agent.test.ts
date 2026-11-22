@@ -809,6 +809,45 @@ describe("kodel agent exec --pty --attach (TASK-K6MA)", () => {
     expect(gone.out).toContain("[killed: cc]\n");
   });
 
+  test("t45_agent_attach_keep_screen_reaches_the_client", async () => {
+    // The TUI's `o` starts `agent attach <id> --keep-screen`; a person's own attach has no such flag.
+    for (const flag of [[], ["--keep-screen"]]) {
+      const sessions = new FakeSessions();
+      sessions.add({
+        id: "a_000000001_live",
+        name: "kw-r_1",
+        mode: "pty",
+        status: { state: "running" },
+      });
+      const seen: AttachClientOptions[] = [];
+      const r = await cli(
+        {
+          interactive: true,
+          agent: {
+            sessions: async () => sessions,
+            attachTerminal: () => ({}) as AttachTerminal,
+            attach: async (options: AttachClientOptions): Promise<AttachResult> => {
+              seen.push(options);
+              return { end: { how: "detached" }, line: "" };
+            },
+          },
+        },
+        "agent",
+        "attach",
+        "a_000000001_live",
+        ...flag,
+      );
+      expect(r.code, r.err).toBe(0);
+      expect(seen.length).toBe(1);
+      expect(seen[0]?.name).toBe("kw-r_1");
+      expect(seen[0]?.keepScreen).toBe(flag.length > 0 ? true : undefined);
+    }
+    // It is the TUI's flag, not a person's: the help does not list it.
+    const help = await cli({ interactive: false }, "agent", "attach", "--help");
+    expect(help.out).toContain("Ctrl+\\ detaches");
+    expect(help.out).not.toContain("keep-screen");
+  });
+
   describe("a name or an id, resolved before the question", () => {
     const fixture = () => {
       const sessions = new FakeSessions();

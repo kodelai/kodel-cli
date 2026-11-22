@@ -94,6 +94,16 @@ export const HANDOVER_DROP_MS = 150;
 
 const SCREEN_ON = `\u001b[?1049h\u001b[?25l\u001b[2J${PASTE_ON}`;
 const SCREEN_OFF = `${MOUSE_OFF}${PASTE_OFF}\u001b[?25h\u001b[?1049l`;
+/**
+ * What the screen writes when it hands its terminal to an agent (`o`): its own modes off, and the
+ * alternate screen kept, cleared, with one line on it. The child draws into this screen and the TUI over
+ * it on the return, so the shell behind is seen at neither moment (the child takes about a second to
+ * come up).
+ */
+export const handoverScreen = (name: string): string =>
+  `${MOUSE_OFF}${PASTE_OFF}\u001b[?25h\u001b[2J\u001b[H${neutralize(plain(`opening ${name}…`))}`;
+const ALT_SCREEN_ON = "\u001b[?1049h";
+const ALT_SCREEN_OFF = "\u001b[?1049l";
 
 /** What `startTask` and `resumeWorker` answer: the notice, and the run that got an agent. */
 export interface StartResult {
@@ -703,8 +713,12 @@ export async function runTui(
         // already gone
       }
     }
-    // While away the terminal is already as the shell had it: it is put back once, not twice.
-    if (wasAway) return;
+    // While away the screen's own modes are off already and the keys are not raw: only the alternate
+    // screen, which the child draws into, is left. The child leaves it alone and writes no line.
+    if (wasAway) {
+      stdout.write(ALT_SCREEN_OFF);
+      return;
+    }
     stdout.write(SCREEN_OFF);
     if (stdin.isTTY) stdin.setRawMode(false);
   };
@@ -865,9 +879,12 @@ export async function runTui(
     const noQuit = () => undefined;
     const onStop = () => {
       child?.signal("SIGTSTP");
+      // The shell has the terminal while both are stopped: it gets its own screen.
+      stdout.write(ALT_SCREEN_OFF);
       process.kill(process.pid, "SIGSTOP");
     };
     const onContinue = () => {
+      stdout.write(ALT_SCREEN_ON);
       child?.signal("SIGCONT");
     };
     let awayHandled = false;
@@ -881,14 +898,17 @@ export async function runTui(
     };
     let dropTimer: ReturnType<typeof setTimeout> | undefined;
     const dropInput = () => undefined;
-    /** Leaves the screen and keeps the model: no listener, no raw keys, no drawing until `resumeScreen`. */
-    const suspend = () => {
+    /**
+     * Gives the terminal away and keeps the model: no listener, no raw keys, no drawing until
+     * `resumeScreen`. The alternate screen is kept (`handoverScreen`).
+     */
+    const suspend = (name: string) => {
       isAway = true;
       if (holdTimer) clearTimeout(holdTimer);
       if (dropTimer) clearTimeout(dropTimer);
       dropTimer = undefined;
       awaySignals(true);
-      stdout.write(SCREEN_OFF);
+      stdout.write(handoverScreen(name));
       mouseSent = false;
       if (stdin.isTTY) stdin.setRawMode(false);
       stdin.off("data", onData);
@@ -949,7 +969,7 @@ export async function runTui(
             draw();
             return;
           }
-          suspend();
+          suspend(model.workers[effect.runId]?.name ?? effect.id);
           let started: AttachedChild;
           try {
             started = answer.attach();

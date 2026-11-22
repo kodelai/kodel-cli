@@ -110,7 +110,8 @@ Run before a release, on the built file (`node packages/cli/dist/kodel.js`), by 
   hour, has no trigger in CI. The half "is reported within 2 minutes" is tested with a fake clock
   (`t44_not_moving_*`); the half "goes on" is this check and the real-agent scenario.
 - `kodel agent doctor`; `s` on a task; open another run's card, scroll, `o`, type, `Ctrl+\`, and see the same
-  card at the same scroll; detach while a dialog of the agent is open; let the agent end while attached.
+  card at the same scroll, with no glimpse of the shell on the way in (a line `opening kw-…` first) or on
+  the way back; detach while a dialog of the agent is open; let the agent end while attached.
 - `kodel serve` with `max_workers: 1`, `max_runs: 2`: a second task starts while the first waits.
 - Stop a session of `kodel agent start`, then `kodel agent start --resume <name>`; `kodel agent prune`.
 - Ask a worker to run `kodel gate` for you and see it refused; the same with `KODEL_STATE_DIR` set in the

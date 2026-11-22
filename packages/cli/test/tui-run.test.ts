@@ -6,6 +6,7 @@ import { MOUSE_OFF, MOUSE_ON, PASTE_OFF, PASTE_ON } from "../src/tui/input";
 import {
   type AttachedChild,
   HANDOVER_DROP_MS,
+  handoverScreen,
   raiseAgain,
   runTui,
   type TuiOptions,
@@ -505,6 +506,10 @@ describe("task_g4jy_the_end_of_the_loop_is_safe", () => {
 
 const SCREEN_OFF = `${MOUSE_OFF}${PASTE_OFF}\u001b[?25h\u001b[?1049l`;
 const SCREEN_ON = `\u001b[?1049h\u001b[?25l\u001b[2J${PASTE_ON}`;
+const ALT_OFF = "\u001b[?1049l";
+const ALT_ON = "\u001b[?1049h";
+/** How often a text is in another. */
+const count = (text: string, part: string) => text.split(part).length - 1;
 const SPINNER = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g;
 
 /** A terminal that also keeps the order of what is done to it. */
@@ -712,11 +717,13 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
       const loadsBefore = loop.loads.length;
       const mark = loop.t.mark();
       await loop.open();
-      // One child, for the selected run's record; the screen is the shell's meanwhile.
+      // One child, for the selected run's record. The alternate screen is kept for it, cleared, with
+      // one line that names the agent: the shell behind is not shown while the child comes up.
       const selected = row.keys.filter((k) => k === "j").length;
       const run = loop.sessions[selected]?.id ?? "";
       expect(loop.asked, row.name).toEqual([[run, `a_${run.slice(2)}_fake`]]);
-      expect(loop.t.raw(mark).endsWith(SCREEN_OFF), row.name).toBe(true);
+      expect(loop.t.raw(mark).endsWith(handoverScreen(`kw-${run}`)), row.name).toBe(true);
+      expect(loop.t.raw(mark), row.name).not.toContain(ALT_OFF);
       const away = loop.t.mark();
       await loop.back("Back from the agent · > working on it");
       // The same screen and tab, the same run, card and scroll: only the notice and the data are new.
@@ -726,9 +733,13 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
       const since = loop.t.raw(away);
       expect(since.startsWith(SCREEN_ON), row.name).toBe(true);
       expect(since.includes(MOUSE_ON), row.name).toBe(row.mouse === true);
+      // From `o` to the redraw the alternate screen was never left: the shell was not seen.
+      expect(loop.t.raw(mark), row.name).not.toContain(ALT_OFF);
       // The keys are the screen's again.
       expect(await loop.quit(), row.name).toBe(0);
       expect(loop.t.raw().endsWith(SCREEN_OFF), row.name).toBe(true);
+      // The alternate screen is left once, at the very end.
+      expect(count(loop.t.raw(), ALT_OFF), row.name).toBe(1);
     }
   });
 
@@ -864,8 +875,9 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
     await wait(200);
     expect(thrown.t.place()).toEqual(place);
     expect(thrown.t.notice()).toContain("Could not open the agent: spawn EAGAIN");
-    expect(thrown.t.raw().split("\u001b[?1049l").length - 1).toBe(1);
+    expect(thrown.t.raw()).not.toContain(ALT_OFF);
     expect(await thrown.quit()).toBe(0);
+    expect(count(thrown.t.raw(), ALT_OFF)).toBe(1);
   });
 
   test("t45_tui_same_place_when_the_run_is_gone", async () => {
@@ -899,11 +911,20 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
     expect(loop.t.output.listenerCount("resize")).toBe(1);
     const leaving = loop.t.log.length;
     await loop.open();
-    // Leaving: mouse off, paste off, cursor shown, the alternate screen left (one write, in that
-    // order), raw off, both listeners off, stdin paused.
-    const left = loop.t.log.indexOf(`write ${SCREEN_OFF}`, leaving);
+    // Giving the terminal away: mouse off, paste off, cursor shown, the screen cleared and one line
+    // that names the agent (one write, in that order), raw off, both listeners off, stdin paused. The
+    // alternate screen is not left: the child draws into it.
+    const run = loop.sessions[1]?.id ?? "";
+    const HANDOVER = handoverScreen(`kw-${run}`);
+    const left = loop.t.log.indexOf(`write ${HANDOVER}`, leaving);
     expect(left).toBeGreaterThanOrEqual(leaving);
-    expect(loop.t.log.slice(left)).toEqual([`write ${SCREEN_OFF}`, "raw off", "pause"]);
+    expect(loop.t.log.slice(left)).toEqual([`write ${HANDOVER}`, "raw off", "pause"]);
+    expect(HANDOVER).toBe(`${MOUSE_OFF}${PASTE_OFF}\u001b[?25h\u001b[2J\u001b[Hopening kw-${run}…`);
+    expect(HANDOVER).not.toContain("1049");
+    // A name cannot put a switch of its own into that write.
+    expect(handoverScreen("x\u001b[?1049l\ny")).toBe(
+      `${MOUSE_OFF}${PASTE_OFF}\u001b[?25h\u001b[2J\u001b[Hopening x [?1049l y…`,
+    );
     expect(SCREEN_OFF.indexOf(MOUSE_OFF)).toBeLessThan(SCREEN_OFF.indexOf(PASTE_OFF));
     expect(SCREEN_OFF.indexOf(PASTE_OFF)).toBeLessThan(SCREEN_OFF.indexOf("\u001b[?25h"));
     expect(SCREEN_OFF.indexOf("\u001b[?25h")).toBeLessThan(SCREEN_OFF.indexOf("\u001b[?1049l"));
@@ -936,7 +957,8 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
     expect(loop.t.raw(mark)).toContain("\u001b[1;1H");
     expect(await loop.quit()).toBe(0);
     expect(loop.t.raw().endsWith(SCREEN_OFF)).toBe(true);
-    expect(loop.t.raw().split("\u001b[?1049l").length - 1).toBe(2);
+    // Left once, at the end: the handover did not leave it.
+    expect(count(loop.t.raw(), ALT_OFF)).toBe(1);
     expect(process.listenerCount("exit")).toBe(exitListeners);
   });
 
@@ -978,18 +1000,21 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
         await loop.open();
         const logged = loop.t.log.length;
         process.emit(signal, signal);
-        // The child is ended first (it only connects: no session ends), and the terminal, which the
-        // screen had already given back when it left, is not written to a second time.
+        // The child is ended first (it only connects: no session ends). The screen's own modes went
+        // off when it gave the terminal away, so one thing is left to put back: the alternate screen
+        // the child drew into is left, once, and the keys (not raw while away) are not touched.
         expect(loop.last().signals, signal).toEqual(["SIGTERM"]);
-        expect(loop.t.log.slice(logged), signal).toEqual([]);
-        expect(loop.t.raw().split("\u001b[?1049l").length - 1, signal).toBe(1);
+        expect(loop.t.log.slice(logged), signal).toEqual([`write ${ALT_OFF}`]);
+        expect(count(loop.t.raw(), ALT_OFF), signal).toBe(1);
         expect(kills, signal).toEqual([[process.pid, signal]]);
         expect(loop.launcher.stopped, signal).toEqual([]);
         expect(loop.launcher.finished, signal).toEqual([]);
         // The child goes: the loop is over and the alternate screen is not entered again.
         loop.last().back("");
         expect(await loop.done, signal).toBe(0);
-        expect(loop.t.raw().split("\u001b[?1049h").length - 1, signal).toBe(1);
+        expect(count(loop.t.raw(), ALT_ON), signal).toBe(1);
+        expect(count(loop.t.raw(), ALT_OFF), signal).toBe(1);
+        expect(loop.t.raw().endsWith(ALT_OFF), signal).toBe(true);
       });
     }
     // The process ending while away: the same order.
@@ -1002,10 +1027,10 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
     const logged = loop.t.log.length;
     (mine[0] as () => void)();
     expect(loop.last().signals).toEqual(["SIGTERM"]);
-    expect(loop.t.log.slice(logged)).toEqual([]);
+    expect(loop.t.log.slice(logged)).toEqual([`write ${ALT_OFF}`]);
     loop.last().back("");
     expect(await loop.done).toBe(0);
-    expect(loop.t.raw().split("\u001b[?1049l").length - 1).toBe(1);
+    expect(count(loop.t.raw(), ALT_OFF)).toBe(1);
   });
 
   test("t45_tui_ignores_quit_while_away", async () => {
@@ -1046,12 +1071,14 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
       await loop.open();
       const logged = loop.t.log.length;
       // A stop from outside stops the child and then the screen; a continue brings both back.
+      // The shell has the terminal while both are stopped, so it gets its own screen for that time.
       process.emit("SIGTSTP", "SIGTSTP");
       expect(loop.last().signals).toEqual(["SIGTSTP"]);
       expect(kills).toEqual([[process.pid, "SIGSTOP"]]);
+      expect(loop.t.log.slice(logged)).toEqual([`write ${ALT_OFF}`]);
       process.emit("SIGCONT", "SIGCONT");
       expect(loop.last().signals).toEqual(["SIGTSTP", "SIGCONT"]);
-      expect(loop.t.log.slice(logged)).toEqual([]);
+      expect(loop.t.log.slice(logged)).toEqual([`write ${ALT_OFF}`, `write ${ALT_ON}`]);
       // Nothing was ended: not the child, not a session.
       expect(loop.launcher.stopped).toEqual([]);
       expect(loop.launcher.finished).toEqual([]);
@@ -1172,16 +1199,19 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
           "agent",
           "attach",
           `a_${run.slice(2)}_fake`,
+          // The child draws into the alternate screen the TUI keeps, and does not leave it.
+          "--keep-screen",
         ],
       ]);
-      expect(loop.t.raw(mark).endsWith(SCREEN_OFF), way.name).toBe(true);
+      expect(loop.t.raw(mark).endsWith(handoverScreen(`kw-${run}`)), way.name).toBe(true);
       way.after?.(launcher, run);
       exits.at(-1)?.(way.end);
       await wait(250);
       // Back on the same card, with the reason; the screen is entered again exactly once.
       expect(cardTitle(loop.t.frame()), way.name).toBe(title);
       expect(loop.t.notice(), way.name).toContain(way.notice);
-      expect(loop.t.raw(mark).split("\u001b[?1049h").length - 1, way.name).toBe(1);
+      expect(count(loop.t.raw(mark), ALT_ON), way.name).toBe(1);
+      expect(loop.t.raw(mark), way.name).not.toContain(ALT_OFF);
       expect(kills, way.name).toEqual([]);
       expect(launcher.stopped, way.name).toEqual([]);
       expect(await loop.quit(), way.name).toBe(0);

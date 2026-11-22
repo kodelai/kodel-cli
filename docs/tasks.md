@@ -277,8 +277,13 @@ edits `.kodel/tasks/*.yaml` with a shell, an MCP server of an older build, or ta
   block is not as committed; `--demo` has no `s`. A refusal stays on the task's Backlog row as `cannot start:
   <reason>` until a start of that task is let through.
 - **`o` opens a run's agent, and `Ctrl+\` brings you back to the same place.** On a run row or card whose
-  agent runs in a terminal, `o` leaves the screen and your terminal is the agent's (`kodel agent attach` of
-  the run's latest record, also `kw-<run>-d<seq>`). `Ctrl+\` detaches, the agent runs on, and the TUI is back
+  agent runs in a terminal, `o` gives your terminal to the agent (`kodel agent attach --keep-screen` of
+  the run's latest record, also `kw-<run>-d<seq>`). The TUI keeps its alternate screen for that: it clears
+  it, writes `opening kw-<run>…`, the agent's screen is drawn into it when the client is up, and the TUI
+  draws over it on the return, so your shell is seen neither on the way in nor on the way back. The cost: the
+  terminal's own scrollback does not hold the agent's output while you are in it from the TUI (`kodel agent
+  attach kw-<run>` at a shell does), and a program of the agent that switches to an alternate screen of its
+  own gets this one, cleared. `Ctrl+\` detaches, the agent runs on, and the TUI is back
   as you left it: the same screen and tab, the same selected run, the same open card and its scroll, the same
   list scroll, filter and picked decision; only the data is fresh, and a notice carries the agent's last line
   (`Back from kw-… · …`). The same holds when the agent ended while you were in it; the notice then says so
@@ -286,7 +291,8 @@ edits `.kodel/tasks/*.yaml` with a shell, an MCP server of an older build, or ta
   refresh. A print agent, Windows, or a child that cannot be started answers with a notice and the screen is
   not left. A TUI that runs under Bun does not open an agent: the notice spells `node
   packages/cli/dist/kodel.js agent attach <id>`. Keys typed during the handover are dropped for 150 ms after
-  the return.
+  the return. A signal that ends the TUI while you are in the agent ends the client and leaves the alternate
+  screen once; a stop from outside (`SIGTSTP`) leaves it for the time both are stopped.
 - **At a gate a terminal agent stays.** It tells what waits and starts its wait command in the background;
   the row reads `◆ with you` and the card `agent waits with you`. After your decision it goes on within
   seconds, with or without a TUI or a daemon; nothing is typed for you. If it has not gone on after 2 minutes

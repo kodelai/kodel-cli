@@ -25,7 +25,7 @@ import {
   type StartResult,
   type TerminalSize,
 } from "@kodel-ai/pipeline-core";
-import type { Command } from "commander";
+import { type Command, Option } from "commander";
 import {
   type AttachResult,
   type AttachTerminal,
@@ -377,6 +377,7 @@ export async function attachSession(
   ctx: Pick<AgentContext, "attach" | "attachTerminal">,
   sessions: SessionAdapter,
   ref: string,
+  options: { keepScreen?: boolean } = {},
 ): Promise<AttachResult> {
   const found = await resolveSession(sessions, ref);
   if (sessions.attach === undefined) {
@@ -387,6 +388,7 @@ export async function attachSession(
     stream,
     terminal: (ctx.attachTerminal ?? processTerminal)(),
     name: found.name ?? found.id,
+    ...(options.keepScreen ? { keepScreen: true } : {}),
   });
 }
 
@@ -608,11 +610,15 @@ export function registerAgentCommands(
     .description(
       "Connect this terminal to an agent that runs in a terminal of its own, by name or id (Ctrl+\\ detaches)",
     )
-    .action(async (ref: string) => {
+    // The TUI's `o` starts this command on its own alternate screen and takes the screen back after it.
+    .addOption(new Option("--keep-screen").hideHelp())
+    .action(async (ref: string, opts: { keepScreen?: boolean }) => {
       platform();
       ctx.requireHuman();
       const all = await sessions();
-      const result = await guard(() => attachSession(ctx, all, ref));
+      const result = await guard(() =>
+        attachSession(ctx, all, ref, opts.keepScreen ? { keepScreen: true } : {}),
+      );
       if (result.problem !== undefined) ctx.fail(result.problem);
     });
 

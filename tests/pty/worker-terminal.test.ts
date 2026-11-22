@@ -3,7 +3,8 @@
  *
  * The TUI's `o`: the built `kodel tui` on Node in a terminal of the test's own, two runs of a project,
  * and for each run a session `kw-<run>` in a terminal of its own with a shell script standing for the
- * agent. The screen hands its terminal to `kodel agent attach` and takes it back where it was.
+ * agent. The screen hands its terminal to `kodel agent attach --keep-screen` and takes it back where it
+ * was; from the key to the redraw the alternate screen is never left, so the shell is not seen.
  *
  * The launcher: a worker started through the one launcher, with the scripted fake terminal agent of the
  * testkit as its program (the second half of this file).
@@ -55,6 +56,7 @@ const ALT_ON = "\u001b[?1049h";
 const ALT_OFF = "\u001b[?1049l";
 const CURSOR_OFF = "\u001b[?25l";
 const PASTE_ON = "\u001b[?2004h";
+const CLEAR = "\u001b[2J\u001b[H";
 /** Ctrl+\: the detach chord of `kodel agent attach`. */
 const DETACH = "\u001c";
 
@@ -154,10 +156,36 @@ async function onSecondCard(term: Term, runs: readonly string[]): Promise<string
   return run;
 }
 
-/** The screen is back: the alternate screen, the hidden cursor and bracketed paste are on again, in that order. */
-async function screenIsBack(term: Term, from: number): Promise<number> {
+/**
+ * `o` on the open card: the screen is given to the agent of `run`. The alternate screen is kept, cleared,
+ * with one line that names the agent, until the agent's own screen is drawn into it.
+ */
+async function opens(term: Term, run: string): Promise<number> {
+  const away = term.output.length;
+  term.type("o");
+  await term.sees(raw(`opening kw-${run}…`), 30_000, away);
+  await term.sees(`agent-of-${run}-ready`, 30_000, away);
+  const shown = term.output.slice(away);
+  // The line first, then the child clears the screen for what the agent shows.
+  const line = shown.indexOf(raw(`opening kw-${run}…`));
+  const cleared = shown.indexOf(CLEAR, line);
+  expect(cleared).toBeGreaterThan(line);
+  expect(shown.indexOf(`agent-of-${run}-ready`)).toBeGreaterThan(cleared);
+  expect(shown).not.toContain(ALT_OFF);
+  return away;
+}
+
+/**
+ * The screen is back: the alternate screen, the hidden cursor and bracketed paste are on again, in that
+ * order. Since `away` (the key `o`) the alternate screen was not left once and the child wrote no line of
+ * its own: the shell behind was never seen.
+ */
+async function screenIsBack(term: Term, from: number, away = from): Promise<number> {
   await term.sees(ALT_ON, undefined, from);
   const at = term.output.indexOf(ALT_ON, from);
+  expect(term.output.slice(away, at)).not.toContain(ALT_OFF);
+  expect(term.output.slice(away, at)).not.toContain("[detached:");
+  expect(term.output.slice(away, at)).not.toContain("[ended:");
   await term.sees(CURSOR_OFF, undefined, at);
   await term.sees(PASTE_ON, undefined, at);
   // A whole frame was drawn after it, and the alternate screen was not left again.
@@ -182,11 +210,8 @@ describe("the TUI hands its terminal to a run's agent and takes it back", () => 
       const s = await scene("echo agent-of-$RUN-ready; exec cat");
       const run = await onSecondCard(s.term, s.runs);
       const id = s.sessions.get(run) ?? "";
-      const away = s.term.output.length;
-      s.term.type("o");
-      // The screen is left, and the terminal is the agent's of the very run the card was about.
-      await s.term.sees(`agent-of-${run}-ready`, 30_000, away);
-      expect(s.term.output.slice(away)).toContain(ALT_OFF);
+      // The terminal is the agent's of the very run the card was about.
+      const away = await opens(s.term, run);
       for (const other of s.runs.filter((r) => r !== run)) {
         expect(s.term.output.slice(away)).not.toContain(`agent-of-${other}-ready`);
       }
@@ -194,8 +219,7 @@ describe("the TUI hands its terminal to a run's agent and takes it back", () => 
       await s.term.sees("typed-in\r\ntyped-in", undefined, away);
       const leaving = s.term.output.length;
       s.term.type(DETACH);
-      await s.term.sees(`[detached: kw-${run}]`, undefined, leaving);
-      const back = await screenIsBack(s.term, leaving);
+      const back = await screenIsBack(s.term, leaving, away);
       // The same run is selected and its card is open, with the notice of the return.
       await s.term.sees(raw(`${run} · one`), undefined, back);
       await s.term.sees(raw("┃"), undefined, back);
@@ -205,6 +229,8 @@ describe("the TUI hands its terminal to a run's agent and takes it back", () => 
       expect((await s.w.adapter().status(id)).state).toBe("running");
       await sleep(300);
       await quits(s.term);
+      // The alternate screen was entered at the start and after the return, and left once, by `q`.
+      expect(s.term.output.split(ALT_OFF).length - 1).toBe(1);
     },
     120_000,
   );
@@ -214,14 +240,11 @@ describe("the TUI hands its terminal to a run's agent and takes it back", () => 
     async () => {
       const s = await scene("echo agent-of-$RUN-ready; read line; exit 3");
       const run = await onSecondCard(s.term, s.runs);
-      const away = s.term.output.length;
-      s.term.type("o");
-      await s.term.sees(`agent-of-${run}-ready`, 30_000, away);
+      const away = await opens(s.term, run);
       const leaving = s.term.output.length;
       // The agent ends while the person is in it: nothing is pressed to come back.
       s.term.type("go\r");
-      await s.term.sees(`[ended: kw-${run}, exit 3]`, undefined, leaving);
-      const back = await screenIsBack(s.term, leaving);
+      const back = await screenIsBack(s.term, leaving, away);
       await s.term.sees(raw(`${run} · one`), undefined, back);
       await s.term.sees(raw("┃"), undefined, back);
       await s.term.sees("ended while you were in it", undefined, back);
@@ -238,21 +261,43 @@ describe("the TUI hands its terminal to a run's agent and takes it back", () => 
       const s = await scene("echo agent-of-$RUN-ready; exec cat");
       const run = await onSecondCard(s.term, s.runs);
       const id = s.sessions.get(run) ?? "";
-      const away = s.term.output.length;
-      s.term.type("o");
-      await s.term.sees(`agent-of-${run}-ready`, 30_000, away);
+      const away = await opens(s.term, run);
       const leaving = s.term.output.length;
       // The chord twice in a row: the second lands while the terminal is between the two programs,
       // where it is the terminal's QUIT key or a byte nobody asked for. The screen lives either way.
       s.term.type(`${DETACH}${DETACH}`);
-      await s.term.sees(`[detached: kw-${run}]`, undefined, leaving);
-      const back = await screenIsBack(s.term, leaving);
+      const back = await screenIsBack(s.term, leaving, away);
       await s.term.sees(raw(`${run} · one`), undefined, back);
       await sleep(1_000);
       expect(s.term.exit).toBeUndefined();
       expect(shownRun(s.term, s.runs, back)).toBe(run);
       expect((await s.w.adapter().status(id)).state).toBe("running");
       await quits(s.term);
+    },
+    120_000,
+  );
+
+  ptyTest(
+    "t45_real_tui_keeps_its_screen_when_the_agent_switches_screens",
+    async () => {
+      // The agent's program enters an alternate screen of its own, and leaves it when it ends: neither
+      // switch reaches the terminal, which stays on the one the TUI keeps.
+      const s = await scene(
+        "printf '\\033[?1049h\\033[?1000h'; echo agent-of-$RUN-ready; read line; printf '\\033[?1000l\\033[?1049l'; echo agent-left-its-screen; read again; exit 0",
+      );
+      const run = await onSecondCard(s.term, s.runs);
+      const away = await opens(s.term, run);
+      s.term.type("go\r");
+      await s.term.sees("agent-left-its-screen", undefined, away);
+      expect(s.term.output.slice(away)).not.toContain(ALT_OFF);
+      expect(s.term.output.slice(away)).not.toContain(ALT_ON);
+      const leaving = s.term.output.length;
+      s.term.type(DETACH);
+      const back = await screenIsBack(s.term, leaving, away);
+      await s.term.sees(`Back from kw-${run}`, undefined, back);
+      await sleep(300);
+      await quits(s.term);
+      expect(s.term.output.split(ALT_OFF).length - 1).toBe(1);
     },
     120_000,
   );
@@ -267,16 +312,13 @@ describe("the TUI hands its terminal to a run's agent and takes it back", () => 
       const run = await onSecondCard(s.term, s.runs);
       // The screen drew at the terminal's first size.
       expect(s.term.output).toContain("\u001b[40;1H");
-      const away = s.term.output.length;
-      s.term.type("o");
-      await s.term.sees(`agent-of-${run}-ready`, 30_000, away);
+      const away = await opens(s.term, run);
       // The outer terminal is resized while the screen is away: the agent's terminal gets the new size.
       s.term.resize(100, 30);
       await s.term.sees("size:30 100", 30_000, away);
       const leaving = s.term.output.length;
       s.term.type(DETACH);
-      await s.term.sees(`[detached: kw-${run}]`, undefined, leaving);
-      const back = await screenIsBack(s.term, leaving);
+      const back = await screenIsBack(s.term, leaving, away);
       // And the screen draws at it after the return: thirty rows, not forty.
       await s.term.sees("\u001b[30;1H", undefined, back);
       await sleep(500);

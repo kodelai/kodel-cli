@@ -173,6 +173,12 @@ out), then the live terminal. `Ctrl+\` detaches and leaves the agent running; on
 the terminal and prints `[detached: <name>]`, `[ended: <name>, exit <code>]` or `[killed: <name>]`. Several clients
 may be attached (8 at most); the size of the one that resized last wins.
 
+`kodel agent attach <name|id> --keep-screen` (not in the help: it is what `o` in `kodel tui` runs) is the same
+client on a terminal that is on its starter's alternate screen and stays there: it clears the screen once,
+for the session's first output, takes the switches of the screen (modes 1049, 1047, 47) out of the session's
+output (a switch on becomes "save the cursor, clear", a switch off "clear, restore the cursor"), resets the
+other modes on every way out, never leaves the screen and prints no line, because the starter draws over it.
+
 The terminal is made by `@lydell/node-pty`, an optional dependency of the CLI that only the holder loads. Where it
 cannot be used, `exec --pty` answers `UNSUPPORTED` with the reason before anything is written: the package was not
 installed (`--omit=optional`), the platform has no binary package (a Linux without glibc such as Alpine/musl), its

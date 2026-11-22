@@ -1,8 +1,10 @@
 /**
  * What the loop does for `o` (TASK-EKAV, T-45): the checks made while the screen still stands, and the
- * child that has the terminal while it is away. The child is `kodel agent attach <id>` with the terminal
- * inherited: the screen reads its input as text, and a terminal needs bytes. A person's act, reached only
- * from the key; kodel types nothing into the session.
+ * child that has the terminal while it is away. The child is `kodel agent attach <id> --keep-screen` with
+ * the terminal inherited: the screen reads its input as text, and a terminal needs bytes. The flag keeps
+ * the child on the alternate screen the TUI is on, so the shell behind is not seen while one program
+ * hands the terminal to the other. A person's act, reached only from the key; kodel types nothing into
+ * the session.
  */
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
@@ -131,7 +133,7 @@ export function createOpenWorker(
         message: `${COULD_NOT}: a TUI that runs under Bun does not hand its terminal over. In another terminal: node ${BUILT_KODEL} agent attach ${plain(id)}`,
       };
     }
-    const args = [...deps.self.args, "--root", deps.root, "agent", "attach", id];
+    const args = [...deps.self.args, "--root", deps.root, "agent", "attach", id, "--keep-screen"];
     const problem = await runnable(deps.self.exec, args);
     if (problem !== undefined) {
       return { ok: false, message: `${COULD_NOT}: ${plain(problem)}` };

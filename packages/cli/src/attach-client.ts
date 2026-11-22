@@ -13,10 +13,13 @@ import {
   encodeHello,
   encodeResize,
   FRAME,
+  fromBinary,
   isTerminalSize,
   parseBye,
   type TerminalSize,
+  TRACKED_DEC_MODES,
   terminalResetFor,
+  toBinary,
 } from "@kodel-ai/pipeline-core";
 import { plain } from "./plain";
 
@@ -113,6 +116,57 @@ export interface AttachClientOptions {
   /** What the person called the session: it is in the line they read at the end. */
   name: string;
   timers?: AttachClientTimers;
+  /**
+   * The terminal is on the alternate screen of the program that started this client (the TUI's `o`) and
+   * stays there: the client clears it for the session's first output, never leaves it (a switch of the
+   * screen in the session's output is not passed on), and writes no line at the end, because the program
+   * draws over it on its return. So the shell behind is seen neither on the way in nor on the way out.
+   */
+  keepScreen?: boolean;
+}
+
+const ESC = "\u001b";
+const CLEAR_SCREEN = `${ESC}[2J${ESC}[H`;
+const SCREEN_MODES: ReadonlySet<string> = new Set(
+  TRACKED_DEC_MODES.filter((m) => m.group === "screen").map((m) => String(m.mode)),
+);
+/** In place of a switch to the alternate screen, on a terminal that is already there and stays. */
+export const KEPT_SCREEN_ENTER = `${ESC}7${CLEAR_SCREEN}`;
+/** In place of the switch back: what the program drew is cleared, the cursor goes where it was. */
+export const KEPT_SCREEN_LEAVE = `${ESC}[2J${ESC}8`;
+// Built from the escape character: in a regular expression literal it reads as a mistake.
+const DEC_SWITCH = new RegExp(`${ESC}\\[\\?([0-9;]*)([hl])`, "g");
+const DEC_SWITCH_PARTIAL = new RegExp(`${ESC}(?:\\[(?:\\?[0-9;]*)?)?$`);
+/** A switch is short; a longer tail that is still not whole is not one. */
+const MAX_SWITCH_CARRY = 32;
+
+/**
+ * Takes the switches of the screen (modes 1049, 1047 and 47) out of a session's output, for a terminal
+ * that must stay on the alternate screen it is on. A program that enters "its" alternate screen gets a
+ * cleared one, and one that leaves it a cleared one with the cursor back; the other modes of the same
+ * sequence are kept. A switch cut at the end of a chunk waits for the next one.
+ */
+export function createScreenSwitchFilter(): (bytes: Uint8Array) => Uint8Array {
+  let carry = "";
+  return (bytes) => {
+    let text = carry + toBinary(bytes);
+    carry = "";
+    const cut = DEC_SWITCH_PARTIAL.exec(text);
+    if (cut !== null && cut[0].length <= MAX_SWITCH_CARRY) {
+      carry = cut[0];
+      text = text.slice(0, cut.index);
+    }
+    if (!text.includes(ESC)) return fromBinary(text);
+    return fromBinary(
+      text.replace(DEC_SWITCH, (whole: string, params: string, final: string) => {
+        const modes = params.split(";");
+        const kept = modes.filter((mode) => !SCREEN_MODES.has(mode));
+        if (kept.length === modes.length) return whole;
+        const rest = kept.length > 0 ? `${ESC}[?${kept.join(";")}${final}` : "";
+        return rest + (final === "h" ? KEPT_SCREEN_ENTER : KEPT_SCREEN_LEAVE);
+      }),
+    );
+  };
 }
 
 /**
@@ -122,6 +176,10 @@ export interface AttachClientOptions {
  */
 export function runAttachClient(options: AttachClientOptions): Promise<AttachResult> {
   const { stream, terminal, name } = options;
+  const keepScreen = options.keepScreen === true;
+  const filter = keepScreen ? createScreenSwitchFilter() : undefined;
+  // With `keepScreen`: whether the screen was cleared for the session's first output.
+  let cleared = false;
   const timers = options.timers ?? realTimers;
   const decoder = createFrameDecoder();
   const matcher = createChordMatcher();
@@ -143,7 +201,16 @@ export function runAttachClient(options: AttachClientOptions): Promise<AttachRes
       }
       const line = attachLine(name, end);
       const problem = problemOf(end);
-      terminal.write(`${terminalResetFor(shown.state())}\r\n${line}\r\n`);
+      if (keepScreen) {
+        // The screen is the starter's: its modes are put back, it is not left, and nothing is written on it.
+        const state = shown.state();
+        const dec = Object.fromEntries(
+          Object.entries(state.dec).filter(([mode]) => !SCREEN_MODES.has(mode)),
+        );
+        terminal.write(terminalResetFor({ ...state, dec }));
+      } else {
+        terminal.write(`${terminalResetFor(shown.state())}\r\n${line}\r\n`);
+      }
       timers.set(() => {
         terminal.raw(false);
         terminal.release();
@@ -194,7 +261,14 @@ export function runAttachClient(options: AttachClientOptions): Promise<AttachRes
           // The holder probes a client that is held at its input bound with an empty frame.
           if (frame.payload.length === 0) continue;
           shown.feed(frame.payload);
-          if (!terminal.write(frame.payload) && !blocked) {
+          const payload = filter === undefined ? frame.payload : filter(frame.payload);
+          if (keepScreen && !cleared) {
+            // What the starter left on its screen (`opening …`) goes when there is something to show.
+            cleared = true;
+            terminal.write(CLEAR_SCREEN);
+          }
+          if (payload.length === 0) continue;
+          if (!terminal.write(payload) && !blocked) {
             blocked = true;
             stream.pause();
           }

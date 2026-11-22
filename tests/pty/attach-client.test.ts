@@ -102,6 +102,30 @@ describe("kodel agent attach on a terminal of its own", () => {
     expect(await settings(s.term)).toBe(before);
   });
 
+  ptyTest("t45_attach_client_keep_screen_leaves_the_terminal_clean", async () => {
+    // What the TUI's `o` runs, here on a terminal with a shell: the client does not switch the screen
+    // and writes no line of its own, and the terminal's settings are put back all the same.
+    const s = await scene(
+      "printf '\\033[?1049h\\033[?1000h\\033[?2004h'; echo session-ready; exec cat",
+    );
+    const before = await settings(s.term);
+    const from = s.term.begin(`${KODEL} agent attach ${s.name} --keep-screen`);
+    await s.term.sees("session-ready", undefined, from);
+    s.term.type("typed-in\r");
+    await s.term.sees("typed-in\r\ntyped-in", undefined, from);
+    s.term.type("\u001c");
+    const done = await s.term.finished(from);
+    expect(done.code).toBe(0);
+    // Cleared once before the first output; the session's switch of the screen is not passed on; the
+    // modes it switched on are put back; no line, and the alternate screen is neither entered nor left.
+    expect(done.shown).toContain("\u001b[2J\u001b[H");
+    expect(done.shown).toContain(RESET);
+    expect(done.shown).not.toContain("\u001b[?1049");
+    expect(done.shown).not.toContain("[detached:");
+    expect(await settings(s.term)).toBe(before);
+    expect((await s.w.adapter().status(s.id)).state).toBe("running");
+  });
+
   ptyTest("tA_attach_client_clean_after_kill", async () => {
     // the program switches modes on that the shell must not inherit
     const s = await scene(
