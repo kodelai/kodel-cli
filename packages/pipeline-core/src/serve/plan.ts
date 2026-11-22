@@ -179,6 +179,8 @@ export interface ServePlan {
   stalled: {
     runId: string;
     worker: string;
+    /** In a terminal of its own (`kodel agent attach` opens it); a print worker has none. */
+    terminal: boolean;
     quietS: number;
     holdsWorker: boolean;
     holdsRun: boolean;
@@ -576,6 +578,7 @@ export function planServe(input: ServeInput): ServePlan {
       stalled.push({
         runId: run.runId,
         worker: worker.name,
+        terminal,
         quietS,
         holdsWorker: holdsWorker(worker, run),
         holdsRun: holdsRun(run),

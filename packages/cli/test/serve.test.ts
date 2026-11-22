@@ -922,4 +922,18 @@ describe("t44 kodel serve --status with workers that stay alive at a wait (T-45)
     launcher.statusMap.set(working, { ...printing, lastOutputAt: later - 60_000 });
     expect(await status(h, launcher, later)).not.toContain("stalled:");
   });
+
+  test("t44_status_offers_a_stalled_print_worker_its_log_not_attach", async () => {
+    const { h, launcher, working } = await twoRuns();
+    // A print worker has no terminal: `kodel agent attach` would refuse it, so the line names its log.
+    const print = launcher.statusMap.get(working);
+    if (print === undefined) throw new Error("no worker");
+    const { terminal: _none, ...plainWorker } = print;
+    launcher.statusMap.set(working, plainWorker);
+    const out = await status(h, launcher, launcher.started + 2 * 3_600_000);
+    expect(out).toContain(
+      `stalled:     kw-${working} (run ${working}): quiet for 7200 s; it holds a worker place and a run place; nothing stops it but you: kodel agent logs kw-${working}, or kodel agent stop kw-${working}`,
+    );
+    expect(out).not.toContain("kodel agent attach");
+  });
 });

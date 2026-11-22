@@ -974,46 +974,55 @@ describe("a holder that went away: the child's process group", () => {
     expect(quiet.boots).toBe(0);
   });
 
-  test("tA_stop_ends_a_group_only_orphan", async () => {
-    const dir = record("a_000000000_0060");
-    // 700 ends at SIGTERM; 701 ignores it and ends at SIGKILL; the pid 702 is taken by another process between
-    // the listing and the signal (another start time): that one is never signalled.
-    let listings = 0;
-    const table = fakeTable([member(700), member(701), member(702)], {
-      onSignal(fake, pid, signal) {
-        if (pid === 700 || signal === "SIGKILL") {
-          fake.table = (fake.table ?? []).filter((row) => row.pid !== pid);
+  // 700 ends at SIGTERM; 701 ignores it and ends at SIGKILL; the pid 702 is taken by another process AFTER the
+  // members were listed and BEFORE the first signal: that one is never signalled. The stop record is written
+  // between the listing and the first re-read of the table, so its presence marks the moment.
+  for (const [what, id, change] of [
+    ["start_time", "a_000000000_0060", { started: "Wed Mar  3 03:03:03 2026" }],
+    ["group", "a_000000000_0061", { pgid: 702 }],
+  ] as const) {
+    test(`tA_stop_ends_a_group_only_orphan_${what}_changed_after_the_listing`, async () => {
+      const dir = record(id);
+      const table = fakeTable([member(700), member(701), member(702)], {
+        onSignal(fake, pid, signal) {
+          if (pid === 700 || signal === "SIGKILL") {
+            fake.table = (fake.table ?? []).filter((row) => row.pid !== pid);
+          }
+        },
+      });
+      const rows = table.rows.bind(table);
+      let changedAtRead: number | undefined;
+      table.rows = () => {
+        if (changedAtRead === undefined && existsSync(join(dir, "stop.json"))) {
+          changedAtRead = table.reads + 1;
+          table.table = (table.table ?? []).map((row) =>
+            row.pid === 702 ? { ...row, ...change } : row,
+          );
         }
-      },
-    });
-    const rows = table.rows.bind(table);
-    table.rows = () => {
-      // the first two reads are the status and the listing of the members; then 702 changes hands
-      if (++listings === 3) {
-        table.table = (table.table ?? []).map((row) =>
-          row.pid === 702 ? { ...row, pgid: 702, started: "Wed Mar  3 03:03:03 2026" } : row,
-        );
-      }
-      return rows();
-    };
-    const stopping = make({ processes: table });
-    expect((await stopping.status("a_000000000_0060")).childAlive).toBe(true);
-    listings = 1;
-    const stopped = await stopping.stop("a_000000000_0060");
-    expect(table.signals).toEqual([
-      [700, "SIGTERM"],
-      [701, "SIGTERM"],
-      [701, "SIGKILL"],
-    ]);
-    // a stop record was written, by the stop and before any signal could matter
-    expect(JSON.parse(readFileSync(join(dir, "stop.json"), "utf8"))).toMatchObject({
-      v: 1,
-      by: "stop",
-    });
-    expect(stopped).toEqual({ state: "killed", reason: "stopped", childAlive: false });
-    // the holder's own record was not touched
-    expect(JSON.parse(readFileSync(join(dir, "status.json"), "utf8")).state).toBe("running");
-  }, 20_000);
+        return rows();
+      };
+      const stopping = make({ processes: table });
+      expect((await stopping.status(id)).childAlive).toBe(true);
+      const readsBefore = table.reads;
+      const stopped = await stopping.stop(id);
+      // the members were listed with 702 as it was (a read of the stop itself), and nothing was signalled
+      // before the table was read again
+      expect(changedAtRead).toBeGreaterThan(readsBefore + 1);
+      expect(table.signals).toEqual([
+        [700, "SIGTERM"],
+        [701, "SIGTERM"],
+        [701, "SIGKILL"],
+      ]);
+      // a stop record was written, by the stop and before any signal could matter
+      expect(JSON.parse(readFileSync(join(dir, "stop.json"), "utf8"))).toMatchObject({
+        v: 1,
+        by: "stop",
+      });
+      expect(stopped).toMatchObject({ state: "killed", reason: "stopped" });
+      // the holder's own record was not touched
+      expect(JSON.parse(readFileSync(join(dir, "status.json"), "utf8")).state).toBe("running");
+    }, 20_000);
+  }
 
   test("tA_stop_never_signals_a_stranger_group", async () => {
     const dir = record("a_000000000_0070");

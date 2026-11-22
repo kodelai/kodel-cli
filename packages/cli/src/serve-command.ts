@@ -228,8 +228,10 @@ export async function printServeStatus(input: ServeStatusInput): Promise<void> {
       ...(quiet.holdsWorker ? ["a worker place"] : []),
       ...(quiet.holdsRun ? ["a run place"] : []),
     ];
+    // A print worker has no terminal to attach to: its output is all there is to look at.
+    const look = quiet.terminal ? "attach" : "logs";
     out(
-      `stalled:     ${plain(quiet.worker)} (run ${plain(quiet.runId)}): quiet for ${quiet.quietS} s; it holds ${places.length === 0 ? "no place" : places.join(" and ")}; nothing stops it but you: kodel agent attach ${plain(quiet.worker)}, or kodel agent stop ${plain(quiet.worker)}\n`,
+      `stalled:     ${plain(quiet.worker)} (run ${plain(quiet.runId)}): quiet for ${quiet.quietS} s; it holds ${places.length === 0 ? "no place" : places.join(" and ")}; nothing stops it but you: kodel agent ${look} ${plain(quiet.worker)}, or kodel agent stop ${plain(quiet.worker)}\n`,
     );
   }
   if (rules.start.length === 0) out("start rules: none; a daemon only resumes and notes\n");

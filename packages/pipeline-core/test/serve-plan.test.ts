@@ -1433,7 +1433,14 @@ describe("t44 a worker that stays alive at a wait (T-45)", () => {
       { runId: "r_s", detail: "kw-r_s printed nothing and called nothing for 1800 s" },
     ]);
     expect(quiet.stalled).toEqual([
-      { runId: "r_s", worker: "kw-r_s", quietS: 1800, holdsWorker: true, holdsRun: true },
+      {
+        runId: "r_s",
+        worker: "kw-r_s",
+        terminal: true,
+        quietS: 1800,
+        holdsWorker: true,
+        holdsRun: true,
+      },
     ]);
     // Output alone puts it off, and so does a call alone.
     expect(at({ started: 0, lastOutputAt: NOW - 1_000 }, { lastAgentAt: 1 }).stalled).toEqual([]);
@@ -1460,6 +1467,8 @@ describe("t44 a worker that stays alive at a wait (T-45)", () => {
       }),
     );
     expect(logsOf(print.actions, "stalled")[0]?.detail).toBe("kw-r_s printed nothing for 1800 s");
+    // The entry says which kind it is: a print worker has no terminal to attach to.
+    expect(print.stalled).toMatchObject([{ worker: "kw-r_s", terminal: false }]);
     // Once per quiet spell.
     expect(
       logsOf(
