@@ -54,6 +54,8 @@ export interface HumanRun {
     decision: "approved" | "rejected",
     reason?: string,
     byAgent?: AgentDecision,
+    /** The attachments the person was shown: compared under the run's lock with the write. */
+    seen?: { attachments: string | undefined },
   ): Promise<Decision>;
   /** `node`: which paused branch, when more than one is paused. */
   resume(node?: string): Promise<Decision & { warning?: string }>;
@@ -557,6 +559,11 @@ async function gateQuestion(
         node,
         decision === "approve" ? "approved" : "rejected",
         reason === "" ? undefined : reason,
+        undefined,
+        // Compared once more under the run's lock, so no version lands between the look and the write.
+        decision === "approve" && run.gateAttachments
+          ? { attachments: attachments?.fingerprint }
+          : undefined,
       );
       if (!done.ok) return refusedBy(done);
       return {

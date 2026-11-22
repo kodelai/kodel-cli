@@ -1334,16 +1334,26 @@ export class FileStore {
   }
 
   /**
-   * Remove the files in `attachments/` that no record points to: what a crash between the file and
-   * its journal line, or a refused write, left behind. Call under the run's lock. Never throws.
+   * Remove what is known to be a leftover in `attachments/`: the temporary file of a write that did
+   * not finish, and a stored file (`<sha256>-<name>`) whose hash no line of the journal names: what a
+   * crash between the file and its journal line, or a refused write, left behind. The journal is
+   * looked at as text, not as parsed records, so the file of a record this kodel cannot read (a newer
+   * build's, one a rule altered) is never taken away; any other file is not ours and is left alone.
+   * Call under the run's lock. Never throws.
    */
-  async sweepAttachments(runId: string, referenced: ReadonlySet<string>): Promise<void> {
+  async sweepAttachments(runId: string): Promise<void> {
     try {
       const dir = await this.attachmentsDir(runId, false);
       if (dir === undefined) return;
+      let journal: string | undefined;
       for (const name of await readdir(dir)) {
-        if (referenced.has(`attachments/${name}`)) continue;
-        await rm(join(dir, name), { recursive: true, force: true });
+        const stored = /^([0-9a-f]{64})(?:~[0-9]+)?-/.exec(name);
+        if (stored === null) continue;
+        if (!name.includes(".tmp-")) {
+          journal ??= await readFile(join(this.runDir(runId), "journal.jsonl"), "utf8");
+          if (journal.includes(stored[1] as string)) continue;
+        }
+        await rm(join(dir, name), { force: true });
       }
     } catch {
       // a leftover counts toward nothing and is tried again at the next write

@@ -41,7 +41,14 @@ export interface DecisionRun {
   gateResults(node: string): Promise<{ csv: string; count: number } | undefined>;
   /** The attachments the run keeps, on a host that keeps them (T-45). */
   gateAttachments?(node: string): Promise<GateAttachments>;
-  decideHuman(node: string, decision: "approved" | "rejected", reason?: string): Promise<Decision>;
+  decideHuman(
+    node: string,
+    decision: "approved" | "rejected",
+    reason?: string,
+    byAgent?: undefined,
+    /** The attachments the person was shown: compared under the run's lock (see `LocalRun.decideHuman`). */
+    seen?: { attachments: string | undefined },
+  ): Promise<Decision>;
   /** `warning`: the session of an engine step whose outcome was unknown could not be judged. */
   resume(node?: string): Promise<Decision & { warning?: string }>;
 }
@@ -180,16 +187,21 @@ export async function commitGateDecision(
   // Always, for the command too: a version written after the person looked (a sibling branch of a
   // fork goes on writing while a gate waits) is something they have not seen. Not relaxed for a
   // shared tree: an attachment has a writer and a number, so whose write it is can be told.
-  if (prepared.decision === "approve" && run.gateAttachments) {
+  const approving = prepared.decision === "approve" && run.gateAttachments !== undefined;
+  if (approving && run.gateAttachments) {
     const now = await run.gateAttachments(prepared.node);
     if (now.fingerprint !== prepared.attachments?.fingerprint) {
       throw new DecisionRefused(ATTACHMENTS_MOVED);
     }
   }
+  // The same comparison is made again under the run's lock, with the write: a version that lands
+  // between the look above and the decision is refused there, not approved unseen.
   return run.decideHuman(
     prepared.node,
     prepared.decision === "approve" ? "approved" : "rejected",
     reason,
+    undefined,
+    approving ? { attachments: prepared.attachments?.fingerprint } : undefined,
   );
 }
 

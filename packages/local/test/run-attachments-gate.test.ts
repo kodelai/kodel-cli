@@ -226,6 +226,50 @@ describe("t45 the gate tells the agent how a comment points at an attachment", (
   });
 });
 
+describe("t45 the look is held under the lock", () => {
+  test("t45_decision_is_held_against_the_attachments_under_the_lock", async () => {
+    gitInit();
+    const fork = await start(FORK);
+    await fork.completeStep("plan", 1);
+    await fork.settle();
+    await text(fork, "a", "plan.md", "from a\n");
+    await fork.completeStep("a", 1);
+    await fork.settle();
+    const seen = await fork.attachmentsFingerprint();
+    // a sibling writes after the caller's own comparison: the decision is refused with the write
+    await text(fork, "b", "plan.md", "from b\n");
+    const refused = await fork.decideHuman("a-gate", "approved", undefined, undefined, {
+      attachments: seen,
+    });
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) {
+      expect(refused.error.code).toBe("INVALID_ARGUMENTS");
+      expect(refused.error.message).toContain("an attachment was written");
+    }
+    expect((await fork.state()).active.some((v) => v.node === "a-gate")).toBe(true);
+    // "none was shown" is a look too: a first attachment written since refuses the same way
+    const none = await fork.decideHuman("a-gate", "approved", undefined, undefined, {
+      attachments: undefined,
+    });
+    expect(none.ok).toBe(false);
+    // the look and the write in one race: whichever order the lock gives, nothing is approved unseen
+    const now = await fork.attachmentsFingerprint();
+    const [decided, written] = await Promise.all([
+      fork.decideHuman("a-gate", "approved", undefined, undefined, { attachments: now }),
+      text(fork, "b", "notes.md", "late\n").catch(() => undefined),
+    ]);
+    const after = await fork.attachmentsFingerprint();
+    if (decided.ok) {
+      const at = (await fork.journal()).findLast((r) => r.event === "gate_decided")?.seq ?? 0;
+      const records = await fork.attachmentRecords();
+      expect(records.filter((r) => r.seq < at).at(-1)?.seq).toBe(Number(now?.split("@").at(-1)));
+    } else {
+      expect(written).toBeDefined();
+      expect(after).not.toBe(now);
+    }
+  });
+});
+
 describe("t45 what the gate showed is what is read", () => {
   test("t45_what_the_gate_showed_is_what_is_read", async () => {
     gitInit();

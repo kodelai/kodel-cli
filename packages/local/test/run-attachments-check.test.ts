@@ -334,6 +334,52 @@ describe("t45 the attachment check", () => {
   });
 });
 
+describe("t45 the same bytes and the claim", () => {
+  test("t45_same_bytes_with_the_token_after_a_foreign_write_counts", async () => {
+    const run = await started();
+    const taken = await run.takeStep({ node: "plan" });
+    if (taken.status !== "claimed") throw new Error("expected a claim");
+    // someone writes the plan for the claimed step without its token: journaled, and it does not count
+    const foreign = await text(run, "plan", "one\ntwo\n");
+    expect(foreign.attachment.version).toBe(1);
+    // the holder writes the same bytes with its token: not a no-op, or its check could never pass
+    const own = await run.writeAttachment({
+      node: "plan",
+      attempt: 1,
+      name: "plan.md",
+      content: "one\ntwo\n",
+      claimToken: taken.claim_token,
+    });
+    expect(own.unchanged).toBeUndefined();
+    expect(own.attachment.version).toBe(2);
+    const records = (await run.attachmentRecords()).map((r) => [r.version, r.claim, r.ref]);
+    expect(records.map(([version, claim]) => [version, claim])).toEqual([
+      [1, "foreign"],
+      [2, "matched"],
+    ]);
+    // one stored file for the two records
+    expect(records[0]?.[2]).toBe(records[1]?.[2] as string);
+    // the same write once more is nothing new, and the other way round is a record again
+    const again = await run.writeAttachment({
+      node: "plan",
+      attempt: 1,
+      name: "plan.md",
+      content: "one\ntwo\n",
+      claimToken: taken.claim_token,
+    });
+    expect(again.unchanged).toBe(true);
+    expect((await text(run, "plan", "one\ntwo\n")).attachment.version).toBe(3);
+    await run.writeAttachment({
+      node: "plan",
+      attempt: 1,
+      name: "plan.md",
+      content: "one\ntwo\n",
+      claimToken: taken.claim_token,
+    });
+    expect((await complete(run, "plan", 1, taken.claim_token)).status).toBe("passed");
+  });
+});
+
 describe("t45 where the check kind exists", () => {
   test("t45_no_attachment_store_no_attachment_check", async () => {
     // a host that was given the built-in kinds only: the pipeline is not a pipeline there

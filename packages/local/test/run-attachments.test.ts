@@ -483,17 +483,54 @@ describe("t45 the bounds of a run", () => {
 
   test("t45_leftovers_are_swept_under_the_lock", async () => {
     const run = await started();
-    await text(run, "plan.md", "kept\n");
+    const kept = await text(run, "plan.md", "kept\n");
     const folder = join(runDir(run), "attachments");
-    await writeFile(join(folder, `${"0".repeat(64)}-left.md`), "a crash left this\n");
-    await writeFile(join(folder, "junk"), "x".repeat(1024));
+    const left = `${"0".repeat(64)}-left.md`;
+    const temp = `${kept.attachment.sha256}-plan.md.tmp-1-1`;
+    await writeFile(join(folder, left), "a crash left this\n");
+    await writeFile(join(folder, temp), "half written\n");
+    await writeFile(join(folder, "notes-of-a-person.txt"), "not ours\n");
     // a leftover is no version and counts toward nothing
     expect((await run.listAttachments()).map((a) => a.name)).toEqual(["plan.md"]);
     await text(run, "notes.md", "next\n");
-    expect(await stored(run)).toHaveLength(2);
-    expect(
-      (await stored(run)).every((f) => f.endsWith("-plan.md") || f.endsWith("-notes.md")),
-    ).toBe(true);
+    // gone: the stored file no journal line names, and the temporary file; a file that is not of
+    // the store's making is left alone
+    const after = await stored(run);
+    expect(after).not.toContain(left);
+    expect(after).not.toContain(temp);
+    expect(after).toContain("notes-of-a-person.txt");
+    expect(after.filter((f) => f.endsWith("-plan.md") || f.endsWith("-notes.md"))).toHaveLength(2);
+  });
+
+  test("t45_sweep_keeps_the_file_of_a_record_it_cannot_read", async () => {
+    // A line this kodel does not read as a version (a newer build's record with a field it does not
+    // know the meaning of, a record a rule altered) still names its file: the file is not a leftover.
+    const run = await started();
+    await text(run, "plan.md", "kept\n");
+    const hash = sha("from a newer build\n");
+    const file = `${hash}-later.md`;
+    await writeFile(join(runDir(run), "attachments", file), "from a newer build\n");
+    const last = (await journal(run)).at(-1) as { seq: number; v: number };
+    await appendFile(
+      join(runDir(run), "journal.jsonl"),
+      `${JSON.stringify({
+        v: last.v,
+        seq: last.seq + 1,
+        ts: 1,
+        event: "attachment_written",
+        node: "plan",
+        attempt: 1,
+        name: "later.md",
+        version: "one",
+        ref: `attachments/${file}`,
+        type: "text",
+        sha256: hash,
+      })}\n`,
+    );
+    // not a version here
+    expect((await run.listAttachments()).map((a) => a.name)).toEqual(["plan.md"]);
+    await text(run, "notes.md", "next\n");
+    expect(await stored(run)).toContain(file);
   });
 });
 

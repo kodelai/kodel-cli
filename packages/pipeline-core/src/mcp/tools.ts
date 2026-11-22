@@ -565,7 +565,9 @@ export const ATTACHMENT_TOOLS: ToolDescriptor[] = [
         .describe("The token pipeline_take_step gave you for this step, if you took it."),
     },
     readOnly: false,
-    idempotent: true,
+    // The same bytes again in another visit or from another step are a new version: a client must
+    // not repeat the call on its own.
+    idempotent: false,
     run: (service, input) =>
       service.attachmentWrite(input as Parameters<PipelineService["attachmentWrite"]>[0]),
   },

@@ -94,8 +94,11 @@ export function createAgentDecider(humans: HumanHost, dialog: DialogState): Agen
       // What is approved is what the person was told about: the attachments of the waiting answer
       // the agent passed on. A missing fingerprint, or one from before a version was written, is
       // refused with the answer as it is now, so the agent tells the person what is new.
+      let seen: { attachments: string | undefined } | undefined;
       if (approved && run.gateAttachments) {
         const now = await run.gateAttachments(node);
+        // What the decision is held against once more, under the run's lock.
+        seen = { attachments: now.fingerprint };
         if (now.fingerprint !== undefined && input.attachments_fingerprint !== now.fingerprint) {
           const fresh = await service.nextStep({ run_id: input.run_id }).catch(() => undefined);
           const { ok: _ok, ...next } = fresh?.ok ? fresh : { ok: true };
@@ -130,7 +133,13 @@ export function createAgentDecider(humans: HumanHost, dialog: DialogState): Agen
       dialog.deciding++;
       let done: Awaited<ReturnType<typeof run.decideHuman>>;
       try {
-        done = await run.decideHuman(node, input.decision, reason === "" ? undefined : reason, by);
+        done = await run.decideHuman(
+          node,
+          input.decision,
+          reason === "" ? undefined : reason,
+          by,
+          seen,
+        );
       } finally {
         dialog.deciding--;
       }

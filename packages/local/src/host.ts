@@ -1692,10 +1692,17 @@ export class LocalRun {
    * If the state file is not what kodel last wrote, nothing is applied (`STATE_MODIFIED_EXTERNALLY`);
    * `trust` skips that check and is only for a human accepting the change.
    */
-  apply(event: RunEvent, options: { trust?: boolean } = {}): Promise<Decision> {
+  apply(
+    event: RunEvent,
+    options: {
+      trust?: boolean;
+      /** Looked at under the run's lock, right before the event is decided: an error refuses it. */
+      guard?: () => Promise<KodelError | undefined>;
+    } = {},
+  ): Promise<Decision> {
     const step = this.queue
       .catch(() => undefined)
-      .then(() => this.applyLocked(event, options.trust === true));
+      .then(() => this.applyLocked(event, options.trust === true, options.guard));
     this.queue = step;
     // After the lock is let go: the tracker may be slow, and it must not hold up the run's files.
     return step.then(async (decision) => {
@@ -2016,8 +2023,16 @@ export class LocalRun {
     }
   }
 
-  private applyLocked(incoming: RunEvent, trust: boolean): Promise<Decision> {
-    return this.locked(() => this.decideAndWrite(incoming, trust));
+  private applyLocked(
+    incoming: RunEvent,
+    trust: boolean,
+    guard?: () => Promise<KodelError | undefined>,
+  ): Promise<Decision> {
+    return this.locked(async () => {
+      const error = await guard?.();
+      if (error !== undefined) return { ok: false, error } satisfies Decision;
+      return this.decideAndWrite(incoming, trust);
+    });
   }
 
   /**
@@ -3823,19 +3838,38 @@ export class LocalRun {
     decision: "approved" | "rejected",
     reason?: string,
     byAgent?: AgentDecision,
+    /**
+     * What the person was shown of the attachments (`attachmentsFingerprint`, `undefined` for none).
+     * Given, it is compared under the run's lock with what the journal holds: a version written since
+     * refuses the decision, so nothing is approved unseen between the caller's look and the write.
+     */
+    seen?: { attachments: string | undefined },
   ) {
     const comments = decision === "rejected" ? await this.gateResults(node) : undefined;
     const parts = [reason, comments ? `Comments (CSV):\n${comments.csv}` : undefined].filter(
       (part): part is string => part !== undefined && part !== "",
     );
     const full = parts.length > 0 ? parts.join("\n\n") : undefined;
-    return this.apply({
-      type: "human_decided",
-      node,
-      decision,
-      ...(full === undefined ? {} : { reason: full }),
-      ...(byAgent === undefined ? {} : { byAgent }),
-    });
+    return this.apply(
+      {
+        type: "human_decided",
+        node,
+        decision,
+        ...(full === undefined ? {} : { reason: full }),
+        ...(byAgent === undefined ? {} : { byAgent }),
+      },
+      seen === undefined
+        ? {}
+        : {
+            guard: async () =>
+              (await this.attachmentsFingerprint()) === seen.attachments
+                ? undefined
+                : new KodelError(
+                    "INVALID_ARGUMENTS",
+                    "an attachment was written while you were reading; look again",
+                  ),
+          },
+    );
   }
 
   /**
@@ -4235,7 +4269,7 @@ export class LocalRun {
             engine,
           );
           if (!dry.ok) throw dry.error;
-          await store.sweepAttachments(this.runId, new Set(records.map((r) => r.ref)));
+          await store.sweepAttachments(this.runId);
           // The file a verified record of these bytes already points to is used again.
           let reuse: AttachmentRecord | undefined;
           for (const record of records) {
@@ -4245,6 +4279,16 @@ export class LocalRun {
           }
           // The same bytes again are nothing new only inside one visit of one step: a step entered
           // again, another step, and a rewrite after the file was changed outside kodel get a record.
+          // Nor is a write nothing new when it stands otherwise to the step's claim than the latest
+          // record does: a version written across the claim does not count for the check, and the
+          // holder's write of the same bytes with its token must get a record that does.
+          const live = liveClaim(state.nodes[input.node], clock());
+          const claim =
+            live === undefined
+              ? "none"
+              : input.claimToken !== undefined && live.token === hashSource(input.claimToken)
+                ? "matched"
+                : "foreign";
           const latest = history.at(-1);
           if (
             reuse !== undefined &&
@@ -4252,6 +4296,7 @@ export class LocalRun {
             latest.ref === reuse.ref &&
             latest.sha256 === sha &&
             latest.node === input.node &&
+            (latest.claim ?? "none") === claim &&
             latest.seq > visitStartSeq(journal, input.node)
           ) {
             return { attachment: attachmentInfoOf(latest, "ok"), unchanged: true };

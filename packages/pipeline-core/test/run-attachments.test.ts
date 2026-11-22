@@ -441,6 +441,14 @@ describe("t45 the tools of a host with attachments", () => {
         ...names(ATTACHMENT_TOOLS),
       ]);
     }
+    // a write again in another visit is a new version, so a client must not repeat it on its own
+    expect(
+      Object.fromEntries(ATTACHMENT_TOOLS.map((t) => [t.name, [t.readOnly, t.idempotent]])),
+    ).toEqual({
+      pipeline_attachment_write: [false, false],
+      pipeline_attachment_read: [true, true],
+      pipeline_attachment_list: [true, true],
+    });
     expect(SERVER_INSTRUCTIONS).not.toContain("pipeline_attachment");
     expect(serverInstructions({ attachments: true })).toContain("pipeline_attachment_write");
     expect(await invokeTool(service, "pipeline_attachment_list", { run_id })).toMatchObject({
