@@ -121,7 +121,8 @@ What keeps such an agent from deciding:
      for a person; it will not run inside a kodel agent session`), whatever its environment and its terminal
      say. A holder is known by its own command line, so a session is found whatever state base its record
      is under (a session's environment gets no `KODEL_STATE_DIR`); the records of the state base the command
-     resolves also name an agent whose holder is gone. Where the process table cannot be read (a sandbox)
+     resolves also name an agent whose holder is gone, also one whose holder recorded `killed` or `lost`
+     while the process it started still runs. Where the process table cannot be read (a sandbox)
      this guard says nothing and the other two decide: a person there must still be able to decide;
   3. **the terminal**: without a terminal on stdin and stdout (`this command is for a person at a terminal;
      it will not run from a script or an agent`). The shell commands of Claude Code have no terminal.

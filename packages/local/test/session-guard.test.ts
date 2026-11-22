@@ -246,4 +246,52 @@ describe("the session guard's probe", () => {
       { pid: 13, ppid: 12, state: "S+", tty: "??", args: "node  a b  --kodel-session-holder" },
     ]);
   });
+
+  test("tA_inside_session_probe_sees_a_child_that_outlived_its_holder", () => {
+    const base = mkdtempSync(join(tmpdir(), "kodel-guard-"));
+    made.push(base);
+    const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+    const put = (session: string, status: unknown) => {
+      const dir = join(base, "run", String(uid), "aaaa", session);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "status.json"), JSON.stringify(status));
+    };
+    const over = {
+      v: 1,
+      by: "holder",
+      holder: { pid: HOLDER, identity: id("holder") },
+      since: 1,
+    };
+    // The holder wrote the end, and the process it started did not end: the record names it by the child.
+    put("a_000000001_0000", {
+      ...over,
+      state: "killed",
+      reason: "stopped",
+      child: { pid: AGENT, identity: id("agent") },
+    });
+    put("a_000000002_0000", { ...over, state: "lost", child: { pid: 530 } });
+    // An end without a child, and an exit (its child is what ended), name nobody.
+    put("a_000000003_0000", { ...over, by: "reader", state: "lost", reason: "no_status" });
+    put("a_000000004_0000", { ...over, state: "exited", exitCode: 0, child: { pid: 540 } });
+    const found = runningSessions(base, uid);
+    expect(found.map((s) => s.child?.pid).sort()).toEqual([AGENT, 530]);
+    // Never by the holder: its pid is free for another process.
+    expect(found.every((s) => s.holder === undefined)).toBe(true);
+    const rows = table([
+      [1, 0, "Ss", "??"],
+      [HOLDER, 1, "S", "??"],
+      [601, HOLDER, "S", "??"],
+      [AGENT, 1, "Ss+", "ttys009"],
+      [600, AGENT, "S", "??"],
+      [610, AGENT, "S+", "ttys009"],
+      [700, 1, "Ss", "ttys001"],
+    ]);
+    // Under the child that still runs, and on its terminal: inside. Under the pid the holder had: not by this.
+    expect(insideSessionOf(base, 600, view(rows, IDS))).toBe("inside");
+    expect(insideSessionOf(base, 610, view(rows, IDS))).toBe("inside");
+    expect(insideSessionOf(base, 601, view(rows, IDS))).toBe("outside");
+    expect(insideSessionOf(base, 700, view(rows, IDS))).toBe("outside");
+    // The child's pid went to another process: not the session's.
+    expect(insideSessionOf(base, 600, view(rows, { [AGENT]: "somebody else" }))).toBe("outside");
+  });
 });

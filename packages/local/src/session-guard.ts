@@ -10,7 +10,8 @@
  * finds a session whatever state base its record was written under (a session's environment gets no
  * `KODEL_*`, so a command inside one resolves the default base, not the `KODEL_STATE_DIR` of the shell
  * that started it). And by the records of the state base the command resolves, which also name the
- * process a holder started: this finds an agent whose holder is gone.
+ * process a holder started: this finds an agent whose holder is gone, also one whose holder recorded
+ * `killed` or `lost` while the process it started still runs.
  *
  * A guard against mistakes, not a boundary: a process that leaves its session and gets itself a
  * terminal of its own passes, as it did before. Where the table cannot be read the answer is `unknown`
@@ -49,7 +50,7 @@ export interface GuardProcess {
   identity?: ProcessIdentity;
 }
 
-/** A session whose record says it runs. */
+/** A session whose record says it runs, or the process a session that is over may have left running. */
 export interface GuardSession {
   holder?: GuardProcess;
   child?: GuardProcess;
@@ -90,7 +91,9 @@ export const systemGuardView: GuardView = {
 };
 
 /**
- * The sessions of a state base whose record says they run, of every checkout of this user. A record that
+ * The sessions of a state base that may still run, of every checkout of this user: those whose record says
+ * they run, and those whose holder recorded `killed` or `lost` for a child that may have outlived it (by the
+ * child alone; whether that pid is still the child is asked of the table, by its identity). A record that
  * cannot be read names nobody. Reads files only.
  */
 export function runningSessions(base: string, uid?: number): GuardSession[] {
@@ -111,12 +114,16 @@ export function runningSessions(base: string, uid?: number): GuardSession[] {
     for (const id of list(join(runDir, checkout))) {
       const status = readStatus(join(runDir, checkout, id));
       if (typeof status === "string") continue;
-      if (status.state !== "running" && status.state !== "starting") continue;
-      if (status.holder === undefined && status.child === undefined) continue;
-      sessions.push({
-        ...(status.holder === undefined ? {} : { holder: status.holder }),
-        ...(status.child === undefined ? {} : { child: status.child }),
-      });
+      if (status.state === "running" || status.state === "starting") {
+        if (status.holder === undefined && status.child === undefined) continue;
+        sessions.push({
+          ...(status.holder === undefined ? {} : { holder: status.holder }),
+          ...(status.child === undefined ? {} : { child: status.child }),
+        });
+      } else if ((status.state === "killed" || status.state === "lost") && status.child) {
+        // The holder is over; the process it started may not be (a child that outlived its stop).
+        sessions.push({ child: status.child });
+      }
     }
   }
   return sessions;
