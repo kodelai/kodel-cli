@@ -31,13 +31,14 @@ import {
 } from "@kodel-ai/local";
 import { SessionError, type SessionListEntry, validateSpec } from "@kodel-ai/pipeline-core";
 import { decisionTools, HISTORY_TOOLS, TOOLS } from "@kodel-ai/pipeline-core/mcp";
-import { resumeVerdict } from "@kodel-ai/pipeline-core/serve";
+import { resumeVerdict, servePlaces } from "@kodel-ai/pipeline-core/serve";
 import { ScriptedSessionAdapter } from "../../testkit/src/engine-fakes";
 import { AGENT_HUMAN_COMMANDS } from "../src/agent-commands";
 import {
   AGENT_PROFILES,
   type AgentProfile,
   agentProfile,
+  DEFAULT_WORKER_MECHANISM,
   WORKER_PRINT_MIGRATION_LINE,
 } from "../src/agent-profiles";
 import {
@@ -176,6 +177,9 @@ function deps(
     platform: "darwin",
     clock: () => 1_000,
     uuid: () => UUID,
+    // These tests build today's `claude -p` worker: the project says so (`worker: print`). The terminal
+    // mechanism has its own rows below, and the real one runs in `tests/pty`.
+    engines: async () => ({ ok: true, engines: { claude: { worker: "print" } } }),
     ...over,
   };
 }
@@ -1043,6 +1047,8 @@ describe("task_9pns the real adapter", () => {
         platform: process.platform,
         clock: Date.now,
         uuid: () => UUID,
+        // Under `bun test` no terminal can run: the script stands for `claude -p`.
+        engines: async () => ({ ok: true, engines: { claude: { worker: "print" } } }),
       });
       await launcher.start({ runId: RUN, workdir: dir, title: "real" });
       const first = (await adapter.list({ name: `kw-${RUN}` }))[0];
@@ -1120,6 +1126,8 @@ describe("task_9pns the real adapter", () => {
         platform: process.platform,
         clock: Date.now,
         uuid: () => UUID,
+        // Under `bun test` no terminal can run: the script stands for `claude -p`.
+        engines: async () => ({ ok: true, engines: { claude: { worker: "print" } } }),
       });
       const h = host();
       const opts = await options(h, launcher);
@@ -1910,6 +1918,74 @@ describe("t45 the launcher on the profile", () => {
       ok: true,
       note: "taken from a .kodel/config.yaml that git does not track",
     });
+  });
+});
+
+describe("t45 the default mechanism", () => {
+  test("t45_default_is_terminal_only_after_the_rule", async () => {
+    // The serve rule knows a worker that stays alive at a wait: it holds a run place and no worker
+    // place there, and its session ending at the wait is no death.
+    const waiting = {
+      runId: RUN,
+      status: "running" as const,
+      canNote: true,
+      waitsForPerson: true,
+      idleAtWait: true,
+      noted: [],
+      worker: {
+        id: "a_000000001_fake",
+        name: `kw-${RUN}`,
+        state: "running" as const,
+        label: "running",
+        started: 0,
+        resumed: [],
+        resumes: 0,
+        terminal: true,
+      },
+    };
+    expect(servePlaces([waiting])).toEqual({ workers: 0, runs: [RUN] });
+    expect(
+      resumeVerdict(
+        { runId: RUN, status: "running", waitsForPerson: true },
+        { ...waiting.worker, state: "lost", since: 5 },
+        { refuseMoved: true },
+      ),
+    ).toEqual({ kind: "no", why: "waiting_person" });
+    // So the absent key means `terminal`: with no `engines` block at all, and with a `claude` profile
+    // that names no `worker`.
+    expect(DEFAULT_WORKER_MECHANISM).toBe("terminal");
+    for (const engines of [
+      undefined,
+      async (): Promise<UnattendedEngines> => ({ ok: true, engines: {} }),
+      enginesOf(undefined),
+    ]) {
+      const adapter = new ScriptedSessionAdapter();
+      const launcher = createSessionWorkerLauncher(
+        deps(adapter, { engines, ptyProbe: PTY_OK } as Partial<SessionLauncherDeps>),
+      );
+      await launcher.start({ runId: RUN, workdir: WORKTREE, title: "t" });
+      const spec = adapter.specs[0];
+      expect(spec?.mode).toBe("pty");
+      expect(spec?.timeoutMs).toBe(WORKER_TERMINAL_TIMEOUT_MS);
+      expect(spec?.argv).not.toContain("-p");
+      expect(spec?.agent).toEqual({ engine: "claude", session: UUID });
+    }
+    // Where no terminal runs (here, under Bun) the start is refused and spells the line to commit;
+    // with that line the worker is today's.
+    const refused = new ScriptedSessionAdapter();
+    const real = createSessionWorkerLauncher(
+      deps(refused, { engines: undefined } as Partial<SessionLauncherDeps>),
+    );
+    const check = await real.preflight({ dialog: false, taskLink: true, pipelines: 1 });
+    expect(check.ok ? "" : check.reason).toContain("a terminal session cannot run under Bun");
+    expect(check.ok ? "" : check.reason).toContain(WORKER_PRINT_MIGRATION_LINE);
+    await expect(real.start({ runId: RUN, workdir: WORKTREE, title: "t" })).rejects.toThrow(
+      WORKER_PRINT_MIGRATION_LINE,
+    );
+    expect(refused.starts).toBe(0);
+    const print = createSessionWorkerLauncher(deps(refused, { engines: enginesOf("print") }));
+    await print.start({ runId: RUN, workdir: WORKTREE, title: "t" });
+    expect(refused.specs[0]?.argv?.slice(0, 2)).toEqual(["claude", "-p"]);
   });
 });
 

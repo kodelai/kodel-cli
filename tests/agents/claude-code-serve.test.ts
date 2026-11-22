@@ -109,7 +109,9 @@ describe("t44 kodel serve with the real claude", () => {
       const sandbox = makeSandbox({
         fixture: { pipeline: TINY_PIPELINE },
         worktree: true,
-        config: `${TASKS_ON}${SERVE_ON}`,
+        // This scenario is the daemon with `claude -p` workers (the daemon runs under Bun, where no
+        // terminal can); the terminal worker has its own scenario.
+        config: `${TASKS_ON}${SERVE_ON}engines:\n  claude:\n    worker: print\n`,
       });
       sandboxes.push(sandbox);
       const [first, second] = await seedTasks(sandbox, [

@@ -75,7 +75,10 @@ const real = test.skipIf(
 );
 const posix = test.skipIf(process.platform === "win32");
 
-const TASKS = "tasks:\n  enabled: true\n  adapters:\n    local:\n      prefix: KDL\n";
+// The workers of these tests are today's `claude -p` (a script stands for it): the project says so,
+// in the committed config and in every rewrite of it (the block is used only as committed).
+const TASKS =
+  "tasks:\n  enabled: true\n  adapters:\n    local:\n      prefix: KDL\nengines:\n  claude:\n    worker: print\n";
 const SERVE_ON = "serve:\n  enabled: true\n  start:\n    - pipeline: one\n";
 
 let dir: string;
@@ -691,6 +694,7 @@ async function realWorld(hang = false) {
     platform: process.platform,
     clock: Date.now,
     uuid: () => "7f3b2a9c-1d4e-4f6a-9b8c-0d1e2f3a4b5c",
+    engines: async () => ({ ok: true, engines: { claude: { worker: "print" } } }),
   });
   const opened = await openTaskService({ storeRoot: storeRoot() });
   if (!opened) throw new Error("tasks are off");

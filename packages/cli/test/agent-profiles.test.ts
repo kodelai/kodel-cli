@@ -72,11 +72,13 @@ describe("t45 the profile table", () => {
     expect(claude().terminalFlags).toBe(WORKER_ENGINES.claude?.terminalFlags as readonly string[]);
   });
 
-  test("t45_absent_worker_key_is_print_until_the_serve_rule", () => {
-    // Step 8 of TASK-EKAV turns the default; until then only an explicit `terminal` starts one.
-    expect(DEFAULT_WORKER_MECHANISM).toBe("print");
-    expect(workerMechanismOf(undefined)).toBe("print");
-    expect(workerMechanismOf({})).toBe("print");
+  test("t45_absent_worker_key_is_terminal", () => {
+    // It was `print` until the serve rule knew a worker that stays alive at a wait (the last commit of
+    // TASK-EKAV step 8 turned it; `t45_default_is_terminal_only_after_the_rule`). `print` is one
+    // committed line now.
+    expect(DEFAULT_WORKER_MECHANISM).toBe("terminal");
+    expect(workerMechanismOf(undefined)).toBe("terminal");
+    expect(workerMechanismOf({})).toBe("terminal");
     expect(workerMechanismOf({ worker: "terminal" })).toBe("terminal");
     expect(workerMechanismOf({ worker: "print" })).toBe("print");
   });

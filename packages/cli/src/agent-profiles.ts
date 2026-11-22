@@ -19,11 +19,13 @@ import {
 import type { WorkerDecision } from "./worker-launcher";
 
 /**
- * What an absent `worker:` key means. `print` until the serve rule knows a worker that stays alive at a
- * wait (TASK-EKAV step 8 makes it `terminal`, in its last commit): with the older rule such a worker
- * would hold a `max_workers` place at a gate and be called stalled.
+ * What an absent `worker:` key means: a worker in a terminal of its own, which a person can open and
+ * which stays alive at a wait. Where no terminal can run the start is refused, with the line that keeps
+ * print workers (`WORKER_PRINT_MIGRATION_LINE`); nothing falls back. It could become the default only
+ * once the serve rule knew such a worker (it holds no `max_workers` place at a gate, is not called
+ * stalled there, and is not a death when its session ends at a wait).
  */
-export const DEFAULT_WORKER_MECHANISM: WorkerMechanism = "print";
+export const DEFAULT_WORKER_MECHANISM: WorkerMechanism = "terminal";
 
 /**
  * The line a project commits to keep its workers as print processes, where no terminal can run. The
