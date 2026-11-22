@@ -151,6 +151,20 @@ already running when kodel was updated does not read the config again and does n
 makes (`docs/tasks.md`): restart the agents' sessions after the update. The four task keys the mark adds are
 optional and kept by an older kodel as they are.
 
+## Task links (TASK-9RZD, T-45, T-46)
+
+No run format, journal, session record or serve record changes. The task files of the `local` adapter gain
+two optional keys of format 1, `depends_on` and `conflicts_with` (`docs/tasks.md`); `v` stays 1 and a file
+without them reads as before. After the update:
+
+- a run in flight goes on as it was; a task without links is started and ordered as before (with the `local`
+  adapter the order is the same: priority, then `created_at`, then the key);
+- the task tools gain parameters (`TASK_TOOLS_VERSION` 2): an MCP server that was already running does not
+  offer them until the agent's session is restarted;
+- **a kodel from before this change ignores the links.** It keeps both keys when it rewrites a task file (at
+  the end of the file) and its `kodel serve` starts a task that a newer one would hold back. Update every
+  kodel that runs `kodel serve` on the repository before you rely on the links.
+
 ## A step that asks for a model (T-43)
 
 A node `model:` without `engine` asks the agent that drives the run to give the step to a subagent on that

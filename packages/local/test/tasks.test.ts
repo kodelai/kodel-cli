@@ -477,6 +477,7 @@ describe("the list", () => {
       priority: true,
       types: false,
       provenance: true,
+      links: true,
     });
   });
 

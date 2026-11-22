@@ -1,0 +1,13 @@
+v: 1
+id: KKKK
+key: TASK-KKKK
+title: Add a CSV export to the report
+body: "After the split: the export goes in the new module."
+priority: high
+status: todo
+depends_on:
+  - TASK-DDDD
+conflicts_with:
+  - TASK-CCCC
+created_at: 2026-11-22T10:03:03.000Z
+updated_at: 2026-11-22T10:03:03.000Z

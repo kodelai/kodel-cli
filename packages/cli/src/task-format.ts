@@ -4,6 +4,7 @@
  * person reading a terminal.
  */
 import {
+  dependencyWords,
   type FieldInfo,
   needsApproval,
   type SubtaskRef,
@@ -19,7 +20,26 @@ type Plain = (text: string) => string;
 
 const SHOWN_COMMENTS = 5;
 
-export const TASK_HEADER = ["KEY", "STATUS", "PRIORITY", "APPROVE", "TITLE", "SUBTASKS", "PARENT"];
+export const TASK_HEADER = [
+  "KEY",
+  "STATUS",
+  "PRIORITY",
+  "APPROVE",
+  "BLOCKED",
+  "TITLE",
+  "SUBTASKS",
+  "PARENT",
+];
+
+const SHOWN_BLOCKERS = 2;
+
+/** The dependencies that hold a task back, in a cell: the first two keys and how many more. */
+function blockedCell(t: TaskSummary, plain: Plain): string {
+  const by = t.blocked_by ?? [];
+  if (by.length === 0) return "-";
+  const more = by.length - SHOWN_BLOCKERS;
+  return `${by.slice(0, SHOWN_BLOCKERS).map(plain).join(",")}${more > 0 ? `,+${more}` : ""}`;
+}
 
 /** One row of cells per task; the latest comment is not a cell, it goes under the row (`formatTaskTable`). */
 function taskCells(t: TaskSummary, plain: Plain): string[] {
@@ -28,6 +48,7 @@ function taskCells(t: TaskSummary, plain: Plain): string[] {
     `${plain(t.status)}${t.state === t.status ? "" : ` (${t.state})`}`,
     t.priority === undefined ? "-" : plain(t.priority),
     t.needs_approval === true ? "waits" : "-",
+    blockedCell(t, plain),
     plain(t.title),
     t.subtasks ? `${t.subtasks.done}/${t.subtasks.total}` : "-",
     t.parent === undefined ? "-" : plain(t.parent),
@@ -63,6 +84,20 @@ export function formatTask(task: Task, subtasks: SubtaskRef[], plain: Plain): st
   if (task.id !== undefined) lines.push(`  id: ${plain(task.id)}`);
   if (task.parent !== undefined) lines.push(`  parent: ${plain(task.parent)}`);
   if (task.url !== undefined) lines.push(`  url: ${plain(task.url)}`);
+  if (task.depends_on?.length) {
+    const refs = new Map((task.dependencies ?? []).map((ref) => [ref.key, ref] as const));
+    const shown = task.depends_on.map(
+      (key) => `${plain(key)} (${plain(dependencyWords(refs.get(key)))})`,
+    );
+    lines.push(`  depends on: ${shown.join(", ")}`);
+  }
+  if (task.blocked_by?.length) {
+    lines.push(`  blocked by: ${task.blocked_by.map(plain).join(", ")}`);
+  }
+  if (task.blocks?.length) lines.push(`  blocks: ${task.blocks.map(plain).join(", ")}`);
+  if (task.conflicts_with?.length) {
+    lines.push(`  conflicts with: ${task.conflicts_with.map(plain).join(", ")}`);
+  }
   if (task.created_by === "agent") {
     const run = task.created_in_run === undefined ? "" : ` in run ${plain(task.created_in_run)}`;
     lines.push(`  created by: an agent${run}`);
@@ -122,6 +157,7 @@ export function formatSchema(answer: SchemaAnswer, plain: Plain): string {
     caps.fields && "fields",
     caps.priority && "priority",
     caps.types && "types",
+    caps.links === true && "links (depends_on, conflicts_with)",
   ].filter((c): c is string => typeof c === "string");
   const lines = [
     `adapter: ${plain(answer.adapter)}`,
