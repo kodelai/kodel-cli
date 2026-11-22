@@ -5,7 +5,7 @@
  * tools. Anything extra in a call (a made-up `status`, say) is ignored, never trusted.
  */
 import { z } from "zod";
-import { MAX_WAIT_S } from "../next-step";
+import { DEFAULT_WAIT_COMMAND, MAX_WAIT_S, spellWaitCommand } from "../next-step";
 import { RUN_ID_PATTERN } from "../run-id";
 import type { PipelineService, ToolResult } from "../service";
 
@@ -24,8 +24,25 @@ export const CONTRACT_VERSION = 5;
  * off in its config) leaves out the offer of `kodel wait`; `dialog: true` (the host can ask the person
  * through the client) adds the rule for the dialog.
  */
-const WAIT_OFFER =
-  " `tell_the_person` may offer you `kodel wait <run_id>`, a command that only watches and prints one line when the person has decided: start it in the background as it says, end your turn, and call pipeline_next_step when it reports. Never poll pipeline_next_step in a loop to wait for a person.";
+const waitOffer = (command: string) =>
+  ` \`tell_the_person\` may offer you \`${command}\`, a command that only watches and prints one line when the person has decided: start it in the background as it says, end your turn, and call pipeline_next_step when it reports. Never poll pipeline_next_step in a loop to wait for a person.`;
+
+/**
+ * How the instructions name the command that watches a run: the given one (a template in which `{run}`
+ * is the run id) with `<run_id>` in the id's place, offered whatever `waitHint` says; else `kodel wait`,
+ * unless the project turned the offer off.
+ */
+function waitNames(options: {
+  waitHint?: boolean;
+  waitCommand?: string;
+}): { offer: string; name: string } | undefined {
+  if (options.waitCommand !== undefined) {
+    const command = spellWaitCommand(options.waitCommand, "<run_id>");
+    return { offer: command, name: command };
+  }
+  if (options.waitHint === false) return undefined;
+  return { offer: spellWaitCommand(DEFAULT_WAIT_COMMAND, "<run_id>"), name: "kodel wait" };
+}
 
 const DIALOG_RULE =
   "10. Some clients show the person a dialog when a call would answer `waiting` for them (or when the state of a run was changed outside kodel): the call then stays open until they answer, and it returns the state after their decision with a `dialog` entry saying what they did. If `dialog.answer` is anything but `decided`, they did not decide there: do what `tell_the_person` says, the command in `how_to_decide` still works. You cannot answer the dialog, and nothing you send is read as an answer.";
@@ -53,9 +70,16 @@ function agentDecisionsRule(decisions: AgentDecisionFlags | undefined, number: n
 }
 
 export function serverInstructions(
-  options: { waitHint?: boolean; dialog?: boolean; decisions?: AgentDecisionFlags } = {},
+  options: {
+    waitHint?: boolean;
+    /** The wait command of this connection's agent (`ServiceOptions.waitCommand`). */
+    waitCommand?: string;
+    dialog?: boolean;
+    decisions?: AgentDecisionFlags;
+  } = {},
 ): string {
-  const wait = options.waitHint === false ? "" : WAIT_OFFER;
+  const names = waitNames(options);
+  const wait = names === undefined ? "" : waitOffer(names.offer);
   const decides = options.decisions?.gate === true || options.decisions?.pipelineChange === true;
   // The dialog rule is number 10 when it is there; this one follows whatever comes last.
   const decidesRule = options.dialog === true ? 11 : 10;
@@ -76,7 +100,7 @@ export function serverInstructions(
     "7. If the answer to pipeline_start names a `workdir`, do all your work for the run in that directory (read and write files there, not in the directory you started in): the engine runs the commands and checks there.",
     "8. If you are asked to write or change a pipeline, read pipeline_docs first: it is the reference for this engine version. To add a pipeline, or to change one outside a run (start from the `yaml` of pipeline_resolve), call pipeline_propose_change without run_id: a person accepts it with a command. Never put a file in .kodel/pipelines yourself and never run that command. When the change is about a check, the summary names its check_id and what should get better.",
     "9. If an answer tells you that the pipeline of the run was changed and a person has to accept it (a `waiting` answer about the change, or a note about it on a `node` answer), do what `tell_the_person` says. If the change was made by editing the pipeline file and not through pipeline_propose_change, put the file back as it was and propose it instead.",
-    stepsRule(options.waitHint !== false),
+    stepsRule(names?.name),
     FORMAT_RULE,
     HISTORY_RULE,
     ...(options.dialog === true ? [DIALOG_RULE] : []),
@@ -88,9 +112,9 @@ export function serverInstructions(
  * Several steps open at once (a fork of the pipeline). Numbered after rule 9, so the dialog rule and
  * the agent-decision rule keep the numbers the other texts refer to.
  */
-const stepsRule = (waitHint: boolean) =>
+const stepsRule = (waitName: string | undefined) =>
   "9a. A `node` answer may list several open steps (`steps`): `execution.mode` says how this project works them, and `execution.instruction` says exactly what to do. In `parallel` mode you start one worker per free step; each worker takes its step with pipeline_take_step (node_slug), keeps the `claim_token`, does the step, completes it with pipeline_complete_step and that token, and reports the answer back to you; a worker never writes to the person" +
-  (waitHint ? " and never starts `kodel wait`" : "") +
+  (waitName === undefined ? "" : ` and never starts \`${waitName}\``) +
   ". In `sequential` mode you do them one by one, unless its instruction says the project lets you work them in parallel: then, if you can start subagents, call pipeline_next_step again with subagents: {can: true} to have the open steps worked in parallel; if you cannot, carry on one step at a time. A `running` answer with `open_steps` means every open step is in a worker's hands: wait for them (wait_s) or for their reports. `also_waiting` on an answer names decisions a person has to make meanwhile: tell them. pipeline_next_step only reads; it never takes a step.";
 
 /**

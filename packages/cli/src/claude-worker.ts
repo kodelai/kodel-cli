@@ -1,7 +1,8 @@
 /**
  * Claude-specific: how a worker is a `claude -p` process (TASK-9PNS). The argv and its flags
  * (`--session-id` for the first session, `--resume` for the one after a decision), the shape of the
- * `--mcp-config` that points it at its own `kodel mcp --no-decisions --no-wait-hint`, the two tool
+ * `--mcp-config` that points it at its own `kodel mcp --no-decisions --no-wait-hint` (or, for a worker
+ * that stays alive at a wait, `--wait-command <the command it watches its run with>`), the two tool
  * lists Claude Code enforces, the auth probe, the two prompts and the environment markers. To put
  * another agent behind the TUI, replace this file and `claude-stream.ts`; `WorkerLauncher`, the TUI
  * and `kodel mcp`'s two flags do not know which agent runs.
@@ -12,7 +13,7 @@ import { type RedactRule, redactText, validateSpec } from "@kodel-ai/pipeline-co
 import { AGENT_HUMAN_COMMANDS } from "./agent-commands";
 import { sessionIdOf as tailSessionId } from "./claude-stream";
 import { plain } from "./plain";
-import type { WorkerDecision } from "./worker-launcher";
+import { WORKER_TERMINAL_TIMEOUT_MS, type WorkerDecision } from "./worker-launcher";
 
 /** The tools the worker may use besides its kodel server. `Bash` whole: `dev.yaml` needs tests, git and gh. */
 export const WORKER_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Agent"] as const;
@@ -23,6 +24,12 @@ export const WORKER_DENIED = [
   "mcp__kodel__pipeline_accept_change",
 ] as const;
 
+/**
+ * `kodel wait <run>`, as a `Bash` pattern. A run id is `r_…`: `* wait*` alone would refuse
+ * `cd …/.kodel/worktrees/r_x && bun test; wait`.
+ */
+const WAIT_COMMAND_PATTERN = "wait r_*";
+
 /** The human-only commands, as `Bash` patterns refuse them: a verb after any spelling of the binary. */
 export const WORKER_DENIED_COMMANDS: readonly string[] = [
   "gate*",
@@ -30,8 +37,8 @@ export const WORKER_DENIED_COMMANDS: readonly string[] = [
   "seal*",
   "resume*",
   "migrate*",
-  // A run id is `r_…`: `* wait*` alone would refuse `cd …/.kodel/worktrees/r_x && bun test; wait`.
-  "wait r_*",
+  // Not a person's command: a `-p` worker's turn ends at a wait, so it has nothing to watch.
+  WAIT_COMMAND_PATTERN,
   "pipeline changes apply*",
   "pipeline changes discard*",
   "pipeline changes restore*",
@@ -94,11 +101,20 @@ function under(inner: string, outer: string): boolean {
 /**
  * The deny list: the decision tools, the human-only commands in every spelling, and the files the
  * engine owns (worktree-relative and absolute to the root; the state base when it is not under the root).
+ * `terminal`: a worker in a terminal of its own stays alive at a wait and watches its run with
+ * `kodel wait`, so that one command is not refused to it.
  */
-export function workerDenylist(root: string, stateBase: string): string[] {
+export function workerDenylist(
+  root: string,
+  stateBase: string,
+  options: { terminal?: boolean } = {},
+): string[] {
   const out: string[] = [...WORKER_DENIED];
+  const verbs = options.terminal
+    ? WORKER_DENIED_COMMANDS.filter((verb) => verb !== WAIT_COMMAND_PATTERN)
+    : WORKER_DENIED_COMMANDS;
   for (const spelling of WORKER_BINARY_SPELLINGS) {
-    for (const verb of WORKER_DENIED_COMMANDS) out.push(`Bash(${spelling} ${verb})`);
+    for (const verb of verbs) out.push(`Bash(${spelling} ${verb})`);
   }
   for (const path of WORKER_DENIED_PATHS) {
     for (const tool of ["Edit", "Write"]) {
@@ -119,19 +135,84 @@ export interface McpConfigInput {
   root: string;
   /** `KODEL_STATE_DIR` of the TUI's environment, when set: the worker's server keeps the history where the TUI reads it. */
   stateDir?: string;
+  /**
+   * The command the server's answers offer (`workerWaitCommand`), for a worker that stays alive at a wait.
+   * Without it the server offers none: a `-p` worker's turn ends there.
+   */
+  waitCommand?: string;
 }
 
-/** The `--mcp-config` JSON: one server, this binary, `--no-decisions --no-wait-hint`. No task text. */
+/**
+ * The `--mcp-config` JSON: one server, this binary, `--no-decisions` and either `--no-wait-hint` or the
+ * worker's own wait command. No task text.
+ */
 export function workerMcpConfig(input: McpConfigInput): string {
+  const wait =
+    input.waitCommand === undefined ? ["--no-wait-hint"] : ["--wait-command", input.waitCommand];
   return JSON.stringify({
     mcpServers: {
       kodel: {
         command: input.exec,
-        args: [...input.args, "--root", input.root, "mcp", "--no-decisions", "--no-wait-hint"],
+        args: [...input.args, "--root", input.root, "mcp", "--no-decisions", ...wait],
         ...(input.stateDir === undefined ? {} : { env: { KODEL_STATE_DIR: input.stateDir } }),
       },
     },
   });
+}
+
+/** One word of a command line for a POSIX shell: as it is when it needs no quoting, else in single quotes. */
+export function shellQuote(part: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(part)) return part;
+  return `'${part.split("'").join("'\\''")}'`;
+}
+
+/** Where the run id goes in a wait command; a run id needs no quoting. */
+const RUN_PLACE = "{run}";
+
+/**
+ * The command a worker in a terminal starts in the background to be woken by the person's decision:
+ * this very build, the project by its root, and the state base the starter has (the worker's shell has no
+ * `KODEL_*` of its own, so `KODEL_STATE_DIR` is spelled out). A template: `{run}` is the run id. It gives
+ * up when the session does. Every part is quoted by `shellQuote`.
+ */
+export function workerWaitCommand(input: Omit<McpConfigInput, "waitCommand">): string {
+  const state =
+    input.stateDir === undefined ? [] : ["env", shellQuote(`KODEL_STATE_DIR=${input.stateDir}`)];
+  return [
+    ...state,
+    ...[input.exec, ...input.args, "--root", input.root, "wait"].map(shellQuote),
+    RUN_PLACE,
+    "--timeout",
+    String(WORKER_TERMINAL_TIMEOUT_MS / 1000),
+  ].join(" ");
+}
+
+/** Whether a `Bash(<glob>)` pattern covers a command: `*` is any text, the rest is literal. */
+function bashPatternMatches(pattern: string, command: string): boolean {
+  const glob = /^Bash\((.*)\)$/s.exec(pattern)?.[1];
+  if (glob === undefined) return false;
+  const literal = glob.split("*").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp(`^${literal.join(".*")}$`, "s").test(command);
+}
+
+/**
+ * Why a wait command cannot be given to a worker, or nothing. A path that holds `{run}` would be cut by
+ * the run id; one whose spelling a deny pattern of the worker covers (a root named `…/kodel resume/…`)
+ * would be refused to the worker, which would then never learn of a decision.
+ */
+export function waitCommandProblem(
+  input: Omit<McpConfigInput, "waitCommand">,
+  denied: readonly string[],
+): string | undefined {
+  const parts = [input.exec, ...input.args, input.root, input.stateDir ?? ""];
+  if (parts.some((part) => part.includes(RUN_PLACE))) {
+    return `a path of this start holds "${RUN_PLACE}": the command that watches a run cannot be spelled`;
+  }
+  const command = workerWaitCommand(input).split(RUN_PLACE).join("r_0000000000_0000");
+  const pattern = denied.find((entry) => bashPatternMatches(entry, command));
+  return pattern === undefined
+    ? undefined
+    : `the command that watches a run (${command}) is refused by the agent's own deny rule ${pattern}: a path of this start reads as a command that is the person's`;
 }
 
 export interface ArgvInput {

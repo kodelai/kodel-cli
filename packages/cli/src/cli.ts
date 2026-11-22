@@ -430,7 +430,15 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       "--no-wait-hint",
       "never offer the agent `kodel wait`: its turn ends at a wait (a background agent's server)",
     )
-    .action(async (opts: { decisions: boolean; waitHint: boolean }) => {
+    .option(
+      "--wait-command <text>",
+      "the command the answers offer in place of `kodel wait <run>`, with {run} for the run id (the server of a background agent that stays alive at a wait)",
+    )
+    .action(async (opts: { decisions: boolean; waitHint: boolean; waitCommand?: string }) => {
+      // Before anything is served: a command without the run in it would watch nothing.
+      if (opts.waitCommand !== undefined && !opts.waitCommand.includes("{run}")) {
+        throw new UserError("--wait-command needs {run} where the run id goes");
+      }
       // T-42: inside the process group of a live host session's child (an engine step), this server
       // would be a second Kodel client of the person, so it serves nothing. A group that cannot be
       // read fails open.
@@ -534,6 +542,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       });
       await serveStdio(local, pkg.version, tasks, runLink, {
         waitHint: settings.waitHint,
+        ...(opts.waitCommand === undefined ? {} : { waitCommand: opts.waitCommand }),
         humans: local,
         dialog: settings.dialog,
         agentDecisions: settings.agentDecisions,

@@ -61,6 +61,12 @@ export interface ServerOptions {
   /** Whether the answers offer the agent `kodel wait` (the project config can turn it off). */
   waitHint?: boolean;
   /**
+   * The command that watches a run, as this server's agent is to start it (`{run}` is the run id): every
+   * answer and the instructions spell it in place of `kodel wait <run>`, whatever `waitHint` says. The
+   * server of a background agent that stays alive at a wait gets it from its launcher.
+   */
+  waitCommand?: string;
+  /**
    * A host that can decide for a person (the local one). With `dialog`, a client that can show a
    * form is asked there at a gate, a pause, a change of the pipeline and a state changed outside
    * kodel; a client that cannot is answered as before. Without `dialog` the person decides with the
@@ -112,6 +118,7 @@ export function createServer(
       tools: toolsFingerprint([...toolsFor({ taskLink }), ...decisions, ...HISTORY_TOOLS]),
       contract_version: CONTRACT_VERSION,
     },
+    ...(options.waitCommand === undefined ? {} : { waitCommand: options.waitCommand }),
   });
   registerPipelineTools(server, service, {
     taskLink,

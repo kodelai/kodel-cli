@@ -12,7 +12,8 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { workerMcpConfig } from "../src/claude-worker";
+import { workerMcpConfig, workerWaitCommand } from "../src/claude-worker";
+import { runCli } from "../src/cli";
 
 const main = join(import.meta.dir, "../src/main.ts");
 
@@ -287,4 +288,103 @@ describe("task_9pns kodel mcp --no-decisions --no-wait-hint", () => {
       await c.close();
     }
   }, 40_000);
+});
+
+describe("t45 kodel mcp --wait-command", () => {
+  /** A person's decision at the gate, as the command makes it, in the environment the server has. */
+  async function decide(dir: string, env: Record<string, string>, ...args: string[]) {
+    let err = "";
+    // The record of what this machine vouches for is found through the process's own environment.
+    const before = { HOME: process.env.HOME, KODEL_STATE_DIR: process.env.KODEL_STATE_DIR };
+    Object.assign(process.env, env);
+    try {
+      const code = await runCli(["--root", dir, "gate", ...args], {
+        cwd: dir,
+        out: () => {},
+        err: (t) => {
+          err += t;
+        },
+        interactive: true,
+        confirm: async () => true,
+        select: async () => [],
+        environment: { PATH: process.env.PATH ?? "", ...env },
+      });
+      if (code !== 0) throw new Error(`gate ${args.join(" ")}: ${err}`);
+    } finally {
+      for (const [key, value] of Object.entries(before)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }
+
+  test("t45_waiting_answers_spell_the_wait_command", async () => {
+    // The launcher's exact `--mcp-config` for a worker that stays alive at a wait, in a project that
+    // turned the offer off for its own agents: the worker is offered its command all the same.
+    const dir = makeRepo();
+    writeFileSync(join(dir, ".kodel", "config.yaml"), `${CONFIG}agent_hints:\n  wait: false\n`);
+    const home = mkdtempSync(join(tmpdir(), "kodel-waitcmd-home-"));
+    made.push(home);
+    const stateDir = join(dir, "state");
+    const self = { exec: process.execPath, args: [main], root: dir, stateDir };
+    const template = workerWaitCommand(self);
+    const config = JSON.parse(workerMcpConfig({ ...self, waitCommand: template })) as {
+      mcpServers: { kodel: { command: string; args: string[]; env: Record<string, string> } };
+    };
+    const { command, args, env } = config.mcpServers.kodel;
+    expect(args.slice(-4)).toEqual(["mcp", "--no-decisions", "--wait-command", template]);
+    expect(args).not.toContain("--no-wait-hint");
+    const c = await connect(dir, [], { ...env, HOME: home }, { exec: command, args });
+    try {
+      const instructions = c.client.getInstructions() ?? "";
+      expect(instructions).toContain(`\`${template.replace("{run}", "<run_id>")}\``);
+      expect(instructions).not.toContain("kodel wait");
+      const runId = await atGate(dir, c.client);
+      const spelled = template.replace("{run}", runId);
+      const offer = `start \`${spelled}\` that way and end your turn`;
+      const first = await call(c.client, "pipeline_next_step", { run_id: runId });
+      const tell = (answer: Record<string, unknown>) =>
+        String((answer.waiting as { tell_the_person?: string } | undefined)?.tell_the_person);
+      expect(tell(first)).toContain(offer);
+      expect(tell(first)).toContain("run_in_background");
+      expect(JSON.stringify(first)).not.toContain("kodel wait");
+      expect(JSON.stringify(first)).not.toContain("{kodel-wait-command}");
+      // The person sends the step back; at the second gate the answer spells the command again.
+      await decide(dir, { ...env, HOME: home }, "reject", runId, "--reason", "once more");
+      await call(c.client, "pipeline_next_step", { run_id: runId });
+      writeFileSync(join(dir, "out.txt"), "hello again\n");
+      const done = await call(c.client, "pipeline_complete_step", {
+        run_id: runId,
+        node_slug: "write",
+        attempt: 2,
+      });
+      expect(tell(done.next as Record<string, unknown>)).toContain(offer);
+      const second = await call(c.client, "pipeline_next_step", { run_id: runId });
+      expect(second.waiting).toMatchObject({ reason: "gate", attempt: 2 });
+      expect(tell(second)).toContain(offer);
+      // It decides nothing: this is still a background agent's server.
+      expect(c.asked).toEqual([]);
+      expect(journalEvents(dir, runId).filter((e) => e === "gate_decided")).toHaveLength(1);
+    } finally {
+      await c.close();
+    }
+  }, 60_000);
+
+  test("t45_wait_command_flag_needs_the_run", async () => {
+    const dir = makeRepo();
+    let err = "";
+    const code = await runCli(["--root", dir, "mcp", "--wait-command", "kodel wait"], {
+      cwd: dir,
+      out: () => {},
+      err: (t) => {
+        err += t;
+      },
+      interactive: false,
+      confirm: async () => false,
+      select: async () => [],
+      environment: { PATH: process.env.PATH ?? "" },
+    });
+    expect(code).toBe(1);
+    expect(err).toContain("--wait-command needs {run}");
+  });
 });

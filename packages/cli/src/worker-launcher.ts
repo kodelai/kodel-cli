@@ -9,6 +9,11 @@ import type { RunDecision } from "@kodel-ai/pipeline-core/serve";
 
 /** A session lives this long at most; the person's `kodel agent stop` ends it sooner. */
 export const WORKER_TIMEOUT_MS = 12 * 3_600_000;
+/**
+ * A worker in a terminal of its own stays alive at a wait, so it lives this long at most (7 days). The
+ * command it watches its run with gives up at the same moment: one constant for both.
+ */
+export const WORKER_TERMINAL_TIMEOUT_MS = 7 * 24 * 3_600_000;
 /** How often the worker records are read while the screen is open. */
 export const WORKER_REFRESH_MS = 4_000;
 

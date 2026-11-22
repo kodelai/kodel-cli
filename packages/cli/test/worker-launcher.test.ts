@@ -26,12 +26,16 @@ import {
   type Exec,
   resumePrompt,
   sessionIdOf,
+  shellQuote,
   WORKER_DENIED,
   WORKER_TOOLS,
+  waitCommandProblem,
   workerAllowlist,
   workerDenylist,
   workerEnv,
+  workerMcpConfig,
   workerPrompt,
+  workerWaitCommand,
 } from "../src/claude-worker";
 import { loadSessions } from "../src/tui/load";
 import { openTasksForTui } from "../src/tui/tasks-open";
@@ -39,6 +43,7 @@ import { initialModel, withWorkers } from "../src/tui/view";
 import { decisionOf, resumeOffer } from "../src/tui/worker-resume";
 import { createWorkerOptions, taskTextOf } from "../src/tui/worker-start";
 import {
+  WORKER_TERMINAL_TIMEOUT_MS,
   WORKER_TIMEOUT_MS,
   type WorkerDecision,
   type WorkerLauncher,
@@ -1238,5 +1243,121 @@ describe("t44 the launcher for kodel serve", () => {
     launched();
     expect((await starting)?.ok).toBe(true);
     expect(await short().withWorkerStartLock(async () => "in")).toBe("in");
+  });
+});
+
+// ── The wait command of a worker that stays alive at a wait (TASK-EKAV, T-45) ─────────────────
+
+describe("t45 the worker's wait command", () => {
+  const SELF = { exec: "/usr/local/bin/node", args: ["/opt/kodel/dist/kodel.js"], root: ROOT };
+
+  test("t45_wait_command_carries_the_state_dir", () => {
+    // Without a state dir of the starter: this very build, the project by its root, the run, the bound.
+    expect(workerWaitCommand(SELF)).toBe(
+      "/usr/local/bin/node /opt/kodel/dist/kodel.js --root /proj wait {run} --timeout 604800",
+    );
+    // With one: the worker's shell has no `KODEL_*` of its own, so the command spells it out.
+    expect(workerWaitCommand({ ...SELF, stateDir: "/home/u/state" })).toBe(
+      "env KODEL_STATE_DIR=/home/u/state /usr/local/bin/node /opt/kodel/dist/kodel.js --root /proj wait {run} --timeout 604800",
+    );
+    // The server of such a worker is given the command in place of `--no-wait-hint`, and keeps the
+    // state dir in its own environment as before.
+    const template = workerWaitCommand({ ...SELF, stateDir: "/home/u/state" });
+    const server = JSON.parse(
+      workerMcpConfig({ ...SELF, stateDir: "/home/u/state", waitCommand: template }),
+    ).mcpServers.kodel;
+    expect(server.args).toEqual([
+      "/opt/kodel/dist/kodel.js",
+      "--root",
+      ROOT,
+      "mcp",
+      "--no-decisions",
+      "--wait-command",
+      template,
+    ]);
+    expect(server.env).toEqual({ KODEL_STATE_DIR: "/home/u/state" });
+    // without a command the server is today's
+    expect(JSON.parse(workerMcpConfig(SELF)).mcpServers.kodel.args.slice(-3)).toEqual([
+      "mcp",
+      "--no-decisions",
+      "--no-wait-hint",
+    ]);
+  });
+
+  test("t45_wait_command_is_quoted_and_passes_the_deny_list", () => {
+    expect(shellQuote("/plain/path-1.2_x")).toBe("/plain/path-1.2_x");
+    expect(shellQuote("")).toBe("''");
+    expect(shellQuote("two words")).toBe("'two words'");
+    expect(shellQuote("it's")).toBe("'it'\\''s'");
+    expect(shellQuote("$(rm -rf ~)")).toBe("'$(rm -rf ~)'");
+    expect(shellQuote("a;b")).toBe("'a;b'");
+
+    // Every part is quoted by that one function: a root, a build and a state dir with spaces and quotes.
+    const odd = {
+      exec: "/Users/a b/bin/node",
+      args: ["/opt/my kodel/dist/kodel.js"],
+      root: "/work/it's here",
+      stateDir: "/home/u/state $HOME",
+    };
+    const command = workerWaitCommand(odd).replace("{run}", RUN);
+    expect(command).toBe(
+      `env 'KODEL_STATE_DIR=/home/u/state $HOME' '/Users/a b/bin/node' '/opt/my kodel/dist/kodel.js' --root '/work/it'\\''s here' wait ${RUN} --timeout 604800`,
+    );
+    // A shell reads it back as the very words it was built from.
+    const words = execFileSync("sh", ["-c", `printf '%s\\n' ${command}`], { encoding: "utf8" })
+      .trimEnd()
+      .split("\n");
+    expect(words).toEqual([
+      "env",
+      `KODEL_STATE_DIR=${odd.stateDir}`,
+      odd.exec,
+      ...odd.args,
+      "--root",
+      odd.root,
+      "wait",
+      RUN,
+      "--timeout",
+      "604800",
+    ]);
+
+    // The deny list of a worker in a terminal refuses every person's command and not this one; the
+    // `-p` worker's list refuses it, as before.
+    const terminal = workerDenylist(ROOT, BASE, { terminal: true });
+    const print = workerDenylist(ROOT, BASE);
+    expect(print).toContain("Bash(*kodel* wait r_*)");
+    expect(terminal.filter((p) => p.includes(" wait "))).toEqual([]);
+    expect(print.filter((p) => !terminal.includes(p))).toEqual([
+      "Bash(*kodel* wait r_*)",
+      "Bash(*main.ts* wait r_*)",
+      "Bash(*kodel.js* wait r_*)",
+    ]);
+    expect(terminal).toContain("Bash(*kodel* gate*)");
+    expect(terminal).toContain("Bash(*kodel.js* agent stop*)");
+    for (const self of [SELF, { ...SELF, stateDir: "/home/u/state" }, odd]) {
+      expect(waitCommandProblem(self, terminal)).toBeUndefined();
+      expect(waitCommandProblem(self, print)).toContain("wait r_*");
+    }
+    // A root whose spelling reads as a person's command would be refused to the worker: said beforehand.
+    const trips = waitCommandProblem({ ...SELF, root: "/work/kodel resume/proj" }, terminal);
+    expect(trips).toContain("Bash(*kodel* resume*)");
+    expect(trips).toContain("is refused by the agent's own deny rule");
+    expect(
+      waitCommandProblem({ ...SELF, root: "/w", stateDir: "/s/kodel gate" }, terminal),
+    ).toContain("gate*");
+    // and a path that holds the place of the run cannot be spelled at all
+    expect(waitCommandProblem({ ...SELF, root: "/work/{run}/proj" }, terminal)).toContain("{run}");
+  });
+
+  test("t45_wait_timeout_is_the_sessions", () => {
+    // One constant: the session of a terminal worker and the command it watches its run with end together.
+    expect(WORKER_TERMINAL_TIMEOUT_MS).toBe(7 * 24 * 3_600_000);
+    expect(
+      workerWaitCommand(SELF).endsWith(` --timeout ${WORKER_TERMINAL_TIMEOUT_MS / 1000}`),
+    ).toBe(true);
+    expect(WORKER_TERMINAL_TIMEOUT_MS / 1000).toBe(604_800);
+    // a session may be that long
+    expect(
+      validateSpec({ argv: ["claude"], cwd: ROOT, timeoutMs: WORKER_TERMINAL_TIMEOUT_MS }),
+    ).toBeUndefined();
   });
 });

@@ -26,6 +26,7 @@ import {
   type NextStep,
   type PipelineChange,
   type SubagentsDeclaration,
+  spellWaitCommand,
 } from "./next-step";
 import type { PipelineSpec } from "./pipeline";
 import type { NodeDiff } from "./pipeline-diff";
@@ -98,6 +99,12 @@ export interface NextStepRequest {
   subagents?: SubagentsDeclaration;
   /** The caller is a worker on one step: it is told to report back, not to write to the person. */
   worker?: boolean;
+  /**
+   * How the answer is to name the command that watches the run, in place of `kodel wait <run>` (see
+   * `NextStepOptions.waitCommand`). The service gives a neutral mark here and puts its own command in
+   * afterwards, so what the host keeps of an answer never holds a path of this machine.
+   */
+  waitCommand?: string;
   /** The answer goes to the agent (see `RunHandle.nextStep`). */
   serve?: { caller?: Caller };
 }
@@ -146,7 +153,13 @@ export interface RunHandle {
    * token and keeps only its hash; a live hold by another token answers `taken`. A claim is advice
    * to the workers, never a verdict on the step.
    */
-  takeStep(input: { node?: string; token?: string; caller?: Caller }): Promise<TakeOutcome>;
+  takeStep(input: {
+    node?: string;
+    token?: string;
+    caller?: Caller;
+    /** As `NextStepRequest.waitCommand`, for the answers a take carries. */
+    waitCommand?: string;
+  }): Promise<TakeOutcome>;
   completeStep(
     node: string,
     attempt: number,
@@ -313,6 +326,39 @@ export interface ServiceOptions {
   caller?: () => Caller | undefined;
   /** What this connection serves; the host hashes it into the run's `engine` record. */
   surface?: ServedSurface;
+  /**
+   * The command that watches a run, as this connection's agent is to start it: a template in which
+   * `{run}` is the run id. Every answer that names the command spells this one, and offers it whatever
+   * the project's `agent_hints.wait` says. None: the answers say `kodel wait <run>`, as they always did.
+   */
+  waitCommand?: string;
+}
+
+/**
+ * What stands for the wait command in an answer until the service puts the command in. The host builds
+ * and keeps the answer with the mark, so no rule of the project can change the command, and the command
+ * (paths of this machine) reaches no stored record.
+ */
+export const WAIT_COMMAND_MARK = "{kodel-wait-command}";
+
+/**
+ * Every string of `value` with the mark replaced; the shape is kept. An answer is plain data. A mark an
+ * agent wrote itself (in a result the answer shows back) reads as the command too, which gives it nothing:
+ * the command is the host's own text.
+ */
+function withWaitCommand<T>(value: T, command: string): T {
+  if (typeof value === "string") {
+    return (
+      value.includes(WAIT_COMMAND_MARK) ? value.split(WAIT_COMMAND_MARK).join(command) : value
+    ) as T;
+  }
+  if (Array.isArray(value)) return value.map((item) => withWaitCommand(item, command)) as T;
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, inner]) => [key, withWaitCommand(inner, command)]),
+    ) as T;
+  }
+  return value;
 }
 
 export const DEFAULT_WAIT_BUDGET_MS = 20_000;
@@ -323,6 +369,7 @@ export class PipelineService {
   private readonly engineVersion: string;
   private readonly caller: () => Caller | undefined;
   private readonly surface: ServedSurface | undefined;
+  private readonly waitCommand: string | undefined;
 
   constructor(
     private readonly host: PipelineHost,
@@ -333,6 +380,19 @@ export class PipelineService {
     this.engineVersion = options.engineVersion ?? "unknown";
     this.caller = options.caller ?? (() => undefined);
     this.surface = options.surface;
+    this.waitCommand = options.waitCommand;
+  }
+
+  /** What a request for an answer carries when this connection has a wait command of its own. */
+  private waitMark(): { waitCommand?: string } {
+    return this.waitCommand === undefined ? {} : { waitCommand: WAIT_COMMAND_MARK };
+  }
+
+  /** The answer with this connection's wait command where the host left the mark. */
+  private spelled<T>(runId: string, answer: T): T {
+    return this.waitCommand === undefined
+      ? answer
+      : withWaitCommand(answer, spellWaitCommand(this.waitCommand, runId));
   }
 
   private who(): { caller?: Caller } {
@@ -610,7 +670,7 @@ export class PipelineService {
           return { ok: true, started: false, choice: error.choice };
         throw error;
       }
-      return {
+      return this.spelled(outcome.run.runId, {
         ok: true,
         run_id: outcome.run.runId,
         reused: outcome.status === "reused",
@@ -620,8 +680,8 @@ export class PipelineService {
         ...(outcome.workdir?.branch === undefined ? {} : { branch: outcome.workdir.branch }),
         ...(outcome.workdir?.note === undefined ? {} : { note: outcome.workdir.note }),
         ...(outcome.task === undefined ? {} : { task: outcome.task }),
-        next: await outcome.run.nextStep({ serve: this.who() }),
-      };
+        next: await outcome.run.nextStep({ serve: this.who(), ...this.waitMark() }),
+      });
     });
   }
 
@@ -647,6 +707,7 @@ export class PipelineService {
       const completion = input.after_completion;
       const request: NextStepRequest = {
         serve: this.who(),
+        ...this.waitMark(),
         ...(input.node_slug === undefined ? {} : { nodeSlug: input.node_slug }),
         ...(input.subagents === undefined ? {} : { subagents: input.subagents }),
         ...(completion === undefined
@@ -662,7 +723,7 @@ export class PipelineService {
         await run.waitForRest(Math.min(input.wait_s, MAX_WAIT_S) * 1000);
         step = await run.nextStep(request);
       }
-      return { ok: true, ...step };
+      return this.spelled(input.run_id, { ok: true, ...step });
     });
   }
 
@@ -681,53 +742,58 @@ export class PipelineService {
         ...(input.node_slug === undefined ? {} : { node: input.node_slug }),
         ...(input.claim_token === undefined ? {} : { token: input.claim_token }),
         ...this.who(),
+        ...this.waitMark(),
       });
-      switch (outcome.status) {
-        case "claimed":
-        case "renewed":
-          return {
-            ok: true,
-            status: outcome.status,
-            node_slug: outcome.step.slug,
-            attempt: outcome.step.attempt,
-            claim_token: outcome.claim_token,
-            step: outcome.step,
-            note:
-              "The step is yours: do it (where `step.workdir` says, if it is there), then call " +
-              "pipeline_complete_step with node_slug, attempt and this claim_token. The engine's checks " +
-              "decide whether it is done; the token only keeps other workers off it.",
-          };
-        case "taken":
-          return {
-            ok: true,
-            status: "taken",
-            node_slug: outcome.node_slug,
-            attempt: outcome.attempt,
-            taken_by: outcome.taken_by,
-            note: "Another worker holds this step; leave it to them. If you are a worker, report back; otherwise call pipeline_next_step to see what is open.",
-          };
-        case "queued":
-          return {
-            ok: true,
-            status: "queued",
-            node_slug: outcome.node_slug,
-            attempt: outcome.attempt,
-            held: outcome.held,
-            max_parallel: outcome.max_parallel,
-            note:
-              `Nobody holds this step, but this project lets ${outcome.max_parallel} step(s) be worked at once ` +
-              `(agents.max_parallel) and ${outcome.held} are held: it is not yours until one is handed in. ` +
-              "Wait for that (pipeline_next_step with wait_s), or report back if you are a worker.",
-          };
-        case "none":
-          return {
-            ok: true,
-            status: "none",
-            next: outcome.next,
-            note: "No open step is free to take; `next` says what the run is doing.",
-          };
-      }
+      return this.spelled(input.run_id, this.takeAnswer(outcome));
     });
+  }
+
+  private takeAnswer(outcome: TakeOutcome): ToolResult {
+    switch (outcome.status) {
+      case "claimed":
+      case "renewed":
+        return {
+          ok: true,
+          status: outcome.status,
+          node_slug: outcome.step.slug,
+          attempt: outcome.step.attempt,
+          claim_token: outcome.claim_token,
+          step: outcome.step,
+          note:
+            "The step is yours: do it (where `step.workdir` says, if it is there), then call " +
+            "pipeline_complete_step with node_slug, attempt and this claim_token. The engine's checks " +
+            "decide whether it is done; the token only keeps other workers off it.",
+        };
+      case "taken":
+        return {
+          ok: true,
+          status: "taken",
+          node_slug: outcome.node_slug,
+          attempt: outcome.attempt,
+          taken_by: outcome.taken_by,
+          note: "Another worker holds this step; leave it to them. If you are a worker, report back; otherwise call pipeline_next_step to see what is open.",
+        };
+      case "queued":
+        return {
+          ok: true,
+          status: "queued",
+          node_slug: outcome.node_slug,
+          attempt: outcome.attempt,
+          held: outcome.held,
+          max_parallel: outcome.max_parallel,
+          note:
+            `Nobody holds this step, but this project lets ${outcome.max_parallel} step(s) be worked at once ` +
+            `(agents.max_parallel) and ${outcome.held} are held: it is not yours until one is handed in. ` +
+            "Wait for that (pipeline_next_step with wait_s), or report back if you are a worker.",
+        };
+      case "none":
+        return {
+          ok: true,
+          status: "none",
+          next: outcome.next,
+          note: "No open step is free to take; `next` says what the run is doing.",
+        };
+    }
   }
 
   reportResult(input: {
@@ -781,7 +847,7 @@ export class PipelineService {
         failed?.source.startsWith("check:");
       // The answer is about the completed step: its own rework, or a summary; a sibling's open step
       // is handed out by pipeline_next_step, never claimed here for whoever completed this one.
-      return {
+      return this.spelled(input.run_id, {
         ok: true,
         advanced: decision.noop !== true && node?.status === "passed",
         outcome: node?.outcome ?? null,
@@ -793,8 +859,9 @@ export class PipelineService {
           completionOf: input.node_slug,
           ...(input.claim_token === undefined ? {} : { worker: true }),
           serve: this.who(),
+          ...this.waitMark(),
         }),
-      };
+      });
     });
   }
 
