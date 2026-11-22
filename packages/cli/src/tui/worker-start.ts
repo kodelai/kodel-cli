@@ -35,7 +35,7 @@ export interface StartHost {
     pipeline: string;
     task: string;
     restart: boolean;
-    task_key: string;
+    task_key?: string;
     caller: Caller;
   }): Promise<{
     status: "started" | "reused" | "terminal";
@@ -73,6 +73,77 @@ export interface WorkerOptionsInput {
 export function taskTextOf(card: { title: string; body?: string }): string {
   const body = card.body?.trim() ?? "";
   return body === "" ? card.title : `${card.title}\n\n${body}`;
+}
+
+export interface LaunchRunInput {
+  host: Pick<StartHost, "start">;
+  launcher: Pick<WorkerLauncher, "start">;
+  /** The project root: where a run without a worktree works. */
+  root: string;
+  caller: Caller;
+  pipeline: string;
+  /** The task's text, as the run gets it. */
+  task: string;
+  /** What the agent's first prompt calls the task. */
+  title: string;
+  /** What the messages call the thing started: a task's key, or words for a run with no task. */
+  subject: string;
+  /** Absent for a run with no task (`kodel agent start --pipeline`): nothing is written to a tracker. */
+  taskKey?: string;
+}
+
+/**
+ * The launch half of every start by a person: the run through the host, then its agent through the one
+ * launcher. The caller holds the start lock. A run that was made stays when its agent could not be
+ * started: any agent of the project continues it.
+ */
+export async function launchRun(input: LaunchRunInput): Promise<StartResult & { agent?: string }> {
+  const { host, launcher, subject } = input;
+  let outcome: Awaited<ReturnType<StartHost["start"]>>;
+  try {
+    outcome = await host.start({
+      pipeline: input.pipeline,
+      task: input.task,
+      restart: true,
+      ...(input.taskKey === undefined ? {} : { task_key: input.taskKey }),
+      caller: input.caller,
+    });
+  } catch (error) {
+    if (error instanceof ChoiceNeeded) {
+      return {
+        ok: false,
+        message: `Could not start ${subject}: the pipeline file ${error.choice.file} has changes that are not committed. Commit ${error.choice.file} or start the run from an agent.`,
+      };
+    }
+    return { ok: false, message: `Could not start ${subject}: ${messageOf(error)}` };
+  }
+  const runId = outcome.run.runId;
+  if (outcome.status !== "started") {
+    return {
+      ok: false,
+      message:
+        input.taskKey === undefined
+          ? `Could not start ${subject}: a run with this very task is already going: ${runId} (kodel status ${runId}).`
+          : `${subject} has a run already going: ${runId} (started outside the TUI).`,
+    };
+  }
+  const workdir = outcome.workdir?.path ?? input.root;
+  try {
+    const { name } = await launcher.start({ runId, workdir, title: input.title });
+    return {
+      ok: true,
+      runId,
+      agent: name,
+      message: `Started ${subject}: run ${runId} (agent ${name}).`,
+    };
+  } catch (error) {
+    // The run stays as it is: any agent of the project can continue it.
+    return {
+      ok: false,
+      runId,
+      message: `run ${runId} was made but no agent was started: ${messageOf(error)}. Any agent in the project continues it with pipeline_next_step and this run id.`,
+    };
+  }
 }
 
 /** The options of the loop that start and resume background agents. */
@@ -120,43 +191,18 @@ export function createWorkerOptions(
     if (active) {
       return { ok: false, message: `${key} is already started: run ${active.meta.runId}.` };
     }
-    let outcome: Awaited<ReturnType<StartHost["start"]>>;
-    try {
-      outcome = await host.start({
-        pipeline,
-        task: taskTextOf(card),
-        restart: true,
-        task_key: key,
-        caller,
-      });
-    } catch (error) {
-      if (error instanceof ChoiceNeeded) {
-        return {
-          ok: false,
-          message: `Could not start ${key}: the pipeline file ${error.choice.file} has changes that are not committed. Commit ${error.choice.file} or start the run from an agent.`,
-        };
-      }
-      return { ok: false, message: `Could not start ${key}: ${messageOf(error)}` };
-    }
-    const runId = outcome.run.runId;
-    if (outcome.status !== "started") {
-      return {
-        ok: false,
-        message: `${key} has a run already going: ${runId} (started outside the TUI).`,
-      };
-    }
-    const workdir = outcome.workdir?.path ?? input.root;
-    try {
-      const { name } = await launcher.start({ runId, workdir, title: card.title });
-      return { ok: true, runId, message: `Started ${key}: run ${runId} (agent ${name}).` };
-    } catch (error) {
-      // The run stays as it is: any agent of the project can continue it.
-      return {
-        ok: false,
-        runId,
-        message: `run ${runId} was made but no agent was started: ${messageOf(error)}. Any agent in the project continues it with pipeline_next_step and this run id.`,
-      };
-    }
+    const { agent: _agent, ...result } = await launchRun({
+      host,
+      launcher,
+      root: input.root,
+      caller,
+      pipeline,
+      task: taskTextOf(card),
+      title: card.title,
+      subject: key,
+      taskKey: key,
+    });
+    return result;
   };
 
   // From the check that the task is not started to the agent's launch, under the daemon's lock.

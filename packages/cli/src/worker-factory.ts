@@ -9,6 +9,7 @@ import {
   openTaskService,
   resolveBase,
   type ServeLauncherPort,
+  type UnattendedEngines,
   unattendedEngines,
 } from "@kodel-ai/local";
 import type { ServeWorkerView } from "@kodel-ai/pipeline-core/serve";
@@ -24,6 +25,11 @@ export interface WorkerLauncherInput {
   /** This process, so the children and the worker's server are this very build. */
   self: { exec: string; args: string[] };
   platform?: string;
+  /**
+   * The `engines` block for the starts of this launcher, in place of the committed one: `kodel agent
+   * start` gives the block a person was shown and accepted at their terminal.
+   */
+  engines?: () => Promise<UnattendedEngines>;
 }
 
 export async function openWorkerLauncher(input: WorkerLauncherInput): Promise<WorkerLauncher> {
@@ -53,8 +59,9 @@ export async function openWorkerLauncher(input: WorkerLauncherInput): Promise<Wo
     clock: Date.now,
     uuid: () => randomUUID(),
     // Nobody watches these starts: the block is used only as `HEAD` of the checkout holds it.
-    engines: async () =>
-      unattendedEngines(await enginesAgainstHead({ root, storeRoot: input.dataDir })),
+    engines:
+      input.engines ??
+      (async () => unattendedEngines(await enginesAgainstHead({ root, storeRoot: input.dataDir }))),
     terminalSize: () => terminalSizeOf(process.stdout),
   });
 }

@@ -6,6 +6,8 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  renameSync,
+  writeFileSync,
   writeSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -125,7 +127,30 @@ export interface PipesAdapterOptions {
   testHooks?: { afterPublish?(id: string): void };
   /** Tests only: the process table, the boot time and the signals the group rule uses. The system's by default. */
   processes?: ProcessView;
+  /**
+   * Tests only: the named steps of a start at which this process "dies": the start throws there and nothing
+   * is rolled back, as after a crash. Inert when absent.
+   */
+  faults?: readonly StartFault[];
 }
+
+/** The steps of a start that takes a name over (`takeName`) at which a test can stop it for good. */
+export type StartFault = "take_claimed" | "take_published" | "take_moved";
+
+export interface StartOptions {
+  /**
+   * The id of a finished session whose place this one takes (a resumed conversation): its name, when it has
+   * one, goes to the new session. The marker is replaced in one rename after the new record exists, and put
+   * back if the start fails. Only for a session a person started at the command line (`origin: "cli"`) that
+   * is over, with no process of its own left.
+   */
+  takeName?: string;
+}
+
+/** The claim of a start that takes a name over: beside the marker, gone with the rename that moves it. */
+const TAKE_SUFFIX = ".take";
+/** A claim whose session folder has not appeared after this long was left by a process that died. */
+const TAKE_PUBLISH_MS = 15_000;
 
 /** The command a person typed, for `ls`: a shell command, or the argv joined (already redacted in the record). */
 const commandOf = (record: SessionRecord): string =>
@@ -190,7 +215,104 @@ export class PipesSessionAdapter implements SessionAdapter {
     return join(this.place.namesDir, `${foldSessionName(name)}.json`);
   }
 
-  async start(spec: SessionSpec): Promise<StartResult> {
+  /** A fault of the tests: the process "dies" at this step. */
+  private fault(step: StartFault): void {
+    if (this.opts.faults?.includes(step)) throw new Error(`fault: ${step}`);
+  }
+
+  /**
+   * Why the name of `old` cannot go to a new session, checked before anything is written: the session must be
+   * a person's own (`cli`), over, with nothing of it still running.
+   */
+  private takeProblem(old: string, name: string | undefined): SessionError | undefined {
+    const dir = sessionDirOf(this.place, old);
+    const record = isLocalSessionId(old) ? readSession(dir) : "missing";
+    if (typeof record === "string") {
+      return new SessionError(
+        record === "newer" ? "NEWER_FORMAT" : record === "missing" ? "NOT_FOUND" : "CANNOT_READ",
+        record === "newer"
+          ? `session ${old} was written by a newer kodel; upgrade kodel`
+          : record === "missing"
+            ? `no session ${old}`
+            : `session ${old} cannot be read`,
+      );
+    }
+    if (this.isForeign(dir)) {
+      return new SessionError("IDENTITY_UNKNOWN", `session ${old} belongs to another machine`);
+    }
+    if (record.spec.origin !== "cli") {
+      return new SessionError(
+        "UNSUPPORTED",
+        `session ${old} was started by the engine, not by a person: its name is never moved`,
+      );
+    }
+    let status: SessionStatus;
+    try {
+      status = this.settle(old);
+    } catch (error) {
+      return error instanceof SessionError
+        ? error
+        : new SessionError("CANNOT_READ", (error as Error).message);
+    }
+    if (status.childAlive && isTerminalState(status.state)) {
+      return new SessionError(
+        "STILL_RUNNING",
+        `session ${old}: its process still runs without a holder; stop it: kodel agent stop ${old}`,
+      );
+    }
+    if (!isTerminalState(status.state)) {
+      return new SessionError("STILL_RUNNING", `session ${old} still runs; stop it first`);
+    }
+    if ((record.name ?? undefined) !== (name === undefined ? undefined : foldSessionName(name))) {
+      return new SessionError(
+        "SPEC_INVALID",
+        `the name of session ${old} is ${record.name ?? "none"}: a session that takes its place keeps it`,
+      );
+    }
+    return undefined;
+  }
+
+  /**
+   * Whether the claim beside a marker belongs to a start that is at it now. One whose session never began
+   * (a moment is given for the folder to appear) or is over was left by a process that died.
+   */
+  private takeInProgress(claimFile: string): boolean {
+    const claim = readMarker(claimFile);
+    if (claim === "missing") return false;
+    if (typeof claim === "string") return true; // cannot be judged: not ours to take away
+    if (!existsSync(sessionDirOf(this.place, claim.id))) {
+      return this.now() - claim.started < TAKE_PUBLISH_MS;
+    }
+    try {
+      return !isTerminalState(this.read(claim.id).state);
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * Claims the move of a name from `old` to `id`: the new marker, written beside the old one, exclusively. One
+   * of two resumes gets it. A claim left by a process that died is taken away once.
+   */
+  private claimTake(name: string, old: string, claim: NameMarker): string {
+    const markerFile = this.markerPath(name);
+    const claimFile = `${markerFile}${TAKE_SUFFIX}`;
+    const taken = () => new SessionError("NAME_TAKEN", `a session named ${name} exists`);
+    for (let attempt = 0; ; attempt++) {
+      const held = readMarker(markerFile);
+      if (held === "newer") {
+        throw new SessionError("NEWER_FORMAT", "the name marker was written by a newer kodel");
+      }
+      // The marker must still name the session whose place is taken: another resume, or a start, was first.
+      if (typeof held === "string" || held.id !== old) throw taken();
+      if (createExclusive(claimFile, encodeRecord("name", claim))) return claimFile;
+      if (attempt > 0) throw taken();
+      if (this.takeInProgress(claimFile)) throw taken();
+      removeDir(claimFile);
+    }
+  }
+
+  async start(spec: SessionSpec, options: StartOptions = {}): Promise<StartResult> {
     if (process.platform === "win32") {
       throw new SessionError("PLATFORM_UNSUPPORTED", "sessions are not supported on Windows yet");
     }
@@ -204,6 +326,12 @@ export class PipesSessionAdapter implements SessionAdapter {
       throw new SessionError("UNSUPPORTED", "lifetime with-starter and parent are not built yet");
     }
 
+    const takeName = options.takeName;
+    if (takeName !== undefined) {
+      const refused = this.takeProblem(takeName, spec.name);
+      if (refused) throw refused;
+    }
+
     ensurePrivateDir(this.place.runDir);
     ensurePrivateDir(this.place.dir);
     ensurePrivateDir(this.place.namesDir);
@@ -213,7 +341,19 @@ export class PipesSessionAdapter implements SessionAdapter {
     while (existsSync(sessionDirOf(this.place, id))) id = newSessionId(started);
     const dir = sessionDirOf(this.place, id);
     let marker: string | undefined;
-    if (spec.name !== undefined) {
+    /** A name that is being taken over: the claim beside the marker, and the marker as it was. */
+    let take: { claim: string; marker: string; before: string; moved: boolean } | undefined;
+    if (spec.name !== undefined && takeName !== undefined) {
+      const markerFile = this.markerPath(spec.name);
+      const claim = this.claimTake(spec.name, takeName, {
+        v: SESSION_FORMAT_VERSION,
+        name: foldSessionName(spec.name),
+        id,
+        started,
+      });
+      take = { claim, marker: markerFile, before: readFileSync(markerFile, "utf8"), moved: false };
+      this.fault("take_claimed");
+    } else if (spec.name !== undefined) {
       const markerFile = this.markerPath(spec.name);
       marker = markerFile;
       const claim: NameMarker = {
@@ -256,6 +396,20 @@ export class PipesSessionAdapter implements SessionAdapter {
 
     let published = false;
     const rollback = async () => {
+      if (take !== undefined) {
+        // The old marker first, by a rename, so the name is never without a session; then what was claimed.
+        if (take.moved && takeName !== undefined) {
+          if (existsSync(sessionDirOf(this.place, takeName))) {
+            const back = `${take.marker}.${process.pid}.back`;
+            writeFileSync(back, take.before, { mode: 0o600 });
+            renameSync(back, take.marker);
+          } else {
+            // The old session was removed meanwhile: its name is nobody's, as after `rm`.
+            removeDir(take.marker);
+          }
+        }
+        removeDir(take.claim);
+      }
       if (published) removeDir(dir);
       removeDir(`${dir}.tmp-${process.pid}`);
       if (marker) removeDir(marker);
@@ -302,6 +456,18 @@ export class PipesSessionAdapter implements SessionAdapter {
       throw new SessionError("STATE_UNWRITABLE", (error as Error).message);
     }
     this.opts.testHooks?.afterPublish?.(id);
+    if (take !== undefined) {
+      this.fault("take_published");
+      // One rename: the name goes from the old session to this one, and the claim is gone with it.
+      try {
+        renameSync(take.claim, take.marker);
+        take.moved = true;
+      } catch (error) {
+        await rollback();
+        throw new SessionError("STATE_UNWRITABLE", (error as Error).message);
+      }
+      this.fault("take_moved");
+    }
 
     const rules = this.opts.rules ?? [];
     const wire: WireRule[] = rules
@@ -870,6 +1036,18 @@ export class PipesSessionAdapter implements SessionAdapter {
     if (record.name !== undefined && record.spec.origin === "cli") {
       const markerFile = this.markerPath(record.name);
       const held = readMarker(markerFile);
+      // A resume is moving the name away from this record: until it is done (or given up) the record stays,
+      // so a failed resume has a session to give the name back to.
+      if (
+        typeof held !== "string" &&
+        held.id === id &&
+        this.takeInProgress(`${markerFile}${TAKE_SUFFIX}`)
+      ) {
+        throw new SessionError(
+          "STILL_RUNNING",
+          `session ${id} is being resumed under its name; try again`,
+        );
+      }
       if (typeof held !== "string" && held.id === id) removeDir(markerFile);
     }
     removeDir(dir);

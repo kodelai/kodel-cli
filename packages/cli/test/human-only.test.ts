@@ -35,6 +35,9 @@ const ARGS: Record<string, string[]> = {
   "agent exec": ["agent", "exec", "--name", "not a name", "--", "true"],
   "agent forget-name": ["agent", "forget-name", "none"],
   "agent attach": ["agent", "attach", "none"],
+  // There is no such agent to continue: outside a session the command stops there.
+  "agent start": ["agent", "start", "--resume", "none"],
+  "agent prune": ["agent", "prune", "--dry-run"],
 };
 
 let dir: string;

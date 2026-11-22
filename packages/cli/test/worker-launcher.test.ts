@@ -59,6 +59,7 @@ import {
   workerPrompt,
   workerWaitCommand,
 } from "../src/claude-worker";
+import { type CliEnv, runCli } from "../src/cli";
 import { loadSessions } from "../src/tui/load";
 import { openTasksForTui } from "../src/tui/tasks-open";
 import { initialModel, withWorkers } from "../src/tui/view";
@@ -1455,6 +1456,28 @@ class TypingAdapter extends ScriptedSessionAdapter {
   }
 }
 
+/** `kodel agent start` in the test's project, at a terminal, with the launcher the test gives. */
+async function agentStart(agent: NonNullable<CliEnv["agent"]>, ...args: string[]) {
+  let out = "";
+  let err = "";
+  const code = await runCli(["--root", dir, "agent", "start", ...args], {
+    cwd: dir,
+    out: (t) => {
+      out += t;
+    },
+    err: (t) => {
+      err += t;
+    },
+    interactive: true,
+    environment: { PATH: "/usr/bin", HOME: "/home/u" },
+    confirm: async () => true,
+    select: async () => [],
+    ptyProbe: PTY_OK,
+    agent: { engines: async () => ({ state: "committed", engines: {} }), ...agent },
+  });
+  return { code, out, err };
+}
+
 describe("t45 the launcher on the profile", () => {
   test("t45_worker_terminal_spec", async () => {
     const adapter = new ScriptedSessionAdapter();
@@ -1737,6 +1760,23 @@ describe("t45 the launcher on the profile", () => {
     const input = { dialog: false, taskLink: false, pipelines: 1 };
     expect((await launcher.preflight(input)).ok).toBe(false);
     expect((await launcher.preflight({ ...input, noTask: true })).ok).toBe(true);
+
+    // The command: `kodel agent start --pipeline` asks that same preflight, with what the config says.
+    writeFileSync(join(dir, ".kodel", "config.yaml"), `${CONFIG}decisions:\n  dialog: true\n`);
+    for (const worker of ["terminal", "print"] as const) {
+      const sessions = new ScriptedSessionAdapter();
+      const refused = await agentStart(
+        { launcher: async () => createSessionWorkerLauncher(terminalDeps(sessions, {}, worker)) },
+        "--pipeline",
+        "one",
+        "Add a flag",
+      );
+      expect(refused.code, worker).toBe(1);
+      expect(refused.err, worker).toContain("decisions.dialog");
+      expect(sessions.starts, worker).toBe(0);
+    }
+    // No run was made for a start that was refused.
+    expect(await host().runSummaries()).toEqual([]);
   });
 
   test("t45_every_starter_builds_the_same_spec", async () => {
@@ -1765,7 +1805,49 @@ describe("t45 the launcher on the profile", () => {
     expect(tui.specs[0]?.agent?.engine).toBe("claude");
     expect(tui.specs[0]?.argv?.[0]).toBe(profile?.program ?? "");
     expect(AGENT_PROFILES.claude).toBe(profile as AgentProfile);
-    // `kodel agent start --pipeline` is the third starter (TASK-EKAV step 10): it calls this launcher too.
+    // `kodel agent start --pipeline` is the third starter: the command gives its launcher (the same
+    // code) a run it made itself, and what reaches the adapter is what the daemon's port builds for
+    // that very run.
+    const third = new ScriptedSessionAdapter();
+    const thirdAsked: StartInput[] = [];
+    const started3 = await agentStart(
+      {
+        launcher: async (engines) => {
+          const launcher = createSessionWorkerLauncher(
+            terminalDeps(third, engines === undefined ? {} : { engines }),
+          );
+          return {
+            ...launcher,
+            start: (startInput) => {
+              thirdAsked.push(startInput);
+              return launcher.start(startInput);
+            },
+          };
+        },
+        engines: async () => ({ state: "committed", engines: { claude: { worker: "terminal" } } }),
+      },
+      "--pipeline",
+      "one",
+      "--bg",
+      "Add a switch",
+    );
+    expect(started3.code, started3.err).toBe(0);
+    const [input3] = thirdAsked;
+    if (!input3) throw new Error("agent start asked for no start");
+    expect(input3.runId).not.toBe(input.runId);
+    const daemon3 = new ScriptedSessionAdapter();
+    await serveLauncherOf(createSessionWorkerLauncher(terminalDeps(daemon3))).start(input3);
+    expect(third.specs.length).toBe(1);
+    expect(third.specs).toEqual(daemon3.specs);
+    expect(third.specs[0]?.agent?.engine).toBe("claude");
+    expect(third.specs[0]?.name).toBe(workerNameOf(input3.runId));
+    // The three differ only in what names the run: the same spec once the run's id is taken out.
+    const shape = (spec: (typeof tui.specs)[number] | undefined, of: StartInput) =>
+      JSON.parse(
+        JSON.stringify(spec).replaceAll(of.runId, "<run>").replaceAll(of.title, "<title>"),
+      ) as unknown;
+    expect(input3.title).toBe("Add a switch");
+    expect(shape(third.specs[0], input3)).toEqual(shape(tui.specs[0], input));
   });
 
   test("t45_one_caller_starts_workers", () => {
@@ -1794,7 +1876,23 @@ describe("t45 the launcher on the profile", () => {
       `${CONFIG}serve:\n  start:\n    - pipeline: one\n      engine: claude\n`,
     );
     await expect(loadConfig(store)).rejects.toThrow(/engine/);
-    // `kodel agent start --engine` comes with `agent start` (step 10), as an unknown flag.
+    // `kodel agent start --engine` is an unknown flag, and nothing is started for it.
+    writeFileSync(join(store, "config.yaml"), CONFIG);
+    const adapter = new ScriptedSessionAdapter();
+    for (const args of [
+      ["--engine", "claude", "hello"],
+      ["--pipeline", "one", "--engine", "claude", "hello"],
+    ]) {
+      const refused = await agentStart(
+        { launcher: async () => createSessionWorkerLauncher(terminalDeps(adapter)) },
+        ...args,
+      );
+      expect(refused.code, args.join(" ")).toBe(1);
+      expect(refused.err, args.join(" ")).toContain("unknown option '--engine'");
+    }
+    expect(adapter.starts).toBe(0);
+    expect(await host().runSummaries()).toEqual([]);
+    // A start names a run and no engine.
     const input: StartInput = { runId: RUN, workdir: WORKTREE, title: "t" };
     expect(Object.keys(input)).toEqual(["runId", "workdir", "title"]);
   });

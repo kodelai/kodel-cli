@@ -1093,3 +1093,261 @@ describe("a holder that went away: the child's process group", () => {
     30_000,
   );
 });
+
+describe("a resumed session takes the name of the one it continues", () => {
+  const CONVERSATION = "0f4b1c2d-0000-4000-8000-000000000002";
+  const markerFile = (name: string) => join(adapter.place.namesDir, `${name}.json`);
+  const markerOf = (name: string) =>
+    JSON.parse(readFileSync(markerFile(name), "utf8")) as { id: string; name: string };
+  const sessions = () => readdirSync(adapter.place.dir).filter((n) => n.startsWith("a_"));
+  /** A session a person started at the command line, which has ended. */
+  const finished = async (name: string, origin: "cli" | "host" = "cli") => {
+    const { id } = await adapter.start(sh("exit 0", { name, origin }));
+    await adapter.wait(id, { timeoutMs: 15_000 });
+    return id;
+  };
+  const resumeSpec = (name: string, old: string, script = "sleep 30") =>
+    sh(script, {
+      name,
+      origin: "cli",
+      agent: { engine: "claude", session: CONVERSATION, resumes: old },
+    });
+  /** Later than the bound a claim is given to publish its folder, and than the grace of a start. */
+  const later = () => Date.now() + 40_000;
+  const codeOf = (start: Promise<unknown>) =>
+    start.then(
+      () => "started",
+      (error: unknown) => (error instanceof SessionError ? error.code : String(error)),
+    );
+
+  test("tA_name_marker_moves_only_for_a_finished_cli_session", async () => {
+    const old = await finished("cc");
+    const before = readFileSync(markerFile("cc"), "utf8");
+    expect(markerOf("cc").id).toBe(old);
+    // The marker is still the old one when the new record appears, and moves after it.
+    let atPublish: string | undefined;
+    const watching = make({
+      testHooks: {
+        afterPublish() {
+          atPublish = readFileSync(markerFile("cc"), "utf8");
+        },
+      },
+    });
+    const next = await watching.start(resumeSpec("cc", old), { takeName: old });
+    expect(atPublish).toBe(before);
+    expect(next.name).toBe("cc");
+    expect(markerOf("cc")).toMatchObject({ id: next.id, name: "cc" });
+    expect(readdirSync(adapter.place.namesDir)).toEqual(["cc.json"]);
+    // The old record stays listed under the name, and the new one says which it continues.
+    const rows = await adapter.list({ name: "cc" });
+    expect(rows.map((r) => r.id).sort()).toEqual([old, next.id].sort());
+    expect(rows.find((r) => r.id === next.id)?.agent).toMatchObject({
+      session: CONVERSATION,
+      resumes: old,
+    });
+    // Removing the old record keeps the name with the new one.
+    await adapter.remove(old);
+    expect(markerOf("cc").id).toBe(next.id);
+    expect(await codeOf(adapter.start(sh("exit 0", { name: "cc", origin: "cli" })))).toBe(
+      "NAME_TAKEN",
+    );
+
+    // A session that still runs: refused, its marker untouched.
+    const live = readFileSync(markerFile("cc"), "utf8");
+    expect(await codeOf(adapter.start(resumeSpec("cc", next.id), { takeName: next.id }))).toBe(
+      "STILL_RUNNING",
+    );
+    expect(readFileSync(markerFile("cc"), "utf8")).toBe(live);
+
+    // A host session's marker is never moved.
+    const host = await finished("step-1", "host");
+    const hostMarker = readFileSync(markerFile("step-1"), "utf8");
+    expect(await codeOf(adapter.start(resumeSpec("step-1", host), { takeName: host }))).toBe(
+      "UNSUPPORTED",
+    );
+    expect(readFileSync(markerFile("step-1"), "utf8")).toBe(hostMarker);
+    // Neither is one whose name is not the one asked for, nor a session that is not there.
+    const other = await finished("other");
+    const count = sessions().length;
+    expect(await codeOf(adapter.start(resumeSpec("cc2", other), { takeName: other }))).toBe(
+      "SPEC_INVALID",
+    );
+    expect(
+      await codeOf(
+        adapter.start(resumeSpec("gone", "a_000000000_0000"), { takeName: "a_000000000_0000" }),
+      ),
+    ).toBe("NOT_FOUND");
+    expect(sessions().length).toBe(count);
+    expect(readdirSync(adapter.place.namesDir).sort()).toEqual([
+      "cc.json",
+      "other.json",
+      "step-1.json",
+    ]);
+  });
+
+  test("tA_name_marker_is_not_moved_from_a_live_process", async () => {
+    // The holder is gone and never recorded the end; a process of the child's group still runs.
+    const old = await finished("cc");
+    const dir = join(adapter.place.dir, old);
+    const gone = 2 ** 22 + 77;
+    replaceRecord(
+      join(dir, "status.json"),
+      encodeRecord("status", {
+        v: 1,
+        state: "running",
+        by: "holder",
+        holder: { pid: gone + 1 },
+        child: { pid: gone },
+        since: Date.now(),
+      } as Parameters<typeof encodeRecord<"status">>[1]),
+    );
+    const orphan: ProcessRow = {
+      pid: gone + 2,
+      pgid: gone,
+      state: "S",
+      started: "Mon Jan  1 00:00:00 2024",
+    };
+    const view: ProcessView = {
+      rows: () => [orphan],
+      bootTime: () => 0,
+      identity: () => undefined,
+      signal: () => {},
+    };
+    const withOrphan = make({ processes: view });
+    expect((await withOrphan.list()).find((r) => r.id === old)?.status).toMatchObject({
+      state: "lost",
+      childAlive: true,
+    });
+    const before = readFileSync(markerFile("cc"), "utf8");
+    const refused = await withOrphan.start(resumeSpec("cc", old), { takeName: old }).then(
+      () => undefined,
+      (error: unknown) => error as SessionError,
+    );
+    expect(refused?.code).toBe("STILL_RUNNING");
+    expect(refused?.message).toContain(`kodel agent stop ${old}`);
+    expect(readFileSync(markerFile("cc"), "utf8")).toBe(before);
+    expect(sessions()).toEqual([old]);
+    expect(readdirSync(adapter.place.namesDir)).toEqual(["cc.json"]);
+    // so that the cleanup of the test has nothing to signal
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("tA_failed_resume_restores_the_marker", async () => {
+    const old = await finished("cc");
+    const before = readFileSync(markerFile("cc"), "utf8");
+    // The holder cannot start the command (its folder is not there): the boot fails after the move.
+    let movedTo: string | undefined;
+    const failing = make({
+      testHooks: {
+        afterPublish(id) {
+          movedTo = id;
+        },
+      },
+    });
+    expect(
+      await codeOf(
+        failing.start({ ...resumeSpec("cc", old), cwd: join(root, "missing") }, { takeName: old }),
+      ),
+    ).toBe("HOLDER_BOOT_FAILED");
+    expect(movedTo).toBeDefined();
+    expect(readFileSync(markerFile("cc"), "utf8")).toBe(before);
+    expect(readdirSync(adapter.place.namesDir)).toEqual(["cc.json"]);
+    expect(sessions()).toEqual([old]);
+    // The name is still the old session's: a resume after the failure goes through.
+    const next = await adapter.start(resumeSpec("cc", old, "exit 0"), { takeName: old });
+    expect(markerOf("cc").id).toBe(next.id);
+  });
+
+  test("tA_no_dangling_name_after_a_crash_in_a_resume", async () => {
+    for (const step of ["take_claimed", "take_published", "take_moved"] as const) {
+      const name = `cc-${step.replace("take_", "")}`;
+      const old = await finished(name);
+      const dying = make({ faults: [step] });
+      await expect(dying.start(resumeSpec(name, old), { takeName: old })).rejects.toThrow(
+        `fault: ${step}`,
+      );
+      // Whatever the step, the marker names a session whose folder is there.
+      const held = markerOf(name).id;
+      expect(existsSync(join(adapter.place.dir, held)), step).toBe(true);
+      expect(held === old, step).toBe(step !== "take_moved");
+      // A plain start under the name is refused, never let in by a half-done move.
+      expect(await codeOf(adapter.start(sh("exit 0", { name, origin: "cli" }))), step).toBe(
+        "NAME_TAKEN",
+      );
+      // What the dead starter left does not hold the name for good: once it is clearly dead (its
+      // session never began, or is over), a resume of whatever the marker names goes through.
+      const after = make({ now: later });
+      const next = await after.start(resumeSpec(name, held, "exit 0"), { takeName: held });
+      expect(markerOf(name).id, step).toBe(next.id);
+      expect(
+        readdirSync(adapter.place.namesDir).filter((n) => n.startsWith(name)),
+        step,
+      ).toEqual([`${name}.json`]);
+    }
+  }, 60_000);
+
+  test("tA_plain_start_never_takes_a_name_in_a_resume", async () => {
+    const old = await finished("cc");
+    const answers: string[] = [];
+    // At each point of the resume a plain start under the name is tried by another starter.
+    const plainStart = async (at: string) => {
+      const code = await codeOf(make().start(sh("exit 0", { name: "cc", origin: "cli" })));
+      answers.push(`${at}: ${code}`);
+    };
+    await plainStart("before");
+    let atPublish: Promise<void> | undefined;
+    const resuming = make({
+      testHooks: {
+        afterPublish() {
+          atPublish = plainStart("published");
+        },
+      },
+    });
+    const next = await resuming.start(resumeSpec("cc", old), { takeName: old });
+    await atPublish;
+    await plainStart("moved");
+    await adapter.stop(next.id).catch(() => {});
+    await adapter.wait(next.id, { timeoutMs: 15_000 });
+    await plainStart("ended");
+    expect(answers).toEqual([
+      "before: NAME_TAKEN",
+      "published: NAME_TAKEN",
+      "moved: NAME_TAKEN",
+      "ended: NAME_TAKEN",
+    ]);
+    expect(markerOf("cc").id).toBe(next.id);
+    // A resume that fails gives the name back to the old session, not to a plain start.
+    const again = await finished("dd");
+    expect(
+      await codeOf(
+        make().start(
+          { ...resumeSpec("dd", again), cwd: join(root, "missing") },
+          { takeName: again },
+        ),
+      ),
+    ).toBe("HOLDER_BOOT_FAILED");
+    expect(await codeOf(adapter.start(sh("exit 0", { name: "dd", origin: "cli" })))).toBe(
+      "NAME_TAKEN",
+    );
+    expect(markerOf("dd").id).toBe(again);
+  }, 60_000);
+
+  test("tA_two_resumes_of_one_name_one_wins", async () => {
+    const old = await finished("cc");
+    const answers = await Promise.all([
+      codeOf(make().start(resumeSpec("cc", old), { takeName: old })),
+      codeOf(make().start(resumeSpec("cc", old), { takeName: old })),
+    ]);
+    expect([...answers].sort()).toEqual(["NAME_TAKEN", "started"]);
+    // The loser left nothing: one new record, one marker, no claim.
+    const winner = markerOf("cc").id;
+    expect(winner).not.toBe(old);
+    expect(sessions().sort()).toEqual([old, winner].sort());
+    expect(readdirSync(adapter.place.namesDir)).toEqual(["cc.json"]);
+    // A later resume of the old record is refused too: the name has moved on.
+    expect(await codeOf(adapter.start(resumeSpec("cc", old), { takeName: old }))).toBe(
+      "NAME_TAKEN",
+    );
+    expect(markerOf("cc").id).toBe(winner);
+  });
+});

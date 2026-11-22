@@ -8,6 +8,7 @@
 import { stat } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import {
+  enginesAgainstHead,
   findProjectRoot,
   hashSource,
   insideHostSession,
@@ -22,6 +23,7 @@ import {
   SERVE_EXIT_REFUSED,
   type StoragePlace,
   servePlace,
+  type UnattendedEngines,
 } from "@kodel-ai/local";
 import { MAX_PAYLOAD_BYTES, runHook } from "@kodel-ai/local/hooks";
 import {
@@ -45,7 +47,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { Command, CommanderError } from "commander";
 import pkg from "../package.json" with { type: "json" };
-import { registerAgentCommands } from "./agent-commands";
+import { type AgentContext, type AgentProject, registerAgentCommands } from "./agent-commands";
 import { BUILD } from "./build-info";
 import { describePendingChange } from "./decide-text";
 import { engineHostOptions } from "./engine-steps";
@@ -122,6 +124,17 @@ export interface CliEnv {
   ptyProbe?: () => { ok: true } | { ok: false; reason: string };
   /** For `agent`: the size a terminal session starts with (a test has no terminal to ask). */
   terminalSize?: () => { cols: number; rows: number } | undefined;
+  /**
+   * For `agent start`, `prune` and `doctor`: what a test gives in place of the machine's own (the session
+   * adapter, the attach client, the probes, the launcher of workers and the committed `engines` block).
+   */
+  agent?: Pick<
+    AgentContext,
+    "sessions" | "attach" | "attachTerminal" | "exec" | "which" | "readText" | "uuid" | "now"
+  > & {
+    launcher?: AgentProject["launcher"];
+    engines?: AgentProject["engines"];
+  };
 }
 
 /** A problem to report to the user without a stack trace. */
@@ -325,7 +338,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
   const storeRoot = async () => (await project()).dataDir;
 
   /** The one launcher of background workers, for `tui` and `serve` alike (`worker-factory.ts`). */
-  const openWorkerLauncher = async () => {
+  const openWorkerLauncher = async (engines?: () => Promise<UnattendedEngines>) => {
     const { root, dataDir } = await project();
     const { openWorkerLauncher: open } = await import("./worker-factory");
     return open({
@@ -334,7 +347,30 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       environment: env.environment ?? process.env,
       self: env.sessionLauncher ?? { exec: process.execPath, args: [process.argv[1] ?? "kodel"] },
       ...(env.platform === undefined ? {} : { platform: env.platform }),
+      ...(engines === undefined ? {} : { engines }),
     });
+  };
+
+  /** The project as `agent start`, `prune` and `doctor` read it (`agent-commands.ts`). */
+  const agentProject = async (): Promise<AgentProject> => {
+    const { root, dataDir } = await project();
+    return {
+      root,
+      version: pkg.version,
+      async config() {
+        const config = await loadConfig(dataDir);
+        return {
+          dialog: config.decisions.dialog,
+          agentDecides: Object.entries(config.decisions.agent)
+            .filter(([, on]) => on === true)
+            .map(([key]) => key),
+          worktreesDir: resolve(root, config.worktree.dir),
+        };
+      },
+      engines: env.agent?.engines ?? (() => enginesAgainstHead({ root, storeRoot: dataDir })),
+      launcher: env.agent?.launcher ?? ((engines) => openWorkerLauncher(engines)),
+      host,
+    };
   };
 
   async function openRun(host_: LocalPipelineHost, runId: string) {
@@ -1644,6 +1680,10 @@ Examples:
     ...(env.ptyProbe ? { ptyProbe: env.ptyProbe } : {}),
     ...(env.terminalSize ? { terminalSize: env.terminalSize } : {}),
     ...(env.platform ? { platform: env.platform } : {}),
+    project: agentProject,
+    ...(env.agent === undefined
+      ? {}
+      : (({ launcher: _launcher, engines: _engines, ...seams }) => seams)(env.agent)),
   });
 
   const task = withPlural(program.command("task")).description(

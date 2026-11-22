@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { processIdentity, resolveBase, sessionDirOf, sessionPlace } from "@kodel-ai/local";
-import type { SessionAdapter, SessionListEntry } from "@kodel-ai/pipeline-core";
+import { type SessionAdapter, SessionError, type SessionListEntry } from "@kodel-ai/pipeline-core";
 import {
   AGENT_HUMAN_COMMANDS,
   AGENT_READ_COMMANDS,
@@ -14,7 +14,9 @@ import {
   resolveSession,
   stateLabel,
 } from "../src/agent-commands";
-import { runCli } from "../src/cli";
+import type { AttachClientOptions, AttachResult, AttachTerminal } from "../src/attach-client";
+import { type CliEnv, runCli } from "../src/cli";
+import { FakeSessions } from "./fake-sessions";
 
 // `stop` signals only a process whose identity it can check; a sandbox without the process table skips these, visibly.
 const tableTest = test.skipIf(
@@ -52,6 +54,8 @@ interface Opts {
   platform?: string;
   /** Called when a command asks for the size of the terminal. */
   size?: () => { cols: number; rows: number } | undefined;
+  /** The session adapter and the attach client, in place of the machine's own. */
+  agent?: CliEnv["agent"];
 }
 
 async function cli(opts: Opts, ...args: string[]) {
@@ -73,6 +77,7 @@ async function cli(opts: Opts, ...args: string[]) {
     ...(opts.pty ? { ptyProbe: () => opts.pty as NonNullable<Opts["pty"]> } : {}),
     ...(opts.platform ? { platform: opts.platform } : {}),
     ...(opts.size ? { terminalSize: opts.size } : {}),
+    ...(opts.agent ? { agent: opts.agent } : {}),
   });
   return { code, out, err };
 }
@@ -93,9 +98,25 @@ describe("kodel agent", () => {
       "agent attach": ["agent", "attach", "x"],
       // not a command of its own: the terminal form of `exec` refuses like the plain one
       "agent exec --pty": ["agent", "exec", "--pty", "--", "true"],
+      "agent start": ["agent", "start", "hello"],
+      "agent prune": ["agent", "prune"],
+      // forms of the commands above, each refused like its plain one
+      "agent exec --pty --attach": ["agent", "exec", "--pty", "--attach", "--", "true"],
+      "agent exec --pty -a": ["agent", "exec", "--pty", "-a", "--", "true"],
+      "agent start --pipeline": ["agent", "start", "--pipeline", "one", "do it"],
+      "agent start --resume": ["agent", "start", "--resume", "x"],
+      "agent prune --dry-run": ["agent", "prune", "--dry-run"],
     };
     expect(AGENT_HUMAN_COMMANDS).toContain("agent attach");
-    for (const name of [...AGENT_HUMAN_COMMANDS, "agent exec --pty"]) {
+    expect(AGENT_HUMAN_COMMANDS).toContain("agent start");
+    expect(AGENT_HUMAN_COMMANDS).toContain("agent prune");
+    // `doctor` only reads: it is the agent's, and not in the person's list.
+    expect(AGENT_READ_COMMANDS).toContain("agent doctor");
+    expect(AGENT_HUMAN_COMMANDS as readonly string[]).not.toContain("agent doctor");
+    const forms = Object.keys(argsFor).filter(
+      (name) => !(AGENT_HUMAN_COMMANDS as readonly string[]).includes(name),
+    );
+    for (const name of [...AGENT_HUMAN_COMMANDS, ...forms]) {
       const args = argsFor[name] as string[];
       const withMark = await cli({ interactive: true, engine: true, platform: "linux" }, ...args);
       expect(withMark.code, `${name} under the engine mark`).toBe(1);
@@ -111,6 +132,9 @@ describe("kodel agent", () => {
     for (const args of [
       ["agent", "attach", "x"],
       ["agent", "exec", "--pty", "--", "true"],
+      ["agent", "exec", "--pty", "--attach", "--", "true"],
+      ["agent", "start", "hello"],
+      ["agent", "prune"],
     ]) {
       // an engine without a terminal gets the same answer as a person: the platform, not "for a person"
       const r = await cli({ interactive: false, engine: true, platform: "win32" }, ...args);
@@ -125,9 +149,13 @@ describe("kodel agent", () => {
     const rule = /^- Do not run [\s\S]*?(?=^- )/m.exec(text)?.[0] ?? "";
     const listed = /`agent ([a-z|-]+)`/.exec(rule)?.[1]?.split("|") ?? [];
     expect(listed.sort()).toEqual(AGENT_HUMAN_COMMANDS.map((c) => c.replace("agent ", "")).sort());
-    // `exec` and `attach` ask for none; the instruction says so by name.
-    expect(rule).toContain("all but two ask for a confirmation");
-    expect(rule).toMatch(/`agent exec`[\s\S]*`agent attach`[\s\S]*ask for none/);
+    // `exec`, `attach` and `start` ask for none; the instruction says so by name.
+    expect(rule).toContain("all but three ask for a confirmation");
+    expect(rule).toMatch(
+      /`agent exec`[\s\S]*`agent attach`[\s\S]*`agent start`[\s\S]*ask for none/,
+    );
+    // What only reads is the agent's, `doctor` among it.
+    for (const command of AGENT_READ_COMMANDS) expect(rule).toContain(`\`${command}\``);
   });
 
   tableTest(
@@ -589,5 +617,194 @@ describe("resolveSession", () => {
       expect(error?.code, ref).toBe(code);
       expect(error?.message, ref).toContain(text);
     }
+  });
+});
+
+describe("kodel agent exec --pty --attach (TASK-K6MA)", () => {
+  const terminal = (): AttachTerminal => ({
+    size: () => ({ cols: 100, rows: 30 }),
+    raw() {},
+    write: () => true,
+    onDrain() {},
+    onInput() {},
+    onResize() {},
+    onSignal() {},
+    release() {},
+  });
+
+  /** `agent exec` over a fake adapter and a fake attach client that ends as the test says. */
+  async function exec(
+    sessions: FakeSessions,
+    end: AttachResult | undefined,
+    ...args: string[]
+  ): Promise<{ code: number; out: string; err: string; attaches: { name: string }[] }> {
+    const attaches: { name: string }[] = [];
+    const result = await cli(
+      {
+        interactive: true,
+        pty: { ok: true },
+        platform: "linux",
+        size: () => ({ cols: 100, rows: 30 }),
+        agent: {
+          sessions: async () => sessions,
+          attachTerminal: terminal,
+          attach: async (options: AttachClientOptions) => {
+            attaches.push({ name: options.name });
+            return end ?? { end: { how: "detached" }, line: `[detached: ${options.name}]` };
+          },
+        },
+      },
+      "agent",
+      "exec",
+      ...args,
+    );
+    return { ...result, attaches };
+  }
+
+  test("tA_exec_attach_starts_then_attaches", async () => {
+    for (const flag of ["--attach", "-a"]) {
+      const sessions = new FakeSessions();
+      const r = await exec(sessions, undefined, "--pty", flag, "--name", "cc", "--", "sleep", "30");
+      expect(r.code, r.err).toBe(0);
+      // `started` first, then the attach client that `agent attach` runs; no hint how to attach.
+      expect(r.out).toMatch(/^started a_\S+ \(cc\)\n$/);
+      expect(sessions.specs[0]).toMatchObject({
+        argv: ["sleep", "30"],
+        mode: "pty",
+        name: "cc",
+        origin: "cli",
+        size: { cols: 100, rows: 30 },
+      });
+      expect(r.attaches.map((a) => a.name)).toEqual(["cc"]);
+      expect(sessions.attached).toEqual([sessions.rows[0]?.id ?? ""]);
+      // The session was started before anything was attached, and it is left running by a detach.
+      expect(sessions.calls.indexOf("start")).toBeLessThan(
+        sessions.calls.indexOf(`attach ${sessions.rows[0]?.id}`),
+      );
+      expect(sessions.rows[0]?.status.state).toBe("running");
+    }
+
+    // The exit code is the attach's: 0 when the command ended while attached, the problem otherwise.
+    const ended = await exec(
+      new FakeSessions(),
+      { end: { how: "ended", exitCode: 3 }, line: "[ended: x, exit 3]" },
+      "--pty",
+      "--attach",
+      "--",
+      "true",
+    );
+    expect(ended.code).toBe(0);
+    const refused = await exec(
+      new FakeSessions(),
+      {
+        end: { how: "refused", text: "too many terminals are attached" },
+        line: "[detached: x]",
+        problem: "too many terminals are attached",
+      },
+      "--pty",
+      "--attach",
+      "--",
+      "true",
+    );
+    expect(refused.code).toBe(1);
+    expect(refused.err).toContain("too many terminals are attached");
+    expect(refused.out).toMatch(/^started a_/);
+
+    // Without the flag `exec --pty` still starts a session without taking the terminal.
+    const plainPty = await exec(new FakeSessions(), undefined, "--pty", "--", "true");
+    expect(plainPty.attaches).toEqual([]);
+    expect(plainPty.out).toContain("attach with: kodel agent attach a_");
+
+    // `--attach` without `--pty` is refused with a reason, and nothing is started.
+    const pipes = new FakeSessions();
+    for (const flag of ["--attach", "-a"]) {
+      const r = await exec(pipes, undefined, flag, "--", "true");
+      expect(r.code).toBe(1);
+      expect(r.err).toContain("--attach needs --pty");
+    }
+    expect(pipes.specs).toEqual([]);
+
+    // A start that fails prints its own error and does not attach.
+    const failing = new FakeSessions();
+    failing.failStart = new SessionError("HOLDER_BOOT_FAILED", "the holder could not start");
+    const failed = await exec(failing, undefined, "--pty", "--attach", "--", "true");
+    expect(failed.code).toBe(1);
+    expect(failed.err).toContain("HOLDER_BOOT_FAILED: the holder could not start");
+    expect(failed.out).toBe("");
+    expect(failed.attaches).toEqual([]);
+
+    // It stays a person's command, with no new confirmation.
+    const marked = await cli(
+      { interactive: true, engine: true, platform: "linux" },
+      "agent",
+      "exec",
+      "--pty",
+      "--attach",
+      "--",
+      "true",
+    );
+    expect(marked.err).toContain("for a person");
+  });
+
+  test("tA_exec_attach_of_a_command_that_already_ended", async () => {
+    // The command was over before the terminal could be connected: the line of its end, code 0.
+    const quick = new FakeSessions();
+    quick.startedAs = { state: "exited", exitCode: 0 };
+    const r = await exec(quick, undefined, "--pty", "--attach", "--name", "cc", "--", "true");
+    expect(r.code, r.err).toBe(0);
+    expect(r.out).toMatch(/^started a_\S+ \(cc\)\n\[ended: cc, exit 0\]\n$/);
+    expect(r.attaches).toEqual([]);
+    const failed = new FakeSessions();
+    failed.startedAs = { state: "exited", exitCode: 2 };
+    const nonZero = await exec(failed, undefined, "--pty", "-a", "--", "false");
+    expect(nonZero.code).toBe(0);
+    expect(nonZero.out).toMatch(/\[ended: a_\S+, exit 2\]\n$/);
+    const killed = new FakeSessions();
+    killed.startedAs = { state: "killed", reason: "timeout" };
+    const gone = await exec(killed, undefined, "--pty", "--attach", "--name", "cc", "--", "true");
+    expect(gone.code).toBe(0);
+    expect(gone.out).toContain("[killed: cc]\n");
+  });
+
+  test("tA_agent_ls_hints_the_resume_of_a_finished_agent", async () => {
+    const sessions = new FakeSessions();
+    const agent = { engine: "claude", session: "0f4b1c2d-0000-4000-8000-000000000001" };
+    sessions.add({
+      id: "a_000000001_stop",
+      name: "cc",
+      mode: "pty",
+      command: "claude",
+      agent,
+      status: { state: "killed", reason: "stopped" },
+    });
+    sessions.add({
+      id: "a_000000002_live",
+      name: "dd",
+      mode: "pty",
+      agent,
+      status: { state: "running" },
+    });
+    sessions.add({
+      id: "a_000000003_pipe",
+      name: "ee",
+      mode: "pipes",
+      status: { state: "exited" },
+    });
+    const seam = { agent: { sessions: async () => sessions } };
+    const listed = await cli({ interactive: false, engine: true, ...seam }, "agent", "ls");
+    expect(listed.code, listed.err).toBe(0);
+    const lines = listed.out.trimEnd().split("\n");
+    // Under the table, one line for the stopped agent that can be continued, and for no other.
+    expect(lines.filter((line) => line.includes("agent start --resume"))).toEqual([
+      "cc can be continued: kodel agent start --resume cc",
+    ]);
+    expect(lines.at(-1)).toBe("cc can be continued: kodel agent start --resume cc");
+    expect(lines.find((line) => line.startsWith("a_000000001_stop"))).toMatch(
+      /cc\s+stopped\s+pty\s+claude 0f4b1c2d/,
+    );
+    // The JSON is the list and nothing else.
+    const json = await cli({ interactive: false, ...seam }, "agent", "ls", "--json");
+    expect(json.out).not.toContain("--resume");
+    expect((JSON.parse(json.out) as unknown[]).length).toBe(3);
   });
 });
