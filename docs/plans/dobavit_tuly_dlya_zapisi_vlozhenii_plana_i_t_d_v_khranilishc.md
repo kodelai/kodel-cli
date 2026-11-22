@@ -332,3 +332,59 @@ Rejected:
 - `kodel web` is not in `main`: uncommitted work in `worktrees/web-ui`, reading the same `GateDetail`.
 - Not read by me, taken from the critique: the line numbers in `worker-factory.ts`, `agent-decisions.ts`,
   `integrity.ts` and `tool-calls-registry.test.ts`; the implementation starts by confirming them.
+
+## Implementation notes
+
+Decisions taken at the gate: 1 (a), 2 (a), 3 as written, 4 `T-45`.
+
+Where the work differs from the plan:
+
+- **The fixture and the test kit's `attach` are in commit 4, not commit 1.** The fixture holds the check
+  (a failed and a passed `check_finished`), which does not exist before commit 4, and a fixture is not
+  edited after it is taken. `t45_v2_attachment_fixture_round_trips` and `t45_fixture_reads_without_the_event`
+  moved with it; commit 1 has `t45_an_engine_that_skips_the_event_decides_the_same` on the machine instead.
+- **The fingerprint is plain text** (`plan.md@12;shot.png@15`: each name with the journal number of its latest
+  record), not a hash: the core has no crypto, and it is at most a few hundred characters.
+- **`pipeline_decide_gate` in a fork.** While a sibling step is open the answer to the agent is that step with
+  `also_waiting`, which lists no attachments (as it lists no changes). So the refusal of a missing or stale
+  fingerprint carries the attachments and the fingerprint as they are now in `details`, besides `details.next`.
+- **The look-again rule holds an approval only.** A rejection sends the work back whatever was written since,
+  so it is never refused for a new version (`t45_a_rejection_is_not_held_back_by_a_new_version`).
+- **`kodel attachment show --version n`.** `--version` is the program's own flag wherever it stands, so after
+  `attachment show` it is passed on under a hidden name (`attachmentShowArgs` in `cli.ts`). The command line is
+  as the plan says.
+- **The Report names the attachments in one line** under the changed files, not in a block: a block pushed the
+  decision off the first screen of the sample run (`task_9pns_it_opens_on_the_agents_answer_...`). The Code tab
+  has the group with its rows, and its label counts them apart (`Code 5+2`).
+- **A comment on a line a version removed** records that line of the version before
+  (`attachment:plan.md@1:3`), not `...@2:3 (removed line)`: the location then always parses.
+- **The diff of a version is read under the key `/attachment:<name>@<version>`**: a project path is relative,
+  so no file can have it, and the `load_diff` effect needed no new field.
+- **The format rule for the check is generic.** `CheckHandler.feature` names the pipeline feature a run's
+  format must list, and `unheldCheckFeature` refuses by it in the machine and in the host, so nothing matches
+  on the kind `attachment` (principle 7). `PipelineFeature` gained `attachment` as planned.
+- **A registry for the local host.** The host had none of its own (`engine.registry ?? defaultRegistry()`), and
+  several places parsed a pipeline with the built-in kinds. `localRegistry()` is now the default of
+  `LocalHost` and `LocalPipelineHost`, every parse in them names it, the store reads a kept copy with the
+  host's extra check kinds (`parseSnapshot(..., { extraChecks })`), and `PipelineHost.registry` gives it to the
+  service for `pipeline_docs` and `pipeline_plan`.
+- **No new error code.** Refusals of a write use `INVALID_ARGUMENTS`, `NODE_NOT_RUNNING`, `ATTEMPT_MISMATCH`,
+  `UNKNOWN_NODE` and `UNSUPPORTED_FORMAT_FEATURE`; a refused write is journaled as `call_refused`, like the
+  refusals of the other tools ("no event" in the criteria means no `attachment_written`).
+- **Tests.** `t45_limits_at_and_over_the_bound` is two tests (sizes and bytes; names and versions in
+  `t45_limits_of_names_and_versions`). The end-to-end test runs the real MCP server in memory
+  (`packages/cli/test/attachment-mcp.test.ts`), since `tests/e2e` builds the binary; the test kit has one
+  scenario of its own on the local engine. The new behaviour is in new test files, so of the files the plan
+  listed as updated only these changed: `service.test.ts`, `format-codecs.test.ts`,
+  `tool-calls-registry.test.ts`, `tui.test.ts`, `agent-log.test.ts`, `engine-steps.test.ts`,
+  `history-tools.test.ts`, `cli/test/executor.test.ts`, `local/test/formats.test.ts` and
+  `tests/agents/claude-code-worker.test.ts` (the served tool names). No real-agent scenario was added: it is
+  in the manual part of the final gate.
+- **Not done:** attachments in `history_run_details` and `kodel report`, the web UI, and the change of
+  `.kodel/pipelines/dev.yaml` (follow-ups, as the plan says).
+
+Line references of the plan that were checked: `store.ts` `appendJournal` is at ~1030 (the exemptions for
+`sha256` and `ref` are there); `newerKeptCopy` at ~208; `worker-factory.ts` builds the list at ~30 (now
+`workerToolNames`); `agent-decisions.ts` `decideGate` at ~55-110 compared nothing with what the person was
+shown, as the critique said; `tool-calls-registry.test.ts` held `PIPELINE_TOOL_NAMES` equal to the registered
+names. `integrity.ts` needed no change.
