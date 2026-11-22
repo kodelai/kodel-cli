@@ -84,7 +84,6 @@ describe("the session guard's probe", () => {
     expect(insideSession({ pid: 701, sessions: [SESSION], view: view(person, IDS) })).toBe(
       "outside",
     );
-    // No session runs: nothing is asked of the system at all.
     let asked = 0;
     const counting: GuardView = {
       rows: () => {

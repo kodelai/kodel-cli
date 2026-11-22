@@ -149,10 +149,12 @@ describe("kodel agent", () => {
     const rule = /^- Do not run [\s\S]*?(?=^- )/m.exec(text)?.[0] ?? "";
     const listed = /`agent ([a-z|-]+)`/.exec(rule)?.[1]?.split("|") ?? [];
     expect(listed.sort()).toEqual(AGENT_HUMAN_COMMANDS.map((c) => c.replace("agent ", "")).sort());
-    // `exec`, `attach` and `start` ask for none; the instruction says so by name.
-    expect(rule).toContain("all but three ask for a confirmation");
+    // `exec` and `attach` ask for none, `start` only about a block that is not the committed one; the
+    // instruction says so by name.
+    expect(rule).toContain("all but two ask for a confirmation");
+    expect(rule).toContain("asks when the `engines` block is\n  not the committed one");
     expect(rule).toMatch(
-      /`agent exec`[\s\S]*`agent attach`[\s\S]*`agent start`[\s\S]*ask for none/,
+      /`agent exec`[\s\S]*`agent attach`[\s\S]*ask\s+for none[\s\S]*`agent start`/,
     );
     // What only reads is the agent's, `doctor` among it.
     for (const command of AGENT_READ_COMMANDS) expect(rule).toContain(`\`${command}\``);
@@ -683,6 +685,21 @@ describe("kodel agent exec --pty --attach (TASK-K6MA)", () => {
       );
       expect(sessions.rows[0]?.status.state).toBe("running");
     }
+
+    // `-a` after the command's first word is the command's own, with a terminal and without one.
+    for (const pty of [[], ["--pty"]]) {
+      const own = new FakeSessions();
+      const r = await exec(own, undefined, ...pty, "ls", "-a", "x");
+      expect(r.code, r.err).toBe(0);
+      expect(own.specs[0]?.argv).toEqual(["ls", "-a", "x"]);
+      expect(r.attaches).toEqual([]);
+    }
+    // Before the command it is `--attach`, which needs `--pty`.
+    const bare = new FakeSessions();
+    const noPty = await exec(bare, undefined, "-a", "--", "cat");
+    expect(noPty.code).toBe(1);
+    expect(noPty.err).toContain("--attach needs --pty");
+    expect(bare.specs).toEqual([]);
 
     // The exit code is the attach's: 0 when the command ended while attached, the problem otherwise.
     const ended = await exec(

@@ -615,6 +615,9 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
         });
       }
     }
+    // A run that left the list (it ended, or is another checkout's now) is not read here again.
+    const listed = new Set(own.map((o) => o.runId));
+    for (const runId of liveJournals.keys()) if (!listed.has(runId)) liveJournals.delete(runId);
     return { runs, unreadable };
   };
 

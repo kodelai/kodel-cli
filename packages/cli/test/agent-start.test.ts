@@ -180,11 +180,12 @@ describe("t45 kodel agent start, a person's own agent", () => {
       expect((spec?.argv ?? []).includes(absent), absent).toBe(false);
     }
     expect(flags).not.toContain("kodel");
-    // The session's environment is the adapter's: the person's own, with the mark every session gets.
-    expect(spec?.env).toBeUndefined();
-    expect(spec?.inheritEnv).toBeUndefined();
+    // The session's environment is the person's own, as a worker gets it (the adapter adds its mark).
+    expect(spec?.env).toEqual({ PATH: "/usr/bin", HOME: "/home/u" });
+    expect(spec?.inheritEnv).toBe(false);
     expect(sessionEnv(spec?.env, spec?.inheritEnv ?? true, { PATH: "/usr/bin" })).toEqual({
       PATH: "/usr/bin",
+      HOME: "/home/u",
       KODEL_ENGINE: "1",
     });
     // It prints the argv and what an unattended start may meet, then `started`, then attaches.
@@ -211,6 +212,24 @@ describe("t45 kodel agent start, a person's own agent", () => {
     const bare = new FakeSessions();
     expect((await start({ sessions: bare }, "--bg")).code).toBe(0);
     expect(bare.specs[0]?.argv).toEqual(["claude", "--session-id", UUID]);
+
+    // The session's environment is the person's shell, without what marks a Claude Code session or kodel's own.
+    const marked = new FakeSessions();
+    await start(
+      {
+        sessions: marked,
+        environment: {
+          PATH: "/usr/bin",
+          HOME: "/home/u",
+          CLAUDECODE: "1",
+          CLAUDE_CODE_ENTRYPOINT: "cli",
+          KODEL_STATE_DIR: "/somewhere",
+        },
+      },
+      "--bg",
+    );
+    expect(marked.specs[0]?.inheritEnv).toBe(false);
+    expect(marked.specs[0]?.env).toEqual({ PATH: "/usr/bin", HOME: "/home/u" });
 
     // A one-word prompt that names a subcommand of the agent stays a prompt.
     const word = new FakeSessions();

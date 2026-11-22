@@ -211,6 +211,10 @@ async function startOwn(input: AgentStartInput, flags: StartFlags, prompt: strin
       cwd: project.root,
       origin: "cli",
       mode: "pty",
+      // As a worker gets it: without the marks of a Claude Code session this command may be run from,
+      // which would make the agent stop saving its conversation (and `--resume` would find none).
+      inheritEnv: false,
+      env: profile.env(environment),
       ...(size ? { size } : {}),
       ...(name === undefined ? {} : { name }),
       // The id is chosen here and written down by the starter: nothing the agent prints is read for it.

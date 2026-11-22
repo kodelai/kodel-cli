@@ -519,15 +519,24 @@ export function registerAgentCommands(
     .description("Run a command as an agent (for trying the sessions by hand)")
     .option("--name <name>", "a name to find it again by")
     .option("--pty", "run it in a terminal of its own (kodel agent attach connects to it)")
-    .option("-a, --attach", "with --pty: connect this terminal to it at once (Ctrl+\\ detaches)")
+    .option(
+      "--attach",
+      "with --pty: connect this terminal to it at once (Ctrl+\\ detaches); -a before the command is the same",
+    )
     .allowUnknownOption()
-    .action(async (command: string[], opts: { name?: string; pty?: boolean; attach?: boolean }) => {
+    .action(async (words: string[], opts: { name?: string; pty?: boolean; attach?: boolean }) => {
       platform();
       ctx.requireHuman();
       if (opts.name !== undefined && !isSessionName(opts.name)) ctx.fail("the name is not valid");
+      // `-a` is `--attach` only before the command; after its first word it is the command's own (`ls -a`).
+      const short = words[0] === "-a";
+      // The parser leaves the `--` that followed a word it does not know.
+      const command = short ? words.slice(words[1] === "--" ? 2 : 1) : words;
+      if (short) opts.attach = true;
       if (opts.attach && !opts.pty) {
         ctx.fail("--attach needs --pty: only an agent in a terminal of its own can be attached to");
       }
+      if (command.length === 0) ctx.fail("exec needs a command");
       const size = opts.pty
         ? (ctx.terminalSize ?? (() => terminalSizeOf(process.stdout)))()
         : undefined;
