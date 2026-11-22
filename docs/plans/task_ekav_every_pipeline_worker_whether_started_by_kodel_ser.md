@@ -1333,9 +1333,9 @@ After the person tried it by hand (the final gate, five comments):
   enters it again. Raw mode, the dropped input of the handover, `SIGQUIT` and the return to the same place
   are as they were. The cost, said in `docs/tasks.md`: no terminal scrollback of the agent's output while
   it is opened from the TUI. Tests: the rows of `cli/test/tui-run.test.ts` (the alternate screen is left
-  exactly once, at the end, on every path), `t45_attach_client_keeps_the_screen_of_its_starter`,
-  `t45_screen_switch_filter`, `t45_agent_attach_keep_screen_reaches_the_client`; on a real terminal, run on
+  exactly once, at the end, on every path), `tA_attach_client_keeps_the_screen_of_its_starter`,
+  `tA_screen_switch_filter`, `t45_agent_attach_keep_screen_reaches_the_client`; on a real terminal, run on
   the built file outside the sandbox: the four TUI rows of `tests/pty/worker-terminal.test.ts` (from `o`
   to the redraw no `ESC[?1049l` and no line of the client), the new
   `t45_real_tui_keeps_its_screen_when_the_agent_switches_screens`, and
-  `t45_attach_client_keep_screen_leaves_the_terminal_clean` (`tests/pty/attach-client.test.ts`).
+  `tA_attach_client_keep_screen_leaves_the_terminal_clean` (`tests/pty/attach-client.test.ts`).

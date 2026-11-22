@@ -261,7 +261,7 @@ describe("the attach client", () => {
     expect(c.terminal.screen).toContain(`${TERMINAL_RESET}\r\n[detached: worker]`);
   });
 
-  test("t45_attach_client_keeps_the_screen_of_its_starter", async () => {
+  test("tA_attach_client_keeps_the_screen_of_its_starter", async () => {
     const CLEAR = `${ESC}[2J${ESC}[H`;
     // Started by the TUI on its alternate screen: nothing is written until the session has something
     // to show (the starter's own line stays up), then the screen is cleared once and the output drawn.
@@ -308,7 +308,7 @@ describe("the attach client", () => {
     expect(i.inputs()).toBe("abc");
   });
 
-  test("t45_screen_switch_filter", () => {
+  test("tA_screen_switch_filter", () => {
     const run = (...chunks: string[]) => {
       const filter = createScreenSwitchFilter();
       return chunks.map((chunk) => toBinary(filter(fromBinary(chunk))));

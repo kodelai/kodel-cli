@@ -102,7 +102,7 @@ describe("kodel agent attach on a terminal of its own", () => {
     expect(await settings(s.term)).toBe(before);
   });
 
-  ptyTest("t45_attach_client_keep_screen_leaves_the_terminal_clean", async () => {
+  ptyTest("tA_attach_client_keep_screen_leaves_the_terminal_clean", async () => {
     // What the TUI's `o` runs, here on a terminal with a shell: the client does not switch the screen
     // and writes no line of its own, and the terminal's settings are put back all the same.
     const s = await scene(

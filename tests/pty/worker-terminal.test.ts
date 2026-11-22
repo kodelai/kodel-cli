@@ -163,15 +163,18 @@ async function onSecondCard(term: Term, runs: readonly string[]): Promise<string
 async function opens(term: Term, run: string): Promise<number> {
   const away = term.output.length;
   term.type("o");
-  await term.sees(raw(`opening kw-${run}…`), 30_000, away);
-  await term.sees(`agent-of-${run}-ready`, 30_000, away);
-  const shown = term.output.slice(away);
+  const opening = raw(`opening kw-${run}…`);
+  await term.sees(opening, 30_000, away);
+  // The agent's line is looked for after that one: the card the TUI drew before it left shows the
+  // agent's last line too.
+  const line = term.output.indexOf(opening, away);
+  await term.sees(`agent-of-${run}-ready`, 30_000, line);
+  const shown = term.output.slice(line);
   // The line first, then the child clears the screen for what the agent shows.
-  const line = shown.indexOf(raw(`opening kw-${run}…`));
-  const cleared = shown.indexOf(CLEAR, line);
-  expect(cleared).toBeGreaterThan(line);
+  const cleared = shown.indexOf(CLEAR);
+  expect(cleared).toBeGreaterThan(0);
   expect(shown.indexOf(`agent-of-${run}-ready`)).toBeGreaterThan(cleared);
-  expect(shown).not.toContain(ALT_OFF);
+  expect(term.output.slice(away)).not.toContain(ALT_OFF);
   return away;
 }
 
