@@ -2,8 +2,10 @@
  * A launcher of background workers without processes, for the tests of `kodel serve` (TASK-G8KM,
  * T-44). `start` and `resume` make a record (`kw-<run>`, `kw-<run>-d<seq>`) and, by default, drive the
  * run through the host the way an agent would (complete each agent step) until a `waiting` or `done`
- * answer; then the record is `exited`. Switches make a launch lost, silent, failing, exiting early, or
- * throwing after it made its record. Records can be removed (`kodel agent rm`) and stopped.
+ * answer; then the record is `exited`. With `terminal` the worker is one in a terminal of its own: it
+ * stays `running` at a wait and at the end of its run, and `wake` makes it go on. Switches make a launch
+ * lost, silent, failing, exiting early, or throwing after it made its record. Records can be removed
+ * (`kodel agent rm`) and stopped.
  */
 import type { ServeLauncherPort } from "@kodel-ai/local";
 import { type NextStep, SessionError, type SessionState } from "@kodel-ai/pipeline-core";
@@ -36,6 +38,8 @@ export interface ScriptedLauncherOptions {
   now: () => number;
   /** What every launch does unless `next` says otherwise. */
   behaviour?: ScriptedBehaviour;
+  /** The workers are sessions in a terminal of their own: they stay alive at a wait. */
+  terminal?: boolean;
 }
 
 export interface ScriptedRecord {
@@ -50,6 +54,12 @@ export interface ScriptedRecord {
   decisionSeq?: number;
   lastOutputAt?: number;
   stopped?: boolean;
+  terminal?: boolean;
+  endedBy?: string;
+  /** The session is over while its process still runs without a holder. */
+  childAlive?: boolean;
+  /** The process table could not be read for this record. */
+  groupUnread?: boolean;
 }
 
 export interface ScriptedCall {
@@ -128,6 +138,10 @@ export class ScriptedLauncher implements ServeLauncherPort {
         ...(latest.decisionSeq === undefined ? {} : { decisionSeq: latest.decisionSeq }),
         ...(latest.lastOutputAt === undefined ? {} : { lastOutputAt: latest.lastOutputAt }),
         ...(latest.stopped === true ? { stopped: true } : {}),
+        ...(latest.terminal === true ? { terminal: true } : {}),
+        ...(latest.endedBy === undefined ? {} : { endedBy: latest.endedBy }),
+        ...(latest.childAlive === true ? { childAlive: true } : {}),
+        ...(latest.groupUnread === true ? { groupUnread: true } : {}),
       });
     }
     return out;
@@ -142,6 +156,7 @@ export class ScriptedLauncher implements ServeLauncherPort {
     latest.state = "killed";
     latest.since = this.options.now();
     latest.stopped = true;
+    latest.endedBy = "stopped";
   }
 
   /** The records of a run, oldest first. */
@@ -172,6 +187,7 @@ export class ScriptedLauncher implements ServeLauncherPort {
     if (latest === undefined) return;
     latest.state = "lost";
     latest.since = this.options.now();
+    latest.endedBy = "holder_gone";
   }
 
   /** Drives a `silent` worker on, as if it woke up: until a wait or the end, then exits. */
@@ -202,6 +218,7 @@ export class ScriptedLauncher implements ServeLauncherPort {
       lastOutputAt: now,
       sessionId: `session-${runId}`,
       ...(decisionSeq === undefined ? {} : { decisionSeq }),
+      ...(this.options.terminal === true ? { terminal: true } : {}),
     };
     this.records.push(record);
     switch (behaviour) {
@@ -243,6 +260,8 @@ export class ScriptedLauncher implements ServeLauncherPort {
       }
       break;
     }
+    // A worker in a terminal waits there, alive; a print worker's turn ends.
+    if (record.terminal === true) return;
     record.state = "exited";
     record.since = this.options.now();
     record.exitCode = 0;

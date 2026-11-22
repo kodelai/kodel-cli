@@ -158,6 +158,17 @@ export function decisionOf(journal: readonly JournalRecord[]): DecisionInfo {
   return { ...(lastWait === undefined ? {} : { lastWait }), decision, moved, ...waitList };
 }
 
+/** When an agent last called the engine for the run (was served, claimed or completed a step), by the journal. */
+export function lastAgentCallOf(journal: readonly JournalRecord[]): number | undefined {
+  let last: number | undefined;
+  for (const record of journal) {
+    if (MOVED_EVENTS.includes(record.event) && (last === undefined || record.ts > last)) {
+      last = record.ts;
+    }
+  }
+  return last;
+}
+
 /** What a resume needs to know of a worker: its latest session record, as `kodel agent ls` reads it. */
 export interface ServeWorkerView {
   /** The latest record: the `-d<seq>` one with the highest seq, else `kw-<run>`. */

@@ -37,8 +37,19 @@ export const serveRecordSchema = z
     state_base: z.string().min(1),
     /** The kodel build it runs. */
     build: z.string(),
+    /**
+     * `workers`: the worker places used (the agents that are working), what a reader shows beside
+     * `max_workers`. `alive`: the live worker processes, those that only wait with the person among
+     * them; absent in a record written before T-45, and ignored by a reader from before it.
+     */
     counts: z
-      .object({ workers: count, max_workers: count, runs: count, max_runs: count })
+      .object({
+        workers: count,
+        alive: count.optional(),
+        max_workers: count,
+        runs: count,
+        max_runs: count,
+      })
       .strict()
       .optional(),
   })

@@ -160,6 +160,8 @@ export async function printServeStatus(input: ServeStatusInput): Promise<void> {
   const status = await readServeStatus(input.place, now, {
     ...(input.platform === undefined ? {} : { platform: input.platform as NodeJS.Platform }),
   });
+  // A worker is stalled by the quiet time a daemon has watched; with no daemon, by its own.
+  const watchedFrom = "record" in status ? status.record.started : 0;
   switch (status.kind) {
     case "off":
     case "unknown":
@@ -197,6 +199,7 @@ export async function printServeStatus(input: ServeStatusInput): Promise<void> {
     log: () => undefined,
     version: input.version,
     now: () => now,
+    quietFrom: watchedFrom,
   });
   let answer: Awaited<ReturnType<typeof daemon.plan>>;
   try {
@@ -215,9 +218,20 @@ export async function printServeStatus(input: ServeStatusInput): Promise<void> {
   if (!rules.enabled) out("config:      serve.enabled is not true; a daemon would be idle\n");
   // Disabled, a daemon acts on nothing: what waits is what it would take up once enabled.
   const waitLabel = rules.enabled ? "waits:      " : "if enabled: ";
+  // Two limits, two counts: the agents that are working (a worker whose run only waits for you holds
+  // no such place) and the runs that have a worker; `alive` is every live agent process.
   out(
-    `limits:      workers ${plan.counts.workers} of ${plan.counts.max_workers}, runs with a worker ${plan.counts.runs.length} of ${plan.counts.max_runs}\n`,
+    `limits:      working ${plan.counts.workers} of ${plan.counts.max_workers}, alive ${plan.counts.alive}, runs with a worker ${plan.counts.runs.length} of ${plan.counts.max_runs}\n`,
   );
+  for (const quiet of plan.stalled) {
+    const places = [
+      ...(quiet.holdsWorker ? ["a worker place"] : []),
+      ...(quiet.holdsRun ? ["a run place"] : []),
+    ];
+    out(
+      `stalled:     ${plain(quiet.worker)} (run ${plain(quiet.runId)}): quiet for ${quiet.quietS} s; it holds ${places.length === 0 ? "no place" : places.join(" and ")}; nothing stops it but you: kodel agent attach ${plain(quiet.worker)}, or kodel agent stop ${plain(quiet.worker)}\n`,
+    );
+  }
   if (rules.start.length === 0) out("start rules: none; a daemon only resumes and notes\n");
   rules.start.forEach((rule, i) => {
     out(`${`rule ${i + 1}:`.padEnd(13)}${ruleLine(rule)}\n`);

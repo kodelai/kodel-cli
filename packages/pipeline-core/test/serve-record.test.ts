@@ -103,3 +103,50 @@ describe("t44 the daemon's record", () => {
     expect(fixtures).toBeGreaterThan(0);
   });
 });
+
+describe("t44 the counts of the daemon's record (T-45)", () => {
+  test("t44_record_counts_working_and_alive", () => {
+    // `workers` is the places used (the agents that are working); `alive` is the live processes.
+    const record: ServeRecord = {
+      ...RECORD,
+      counts: { workers: 1, alive: 3, max_workers: 2, runs: 3, max_runs: 4 },
+    };
+    const text = encodeServeRecord(record);
+    const read = decodeServeRecord(JSON.parse(text));
+    expect(read).toEqual({ ok: true, record });
+    if (read.ok) expect(encodeServeRecord(read.record)).toBe(text);
+    // The fixture a daemon of this build wrote holds it; the one from before T-45 has none and reads as it was.
+    const fixture = (name: string) =>
+      decodeServeRecord(JSON.parse(readFileSync(join(FIXTURES, "v1", name), "utf8")));
+    const now = fixture("serve-alive.json");
+    expect(now.ok && now.record.counts).toEqual({
+      workers: 1,
+      alive: 2,
+      max_workers: 1,
+      runs: 2,
+      max_runs: 3,
+    });
+    const before = fixture("serve.json");
+    expect(before.ok && before.record.counts).toEqual({
+      workers: 0,
+      max_workers: 1,
+      runs: 0,
+      max_runs: 1,
+    });
+    // An older reader does not know the field: its `decode` drops what it does not know, at any
+    // level of a known `v`, and what is left is what it showed before (`workers` of `max_workers`).
+    // The same rule, shown on this build with a field it does not know.
+    const later = { ...record, counts: { ...record.counts, waiting: 2 } };
+    expect(decodeServeRecord(later)).toEqual({ ok: true, record });
+    const { alive: _alive, ...older } = record.counts as NonNullable<ServeRecord["counts"]>;
+    expect(older).toEqual({ workers: 1, max_workers: 2, runs: 3, max_runs: 4 });
+    // No new `v`: the field is optional, and nothing decides by it.
+    expect(SERVE_RECORD_VERSION).toBe(1);
+    expect(() =>
+      encodeServeRecord({
+        ...record,
+        counts: { ...record.counts, alive: -1 } as NonNullable<ServeRecord["counts"]>,
+      }),
+    ).toThrow();
+  });
+});
