@@ -5,6 +5,7 @@ export * from "./attach-server";
 export * from "./command";
 export * from "./config";
 export * from "./engines";
+export * from "./engines-head";
 export * from "./executor";
 export * from "./git";
 export * from "./host";

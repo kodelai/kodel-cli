@@ -28,7 +28,8 @@ This repository adds these rules:
   the agent may do). The same goes for the `decisions` block of the project config: it says what the
   agent may decide for the person (`docs/decisions.md`), so only the person changes it. So do the `storage`
   and `project_id` keys, which say where the history is kept (`docs/history.md`), and the `serve` block, which
-  says what `kodel serve` starts on its own (`docs/serve.md`).
+  says what `kodel serve` starts on its own (`docs/serve.md`), and the `engines` block, which says which
+  programs kodel starts as agents and how (`docs/engines.md`; a start nobody watches uses it only as committed).
 - Do not edit the files in `.kodel/pipelines/` while a run is going. To change the pipeline of a run, ask
   the person whether to change it now, and then use `pipeline_propose_change`; the run stops at the end of
   its current step until the person accepts the change. A pipeline file edited by hand is noticed all the
