@@ -13,6 +13,7 @@ import {
   workerProgramOf,
 } from "../src/agent-profiles";
 import { WORKER_DENIED, WORKER_DENIED_PATHS, workerArgv } from "../src/claude-worker";
+import { HUMAN_ONLY_COMMANDS } from "../src/human-only";
 
 const ID = "11111111-2222-4333-8444-555555555555";
 const ROOT = "/proj";
@@ -349,6 +350,34 @@ describe("t45 the lists of a worker", () => {
           .allowlist(served)
           .filter((t) => /decide|accept/.test(t)),
       ).toEqual([]);
+    }
+  });
+
+  test("t45_every_human_only_command_is_denied", () => {
+    // A table from the registry of the person's commands: every one, in every spelling of the binary,
+    // plain and behind `env`, is covered by a deny pattern of both kinds of worker.
+    expect(HUMAN_ONLY_COMMANDS.length).toBeGreaterThan(10);
+    for (const name of ["gate", "seal", "task approve", "agent stop", "agent attach"]) {
+      expect(HUMAN_ONLY_COMMANDS).toContain(name);
+    }
+    const spellings = [
+      "kodel",
+      "env X=1 kodel",
+      "env -u KODEL_ENGINE kodel",
+      "node /opt/kodel/dist/kodel.js",
+      "env X=1 node packages/cli/dist/kodel.js",
+      "bun packages/cli/src/main.ts",
+      "cd /proj && KODEL_STATE_DIR=/s bun packages/cli/src/main.ts",
+      "sh -c 'kodel",
+    ];
+    for (const terminal of [true, false]) {
+      const { denied } = lists(terminal);
+      for (const command of HUMAN_ONLY_COMMANDS) {
+        for (const spelling of spellings) {
+          const line = `${spelling} ${command} r_0abc_0000 --reason ok`;
+          expect(refuses(denied, line), `${terminal ? "terminal" : "print"}: ${line}`).toBe(true);
+        }
+      }
     }
   });
 

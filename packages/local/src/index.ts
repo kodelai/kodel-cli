@@ -17,6 +17,7 @@ export * from "./project-root";
 export * from "./serve";
 export * from "./session-env";
 export * from "./session-finder";
+export * from "./session-guard";
 export * from "./session-holder";
 export * from "./session-paths";
 export * from "./session-pipes";
