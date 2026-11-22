@@ -10,10 +10,12 @@
  * background `kodel wait` reports the person's decision, twice in a row; that told to decide, with the
  * tool and with the person's command in its shell, it cannot.
  *
- * The project is made inside this checkout (in its git-ignored worktrees folder): `claude` asks whether a
- * folder is trusted, and a folder under a trusted one inherits the answer (spike criterion 1). Nothing
- * here accepts trust: where the checkout is not trusted the agent stops at that question and the test
- * fails at its first wait.
+ * The project is made at one fixed path, emptied and built again by every run: `claude` asks whether a
+ * new folder is trusted (a repository of its own does not inherit the answer of the folder it is in), and
+ * it keeps the answer by path. The path is `KODEL_AGENT_TRUSTED_DIR`, else `terminal-worker-project` in
+ * this checkout's git-ignored worktrees folder; a person opens `claude` there once and accepts
+ * (`tests/README.md`). Nothing here accepts trust: where the folder is not trusted the test fails at once
+ * and says so.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
@@ -80,6 +82,12 @@ const CONFIG = [
   "",
 ].join("\n");
 
+const PROJECT =
+  process.env.KODEL_AGENT_TRUSTED_DIR ??
+  join(REPO_ROOT, ".kodel", "worktrees", "terminal-worker-project");
+/** The question `claude` asks in a folder it does not trust, as a terminal's tail holds it (no spaces kept). */
+const TRUST_QUESTION = /trust\s*this\s*folder/i;
+
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
@@ -88,8 +96,9 @@ afterEach(async () => {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function setup() {
-  // Inside the checkout, where git ignores it; a state base of its own, short enough for a socket.
-  const dir = join(REPO_ROOT, ".kodel", "worktrees", `terminal-worker-${randomUUID().slice(0, 8)}`);
+  // A fixed path a person trusted once, built anew; a state base of its own, short enough for a socket.
+  const dir = PROJECT;
+  rmSync(dir, { recursive: true, force: true });
   const stateDir = shortDir("kd-tw-");
   mkdirSync(join(dir, ".kodel", "pipelines"), { recursive: true });
   const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
@@ -203,6 +212,11 @@ describe("t45 a worker in a terminal with the real claude", () => {
       ) => {
         const deadline = Date.now() + timeoutMs;
         while (!check(journalOf(dir, runId))) {
+          if (TRUST_QUESTION.test(await tail(id))) {
+            throw new Error(
+              `claude asks whether ${dir} is trusted, and only a person answers that: run claude there once, accept, and run the scenario again (tests/README.md)`,
+            );
+          }
           if (Date.now() > deadline) {
             throw new Error(
               `timed out waiting for ${what}\n--- journal ---\n${journalOf(dir, runId)

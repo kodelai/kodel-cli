@@ -73,6 +73,9 @@ const PIPELINE = [
   "",
 ].join("\n");
 
+/** A terminal's output is kept as a binary string: the bytes of a text that is not ASCII, to look for in it. */
+const raw = (text: string) => Buffer.from(text, "utf8").toString("latin1");
+
 const worlds: World[] = [];
 const hosts: Host[] = [];
 afterEach(async () => {
@@ -121,7 +124,7 @@ async function scene(agent: string, size = { cols: 140, rows: 40 }) {
   const term = await host.open("node", [ARTIFACT, "tui"], { cwd: w.root, env: w.env, ...size });
   // The list, and the records of the agents read once: the rows say what the agents do.
   await term.sees("RUNNING", 30_000);
-  await term.sees("◆ running", 30_000);
+  await term.sees(raw("◆ running"), 30_000);
   return { w, term, runs, sessions };
 }
 
@@ -131,7 +134,7 @@ const shownRun = (term: Term, runs: readonly string[], from: number): string | u
   let found: { run: string; at: number } | undefined;
   for (const run of runs) {
     // The run's id is on its card only: the rows of the list show titles.
-    const at = drawn.lastIndexOf(`${run} · one`);
+    const at = drawn.lastIndexOf(raw(`${run} · one`));
     if (at >= 0 && (found === undefined || at > found.at)) found = { run, at };
   }
   return found?.run;
@@ -143,7 +146,7 @@ async function onSecondCard(term: Term, runs: readonly string[]): Promise<string
   term.type("j");
   await sleep(300);
   term.type("\r");
-  await term.sees("┃", undefined, from);
+  await term.sees(raw("┃"), undefined, from);
   await sleep(300);
   const run = shownRun(term, runs, from);
   if (run === undefined)
@@ -194,8 +197,8 @@ describe("the TUI hands its terminal to a run's agent and takes it back", () => 
       await s.term.sees(`[detached: kw-${run}]`, undefined, leaving);
       const back = await screenIsBack(s.term, leaving);
       // The same run is selected and its card is open, with the notice of the return.
-      await s.term.sees(`${run} · one`, undefined, back);
-      await s.term.sees("┃", undefined, back);
+      await s.term.sees(raw(`${run} · one`), undefined, back);
+      await s.term.sees(raw("┃"), undefined, back);
       await s.term.sees(`Back from kw-${run}`, undefined, back);
       expect(shownRun(s.term, s.runs, back)).toBe(run);
       // The agent goes on, and a key is the screen's again.
@@ -219,8 +222,8 @@ describe("the TUI hands its terminal to a run's agent and takes it back", () => 
       s.term.type("go\r");
       await s.term.sees(`[ended: kw-${run}, exit 3]`, undefined, leaving);
       const back = await screenIsBack(s.term, leaving);
-      await s.term.sees(`${run} · one`, undefined, back);
-      await s.term.sees("┃", undefined, back);
+      await s.term.sees(raw(`${run} · one`), undefined, back);
+      await s.term.sees(raw("┃"), undefined, back);
       await s.term.sees("ended while you were in it", undefined, back);
       expect(shownRun(s.term, s.runs, back)).toBe(run);
       await sleep(300);
@@ -244,7 +247,7 @@ describe("the TUI hands its terminal to a run's agent and takes it back", () => 
       s.term.type(`${DETACH}${DETACH}`);
       await s.term.sees(`[detached: kw-${run}]`, undefined, leaving);
       const back = await screenIsBack(s.term, leaving);
-      await s.term.sees(`${run} · one`, undefined, back);
+      await s.term.sees(raw(`${run} · one`), undefined, back);
       await sleep(1_000);
       expect(s.term.exit).toBeUndefined();
       expect(shownRun(s.term, s.runs, back)).toBe(run);

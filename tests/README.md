@@ -91,12 +91,15 @@ runs the real `claude` as a terminal worker and needs a PTY besides `KODEL_AGENT
 with `decisions.agent.gate` and `.pipeline_change` on; the worker stays `running`; told to approve with the
 tool, then to run `kodel gate <run> approve` and `env X=1 kodel gate …` in its shell, the gate stays undecided
 each time; a person's decision makes it go on in the same session, twice; the run completes and the session
-is stopped. It prints the version of `claude` it ran. Its project is made inside this checkout's git-ignored
-`.kodel/worktrees`, because `claude` asks to trust a new folder and no supported way to accept that
-beforehand was found, so the scenario runs on a person's machine before a release, not nightly. (The spike
-saw a git worktree of a trusted checkout start with no question, and a separate repository nested in one
-ask: if this scenario stops at the trust question, accept it once for that folder; `claude` keeps trust by
-path.) The three instructions are typed into the worker's terminal by the test, as
+is stopped. It prints the version of `claude` it ran. `claude` asks whether a new folder is trusted, keeps the
+answer by path, and no supported way to accept it beforehand was found; a repository of its own does not inherit
+the answer of the folder it lies in (a git worktree of a trusted checkout does). So the scenario builds its
+project at one fixed path, emptied and built again by every run: `KODEL_AGENT_TRUSTED_DIR`, else
+`.kodel/worktrees/terminal-worker-project` in this checkout (git ignores it). Once, by a person: run the
+scenario (it fails at the question, says so, and with `KODEL_AGENT_KEEP=1` leaves the project there), open
+`claude` in that folder and accept, `/exit`; after that it runs with no question. Nothing in the test accepts
+trust. It therefore runs on a person's machine before a release, not nightly.
+The three instructions are typed into the worker's terminal by the test, as
 the person; kodel itself types nothing.
 
 ## Terminal workers: what the tests cannot show (T-45)
