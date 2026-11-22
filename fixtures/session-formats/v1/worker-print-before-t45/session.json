@@ -1,0 +1,35 @@
+{
+  "v": 1,
+  "id": "a_0loyw3v28_0000",
+  "name": "kw-r_0mw53d7fj_o2lc",
+  "mode": "pipes",
+  "spec": {
+    "argv": [
+      "claude",
+      "-p",
+      "Kodel run r_0mw53d7fj_o2lc exists for the task \"Add a flag --session-id 11111111-2222-4333-8444-555555555555\" and is yours to drive. Call pipeline_next_step with run_id r_0mw53d7fj_o2lc and do what each answer says; never call pipeline_start (it would make a second run). Work in /masked/project.",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--session-id",
+      "7f3b2a9c-1d4e-4f6a-9b8c-0d1e2f3a4b5c",
+      "--mcp-config",
+      "{\"mcpServers\":{\"kodel\":{\"command\":\"/masked/node\",\"args\":[\"/masked/kodel.js\",\"--root\",\"/masked/project\",\"mcp\",\"--no-decisions\",\"--no-wait-hint\"]}}}",
+      "--strict-mcp-config",
+      "--permission-mode",
+      "dontAsk",
+      "--allowedTools",
+      "mcp__kodel__pipeline_next_step,mcp__kodel__pipeline_complete_step,Read,Write,Edit,Glob,Grep,Bash,Agent",
+      "--disallowedTools",
+      "mcp__kodel__pipeline_decide_gate,mcp__kodel__pipeline_accept_change"
+    ],
+    "cwd": "/masked/project",
+    "inheritEnv": false,
+    "timeoutMs": 43200000,
+    "name": "kw-r_0mw53d7fj_o2lc",
+    "origin": "cli",
+    "envNames": ["HOME", "PATH"]
+  },
+  "started": 1700000000000,
+  "root": "/masked/project"
+}

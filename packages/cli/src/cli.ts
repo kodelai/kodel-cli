@@ -6,7 +6,7 @@
  */
 
 import { stat } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import {
   findProjectRoot,
   hashSource,
@@ -856,9 +856,9 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       // The background agents (`s`): the records live where `kodel agent` keeps them, and the worker's
       // own server is this very build.
       const launcher = await openWorkerLauncher();
-      const dialog = await loadConfig(dataDir)
-        .then((config) => config.decisions.dialog)
-        .catch(() => false);
+      const config = await loadConfig(dataDir).catch(() => undefined);
+      const dialog = config?.decisions.dialog ?? false;
+      const worktreesDir = config === undefined ? undefined : resolve(root, config.worktree.dir);
       const place = servePlace({ base: resolveBase(env.environment ?? process.env), root });
       await runTui(process.stdin, process.stdout, () => loadSessions(h, Date.now()), "project", {
         mouse: opts.mouse === true,
@@ -870,7 +870,15 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           removeComment(h, runId, node, attempt, index),
         loadStats: (pipeline) => loadStats(pipeline),
         ...tuiTaskOptions(tasks),
-        ...createWorkerOptions({ host: h, tasks, launcher, dialog, root, version: pkg.version }),
+        ...createWorkerOptions({
+          host: h,
+          tasks,
+          launcher,
+          dialog,
+          root,
+          version: pkg.version,
+          ...(worktreesDir === undefined ? {} : { worktreesDir }),
+        }),
         serve: () => readServeStatus(place, Date.now()),
       });
     });

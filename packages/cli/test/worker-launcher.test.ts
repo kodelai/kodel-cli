@@ -7,26 +7,47 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   LocalPipelineHost,
   type LocalRun,
+  loadConfig,
   openTaskService,
   ownProcessGroup,
   PipesSessionAdapter,
+  sessionPlace,
+  type UnattendedEngines,
 } from "@kodel-ai/local";
 import { SessionError, type SessionListEntry, validateSpec } from "@kodel-ai/pipeline-core";
 import { decisionTools, HISTORY_TOOLS, TOOLS } from "@kodel-ai/pipeline-core/mcp";
+import { resumeVerdict } from "@kodel-ai/pipeline-core/serve";
 import { ScriptedSessionAdapter } from "../../testkit/src/engine-fakes";
 import { AGENT_HUMAN_COMMANDS } from "../src/agent-commands";
+import {
+  AGENT_PROFILES,
+  type AgentProfile,
+  agentProfile,
+  WORKER_PRINT_MIGRATION_LINE,
+} from "../src/agent-profiles";
 import {
   authProbe,
   type Exec,
   resumePrompt,
   sessionIdOf,
   shellQuote,
+  terminalWorkerArgv,
+  trustProbe,
   WORKER_DENIED,
   WORKER_TOOLS,
   waitCommandProblem,
@@ -42,7 +63,9 @@ import { openTasksForTui } from "../src/tui/tasks-open";
 import { initialModel, withWorkers } from "../src/tui/view";
 import { decisionOf, resumeOffer } from "../src/tui/worker-resume";
 import { createWorkerOptions, taskTextOf } from "../src/tui/worker-start";
+import { serveLauncherOf, serveWorkerOf } from "../src/worker-factory";
 import {
+  type StartInput,
   WORKER_TERMINAL_TIMEOUT_MS,
   WORKER_TIMEOUT_MS,
   type WorkerDecision,
@@ -54,6 +77,7 @@ import {
   parseEntry,
   type SessionLauncherDeps,
   startedOf,
+  workerStatusOf,
 } from "../src/worker-launcher-session";
 import { FakeLauncher } from "./fake-launcher";
 
@@ -91,7 +115,7 @@ const SERVED = [...TOOLS.map((t) => t.name), ...HISTORY_TOOLS.map((t) => t.name)
 /** The `exec` of the launcher over the scripted adapter: `agent ls --json` and `agent logs` from the fake's sessions. */
 function fakeExec(
   adapter: ScriptedSessionAdapter,
-  probe: { stdout?: string; throws?: boolean; late?: boolean } = {},
+  probe: { stdout?: string; throws?: boolean; late?: boolean; noAgent?: boolean } = {},
   calls: string[][] = [],
 ): Exec {
   return async (file, args, options) => {
@@ -112,6 +136,10 @@ function fakeExec(
         ...(s.name === undefined ? {} : { name: s.name }),
         command: (s.spec.argv ?? []).join(" "),
         status: { ...s.status },
+        mode: s.spec.mode ?? "pipes",
+        ...(s.spec.agent === undefined || probe.noAgent === true
+          ? {}
+          : { agent: { ...s.spec.agent, source: "chosen" as const } }),
       }));
       return { stdout: JSON.stringify(rows, null, 2), stderr: "", code: 0 };
     }
@@ -461,6 +489,12 @@ describe("task_9pns the session launcher over the scripted adapter", () => {
       `${INIT(UUID)}\n${RESULT(UUID)}\n`,
     );
     await launcher.resume({ runId: RUN, workdir: "/proj", sessionId: UUID, decision: DECISION });
+    // One live agent a run: the first resumed session ends before the next decision is resumed.
+    adapter.finish(adapter.only(`kw-${RUN}-d17`).id, {
+      state: "exited",
+      exitCode: 0,
+      since: 9_500,
+    });
     await launcher.resume({
       runId: RUN,
       workdir: "/proj",
@@ -1123,7 +1157,6 @@ describe("t44 the launcher for kodel serve", () => {
     adapter.finish(first.id, { state: "killed", reason: "stopped", lastOutputAt: 8_000 });
     const stopped = (await launcher.statuses([RUN])).get(RUN);
     expect(stopped).toMatchObject({ state: "killed", stopped: true, lastOutputAt: 8_000 });
-    const { serveLauncherOf } = await import("../src/worker-factory");
     const view = (await serveLauncherOf(launcher).statuses([RUN])).get(RUN);
     expect(view).toMatchObject({ state: "killed", stopped: true, lastOutputAt: 8_000 });
     adapter.finish(first.id, { state: "killed", reason: "timeout" });
@@ -1164,7 +1197,6 @@ describe("t44 the launcher for kodel serve", () => {
   test("t45_child_alive_reaches_the_rule", async () => {
     const adapter = new ScriptedSessionAdapter();
     const launcher = createSessionWorkerLauncher(deps(adapter));
-    const { serveLauncherOf, serveWorkerOf } = await import("../src/worker-factory");
     await launcher.start({ runId: RUN, workdir: ROOT, title: "t" });
     const first = adapter.only(`kw-${RUN}`);
     const viewOf = async () => (await serveLauncherOf(launcher).statuses([RUN])).get(RUN);
@@ -1359,5 +1391,898 @@ describe("t45 the worker's wait command", () => {
     expect(
       validateSpec({ argv: ["claude"], cwd: ROOT, timeoutMs: WORKER_TERMINAL_TIMEOUT_MS }),
     ).toBeUndefined();
+  });
+});
+
+const WORKTREE = "/proj/.kodel/worktrees/x";
+const enginesOf =
+  (worker: "terminal" | "print" | undefined, more: Record<string, unknown> = {}) =>
+  async (): Promise<UnattendedEngines> => ({
+    ok: true,
+    engines: { claude: { ...(worker === undefined ? {} : { worker }), ...more } },
+  });
+const PTY_OK = () => ({ ok: true as const });
+const NO_PTY: [string, string][] = [
+  [
+    "bun",
+    "a terminal session cannot run under Bun: use the built kodel on Node (`bun run build`, then `node packages/cli/dist/kodel.js`)",
+  ],
+  ["package missing", "the optional package @lydell/node-pty is not installed: install it"],
+  [
+    "no binary",
+    "@lydell/node-pty has no binary package installed for this platform (@lydell/node-pty-linux-x64)",
+  ],
+];
+
+/** A launcher whose profile says `worker: terminal` (or what `worker` says) where a terminal can run. */
+const terminalDeps = (
+  adapter: ScriptedSessionAdapter,
+  over: Partial<SessionLauncherDeps> = {},
+  worker: "terminal" | "print" | undefined = "terminal",
+) => deps(adapter, { engines: enginesOf(worker), ptyProbe: PTY_OK, ...over });
+
+/** The scripted adapter with the real one's rule for names: a name is taken once. */
+class NamedAdapter extends ScriptedSessionAdapter {
+  private readonly taken = new Set<string>();
+  override async start(spec: Parameters<ScriptedSessionAdapter["start"]>[0]) {
+    const name = spec.name?.toLowerCase();
+    if (name !== undefined) {
+      if (this.taken.has(name)) throw new SessionError("NAME_TAKEN", `the name ${name} is taken`);
+      this.taken.add(name);
+    }
+    return super.start(spec);
+  }
+}
+
+/** The scripted adapter, counting what is typed into a session. */
+class TypingAdapter extends ScriptedSessionAdapter {
+  typed = 0;
+  async send(): Promise<{ bytes: number }> {
+    this.typed += 1;
+    return { bytes: 0 };
+  }
+  async attachable(id: string) {
+    const live = this.sessions.get(id)?.status.state === "running";
+    return live ? { ok: true as const } : { ok: false as const, reason: "it does not run" };
+  }
+}
+
+describe("t45 the launcher on the profile", () => {
+  test("t45_worker_terminal_spec", async () => {
+    const adapter = new ScriptedSessionAdapter();
+    let reads = 0;
+    const engines = async () => {
+      reads += 1;
+      return enginesOf("terminal")();
+    };
+    const launcher = createSessionWorkerLauncher(terminalDeps(adapter, { engines }));
+    const { name } = await launcher.start({ runId: RUN, workdir: WORKTREE, title: "Add a flag" });
+    // The block is read once for a start (the caller holds the start lock).
+    expect(reads).toBe(1);
+    expect(name).toBe(`kw-${RUN}`);
+    const spec = adapter.specs[0];
+    if (!spec) throw new Error("no spec");
+    const terminal = workerDenylist(ROOT, BASE, { terminal: true });
+    const self = {
+      exec: "/usr/local/bin/node",
+      args: ["/opt/kodel/dist/kodel.js"],
+      root: ROOT,
+      stateDir: "/home/u/state",
+    };
+    expect(spec).toEqual({
+      argv: terminalWorkerArgv({
+        prompt: workerPrompt(RUN, "Add a flag", WORKTREE),
+        mcpConfig: workerMcpConfig({ ...self, waitCommand: workerWaitCommand(self) }),
+        allowed: workerAllowlist(SERVED),
+        denied: terminal,
+        sessionId: UUID,
+      }),
+      cwd: WORKTREE,
+      name: `kw-${RUN}`,
+      origin: "cli",
+      timeoutMs: WORKER_TERMINAL_TIMEOUT_MS,
+      inheritEnv: false,
+      env: workerEnv(ENV),
+      mode: "pty",
+      size: { cols: 120, rows: 40 },
+      agent: { engine: "claude", session: UUID },
+    });
+    expect(validateSpec(spec)).toBeUndefined();
+    const argv = spec.argv ?? [];
+    expect(argv).not.toContain("-p");
+    expect(argv.at(-2)).toBe("--");
+    // Its server spells the command it watches its run with; the shell that runs it has no KODEL_* of its own.
+    const mcp = JSON.parse(argv[argv.indexOf("--mcp-config") + 1] ?? "{}") as {
+      mcpServers: { kodel: { args: string[] } };
+    };
+    const args = mcp.mcpServers.kodel.args;
+    expect(args).not.toContain("--no-wait-hint");
+    expect(args[args.indexOf("--wait-command") + 1]).toBe(workerWaitCommand(self));
+    expect(Object.keys(spec.env ?? {}).filter((key) => key.startsWith("KODEL_"))).toEqual([]);
+    expect(terminal).not.toContain("Bash(*kodel* wait r_*)");
+    // The starter's own terminal gives the first size when it has one.
+    const sized = new ScriptedSessionAdapter();
+    await createSessionWorkerLauncher(
+      terminalDeps(sized, { terminalSize: () => ({ cols: 200, rows: 50 }) }),
+    ).start({ runId: RUN, workdir: WORKTREE, title: "t" });
+    expect(sized.specs[0]?.size).toEqual({ cols: 200, rows: 50 });
+    // The person's committed flags are beside kodel's own, and the built argv is read back before the start.
+    const flagged = new ScriptedSessionAdapter();
+    await createSessionWorkerLauncher(
+      terminalDeps(flagged, {
+        engines: enginesOf("terminal", { terminal: { command: ["claude", "--model", "opus"] } }),
+      }),
+    ).start({ runId: RUN, workdir: WORKTREE, title: "t" });
+    const withFlags = flagged.specs[0]?.argv ?? [];
+    const at = withFlags.indexOf("--model");
+    expect(withFlags.slice(at, at + 2)).toEqual(["--model", "opus"]);
+    const refused = new ScriptedSessionAdapter();
+    await expect(
+      createSessionWorkerLauncher(
+        terminalDeps(refused, {
+          engines: enginesOf("terminal", { terminal: { command: ["claude", "--add-dir", "/"] } }),
+        }),
+      ).start({ runId: RUN, workdir: WORKTREE, title: "t" }),
+    ).rejects.toThrow("terminal.command");
+    expect(refused.starts).toBe(0);
+  });
+
+  test("t45_worker_print_spec_is_todays", async () => {
+    const adapter = new ScriptedSessionAdapter();
+    const launcher = createSessionWorkerLauncher(terminalDeps(adapter, {}, "print"));
+    await launcher.start({ runId: RUN, workdir: WORKTREE, title: "Add a flag" });
+    const { agent, ...spec } = adapter.specs[0] ?? { agent: undefined };
+    // Byte for byte the spec of the `claude -p` worker before T-45; only the `agent` record is new.
+    expect(spec).toEqual({
+      argv: [
+        "claude",
+        "-p",
+        workerPrompt(RUN, "Add a flag", WORKTREE),
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--session-id",
+        UUID,
+        "--mcp-config",
+        JSON.stringify({
+          mcpServers: {
+            kodel: {
+              command: "/usr/local/bin/node",
+              args: [
+                "/opt/kodel/dist/kodel.js",
+                "--root",
+                ROOT,
+                "mcp",
+                "--no-decisions",
+                "--no-wait-hint",
+              ],
+              env: { KODEL_STATE_DIR: "/home/u/state" },
+            },
+          },
+        }),
+        "--strict-mcp-config",
+        "--permission-mode",
+        "dontAsk",
+        "--allowedTools",
+        workerAllowlist(SERVED).join(","),
+        "--disallowedTools",
+        workerDenylist(ROOT, BASE).join(","),
+      ],
+      cwd: WORKTREE,
+      name: `kw-${RUN}`,
+      origin: "cli",
+      timeoutMs: 12 * 3_600_000,
+      inheritEnv: false,
+      env: workerEnv(ENV),
+    });
+    expect(agent).toEqual({ engine: "claude", session: UUID });
+    expect(workerDenylist(ROOT, BASE)).toContain("Bash(*kodel* wait r_*)");
+  });
+
+  test("t45_print_start_writes_the_agent_record", async () => {
+    // The starter writes `agent.json` from `spec.agent` (`tA_agent_record_is_written_once`): a print
+    // start gives it the engine and the chosen id like a terminal one, and so does a resume.
+    const adapter = new ScriptedSessionAdapter();
+    const launcher = createSessionWorkerLauncher(terminalDeps(adapter, {}, "print"));
+    await launcher.start({ runId: RUN, workdir: WORKTREE, title: "t" });
+    const first = adapter.only();
+    expect(first.spec.agent).toEqual({ engine: "claude", session: UUID });
+    expect(first.spec.mode).toBeUndefined();
+    adapter.finish(first.id, { state: "exited", exitCode: 0, since: 9_000 });
+    await launcher.resume({ runId: RUN, workdir: WORKTREE, sessionId: UUID, decision: DECISION });
+    expect(adapter.only(`kw-${RUN}-d17`).spec.agent).toEqual({
+      engine: "claude",
+      session: UUID,
+      resumes: first.id,
+    });
+    // Neither holds a prompt or an argv.
+    expect(JSON.stringify(first.spec.agent)).not.toContain("Kodel run");
+  });
+
+  test("t45_terminal_that_cannot_run_is_refused", async () => {
+    for (const [what, reason] of NO_PTY) {
+      const adapter = new ScriptedSessionAdapter();
+      const launcher = createSessionWorkerLauncher(
+        terminalDeps(adapter, { ptyProbe: () => ({ ok: false, reason }) }),
+      );
+      const check = await launcher.preflight({ dialog: false, taskLink: true, pipelines: 1 });
+      expect(check.ok, what).toBe(false);
+      expect(check.ok ? "" : check.reason).toContain(reason);
+      // A start that skipped the preflight is refused the same way, and nothing reaches the adapter.
+      await expect(launcher.start({ runId: RUN, workdir: WORKTREE, title: "t" })).rejects.toThrow(
+        reason,
+      );
+      expect(adapter.starts, what).toBe(0);
+      // The TUI asks before it makes a run: no run, no agent.
+      const h = host();
+      const opts = await options(h, launcher);
+      const key = await seedTask(`Task ${what}`);
+      const asked = await opts.prepareStart?.(key);
+      expect(asked?.ok, what).toBe(false);
+      expect(asked?.ok === false ? asked.message : "").toContain(reason);
+      expect(await h.runSummaries()).toEqual([]);
+    }
+    // The daemon asks the same preflight and uses no attempt: `t44_environment_no_claude_is_not_an_attempt`.
+  });
+
+  test("t45_no_mechanism_is_switched_by_itself", async () => {
+    // `terminal` where no terminal runs: no print worker instead.
+    const none = new ScriptedSessionAdapter();
+    await expect(
+      createSessionWorkerLauncher(
+        terminalDeps(none, { ptyProbe: () => ({ ok: false, reason: "no terminal here" }) }),
+      ).start({ runId: RUN, workdir: WORKTREE, title: "t" }),
+    ).rejects.toThrow("no terminal here");
+    expect(none.specs).toEqual([]);
+    // `print` where a terminal runs: no terminal worker instead, and the probe is not even asked.
+    const print = new ScriptedSessionAdapter();
+    let asked = 0;
+    await createSessionWorkerLauncher(
+      terminalDeps(
+        print,
+        {
+          ptyProbe: () => {
+            asked += 1;
+            return { ok: true };
+          },
+        },
+        "print",
+      ),
+    ).start({ runId: RUN, workdir: WORKTREE, title: "t" });
+    expect(print.specs.map((spec) => spec.mode)).toEqual([undefined]);
+    expect(print.specs[0]?.argv?.[1]).toBe("-p");
+    expect(asked).toBe(0);
+    // A terminal start that fails is not tried again another way.
+    const failing = new ScriptedSessionAdapter();
+    failing.failStart = { code: "HOLDER_BOOT_FAILED" };
+    await expect(
+      createSessionWorkerLauncher(terminalDeps(failing)).start({
+        runId: RUN,
+        workdir: WORKTREE,
+        title: "t",
+      }),
+    ).rejects.toThrow();
+    expect(failing.specs.map((spec) => spec.mode)).toEqual(["pty"]);
+  });
+
+  test("t45_holder_failure_is_a_failed_start", async () => {
+    // The holder cannot open the terminal: the start fails as any launch does, with the session's own error.
+    const adapter = new ScriptedSessionAdapter();
+    adapter.failStart = { code: "HOLDER_BOOT_FAILED" };
+    const launcher = createSessionWorkerLauncher(terminalDeps(adapter));
+    const failure = await launcher
+      .start({ runId: RUN, workdir: WORKTREE, title: "t" })
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(SessionError);
+    expect((failure as SessionError).code).toBe("HOLDER_BOOT_FAILED");
+    expect(adapter.starts).toBe(1);
+    expect(adapter.sessions.size).toBe(0);
+    // Through the TUI's start the run is kept and said to have no agent (the daemon notes `not_started`:
+    // `t44_failed_launch_is_noted_not_retried`).
+    const key = await seedTask();
+    const started = await (await options(host(), launcher)).startTask?.(key, "one");
+    expect(started?.ok).toBe(false);
+    expect(started?.message).toContain("was made but no agent was started");
+    expect(adapter.specs.every((spec) => spec.mode === "pty")).toBe(true);
+  });
+
+  test("t45_refusal_spells_the_migration_line", async () => {
+    expect(WORKER_PRINT_MIGRATION_LINE).toBe("engines: { claude: { worker: print } }");
+    const reason = NO_PTY[0]?.[1] ?? "";
+    const probe = () => ({ ok: false as const, reason });
+    const adapter = new ScriptedSessionAdapter();
+    const refused = await createSessionWorkerLauncher(
+      terminalDeps(adapter, { ptyProbe: probe }),
+    ).preflight({ dialog: false, taskLink: true, pipelines: 1 });
+    expect(refused.ok ? "" : refused.reason).toBe(
+      `${reason}; to start agents without a terminal, commit ${WORKER_PRINT_MIGRATION_LINE} in .kodel/config.yaml`,
+    );
+    // With that line committed the same machine starts today's worker.
+    const launcher = createSessionWorkerLauncher(
+      terminalDeps(adapter, { ptyProbe: probe }, "print"),
+    );
+    expect(await launcher.preflight({ dialog: false, taskLink: true, pipelines: 1 })).toEqual({
+      ok: true,
+    });
+    await launcher.start({ runId: RUN, workdir: WORKTREE, title: "t" });
+    expect(adapter.specs[0]?.argv?.slice(0, 2)).toEqual(["claude", "-p"]);
+  });
+
+  test("t45_dialog_still_refuses_every_worker", async () => {
+    for (const worker of ["terminal", "print"] as const) {
+      const adapter = new ScriptedSessionAdapter();
+      const launcher = createSessionWorkerLauncher(terminalDeps(adapter, {}, worker));
+      const check = await launcher.preflight({ dialog: true, taskLink: true, pipelines: 1 });
+      expect(check.ok ? "" : check.reason).toContain("decisions.dialog");
+      // also for a run with no task (`kodel agent start --pipeline`)
+      const noTask = await launcher.preflight({
+        dialog: true,
+        taskLink: false,
+        pipelines: 1,
+        noTask: true,
+      });
+      expect(noTask.ok).toBe(false);
+    }
+    // A run with no task skips only the tracker check.
+    const adapter = new ScriptedSessionAdapter();
+    const launcher = createSessionWorkerLauncher(terminalDeps(adapter));
+    const input = { dialog: false, taskLink: false, pipelines: 1 };
+    expect((await launcher.preflight(input)).ok).toBe(false);
+    expect((await launcher.preflight({ ...input, noTask: true })).ok).toBe(true);
+  });
+
+  test("t45_every_starter_builds_the_same_spec", async () => {
+    // The TUI's start, with the launcher it was given, and what it asks of it.
+    const tui = new ScriptedSessionAdapter();
+    const real = createSessionWorkerLauncher(terminalDeps(tui));
+    const asked: StartInput[] = [];
+    const recording: WorkerLauncher = {
+      ...real,
+      start: (input) => {
+        asked.push(input);
+        return real.start(input);
+      },
+    };
+    const key = await seedTask("Add a flag");
+    const started = await (await options(host(), recording)).startTask?.(key, "one");
+    expect(started?.ok).toBe(true);
+    const [input] = asked;
+    if (!input) throw new Error("the TUI asked for no start");
+    // The daemon's port over the same launcher code gives the adapter the same spec for that run.
+    const daemon = new ScriptedSessionAdapter();
+    await serveLauncherOf(createSessionWorkerLauncher(terminalDeps(daemon))).start(input);
+    expect(daemon.specs).toEqual(tui.specs);
+    // Each takes the `claude` profile by name from the one table.
+    const profile = agentProfile("claude");
+    expect(tui.specs[0]?.agent?.engine).toBe("claude");
+    expect(tui.specs[0]?.argv?.[0]).toBe(profile?.program ?? "");
+    expect(AGENT_PROFILES.claude).toBe(profile as AgentProfile);
+    // `kodel agent start --pipeline` is the third starter (TASK-EKAV step 10): it calls this launcher too.
+  });
+
+  test("t45_one_caller_starts_workers", () => {
+    // A worker's name is `workerNameOf(...)`; only the session launcher gives one to `adapter.start`.
+    const roots = [join(import.meta.dir, "../src"), join(import.meta.dir, "../../local/src")];
+    const files = roots.flatMap((root) =>
+      (readdirSync(root, { recursive: true }) as string[])
+        .filter((file) => file.endsWith(".ts"))
+        .map((file) => join(root, file)),
+    );
+    const starters = files.filter((file) => {
+      const text = readFileSync(file, "utf8");
+      return /adapter\.start\(/.test(text) && /workerNameOf\(|name: ["'`]kw-/.test(text);
+    });
+    expect(starters.map((file) => file.split("/").at(-1))).toEqual(["worker-launcher-session.ts"]);
+    // And the factory that builds that launcher is the one `tui` and `serve` open.
+    const cli = readFileSync(join(import.meta.dir, "../src/cli.ts"), "utf8");
+    expect(cli.match(/createSessionWorkerLauncher/g)).toBeNull();
+  });
+
+  test("t45_engine_choice_is_not_built", async () => {
+    // `serve.start[].engine` is an unknown key: which engine a worker uses is the follow-up task's.
+    const store = join(dir, ".kodel");
+    writeFileSync(
+      join(store, "config.yaml"),
+      `${CONFIG}serve:\n  start:\n    - pipeline: one\n      engine: claude\n`,
+    );
+    await expect(loadConfig(store)).rejects.toThrow(/engine/);
+    // `kodel agent start --engine` comes with `agent start` (step 10), as an unknown flag.
+    const input: StartInput = { runId: RUN, workdir: WORKTREE, title: "t" };
+    expect(Object.keys(input)).toEqual(["runId", "workdir", "title"]);
+  });
+
+  test("t45_trust_is_probed_for_the_worktrees_folder", async () => {
+    const worktrees = "/proj/.kodel/worktrees";
+    const reads: string[] = [];
+    const answer = async (file: string | undefined, worker: "terminal" | "print" = "terminal") => {
+      const adapter = new ScriptedSessionAdapter();
+      const launcher = createSessionWorkerLauncher(
+        terminalDeps(
+          adapter,
+          {
+            readText: async (path) => {
+              reads.push(path);
+              return file;
+            },
+          },
+          worker,
+        ),
+      );
+      const check = await launcher.preflight({
+        dialog: false,
+        taskLink: true,
+        pipelines: 1,
+        worktreesDir: worktrees,
+        unattended: true,
+      });
+      // Before any run exists: nothing was started.
+      expect(adapter.starts).toBe(0);
+      return check;
+    };
+    const trusted = JSON.stringify({ projects: { "/proj": { hasTrustDialogAccepted: true } } });
+    // Trust of a folder above is inherited; the file is claude's own, in its config folder.
+    expect(await answer(trusted)).toEqual({ ok: true });
+    expect(reads).toEqual(["/home/u/.claude/.claude.json"]);
+    expect(await trustProbe(worktrees, ENV, async () => trusted)).toBe("trusted");
+    expect(await trustProbe("/proj", ENV, async () => trusted)).toBe("trusted");
+    expect(await trustProbe("/projects", ENV, async () => trusted)).toBe("will_ask");
+    const elsewhere = JSON.stringify({
+      projects: { "/other": { hasTrustDialogAccepted: true }, "/proj": {} },
+    });
+    expect(await trustProbe(worktrees, ENV, async () => elsewhere)).toBe("will_ask");
+    // Another product's file: anything that is not the shape known is "unknown", never a refusal.
+    for (const odd of [undefined, "not json", "[]", JSON.stringify({ projects: 3 })]) {
+      expect(await trustProbe(worktrees, ENV, async () => odd)).toBe("unknown");
+    }
+    expect(await trustProbe(worktrees, { PATH: "/bin" }, async () => trusted)).toBe("unknown");
+    // A print worker is asked no such question: the file is not read for it.
+    reads.length = 0;
+    expect(await answer(JSON.stringify({ projects: {} }), "print")).toEqual({ ok: true });
+    expect(reads).toEqual([]);
+  });
+
+  test("t45_preflight_blocks_an_unattended_start_when_trust_asks", async () => {
+    const worktrees = "/proj/.kodel/worktrees";
+    const check = (file: string | undefined, unattended: boolean) =>
+      createSessionWorkerLauncher(
+        terminalDeps(new ScriptedSessionAdapter(), { readText: async () => file }),
+      ).preflight({
+        dialog: false,
+        taskLink: true,
+        pipelines: 1,
+        worktreesDir: worktrees,
+        unattended,
+      });
+    const asks = JSON.stringify({ projects: { "/elsewhere": { hasTrustDialogAccepted: true } } });
+    // "Will ask" blocks a start nobody watches.
+    const blocked = await check(asks, true);
+    expect(blocked.ok).toBe(false);
+    expect(blocked.ok ? "" : blocked.reason).toContain(
+      `claude in ${worktrees} will first ask whether the folder is trusted`,
+    );
+    // A person's start goes on, with a notice.
+    const person = await check(asks, false);
+    expect(person.ok).toBe(true);
+    expect(person.ok ? person.note : "").toContain("open the agent and answer it");
+    // Unknown lets the daemon's start go, and says so (the daemon logs it once).
+    const unknown = await check(undefined, true);
+    expect(unknown.ok).toBe(true);
+    expect(unknown.ok ? unknown.note : "").toContain("is not known");
+    expect(await check(undefined, false)).toEqual({ ok: true });
+  });
+
+  test("t45_engines_as_committed_refuse_a_start", async () => {
+    const refusing = async (): Promise<UnattendedEngines> => ({
+      ok: false,
+      reason:
+        "engines is used only as committed: commit .kodel/config.yaml or put the block back as it was",
+    });
+    const adapter = new ScriptedSessionAdapter();
+    const launcher = createSessionWorkerLauncher(terminalDeps(adapter, { engines: refusing }));
+    const check = await launcher.preflight({ dialog: false, taskLink: true, pipelines: 1 });
+    expect(check.ok ? "" : check.reason).toContain("engines is used only as committed");
+    await expect(launcher.start({ runId: RUN, workdir: WORKTREE, title: "t" })).rejects.toThrow(
+      "engines is used only as committed",
+    );
+    expect(adapter.starts).toBe(0);
+    // A reader that throws (a config that does not load) refuses too.
+    const broken = createSessionWorkerLauncher(
+      terminalDeps(adapter, {
+        engines: async () => {
+          throw new Error("engines.codex: unknown key");
+        },
+      }),
+    );
+    expect((await broken.preflight({ dialog: false, taskLink: true, pipelines: 1 })).ok).toBe(
+      false,
+    );
+    // The one line about a config git does not track comes back as a note.
+    const noted = createSessionWorkerLauncher(
+      terminalDeps(adapter, {
+        engines: async () => ({
+          ok: true,
+          engines: { claude: { worker: "print" } },
+          note: "taken from a .kodel/config.yaml that git does not track",
+        }),
+      }),
+    );
+    expect(await noted.preflight({ dialog: false, taskLink: true, pipelines: 1 })).toEqual({
+      ok: true,
+      note: "taken from a .kodel/config.yaml that git does not track",
+    });
+  });
+});
+
+describe("t45 the id of a worker's conversation", () => {
+  test("t45_session_id_is_the_chosen_one", async () => {
+    // A terminal argv ends with the prompt, and a title may spell a flag: the id is the record's.
+    const adapter = new ScriptedSessionAdapter();
+    const launcher = createSessionWorkerLauncher(terminalDeps(adapter));
+    await launcher.start({ runId: RUN, workdir: WORKTREE, title: `fix --session-id ${OTHER}` });
+    const first = adapter.only();
+    expect(first.spec.argv?.at(-1)).toContain(`--session-id ${OTHER}`);
+    expect((await launcher.statuses([RUN])).get(RUN)).toMatchObject({
+      sessionId: UUID,
+      terminal: true,
+    });
+    adapter.finish(first.id, { state: "exited", exitCode: 0, since: 9_000 });
+    await launcher.resume({ runId: RUN, workdir: WORKTREE, sessionId: UUID, decision: DECISION });
+    const resumed = adapter.only(`kw-${RUN}-d17`).spec.argv ?? [];
+    expect(resumed[resumed.indexOf("--resume") + 1]).toBe(UUID);
+    expect((await launcher.statuses([RUN])).get(RUN)?.sessionId).toBe(UUID);
+    // Without the record the argv of a terminal session would name the title's id: it is never read.
+    const entry = (more: Partial<SessionListEntry>): SessionListEntry => ({
+      id: "a_000000001_fake",
+      name: `kw-${RUN}`,
+      command: (first.spec.argv ?? []).join(" "),
+      status: { state: "exited" },
+      mode: "pty",
+      ...more,
+    });
+    expect(workerStatusOf([entry({ agent: { engine: "claude", session: UUID } })])?.sessionId).toBe(
+      UUID,
+    );
+    // A record of another engine names no conversation of this profile.
+    expect(
+      workerStatusOf([entry({ agent: { engine: "codex", session: OTHER } })])?.sessionId,
+    ).toBeUndefined();
+    expect(workerStatusOf([entry({ agent: { engine: "claude" } })])?.sessionId).toBeUndefined();
+  });
+
+  test("t45_session_id_never_from_the_screen", async () => {
+    for (const worker of ["terminal", "print"] as const) {
+      const adapter = new ScriptedSessionAdapter();
+      const launcher = createSessionWorkerLauncher(terminalDeps(adapter, {}, worker));
+      await launcher.start({ runId: RUN, workdir: WORKTREE, title: "t" });
+      // What the agent printed names another conversation: nothing reads an id from it.
+      adapter.finish(
+        adapter.only().id,
+        { state: "running" },
+        `${INIT(OTHER)}\n${RESULT(OTHER)}\n--session-id ${OTHER}\n--resume ${OTHER}\n`,
+      );
+      expect((await launcher.statuses([RUN])).get(RUN)?.sessionId, worker).toBe(UUID);
+      const progress = await launcher.progress(RUN);
+      expect(Object.keys(progress)).toEqual(["lines"]);
+      expect((await launcher.statuses([RUN])).get(RUN)?.sessionId, worker).toBe(UUID);
+    }
+  });
+
+  test("t45_older_record_id_comes_from_its_argv", async () => {
+    // A record from before the `agent` record existed: listed without one, its id read from its argv.
+    const adapter = new ScriptedSessionAdapter();
+    const launcher = createSessionWorkerLauncher(
+      terminalDeps(adapter, { exec: fakeExec(adapter, { noAgent: true }) }, "print"),
+    );
+    await launcher.start({ runId: RUN, workdir: WORKTREE, title: `t --session-id ${OTHER}` });
+    const first = adapter.only();
+    adapter.finish(first.id, { state: "exited", exitCode: 0, since: 9_000 });
+    const starts = adapter.starts;
+    expect((await launcher.statuses([RUN])).get(RUN)?.sessionId).toBe(UUID);
+    // Reading it writes nothing and starts nothing.
+    expect(adapter.starts).toBe(starts);
+    // An argv without a valid id names none, and the rule says `no_session_id`.
+    const row = (command: string): SessionListEntry => ({
+      id: "a_000000001_fake",
+      name: `kw-${RUN}`,
+      command,
+      status: { state: "exited", exitCode: 0, since: 4_500 },
+      mode: "pipes",
+    });
+    expect(
+      workerStatusOf([row("claude -p hello --session-id not-a-uuid")])?.sessionId,
+    ).toBeUndefined();
+    const none = workerStatusOf([row("claude -p hello")]);
+    if (!none) throw new Error("no status");
+    expect(none.sessionId).toBeUndefined();
+    const journal = [
+      { v: 2, seq: 1, ts: 1_000, event: "run_started" },
+      { v: 2, seq: 2, ts: 4_000, event: "gate_waiting", node: "g" },
+      { v: 2, seq: 3, ts: 5_000, event: "gate_decided", node: "g", decision: "approved" },
+    ] as Parameters<typeof decisionOf>[0];
+    const verdict = resumeVerdict(
+      { runId: RUN, status: "running", waitsForPerson: false, marks: decisionOf(journal) },
+      serveWorkerOf({ ...none, started: 0 }),
+      { refuseMoved: true },
+    );
+    expect(verdict).toEqual({ kind: "no", why: "no_session_id" });
+  });
+
+  test("t45_inflight_print_worker_is_resumed_after_the_update", async () => {
+    // A `claude -p` worker record as a build before T-45 wrote it (no `agent.json`), exited at its gate.
+    const fixture = join(
+      import.meta.dir,
+      "../../../fixtures/session-formats/v1/worker-print-before-t45",
+    );
+    expect(readdirSync(fixture).sort()).toEqual(["session.json", "status.json"]);
+    const stateBase = mkdtempSync(join(tmpdir(), "kodel-worker-old-"));
+    made.push(stateBase);
+    const place = sessionPlace({ base: stateBase, root: dir });
+    const id = "a_0loyw3v28_0000";
+    mkdirSync(place.dir, { recursive: true, mode: 0o700 });
+    cpSync(fixture, join(place.dir, id), { recursive: true });
+    const old = `kw-${RUN}`;
+    const stored = new PipesSessionAdapter({
+      base: stateBase,
+      root: dir,
+      holder: { exec: process.execPath, args: ["holder"] },
+      intermediate: { exec: process.execPath, args: [] },
+    });
+    const listed = await stored.list();
+    expect(listed).toHaveLength(1);
+    expect(listed[0]).toMatchObject({ id, name: old, mode: "pipes", status: { state: "exited" } });
+    expect(listed[0]?.agent).toBeUndefined();
+    // The launcher reads it through `agent ls --json`; the start of the resume goes to the scripted adapter.
+    const adapter = new ScriptedSessionAdapter();
+    const launcher = createSessionWorkerLauncher(
+      terminalDeps(
+        adapter,
+        { exec: async () => ({ stdout: JSON.stringify(listed), stderr: "", code: 0 }) },
+        "print",
+      ),
+    );
+    const status = (await launcher.statuses([RUN])).get(RUN);
+    // The id is the last `--session-id` of its argv, not the one the task's title spells.
+    expect(status).toMatchObject({ name: old, state: "exited", sessionId: UUID, resumes: 0 });
+    expect(status?.terminal).toBeUndefined();
+    if (!status) throw new Error("no status");
+    // Decided after the update: resumed, once, with that id.
+    const journal = [
+      { v: 2, seq: 1, ts: 1_700_000_001_000, event: "run_started" },
+      { v: 2, seq: 2, ts: 1_700_000_050_000, event: "gate_waiting", node: "g" },
+    ] as Parameters<typeof decisionOf>[0];
+    const view = serveWorkerOf(status);
+    const run = (records: typeof journal, waitsForPerson: boolean) => ({
+      runId: RUN,
+      status: "running" as const,
+      waitsForPerson,
+      marks: decisionOf(records),
+    });
+    // Until the decision it keeps its place and is not a worker without an id.
+    expect(resumeVerdict(run(journal, true), view, { refuseMoved: true })).toEqual({
+      kind: "no",
+      why: "waiting_person",
+    });
+    const decided = [
+      ...journal,
+      {
+        v: 2,
+        seq: 3,
+        ts: 1_700_000_900_000,
+        event: "gate_decided",
+        node: "g",
+        decision: "approved",
+      },
+    ] as typeof journal;
+    const verdict = resumeVerdict(run(decided, false), view, { refuseMoved: true });
+    expect(verdict.kind).toBe("resume");
+    if (verdict.kind !== "resume") throw new Error("no resume");
+    await launcher.resume({
+      runId: RUN,
+      workdir: WORKTREE,
+      sessionId: status.sessionId ?? "",
+      decision: verdict.decision,
+    });
+    expect(adapter.starts).toBe(1);
+    const argv = adapter.specs[0]?.argv ?? [];
+    expect(argv[argv.indexOf("--resume") + 1]).toBe(UUID);
+    expect(adapter.specs[0]?.name).toBe(`kw-${RUN}-d3`);
+    expect(adapter.specs[0]?.agent).toEqual({ engine: "claude", session: UUID, resumes: id });
+    // Nothing was written into the old record's folder.
+    expect(readdirSync(join(place.dir, id)).sort()).toEqual(["session.json", "status.json"]);
+  });
+});
+
+describe("t45 one live worker a run", () => {
+  test("t45_one_live_worker_per_run_across_modes", async () => {
+    // A print worker lives; the setting becomes `terminal`: no second agent for the run, by its name.
+    const adapter = new NamedAdapter();
+    const print = createSessionWorkerLauncher(terminalDeps(adapter, {}, "print"));
+    const terminal = createSessionWorkerLauncher(terminalDeps(adapter));
+    await print.start({ runId: RUN, workdir: WORKTREE, title: "t" });
+    const second = await terminal
+      .start({ runId: RUN, workdir: WORKTREE, title: "t" })
+      .catch((error: unknown) => error);
+    expect((second as SessionError).code).toBe("NAME_TAKEN");
+    // A resume while it lives has another name, and is refused all the same.
+    const resumed = await terminal
+      .resume({ runId: RUN, workdir: WORKTREE, sessionId: UUID, decision: DECISION })
+      .catch((error: unknown) => error);
+    expect(resumed).toBeInstanceOf(SessionError);
+    expect((resumed as SessionError).code).toBe("NAME_TAKEN");
+    expect(adapter.sessions.size).toBe(1);
+    // A record whose process still runs without a holder is alive too.
+    const orphan = createSessionWorkerLauncher(
+      terminalDeps(adapter, {
+        exec: async () => ({
+          stdout: JSON.stringify([
+            {
+              id: "a_000000001_fake",
+              name: `kw-${RUN}`,
+              status: { state: "lost", reason: "holder_gone", childAlive: true },
+              mode: "pty",
+              agent: { engine: "claude", session: UUID },
+            },
+          ]),
+          stderr: "",
+          code: 0,
+        }),
+      }),
+    );
+    await expect(
+      orphan.resume({ runId: RUN, workdir: WORKTREE, sessionId: UUID, decision: DECISION }),
+    ).rejects.toThrow("its process still runs without a holder; stop it: kodel agent stop");
+    expect(adapter.sessions.size).toBe(1);
+  });
+
+  test("t45_tui_and_daemon_resume_one_decision_once", async () => {
+    // Two launchers (the TUI's and the daemon's) over one set of records resume one decision.
+    const adapter = new NamedAdapter();
+    const tui = createSessionWorkerLauncher(terminalDeps(adapter));
+    const daemon = serveLauncherOf(createSessionWorkerLauncher(terminalDeps(adapter)));
+    await tui.start({ runId: RUN, workdir: WORKTREE, title: "t" });
+    adapter.finish(adapter.only().id, { state: "exited", exitCode: 0, since: 9_000 });
+    const input = { runId: RUN, workdir: WORKTREE, sessionId: UUID, decision: DECISION };
+    const answers = await Promise.allSettled([tui.resume(input), daemon.resume(input)]);
+    expect(answers.filter((a) => a.status === "fulfilled")).toHaveLength(1);
+    const refused = answers.find((a) => a.status === "rejected") as PromiseRejectedResult;
+    expect((refused.reason as SessionError).code).toBe("NAME_TAKEN");
+    expect([...adapter.sessions.values()].map((s) => s.name)).toEqual([
+      `kw-${RUN}`.toLowerCase(),
+      `kw-${RUN}-d17`.toLowerCase(),
+    ]);
+    // And one after the other: the second reads the records again and finds the first one's session.
+    await expect(daemon.resume(input)).rejects.toMatchObject({ code: "NAME_TAKEN" });
+  });
+
+  test("t45_resume_stays_in_the_records_mode", async () => {
+    // A profile whose conversations do not cross: the resume is in the mode of the record that wrote it.
+    const claude = agentProfile("claude") as AgentProfile;
+    const profile: AgentProfile = { ...claude, resumeAcrossModes: false };
+    for (const [written, setting] of [
+      ["print", "terminal"],
+      ["terminal", "print"],
+    ] as const) {
+      const adapter = new ScriptedSessionAdapter();
+      const first = createSessionWorkerLauncher(terminalDeps(adapter, { profile }, written));
+      await first.start({ runId: RUN, workdir: WORKTREE, title: "t" });
+      adapter.finish(adapter.only().id, { state: "exited", exitCode: 0, since: 9_000 });
+      const later = createSessionWorkerLauncher(terminalDeps(adapter, { profile }, setting));
+      await later.resume({ runId: RUN, workdir: WORKTREE, sessionId: UUID, decision: DECISION });
+      expect(adapter.specs[1]?.mode, written).toBe(written === "terminal" ? "pty" : undefined);
+    }
+  });
+
+  test("t45_resume_across_modes_when_it_continues", async () => {
+    // claude continues a conversation across the two (spike criterion 9): the setting's mode is used.
+    expect(agentProfile("claude")?.resumeAcrossModes).toBe(true);
+    for (const [written, setting] of [
+      ["print", "terminal"],
+      ["terminal", "print"],
+    ] as const) {
+      const adapter = new ScriptedSessionAdapter();
+      const first = createSessionWorkerLauncher(terminalDeps(adapter, {}, written));
+      await first.start({ runId: RUN, workdir: WORKTREE, title: "t" });
+      adapter.finish(adapter.only().id, { state: "exited", exitCode: 0, since: 9_000 });
+      const later = createSessionWorkerLauncher(terminalDeps(adapter, {}, setting));
+      await later.resume({ runId: RUN, workdir: WORKTREE, sessionId: UUID, decision: DECISION });
+      const spec = adapter.specs[1];
+      expect(spec?.mode, written).toBe(setting === "terminal" ? "pty" : undefined);
+      const argv = spec?.argv ?? [];
+      expect(argv[argv.indexOf("--resume") + 1]).toBe(UUID);
+      expect(argv.includes("-p")).toBe(setting === "print");
+    }
+  });
+
+  test("t45_resume_refused_makes_no_record", async () => {
+    const adapter = new ScriptedSessionAdapter();
+    const launcher = createSessionWorkerLauncher(terminalDeps(adapter, {}, "print"));
+    await launcher.start({ runId: RUN, workdir: WORKTREE, title: "t" });
+    adapter.finish(adapter.only().id, { state: "exited", exitCode: 0, since: 9_000 });
+    const input = { runId: RUN, workdir: WORKTREE, sessionId: UUID, decision: DECISION };
+    // The mode of the resume cannot run here: refused with the reason, nothing reaches the adapter.
+    const noTerminal = createSessionWorkerLauncher(
+      terminalDeps(adapter, { ptyProbe: () => ({ ok: false, reason: "no terminal here" }) }),
+    );
+    await expect(noTerminal.resume(input)).rejects.toThrow("no terminal here");
+    // An id the records do not name is not tried.
+    await expect(launcher.resume({ ...input, sessionId: OTHER })).rejects.toThrow(
+      "the id of the agent's conversation is not known",
+    );
+    // A run with no record at all.
+    await expect(launcher.resume({ ...input, runId: "r_0mw53d7fj_none" })).rejects.toThrow(
+      "is gone",
+    );
+    expect(adapter.starts).toBe(1);
+    expect(adapter.sessions.size).toBe(1);
+    // The daemon counts each as one failed attempt, three at most: `t44_failed_resume_is_retried_then_given_up`.
+  });
+
+  test("t45_nothing_types_into_a_session", async () => {
+    const adapter = new TypingAdapter();
+    const launcher = createSessionWorkerLauncher(terminalDeps(adapter));
+    const port = serveLauncherOf(launcher);
+    await launcher.preflight({ dialog: false, taskLink: true, pipelines: 1 });
+    await port.start({ runId: RUN, workdir: WORKTREE, title: "t" });
+    await port.statuses([RUN]);
+    await launcher.progress(RUN);
+    await launcher.logs(RUN);
+    expect(await launcher.attachable(RUN)).toEqual({ ok: true, id: adapter.only().id });
+    await port.finish(RUN);
+    await launcher.resume({ runId: RUN, workdir: WORKTREE, sessionId: UUID, decision: DECISION });
+    await launcher.stop(RUN);
+    expect(adapter.typed).toBe(0);
+    // Nothing in the launcher, the factory, the TUI's worker code or the daemon calls `send` at all.
+    const files = [
+      "../src/worker-launcher.ts",
+      "../src/worker-launcher-session.ts",
+      "../src/worker-factory.ts",
+      "../src/serve-command.ts",
+      "../src/tui/worker-start.ts",
+      "../src/tui/worker-resume.ts",
+      "../src/tui/run.ts",
+      "../../local/src/serve/daemon.ts",
+    ];
+    for (const file of files) {
+      expect(readFileSync(join(import.meta.dir, file), "utf8"), file).not.toMatch(/\.send\??\.?\(/);
+    }
+    // The daemon's port has no call that could: start, resume, finish, statuses and preflight only.
+    expect(Object.keys(port).sort()).toEqual([
+      "finish",
+      "preflight",
+      "resume",
+      "start",
+      "statuses",
+    ]);
+  });
+
+  test("t45_finish_of_a_stopped_session_is_harmless", async () => {
+    const adapter = new ScriptedSessionAdapter();
+    const launcher = createSessionWorkerLauncher(terminalDeps(adapter));
+    // A run with no record.
+    await launcher.finish(RUN);
+    await launcher.start({ runId: RUN, workdir: WORKTREE, title: "t" });
+    const session = adapter.only();
+    await launcher.finish(RUN);
+    expect(session.status).toMatchObject({ state: "killed", reason: "stopped" });
+    // Again, on a session that is stopped already, and on one that exited by itself.
+    await launcher.finish(RUN);
+    adapter.finish(session.id, { state: "exited", exitCode: 0 });
+    await launcher.finish(RUN);
+    expect(session.status.state).toBe("exited");
+    // A session that ended between the read and the stop is no error either.
+    const racing = new ScriptedSessionAdapter();
+    const raced = createSessionWorkerLauncher(terminalDeps(racing));
+    await raced.start({ runId: RUN, workdir: WORKTREE, title: "t" });
+    racing.stop = async () => {
+      throw new SessionError("NOT_RUNNING", "it ended");
+    };
+    await raced.finish(RUN);
+    // `attachable` says why not for a print worker and for a run with none.
+    const print = new TypingAdapter();
+    const printing = createSessionWorkerLauncher(terminalDeps(print, {}, "print"));
+    expect(await printing.attachable(RUN)).toMatchObject({ ok: false });
+    await printing.start({ runId: RUN, workdir: WORKTREE, title: "t" });
+    const answer = await printing.attachable(RUN);
+    expect(answer.ok ? "" : answer.reason).toContain("runs without a terminal (worker: print)");
   });
 });

@@ -67,16 +67,23 @@ export interface WorkerStatus {
    * worker is alive for every rule, and only the person's `kodel agent stop` ends it.
    */
   childAlive?: true;
+  /** The latest record is a session in a terminal of its own (`mode: pty`): it stays alive at a wait. */
+  terminal?: true;
+  /** How the latest record ended, as the record says (`stopped`, `timeout`, `holder_error`, `holder_gone`, …). */
+  endedBy?: string;
+  /** The agent's profile says an idle session keeps writing to its terminal: output is no sign of work. */
+  idleWrites?: true;
+  /** The process table could not be read for this record: an agent left behind a dead wrapper would not be seen. */
+  groupUnread?: true;
 }
 
 export interface WorkerProgress {
   /** The digest, oldest first. */
   lines: string[];
-  /** The session id the tail names, when it does: it wins over the one read from the records' argv. */
-  sessionId?: string;
 }
 
-export type PreflightResult = { ok: true } | { ok: false; reason: string };
+/** `note`: something the starter is told once though the start may go on. */
+export type PreflightResult = { ok: true; note?: string } | { ok: false; reason: string };
 
 export interface PreflightInput {
   /** `decisions.dialog` of the project config: a background agent cannot answer a dialog. */
@@ -85,6 +92,12 @@ export interface PreflightInput {
   taskLink: boolean;
   /** How many pipelines load. */
   pipelines: number;
+  /** The folder the worktrees of the runs are made in: where the agent's question about trust would come. */
+  worktreesDir?: string;
+  /** Nobody watches the start (the daemon): what would stop at a question is refused. */
+  unattended?: boolean;
+  /** The run has no task (`kodel agent start --pipeline`): the tracker is not asked. */
+  noTask?: boolean;
 }
 
 export interface StartInput {
@@ -115,6 +128,13 @@ export interface WorkerLauncher {
   progress(runId: string): Promise<WorkerProgress>;
   logs(runId: string, bytes?: number): Promise<string>;
   stop(runId: string): Promise<void>;
+  /**
+   * Ends the live session of a run that is over, with the processes it started. A session that is
+   * already stopped or gone is no error. It decides nothing about a run.
+   */
+  finish(runId: string): Promise<void>;
+  /** Whether a person's terminal can be connected to the run's live record now, and which record that is. */
+  attachable(runId: string): Promise<{ ok: true; id: string } | { ok: false; reason: string }>;
 }
 
 /** A worker of a run that `kodel serve` saw gone, as its `worker_note` says (TASK-G8KM, T-44). */

@@ -53,7 +53,7 @@ export interface ScriptedRecord {
 }
 
 export interface ScriptedCall {
-  kind: "preflight" | "start" | "resume" | "statuses";
+  kind: "preflight" | "start" | "resume" | "statuses" | "finish";
   runId?: string;
   name?: string;
   workdir?: string;
@@ -69,6 +69,8 @@ export class ScriptedLauncher implements ServeLauncherPort {
   behaviour: ScriptedBehaviour;
   /** `statuses` throws, as `kodel agent ls` failing does. */
   failStatuses = false;
+  /** `finish` throws this. */
+  failFinish: Error | undefined;
   preflightResult: { ok: true } | { ok: false; reason: string } = { ok: true };
   private count = 0;
 
@@ -129,6 +131,17 @@ export class ScriptedLauncher implements ServeLauncherPort {
       });
     }
     return out;
+  }
+
+  /** `finish`: the live record of the run is stopped, as the launcher's `adapter.stop` does. */
+  async finish(runId: string): Promise<void> {
+    this.calls.push({ kind: "finish", runId });
+    if (this.failFinish !== undefined) throw this.failFinish;
+    const latest = this.of(runId).at(-1);
+    if (latest === undefined || (latest.state !== "running" && latest.state !== "starting")) return;
+    latest.state = "killed";
+    latest.since = this.options.now();
+    latest.stopped = true;
   }
 
   /** The records of a run, oldest first. */

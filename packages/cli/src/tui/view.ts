@@ -657,15 +657,11 @@ export function withWorkersUnknown(m: Model): Model {
   return questionsKept(withOffers({ ...m, workers }));
 }
 
-/** The digest of the selected run's worker. The session id the tail names wins over the records' argv. */
+/** The digest of the selected run's worker. The id of its conversation is the records', never the tail's. */
 export function withProgress(m: Model, runId: string, progress: WorkerProgress): Model {
   const w = m.workers[runId];
   if (w === undefined) return m;
-  const view: WorkerView = {
-    ...w,
-    lines: progress.lines,
-    ...(progress.sessionId === undefined ? {} : { sessionId: progress.sessionId }),
-  };
+  const view: WorkerView = { ...w, lines: progress.lines };
   return questionsKept(withOffers({ ...m, workers: { ...m.workers, [runId]: view } }));
 }
 

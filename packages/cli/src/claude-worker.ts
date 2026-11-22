@@ -552,6 +552,52 @@ export async function authProbe(
   }
 }
 
+export type TrustAnswer = "trusted" | "will_ask" | "unknown";
+
+/**
+ * Whether an interactive `claude` started in `dir` would first ask to trust the folder. It reads claude's
+ * own file (`.claude.json` in `CLAUDE_CONFIG_DIR`, else in the home folder), which is another product's:
+ * a file that is missing, does not parse or has another shape is `unknown`, never a refusal. Trust is
+ * inherited from a folder above (spike criterion 1), so every folder from `dir` up is looked at. Nothing
+ * is written: accepting trust is the person's act.
+ */
+export async function trustProbe(
+  dir: string,
+  environment: Record<string, string | undefined>,
+  readText: (path: string) => Promise<string | undefined>,
+): Promise<TrustAnswer> {
+  const base = environment.CLAUDE_CONFIG_DIR ?? environment.HOME;
+  if (base === undefined || base === "") return "unknown";
+  const text = await readText(`${base.replace(/\/+$/, "")}/.claude.json`).catch(() => undefined);
+  if (text === undefined) return "unknown";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return "unknown";
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return "unknown";
+  const projects = (parsed as Record<string, unknown>).projects;
+  if (typeof projects !== "object" || projects === null || Array.isArray(projects)) {
+    return "unknown";
+  }
+  let at = dir.replace(/\/+$/, "") || "/";
+  for (;;) {
+    const entry = Object.hasOwn(projects, at)
+      ? (projects as Record<string, unknown>)[at]
+      : undefined;
+    if (
+      typeof entry === "object" &&
+      entry !== null &&
+      (entry as Record<string, unknown>).hasTrustDialogAccepted === true
+    ) {
+      return "trusted";
+    }
+    if (at === "/" || !at.includes("/")) return "will_ask";
+    at = at.slice(0, at.lastIndexOf("/")) || "/";
+  }
+}
+
 /** The `claude` entry of the profile table (`agent-profiles.ts`), written against claude 2.1.330. */
 export const claudeProfile: AgentProfile = {
   name: CLAUDE,
@@ -576,5 +622,6 @@ export const claudeProfile: AgentProfile = {
   resumePrompt,
   sessionIdOf: (records) => sessionIdOf(records),
   authProbe,
+  trustProbe,
   digest,
 };

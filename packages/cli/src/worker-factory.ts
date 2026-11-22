@@ -4,9 +4,16 @@
  * by the daemon is the same process, with the same lists and the same server, as one started with `s`.
  */
 import { randomUUID } from "node:crypto";
-import { openTaskService, resolveBase, type ServeLauncherPort } from "@kodel-ai/local";
+import {
+  enginesAgainstHead,
+  openTaskService,
+  resolveBase,
+  type ServeLauncherPort,
+  unattendedEngines,
+} from "@kodel-ai/local";
 import type { ServeWorkerView } from "@kodel-ai/pipeline-core/serve";
 import { pipesAdapter } from "./agent-commands";
+import { terminalSizeOf } from "./attach-client";
 import type { WorkerLauncher, WorkerStatus } from "./worker-launcher";
 
 export interface WorkerLauncherInput {
@@ -45,6 +52,10 @@ export async function openWorkerLauncher(input: WorkerLauncherInput): Promise<Wo
     platform: input.platform ?? process.platform,
     clock: Date.now,
     uuid: () => randomUUID(),
+    // Nobody watches these starts: the block is used only as `HEAD` of the checkout holds it.
+    engines: async () =>
+      unattendedEngines(await enginesAgainstHead({ root, storeRoot: input.dataDir })),
+    terminalSize: () => terminalSizeOf(process.stdout),
   });
 }
 
@@ -68,12 +79,16 @@ export function serveWorkerOf(status: WorkerStatus): ServeWorkerView {
   };
 }
 
-/** The daemon's port over the CLI's launcher: the same calls, and nothing that reads logs or stops a worker. */
+/**
+ * The daemon's port over the CLI's launcher: the same calls, and nothing that reads logs, types into a
+ * session or stops the worker of a run that goes on (`finish` ends the session of a run that is over).
+ */
 export function serveLauncherOf(launcher: WorkerLauncher): ServeLauncherPort {
   return {
     preflight: (input) => launcher.preflight(input),
     start: (input) => launcher.start(input),
     resume: (input) => launcher.resume(input),
+    finish: (runId) => launcher.finish(runId),
     async statuses(runIds) {
       const out = new Map<string, ServeWorkerView>();
       for (const [runId, status] of await launcher.statuses(runIds)) {

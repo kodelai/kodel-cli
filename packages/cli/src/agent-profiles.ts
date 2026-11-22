@@ -13,6 +13,7 @@ import {
   claudeProfile,
   type Exec,
   type McpConfigInput,
+  type TrustAnswer,
   type WorkerRecord,
 } from "./claude-worker";
 import type { WorkerDecision } from "./worker-launcher";
@@ -23,6 +24,16 @@ import type { WorkerDecision } from "./worker-launcher";
  * would hold a `max_workers` place at a gate and be called stalled.
  */
 export const DEFAULT_WORKER_MECHANISM: WorkerMechanism = "print";
+
+/**
+ * The line a project commits to keep its workers as print processes, where no terminal can run. The
+ * refusal of a terminal start and `docs/changes.md` spell this same text.
+ */
+export const WORKER_PRINT_MIGRATION_LINE = "engines: { claude: { worker: print } }";
+
+/** Why a terminal worker cannot be started here, with the one line that starts a print worker instead. */
+export const terminalRefusal = (reason: string): string =>
+  `${reason}; to start agents without a terminal, commit ${WORKER_PRINT_MIGRATION_LINE} in .kodel/config.yaml`;
 
 export interface ProfileWorkerArgv {
   mechanism: WorkerMechanism;
@@ -89,6 +100,15 @@ export interface AgentProfile {
   /** The id of a conversation from the argv of older records (those with no `agent` record). */
   sessionIdOf(records: readonly WorkerRecord[]): string | undefined;
   authProbe(exec: Exec, clock: () => number, timeoutMs?: number): Promise<AuthProbe>;
+  /**
+   * Whether the agent, started in a terminal in `dir`, would first ask to trust the folder. It only reads
+   * (the agent's own files, through `readText`) and answers `unknown` for anything it does not know.
+   */
+  trustProbe(
+    dir: string,
+    environment: Record<string, string | undefined>,
+    readText: (path: string) => Promise<string | undefined>,
+  ): Promise<TrustAnswer>;
   /** A few lines of what a print worker did, from the tail of its output. */
   digest(tail: string, options?: DigestOptions): string[];
 }

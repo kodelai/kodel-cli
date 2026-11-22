@@ -61,6 +61,8 @@ export interface WorkerOptionsInput {
   root: string;
   /** This build's version, for `caller`. */
   version: string;
+  /** The folder the worktrees of the runs are made in, for the launcher's trust probe. */
+  worktreesDir?: string;
 }
 
 /** The task text a run gets: the title, a blank line, the body; the title alone without a body. */
@@ -83,6 +85,7 @@ export function createWorkerOptions(
       dialog: input.dialog,
       taskLink: link !== undefined,
       pipelines: pipelines.length,
+      ...(input.worktreesDir === undefined ? {} : { worktreesDir: input.worktreesDir }),
     });
     if (!check.ok) return { ok: false, message: `Could not start ${key}: ${check.reason}.` };
     return { ok: true, pipelines };
@@ -161,7 +164,7 @@ export function createWorkerOptions(
     }
   };
 
-  const resumeWorker = async (
+  const resumeLocked = async (
     runId: string,
     seq: number,
     sessionId?: string,
@@ -174,7 +177,12 @@ export function createWorkerOptions(
     if (decision === undefined || decision.seq !== seq) {
       return { ok: false, message: notResumed("the run moved on.") };
     }
-    const id = sessionId ?? (await launcher.statuses([runId])).get(runId)?.sessionId;
+    // The records too, under the lock: the daemon may have resumed it, or the agent went on by itself.
+    const now = (await launcher.statuses([runId])).get(runId);
+    if (now !== undefined && (now.state === "starting" || now.state === "running")) {
+      return { ok: false, message: notResumed(`its agent ${now.name} is alive (kodel agent ls).`) };
+    }
+    const id = now?.sessionId ?? sessionId;
     if (id === undefined) return { ok: false, message: notResumed("no session id is known.") };
     const located = await run.location();
     const workdir = located === undefined ? input.root : await run.inProject(located.path);
@@ -189,6 +197,26 @@ export function createWorkerOptions(
         ok: false,
         message: `${notResumed(messageOf(error))}. Any agent in the project continues it with pipeline_next_step and this run id.`,
       };
+    }
+  };
+
+  // Under the lock the daemon takes for its starts and resumes: one of the two resumes a decision.
+  const resumeWorker = async (
+    runId: string,
+    seq: number,
+    sessionId?: string,
+  ): Promise<StartResult> => {
+    if (host.withWorkerStartLock === undefined) return resumeLocked(runId, seq, sessionId);
+    try {
+      return await host.withWorkerStartLock(() => resumeLocked(runId, seq, sessionId));
+    } catch (error) {
+      if (error instanceof KodelError && error.code === "STATE_LOCKED") {
+        return {
+          ok: false,
+          message: `run ${runId} was not resumed: another start is in progress, try again.`,
+        };
+      }
+      throw error;
     }
   };
 

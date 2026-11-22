@@ -11,7 +11,7 @@
  */
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   type Caller,
   ChoiceNeeded,
@@ -123,7 +123,11 @@ export interface ServeLauncherPort {
     dialog: boolean;
     taskLink: boolean;
     pipelines: number;
-  }): Promise<{ ok: true } | { ok: false; reason: string }>;
+    /** The folder the worktrees of the runs are made in: where an agent's question about trust would come. */
+    worktreesDir?: string;
+    /** Nobody watches the daemon's starts: what would stop at a question is refused. */
+    unattended?: boolean;
+  }): Promise<{ ok: true; note?: string } | { ok: false; reason: string }>;
   /** Starts the first session of a run (`kw-<run>`); throws with the reason. */
   start(input: { runId: string; workdir: string; title: string }): Promise<{ name: string }>;
   /** Starts `kw-<run>-d<seq>`; a `SessionError` `NAME_TAKEN` means someone did it already. */
@@ -135,6 +139,11 @@ export interface ServeLauncherPort {
   }): Promise<{ name: string }>;
   /** The latest record of each run named; a run without a record is absent. Throws when the records cannot be read. */
   statuses(runIds: readonly string[]): Promise<Map<string, ServeWorkerView>>;
+  /**
+   * Ends the live session of a run that is over, with the processes it started. A session that is already
+   * stopped or gone is no error; it decides nothing about a run.
+   */
+  finish(runId: string): Promise<void>;
 }
 
 /** The tracker as the daemon uses it. */
@@ -391,7 +400,9 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
   let baseBuild: string | undefined;
   let lastCycleAt: number | undefined;
   let quietFrom = started;
-  let preflight: { at: number; result: { ok: true } | { ok: false; reason: string } } | undefined;
+  let preflight:
+    | { at: number; result: { ok: true; note?: string } | { ok: false; reason: string } }
+    | undefined;
   /** Lines said once per change of a condition outside the plan (idle, a failed write, a start's environment). */
   const said = new Map<string, string>();
   const sayOnChange = (topic: string, line: string | undefined) => {
@@ -583,9 +594,13 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
           dialog: config.decisions.dialog,
           taskLink: true,
           pipelines: listed.pipelines.length,
+          worktreesDir: resolve(deps.root, config.worktree.dir),
+          unattended: true,
         }),
       };
     }
+    // What the launcher only remarks on (a config git does not track, a trust it cannot tell): said once.
+    sayOnChange("preflight-note", preflight.result.ok ? preflight.result.note : undefined);
     return preflight.result.ok
       ? { ok: true }
       : { ok: false, reason: `${preflight.result.reason}; nothing is started` };
