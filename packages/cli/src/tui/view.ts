@@ -117,7 +117,13 @@ import {
   withTasksLoad,
 } from "./tasks";
 import type { CardSlot, NewTaskInput, TaskRow, TasksLoad } from "./tasks-load";
-import { type ResumeOffer, resumeOffer } from "./worker-resume";
+import {
+  NOT_GONE_ON_LINE,
+  type ResumeOffer,
+  resumeOffer,
+  STALLED_LINE,
+  WAITS_WITH_YOU_LINE,
+} from "./worker-resume";
 
 export const SECTIONS = ["Sessions", "Pipeline", "Tasks", "Report"] as const;
 
@@ -205,6 +211,8 @@ export interface Model {
   workerStarting: Record<string, true>;
   /** Runs whose agent is being resumed, with the decision's seq: the row says `agent resuming` until the record is read. */
   resuming: Record<string, number>;
+  /** Tasks whose last start was refused before anything was made, with the reason: the row says `cannot start`. */
+  startRefused: Record<string, string>;
   /** The question `s` asks on a task, or nothing. */
   start: StartQuestion | null;
   /** The question `s` asks on a run whose agent exited at a decision, or nothing. */
@@ -230,6 +238,8 @@ export interface StartQuestion {
   seq: number;
   /** The pipelines that load, once the loop answered; one is asked with `y`, several with a digit. */
   pipelines?: string[];
+  /** What the preflight tells the person once though the start may go on (a folder whose trust is not known). */
+  note?: string;
   /** The model's clock when the question appeared: `y` is ignored for `COMMENT_GUARD_MS` after it. */
   askedAt?: number;
 }
@@ -330,7 +340,12 @@ export type Effect =
   /** The person confirmed: a run for the task and a background agent for the run. A person's act, never an agent's. */
   | { type: "start_task"; key: string; pipeline: string; seq: number }
   /** The person confirmed: the agent of the run goes on after their decision at journal line `seq`. */
-  | { type: "resume_worker"; runId: string; seq: number };
+  | { type: "resume_worker"; runId: string; seq: number }
+  /**
+   * `o` on a run: the loop leaves the screen and connects the terminal to the agent's (record `id`, the
+   * run's latest), then comes back to the same place. Nothing is typed into the session by kodel.
+   */
+  | { type: "attach_worker"; runId: string; id: string };
 
 /**
  * A run's gate detail is good for the wait it was read for: a new wait is a new key. With several
@@ -468,6 +483,7 @@ export function initialModel(
     starting: {},
     workerStarting: {},
     resuming: {},
+    startRefused: {},
     start: null,
     resume: null,
     startSeq: 0,
@@ -588,7 +604,7 @@ function withOffers(m: Model): Model {
   for (const s of m.sessions) {
     const worker = m.workers[s.id];
     if (worker === undefined) continue;
-    const offer = resumeOffer(s, worker, m.workPending);
+    const offer = resumeOffer(s, worker, m.workPending, m.now);
     // An active daemon resumes it in its next cycle: offering it here too would only race it. A run
     // an agent moved on since the decision, or one of another checkout, the daemon leaves alone, so
     // the offer stays here.
@@ -666,15 +682,39 @@ export function withProgress(m: Model, runId: string, progress: WorkerProgress):
 }
 
 /** The loop answered a `prepare_start`: the pipelines that load. A late answer, or one for another task, is dropped. */
-export function withStartReady(m: Model, seq: number, key: string, pipelines: string[]): Model {
+export function withStartReady(
+  m: Model,
+  seq: number,
+  key: string,
+  pipelines: string[],
+  note?: string,
+): Model {
   if (m.start === null || m.start.seq !== seq || m.start.key !== key) return m;
-  return { ...m, start: { ...m.start, pipelines, askedAt: m.now }, notice: "" };
+  const { [key]: _was, ...startRefused } = m.startRefused;
+  const start = {
+    ...m.start,
+    pipelines,
+    askedAt: m.now,
+    ...(note === undefined || note === "" ? {} : { note }),
+  };
+  return { ...m, start, startRefused, notice: "" };
 }
 
-/** The loop refused a `prepare_start` (the preflight): one notice, no question. */
-export function withStartRefused(m: Model, seq: number, key: string, message: string): Model {
+/**
+ * The loop refused a `prepare_start` (the preflight): one notice, no question. With a `reason` (what
+ * keeps an agent from starting here) the task's row says it too, until a start of it is let through.
+ */
+export function withStartRefused(
+  m: Model,
+  seq: number,
+  key: string,
+  message: string,
+  reason?: string,
+): Model {
   if (m.start === null || m.start.seq !== seq || m.start.key !== key) return m;
-  return { ...m, start: null, notice: message };
+  const startRefused =
+    reason === undefined || reason === "" ? m.startRefused : { ...m.startRefused, [key]: reason };
+  return { ...m, start: null, startRefused, notice: message };
 }
 
 /** A `start_task` is done, well or not: the notice, and the row of the new run reads `agent starting` until the records are read. */
@@ -772,6 +812,45 @@ function startKey(m: Model): Model {
   return s === undefined ? m : askResume(m, s);
 }
 
+/** A worker whose terminal a person can be connected to: in a terminal of its own, and alive. */
+function openable(w: WorkerView | undefined): boolean {
+  return (
+    w !== undefined && w.terminal === true && (w.state === "running" || w.state === "starting")
+  );
+}
+
+/**
+ * The `o` key on a run: one effect for the run's latest record when its agent runs in a terminal of
+ * its own, else why not. The screen is left by the loop, and only after its own checks.
+ */
+function openKey(m: Model): Model {
+  if (m.section !== 0 || m.pick.kind !== "run") return m;
+  const s = selectedSession(m);
+  if (s === undefined) return m;
+  if (m.source === "demo") return { ...m, notice: "opening an agent is not available in --demo" };
+  const w = m.workers[s.id];
+  if (w === undefined) return { ...m, notice: "Nothing to open: no agent of kodel on this run." };
+  const name = plain(w.name);
+  if (w.terminal !== true) {
+    return {
+      ...m,
+      notice: `Nothing to open: ${name} runs without a terminal (worker: print): kodel agent logs ${name}`,
+    };
+  }
+  if (w.childAlive === true) {
+    return {
+      ...m,
+      notice: `Nothing to open: ${name} has no holder to connect to, though its process still runs; stop it: kodel agent stop ${plain(w.id)}`,
+    };
+  }
+  if (!openable(w)) return { ...m, notice: `Nothing to open: agent ${plain(w.label)}.` };
+  return {
+    ...m,
+    notice: "",
+    effects: [...m.effects, { type: "attach_worker", runId: s.id, id: w.id }],
+  };
+}
+
 const MAKE_TALLER = "make the terminal taller";
 
 /**
@@ -867,6 +946,9 @@ function workerTag(m: Model, s: Session): string | undefined {
   if (offer?.offer !== undefined) return `${WORKER_MARK} s resumes`;
   if (offer?.line === SERVE_RESUMES_LINE) return `${WORKER_MARK} serve resumes`;
   if (offer?.line === "agent waiting for you") return `${WORKER_MARK} for you`;
+  if (offer?.line === WAITS_WITH_YOU_LINE) return `${WORKER_MARK} with you`;
+  if (offer?.line === STALLED_LINE) return `${WORKER_MARK} stalled`;
+  if (offer?.line === NOT_GONE_ON_LINE) return `${WORKER_MARK} not moving`;
   if (w.state === "killed")
     return `${WORKER_MARK} ${w.label.startsWith("stopped") ? "stopped" : "killed"}`;
   return `${WORKER_MARK} ${w.state}`;
@@ -875,6 +957,8 @@ function workerTag(m: Model, s: Session): string | undefined {
 function workerStyle(m: Model, s: Session, line: string): string {
   if (m.offers[s.id]?.offer !== undefined) return bold(green(line));
   if (line === "agent waiting for you") return yellow(line);
+  if (line === STALLED_LINE || line === NOT_GONE_ON_LINE) return yellow(line);
+  if (line === WAITS_WITH_YOU_LINE) return cyan(line);
   if (
     line.startsWith("agent starting") ||
     line.startsWith("agent running") ||
@@ -904,6 +988,16 @@ function workerBlock(m: Model, s: Session, width: number, d?: GateDetail, log = 
   if (line === undefined && w === undefined) return [];
   const out: string[] = [];
   if (line !== undefined) out.push(workerStyle(m, s, line));
+  // A process without a holder is ended by the person only: the card names the command.
+  const record = m.workers[s.id];
+  if (record?.childAlive === true && line === m.offers[s.id]?.line) {
+    out.push(
+      ...wrapText(
+        `its process still runs without a holder; stop it: kodel agent stop ${plain(record.id)}`,
+        width,
+      ).map((l) => yellow(l)),
+    );
+  }
   if (w !== undefined && log && s.status === "running") out.push(...activityBlock(d, w, width));
   out.push("");
   return out.map((l) => fit(l, width));
@@ -1276,6 +1370,8 @@ function startWindowOf(m: Model, q: StartQuestion, cols: number, height: number)
       ...wrap(bold(`Start ${q.key} in a background agent (pipeline ${offered[0]})?`)),
       dim(named),
     );
+    // What the preflight tells once: under the question, so the answer and its key stay first.
+    if (q.note !== undefined) content.push(...wrap(yellow(plain(q.note))));
     keys = `y start · ${CANCEL_WORDS}`;
     buttons.push({ key: "y", text: "[y Start]" });
   } else {
@@ -1288,6 +1384,7 @@ function startWindowOf(m: Model, q: StartQuestion, cols: number, height: number)
     }
     if (more > 0) content.push(dim(`  ${more} more are not offered here`));
     content.push(dim(named));
+    if (q.note !== undefined) content.push(...wrap(yellow(plain(q.note))));
     keys = `${pickerDigits(offered.length)} choose a pipeline · ${CANCEL_WORDS}`;
   }
   buttons.push({ key: "escape", text: "[Esc Cancel]" });
@@ -1664,6 +1761,8 @@ function updateKey(input: Model, key: string, size: Size, alone: boolean): Model
       return m.focus === "card" ? startTaskComment(m) : m;
     case "s":
       return startKey(m);
+    case "o":
+      return openKey(m);
     case "n":
       // A new task, from the Backlog (a task picked, or nothing at all to pick yet). Never from a run.
       return m.section === 0 && (m.pick.kind === "task" || m.sessions.length === 0)
@@ -2753,6 +2852,7 @@ function listLines(m: Model, width: number): ListLines {
     m.pick.kind === "task" ? m.pick.key : undefined,
     m.focus === "list",
     width,
+    m.startRefused,
   );
   const picked = m.pick.kind === "task" ? m.pick.key : undefined;
   for (const [i, line] of block.lines.entries()) {
@@ -3055,7 +3155,10 @@ function hints(m: Model): string {
   const keys = keysOf(m, current);
   const pick = (current?.decisions?.length ?? 0) > 1 ? `   ${bold("g/G")} pick` : "";
   // The buttons in front of these hints already say what a and r do.
-  const decide = barButtons(m).length > 0 ? pick : `${pick}${decisionKeys(keys)}`;
+  const open = openable(current === undefined ? undefined : m.workers[current.id])
+    ? `   ${bold("o")} agent`
+    : "";
+  const decide = `${barButtons(m).length > 0 ? pick : `${pick}${decisionKeys(keys)}`}${open}`;
   const zoom = `   ${bold("z")} ${m.zoom ? "show list" : "zoom"}`;
   if (m.focus === "card" && m.section === 0) {
     const found = detailOf(m);
@@ -3091,7 +3194,10 @@ function runHints(m: Model, current: Session | undefined): string {
     current !== undefined && m.offers[current.id]?.offer !== undefined
       ? `   ${bold("s")} resume`
       : "";
-  const decide = `${barButtons(m).length > 0 ? pick : `${pick}${decisionKeys(keysOf(m, current))}`}${resume}`;
+  const open = openable(current === undefined ? undefined : m.workers[current.id])
+    ? `   ${bold("o")} agent`
+    : "";
+  const decide = `${barButtons(m).length > 0 ? pick : `${pick}${decisionKeys(keysOf(m, current))}`}${resume}${open}`;
   const proposals =
     m.proposals > 0
       ? dim(`   ${m.proposals} pipeline proposal${m.proposals === 1 ? "" : "s"} wait on 2`)
@@ -3173,7 +3279,7 @@ function emptyState(): string[] {
 
 /** The notices that tell a refusal or a failure: the loop words them with these openings. */
 const isFailure = (notice: string): boolean =>
-  /^(Could not|Cannot|Comments cannot|Tasks cannot|Nothing to save|Nothing to resume|run r_|starting is not available|creating a task is not available|A task needs a title)|( is (already|being) started| cannot be started|nothing to start|was not resumed|was made but no agent)/.test(
+  /^(Could not|Cannot|Comments cannot|Tasks cannot|Nothing to save|Nothing to resume|Nothing to open|Could not open|run r_|starting is not available|creating a task is not available|A task needs a title)|( is (already|being) started| cannot be started|nothing to start|was not resumed|was made but no agent)/.test(
     notice,
   );
 

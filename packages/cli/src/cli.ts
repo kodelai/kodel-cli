@@ -864,6 +864,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const { createDecisionTools, decisionOptions } = await import("./tui/decide");
       const { openTasksForTui, tuiTaskOptions } = await import("./tui/tasks-open");
       const { createWorkerOptions } = await import("./tui/worker-start");
+      const { createOpenWorker } = await import("./tui/worker-open");
       const h = await host();
       const { root, dataDir } = await project();
       const tasks = await openTasksForTui(dataDir);
@@ -896,6 +897,18 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           ...(worktreesDir === undefined ? {} : { worktreesDir }),
         }),
         serve: () => readServeStatus(place, Date.now()),
+        // `o`: the terminal of a run's agent, through `kodel agent attach` of this very build.
+        openWorker: createOpenWorker({
+          launcher,
+          platform: env.platform ?? process.platform,
+          bun: process.versions.bun !== undefined,
+          self: env.sessionLauncher ?? {
+            exec: process.execPath,
+            args: [process.argv[1] ?? "kodel"],
+          },
+          root,
+          environment: env.environment ?? process.env,
+        }),
       });
     });
 

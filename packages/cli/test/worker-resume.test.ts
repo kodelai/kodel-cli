@@ -273,11 +273,15 @@ describe("task_9pns the resume offer", () => {
       "agent exited (1), not at a gate",
     );
     // A run that is over, in every end state.
-    for (const status of ["done", "failed", "canceled", "unreadable"] as const) {
+    for (const status of ["done", "failed", "canceled"] as const) {
       const over = resumeOffer(session(info, status), worker(), false);
       expect(over.offer).toBeUndefined();
       expect(whyOf(over)).toBe("the run is over");
     }
+    // A run that cannot be read is kept apart from one that failed (T-45): nothing is known of it.
+    const unread = resumeOffer(session(info, "unreadable"), worker(), false);
+    expect(unread.offer).toBeUndefined();
+    expect(whyOf(unread)).toBe("the run cannot be read");
     // A run waiting again (a worker resumed after gate A reached gate B and exited): waiting for you.
     const again = decisionOf([
       ...GATE,

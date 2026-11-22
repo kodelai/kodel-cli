@@ -43,7 +43,11 @@ export interface StartHost {
     workdir?: { path: string };
   }>;
   open(runId: string): Promise<LocalRun | StartRun | undefined>;
-  runSummaries(): Promise<{ meta: { runId: string }; state: RunState | undefined }[]>;
+  runSummaries(): Promise<
+    { meta: { runId: string; root?: string }; state: RunState | undefined }[]
+  >;
+  /** The root of another checkout that made the run, when it is not this one. */
+  foreignRootOf?(meta: { runId: string; root?: string }): string | undefined;
   /**
    * The lock `kodel serve` takes around its starts (TASK-G8KM, T-44), so the two never start one task
    * twice; throws `STATE_LOCKED` after a wait. A host without it starts without the lock.
@@ -74,7 +78,7 @@ export function taskTextOf(card: { title: string; body?: string }): string {
 /** The options of the loop that start and resume background agents. */
 export function createWorkerOptions(
   input: WorkerOptionsInput,
-): Pick<TuiOptions, "prepareStart" | "startTask" | "resumeWorker" | "workers"> {
+): Pick<TuiOptions, "prepareStart" | "startTask" | "resumeWorker" | "workers" | "finishWorker"> {
   const { host, tasks, launcher } = input;
   const caller: Caller = { name: "kodel-tui", version: input.version };
 
@@ -87,8 +91,15 @@ export function createWorkerOptions(
       pipelines: pipelines.length,
       ...(input.worktreesDir === undefined ? {} : { worktreesDir: input.worktreesDir }),
     });
-    if (!check.ok) return { ok: false, message: `Could not start ${key}: ${check.reason}.` };
-    return { ok: true, pipelines };
+    if (!check.ok) {
+      return {
+        ok: false,
+        message: `Could not start ${key}: ${check.reason}.`,
+        reason: check.reason,
+      };
+    }
+    // What a person's start is told once though it may go on (a folder whose trust is not known).
+    return { ok: true, pipelines, ...(check.note === undefined ? {} : { note: check.note }) };
   };
 
   const startLocked = async (key: string, pipeline: string): Promise<StartResult> => {
@@ -220,10 +231,35 @@ export function createWorkerOptions(
     }
   };
 
+  /** Whether the run is one of this checkout that has ended, as read now. */
+  const endedHere = async (runId: string): Promise<boolean> => {
+    const found = (await host.runSummaries()).find((s) => s.meta.runId === runId);
+    if (found === undefined || host.foreignRootOf?.(found.meta) !== undefined) return false;
+    const status = found.state?.status;
+    return status === "completed" || status === "failed" || status === "canceled";
+  };
+
+  // The daemon's `finish`, for when none is active: under the same lock, the state and the records
+  // read again inside it. A run that cannot be read, or another checkout's, is never touched.
+  const finishWorker = async (runId: string): Promise<void> => {
+    const finishLocked = async () => {
+      if (await endedHere(runId)) await launcher.finish(runId);
+    };
+    if (host.withWorkerStartLock === undefined) return finishLocked();
+    try {
+      await host.withWorkerStartLock(finishLocked);
+    } catch (error) {
+      // Another start holds the lock: the next read of the records asks again.
+      if (error instanceof KodelError && error.code === "STATE_LOCKED") return;
+      throw error;
+    }
+  };
+
   return {
     prepareStart,
     startTask,
     resumeWorker,
+    finishWorker,
     workers: { statuses: (ids) => launcher.statuses(ids), progress: (id) => launcher.progress(id) },
   };
 }
