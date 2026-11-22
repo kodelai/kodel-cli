@@ -56,8 +56,10 @@ Each accepted write is the next version of its name, with one journal record
 (`attachment_written`: `node`, `attempt`, `name`, `version`, `ref`, `type`, `bytes`, `lines`, `sha256`,
 `scanned`, `claim`) and no content in it. The stored file is named by the sha256 of its bytes.
 
-Writing the bytes of the latest version again is a no-op only when that version verifies and was written
-by the same step in the same visit. Otherwise it is a new version that points to the same stored file: a
+Writing the bytes of the latest version again is a no-op only when that version verifies, was written
+by the same step in the same visit, and stands to the step's claim as this write does (a version written
+without the token of the worker that holds the step does not count for the check, so the holder's write
+of the same bytes with its token is a new version). Otherwise it is a new version that points to the same stored file: a
 step entered again, another step, and a rewrite after the file was changed outside kodel each get their
 own record. A record's file is never replaced.
 
@@ -68,11 +70,19 @@ own record. A record's file is never replaced.
   `.kodel/` (compared by the identity of the folders, so the case of the letters does not matter), within
   the size cap, and the path must still name the file that was opened. A link, a hard link, a FIFO and a file
   swapped between the open and the check are refused. Windows has no `O_NOFOLLOW`; there the comparison of
-  identities alone guards.
+  identities alone guards. Two limits of this check:
+  - The path is opened before it is known to be inside the working directory (the check is made on the
+    handle), so the wording of a refusal can tell an agent whether a path outside exists and what kind of
+    file it is ("there is no such file", "not a regular file", "not a file inside the run's working
+    directory"). Nothing of such a file is read or stored.
+  - Only `.git` and `.kodel` directly under the run's working directory are closed. A `.git` or `.kodel`
+    folder deeper in the tree (a nested repository, a vendored project) is an ordinary folder here.
 - **A read trusts the journal, not the folder.** A version is a record whose stored file hashes to the
   recorded `sha256`. A file with no record is not an attachment; a missing or changed file is said to be
-  so and has no content and no path. Files that no record points to (what a crash or a refused write left)
-  are removed at the next write.
+  so and has no content and no path. What a crash or a refused write left is removed at the next write:
+  a temporary file, and a stored file whose hash no line of the journal names. The journal is looked at
+  as text for this, so the file of a record this kodel does not read (a newer build's) is never taken
+  away, and a file that is not of the store's making is left alone.
 - **Redaction.** Text is redacted before it is hashed and stored, like everything else that reaches the
   history. The agent's own log and the tool-call previews also hold the first 500 redacted characters of a
   written text, outside the 16 MB bound.
@@ -114,7 +124,10 @@ while a gate waits. `kodel gate`, the dialog and the TUI compare the attachments
 ask the person to look again; `pipeline_decide_gate` must send back the `attachments_fingerprint` of the
 answer the person decided on, and a missing or stale one is refused with the attachments as they are now.
 A write that was a no-op changes nothing, and the 200 versions end the loop. A rejection is never held
-back. This is not relaxed for a shared tree: an attachment has a writer and a number.
+back. This is not relaxed for a shared tree: an attachment has a writer and a number. The comparison is
+made twice: when the person answers, for a refusal in plain words, and again under the run's lock with the
+write of the decision, so a version that lands in between is refused and never approved unseen
+(`t45_decision_is_held_against_the_attachments_under_the_lock`).
 
 ## Comments
 

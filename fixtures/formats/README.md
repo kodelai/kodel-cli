@@ -264,7 +264,10 @@ nothing to drop when it is written back (see `docs/run-formats.md` and `docs/att
 `bun scripts/take-v2-attachment-fixture.mjs`, which drives `LocalPipelineHost` with nothing replaced and plays the
 agent (`writeAttachment`, `completeStep`) and the person (`decideHuman` at the gate), and was taken with
 `node scripts/take-format-fixture.mjs v2-attachment <run dir>`. As in the other directories, the workdir is the
-placeholder and there is no `seal.json`.
+placeholder and there is no `seal.json`. Like the other format-2 fixtures it was written by the sources under
+Bun (`packages/local/src`, the code `kodel mcp` is built from), not by the built `dist/kodel.js`: the script
+calls the host's own methods, which the single-file artifact does not export, and the build bundles these same
+sources without changing what they write. `scripts/check-artifact.mjs` is what runs the built file.
 
 - `r_0mwrset3s_actm` (finished): the step `plan` has the check `{ kind: attachment, name: plan.md, min_lines: 3 }`.
   It kept a plan of two lines (`plan.md` version 1) and handed in; the check failed (`check_finished` with

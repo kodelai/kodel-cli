@@ -393,3 +393,30 @@ Line references of the plan that were checked: `store.ts` `appendJournal` is at 
 `workerToolNames`); `agent-decisions.ts` `decideGate` at ~55-110 compared nothing with what the person was
 shown, as the critique said; `tool-calls-registry.test.ts` held `PIPELINE_TOOL_NAMES` equal to the registered
 names. `integrity.ts` needed no change.
+
+### After the independent review (attempt 3)
+
+1. **The no-op and the claim (fixed).** The same-bytes no-op now also needs the latest record to stand to the
+   step's claim as the new write does. A version written without the token of the worker that holds the step
+   (`claim: "foreign"`) no longer swallows the holder's write of the same bytes: that write is a new version
+   that counts for the check (`t45_same_bytes_with_the_token_after_a_foreign_write_counts`).
+2. **The sweep (fixed).** `sweepAttachments` removes only what is known to be a leftover: a temporary file,
+   and a `<sha256>-<name>` file whose hash no line of the journal names, looked up in the journal as text.
+   The file of a record this kodel cannot read stays, and so does any file the store did not make
+   (`t45_leftovers_are_swept_under_the_lock`, `t45_sweep_keeps_the_file_of_a_record_it_cannot_read`).
+3. **The look-again check under the lock (fixed).** `LocalRun.decideHuman` takes what the person was shown
+   (`seen.attachments`) and compares it with the journal under the run's lock, right before the decision is
+   written (`apply` got a `guard`). `kodel gate`, the TUI, the dialog and `pipeline_decide_gate` pass it for an
+   approval; their earlier comparison stays, for the refusal in plain words
+   (`t45_decision_is_held_against_the_attachments_under_the_lock`).
+4. **`pipeline_attachment_write` is not idempotent (fixed):** `idempotent: false`. The surface hash of a run is
+   computed from the tools, and no test pinned the old value.
+5. **Docs (done):** `docs/attachments.md` says that the path is opened before the working-directory check, so
+   a refusal's wording can reveal whether an outside path exists, and that only `.git` and `.kodel` directly
+   under the working directory are closed.
+6. **The fixture (documented, not regenerated).** `fixtures/formats/v2-attachment/` was taken by
+   `scripts/take-v2-attachment-fixture.mjs`, which drives the sources through `LocalPipelineHost` under Bun,
+   as the scripts of `v2`, `v2-engine` and `v2-model` do. It was not taken from the built `dist/kodel.js`: the
+   script needs the host's methods, which the single-file artifact does not export, and this step may not run
+   the build. The plan's words "a real run of the built engine" are met in that sense only; the README of the
+   fixtures says so.
