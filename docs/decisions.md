@@ -108,7 +108,9 @@ What keeps such an agent from deciding:
 - **Its lists.** An allow list without the decision tools, and a deny list with them, with every command that
   is a person's (in the spellings `kodel`, `main.ts` and `kodel.js`, also behind `env X=…`) and with the files
   that are yours (`.kodel/config.yaml`, the pipelines, the runs, `.mcp.json`, `.claude/settings*.json`).
-  Patterns are substrings: a variable or a decoded string passes them.
+  Patterns are substrings: a variable or a decoded string passes them. The files of a terminal worker are
+  denied with `Edit(<path>)` rules alone, which cover every file-editing tool of Claude Code (it prints a
+  warning on the agent's screen for each `Write(<path>)` rule); a print worker's list keeps both.
 - **The three guards of a person's command.** `gate`, `resume`, `ack`, `seal`, `migrate`, `task approve`, the
   `pipeline changes|proposals` decisions and the person's `agent` commands refuse:
   1. **the mark**: with `KODEL_ENGINE` in the environment, which every process of an agent session has

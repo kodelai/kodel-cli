@@ -1367,11 +1367,13 @@ describe("t45 the worker's wait command", () => {
     const print = workerDenylist(ROOT, BASE);
     expect(print).toContain("Bash(*kodel* wait r_*)");
     expect(terminal.filter((p) => p.includes(" wait "))).toEqual([]);
-    expect(print.filter((p) => !terminal.includes(p))).toEqual([
+    // Besides that command the terminal list only lacks the `Write(...)` twins of its `Edit(...)` rules.
+    expect(print.filter((p) => !terminal.includes(p) && !p.startsWith("Write("))).toEqual([
       "Bash(*kodel* wait r_*)",
       "Bash(*main.ts* wait r_*)",
       "Bash(*kodel.js* wait r_*)",
     ]);
+    expect(terminal.filter((p) => p.startsWith("Write("))).toEqual([]);
     expect(terminal).toContain("Bash(*kodel* gate*)");
     expect(terminal).toContain("Bash(*kodel.js* agent stop*)");
     for (const self of [SELF, { ...SELF, stateDir: "/home/u/state" }, odd]) {

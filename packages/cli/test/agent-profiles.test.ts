@@ -415,7 +415,6 @@ describe("t45 the lists of a worker", () => {
       const paths = (tool: string) =>
         denied.filter((d) => d.startsWith(`${tool}(`)).map((d) => d.slice(tool.length + 1, -1));
       const edits = new Set(paths("Edit"));
-      expect(paths("Write").length).toBeGreaterThan(0);
       for (const path of paths("Write")) expect(edits.has(path), path).toBe(true);
       for (const path of WORKER_DENIED_PATHS) {
         expect(edits.has(path), path).toBe(true);
@@ -424,5 +423,16 @@ describe("t45 the lists of a worker", () => {
       // The state base outside the root, whole.
       expect(edits.has("//home/u/.kodel/**")).toBe(true);
     }
+  });
+
+  test("t45_terminal_worker_list_has_no_write_rule", () => {
+    // Each `Write(...)` rule is a warning line at the top of the worker's screen, so a terminal worker
+    // gets none. The print list keeps its `Write` twins: its spec stays what it was before T-45.
+    const terminal = lists(true).denied;
+    const print = lists(false).denied;
+    expect(terminal.filter((d) => d.startsWith("Write("))).toEqual([]);
+    const edits = (list: readonly string[]) => list.filter((d) => d.startsWith("Edit("));
+    expect(edits(terminal)).toEqual(edits(print));
+    expect(print.filter((d) => d.startsWith("Write(")).length).toBe(edits(print).length);
   });
 });

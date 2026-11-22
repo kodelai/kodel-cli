@@ -110,7 +110,9 @@ function under(inner: string, outer: string): boolean {
  * The deny list: the decision tools, the human-only commands in every spelling, and the files the
  * engine owns (worktree-relative and absolute to the root; the state base when it is not under the root).
  * `terminal`: a worker in a terminal of its own stays alive at a wait and watches its run with
- * `kodel wait`, so that one command is not refused to it.
+ * `kodel wait`, so that one command is not refused to it. Its paths are denied with `Edit(<path>)` alone:
+ * that rule covers every file-editing tool of Claude Code, which prints a warning on the worker's screen
+ * for each `Write(<path>)` rule ("never matches"). The print list keeps both, as it was.
  */
 export function workerDenylist(
   root: string,
@@ -124,14 +126,15 @@ export function workerDenylist(
   for (const spelling of WORKER_BINARY_SPELLINGS) {
     for (const verb of verbs) out.push(`Bash(${spelling} ${verb})`);
   }
+  const tools = options.terminal ? ["Edit"] : ["Edit", "Write"];
   for (const path of WORKER_DENIED_PATHS) {
-    for (const tool of ["Edit", "Write"]) {
+    for (const tool of tools) {
       out.push(`${tool}(${path})`);
       out.push(`${tool}(${absolute(`${root}/${path}`)})`);
     }
   }
   if (!under(stateBase, root)) {
-    for (const tool of ["Edit", "Write"]) out.push(`${tool}(${absolute(`${stateBase}/**`)})`);
+    for (const tool of tools) out.push(`${tool}(${absolute(`${stateBase}/**`)})`);
   }
   return out;
 }
