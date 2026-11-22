@@ -67,10 +67,12 @@ A task is started when all of these hold:
 - its state is `todo` and one of your rules matches it (the first one that does decides the pipeline);
 - no run names it, and the tracker lists no run for it besides the one it was found in;
 - it does not wait for your approval (below), unless the rule that matched it says `approval: any`;
+- its links let it go (see [Task links](#task-links-what-waits-and-in-which-order));
 - its latest comment is not the daemon's give-up;
 - both limits have room, and starts are not paused.
 
-Tasks go in the tracker's priority order, then its list order, across all the rules: a rule decides only
+Tasks go in one computed order across all the rules (see [Task links](#task-links-what-waits-and-in-which-order));
+without links that is the tracker's priority order, then the older task first. A rule decides only
 whether a task is taken and with which pipeline. The pipeline of every rule must load, or nothing starts. A start is what `s` does in the TUI: a run
 through the host with the task's key, then one worker for it, from the `HEAD` of the checkout at that moment.
 If the host answers with a run that already existed, the daemon launches nothing for it.
@@ -167,6 +169,54 @@ A worker that is running but has printed nothing for `stalled_after_s` (counted 
 output, its start, the daemon's start, and the last gap of more than 60 seconds between two cycles, such as a
 sleep) gets one log line per quiet spell, nothing else.
 
+## Task links: what waits and in which order
+
+A task may name tasks it waits for (`depends_on`) and tasks it must not run beside (`conflicts_with`);
+`docs/tasks.md` says how they are set and read. The daemon does not start a task while
+
+- a dependency is open, or cannot be found or read (fail closed);
+- a dependency is closed but **waits for your approval**: an agent set it to done or declined through the
+  tools, or an agent made it and nobody approved it. `kodel task approve <dependency>` releases it. **A
+  dependency is released by your approval or by a completed run of it**: a run that completes closes its task
+  without a mark, also a run an agent started with `pipeline_start` and a `task_key`, because the close is
+  then the engine's verdict (the pipeline's checks and gates passed), not the agent's word. A dependency that
+  waited for approval before its run still waits after it. A rule with `approval: any` waives the approval of
+  the dependencies of the tasks it takes too, whichever rule those match;
+- a run of a task it conflicts with is open, whoever started it. Two conflicting tasks are never started in
+  one cycle. While a run of this checkout cannot be read and is not known to have ended, no task that has a
+  conflict is started (the run's task is not known); a run of another checkout that cannot be read holds
+  nothing back.
+
+`declined` counts as done. The daemon writes no comment about it: `kodel task show`, the card and `--status`
+show `(declined)` beside the dependency, and the daemon logs one line when it starts a task past a declined
+dependency (`started past a declined dependency: TASK-B: TASK-A was declined, not done`).
+
+The check is made in the plan and again under the start lock, on the task as it is read then: a link added
+since the plan stops the start, and uses no attempt.
+
+**The order.** The tasks that may start go by:
+
+1. effective priority: the task's own, raised to the highest priority of any open task that waits for it,
+   through any number of steps;
+2. how many open tasks wait for it, directly or through others (more first), so a dependency stands before
+   what depends on it;
+3. `created_at`, compared as text (a task without one goes after those with one, in its list place);
+4. the key.
+
+A task that waits for your approval raises nothing and counts for nothing, and nothing is raised through
+it: a task an agent made cannot reorder yours. A task no rule takes still counts (it raises a priority; it
+is not started). The order is a function of the tasks alone: two daemons that read the same task files plan
+the same order. Resumes stay as they were: oldest decision first, and before any start.
+
+A project with no link in any listed task is read exactly as before. When a listed task has a link, the
+daemon also reads every open task without the rule filter, for the order, under the same cap (5 pages of
+200); with more than 1,000 open tasks nothing is started and the log says `close tasks or remove the links`.
+
+Links hold back the daemon only. `s` in the TUI warns in one line and starts the task if you say `y`;
+`pipeline_start` with a `task_key` in a session is a start by hand too. And `depends_on` orders starts, not
+code: the dependent's worktree is cut from `HEAD` when it starts, whether or not the dependency's branch is
+merged.
+
 ## Tasks an agent made or changed
 
 A task an agent made with `task_create`, or whose title, body, status, priority or parent an agent changed
@@ -190,7 +240,11 @@ pipeline whose gates you read (the `triage` rule above).
 
 Prints, and changes nothing: whether a daemon runs for this checkout (its pid, since when, active or idle and
 why, its state base), the counts against the limits, your start rules in order (`rule 1:`, `rule 2:`, ...),
-why starts are blocked, what waits for a place, and open runs with a task and no agent. With `serve.enabled`
+why starts are blocked, what waits for a place, and open runs with a task and no agent. Then the two queues
+in their order with the reason of each place (`worker queue: 1. r_...: decided at 1763806500000`, the time of the decision in milliseconds, `start queue: 1. TASK-A:
+priority high (raised by TASK-C), unblocks 2`) and the tasks their links hold back (`blocked:     TASK-Y waits
+for TASK-X (open)`, `... (done, waits for approval)`, `TASK-Z conflicts with TASK-W (run r_...)`). These lines
+hold keys, run ids, priority names and fixed words only, never a title. With `serve.enabled`
 not true the tasks and runs a daemon would take up once enabled are listed as `if enabled:`. It does not show
 what the next cycle would do; a separate command will (TASK-H9QP).
 
@@ -306,6 +360,11 @@ launchd (macOS):
   it in a checkout that stays on one branch and ignores `.kodel/runs`.
 - **A TUI built before this change** does not know the daemon: it still offers `s resumes` (the record's name
   keeps the resume to one) and starts without the lock.
+- **Links (T-45).** A run tied to a task later with `add_run` is not seen by the conflict check: the check
+  goes by the task a run was started for. A dependency that never starts on its own leaves its dependent
+  waiting: `--status` and the card name the dependency, nothing chases it. An old run that cannot be read
+  keeps tasks with a conflict from being started until you remove it; `s` in the TUI still starts them. A
+  kodel from before the links ignores them and starts a blocked task (`docs/tasks.md`, the `local` adapter).
 - **A systemd user unit without linger** ends at logout. **On macOS** a refusal (78) is started again by
   launchd every 60 seconds, one log line each.
 
@@ -317,6 +376,11 @@ launchd (macOS):
   instructions (and, in this repository, `AGENTS.md`), the refusal under `KODEL_ENGINE` (a worker cannot start
   it), the task mark, the two limits and the gates of your pipeline. For your own interactive agent, that text
   is the only guard.
+- **An agent can change the links of a task you approved.** A change of `depends_on` or `conflicts_with`
+  through the tools sets no mark (`docs/tasks.md`), so an agent can remove a dependency or a conflict of an
+  approved task and the daemon then starts it without asking you again. What stays: an agent cannot release
+  a dependency by closing it (that waits for your approval), and a task that waits for approval cannot move
+  the order of the others.
 - **The task mark is advisory.** It holds for an agent that uses the task tools inside a run. An agent that
   edits `.kodel/tasks/*.yaml` with a shell, an MCP server of an older build, and task files that arrive by `git
   pull` make tasks without a mark, and those count as yours.
@@ -343,7 +407,7 @@ builds with this change:
 - a task is started twice;
 - a task an agent made, or whose title, body, status, priority or parent an agent changed through the tools,
   is started by the daemon without a `kodel task approve` after that, unless the rule that matched it says
-  `approval: any`;
+  `approval: any` (a change of the task's links is not such a change: T-45);
 - more worker processes than `max_workers`, or more open worker runs than `max_runs`, exist after an act of the
   daemon;
 - a decided run of a worker is not resumed within two cycles of a free worker place with no TUI open, or is
@@ -355,3 +419,34 @@ builds with this change:
 - a launch the daemon saw fail leaves no note;
 - a journal has a decision made by the daemon;
 - a run of format 1 is changed or refused because of a note.
+
+## Decision T-45
+
+*A task may name tasks it waits for (`depends_on`) and tasks it must not run beside (`conflicts_with`). The
+daemon starts no task whose dependency is open, missing, or closed by an agent and not approved by a person,
+and none beside an open run of a task it conflicts with; a dependency is released by the person's approval or
+by a completed run of it. Links hold back the daemon only, and a change of links sets no approval mark.*
+
+Test plan: the `t45_*` tests. The decision is refuted if, with builds that have this change:
+
+- a task is started by the daemon with an open or missing dependency;
+- a task is started by the daemon with a dependency an agent closed through the tools and no person approved
+  (a completed run of the dependency releases it; rules with `approval: any` aside);
+- a task is started by the daemon beside an open run of a task it conflicts with, or two conflicting tasks
+  are started in one cycle;
+- a cycle of `depends_on`, or a link to the task itself, is accepted through the tools;
+- a link that names no task, or a cycle that a merge made, stops tasks other than its own from starting;
+- a change of links through the tools sets or clears the approval mark of any task.
+
+## Decision T-46
+
+*The tasks the daemon may start go in one base order computed from the tasks alone: effective priority (raised
+by the open tasks that wait for it), how many open tasks it unblocks, `created_at` as text, the key. Both
+queues of a plan are ordered through one interface (`order(entries, policy, context)`), so another policy can
+stand in without the plan changing.*
+
+Test plan: the `t46_*` tests. The decision is refuted if:
+
+- two daemons on copies of the same task files and runs plan different orders;
+- a counted dependent stands before its open dependency;
+- a task that waits for approval changes the place of another task.

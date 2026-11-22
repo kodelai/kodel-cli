@@ -230,6 +230,8 @@ export interface StartQuestion {
   seq: number;
   /** The pipelines that load, once the loop answered; one is asked with `y`, several with a digit. */
   pipelines?: string[];
+  /** The task's links would hold it back from `kodel serve` (T-45): one more line of the question. */
+  warning?: string;
   /** The model's clock when the question appeared: `y` is ignored for `COMMENT_GUARD_MS` after it. */
   askedAt?: number;
 }
@@ -670,9 +672,24 @@ export function withProgress(m: Model, runId: string, progress: WorkerProgress):
 }
 
 /** The loop answered a `prepare_start`: the pipelines that load. A late answer, or one for another task, is dropped. */
-export function withStartReady(m: Model, seq: number, key: string, pipelines: string[]): Model {
+export function withStartReady(
+  m: Model,
+  seq: number,
+  key: string,
+  pipelines: string[],
+  warning?: string,
+): Model {
   if (m.start === null || m.start.seq !== seq || m.start.key !== key) return m;
-  return { ...m, start: { ...m.start, pipelines, askedAt: m.now }, notice: "" };
+  return {
+    ...m,
+    start: {
+      ...m.start,
+      pipelines,
+      askedAt: m.now,
+      ...(warning === undefined ? {} : { warning }),
+    },
+    notice: "",
+  };
 }
 
 /** The loop refused a `prepare_start` (the preflight): one notice, no question. */
@@ -1275,16 +1292,18 @@ function startWindowOf(m: Model, q: StartQuestion, cols: number, height: number)
   const buttons: { key: string; text: string }[] = [];
   let keys: string;
   let firstRow = 0;
+  const warning = q.warning === undefined ? [] : wrap(yellow(plain(q.warning)));
   if (offered.length === 1) {
     content.push(
       ...wrap(bold(`Start ${q.key} in a background agent (pipeline ${offered[0]})?`)),
+      ...warning,
       dim(named),
     );
     keys = `y start · ${CANCEL_WORDS}`;
     buttons.push({ key: "y", text: "[y Start]" });
   } else {
     const more = q.pipelines.length - offered.length;
-    content.push(...wrap(bold(`Start ${q.key} in a background agent with:`)));
+    content.push(...warning, ...wrap(bold(`Start ${q.key} in a background agent with:`)));
     firstRow = content.length;
     for (const [i, p] of offered.entries()) {
       content.push(`  ${bold(String(i + 1))} ${clip(p, inner - 4)}`);

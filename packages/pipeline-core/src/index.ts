@@ -30,6 +30,7 @@ export * from "./result";
 export * from "./run";
 export * from "./run-id";
 export * from "./run-task";
+export * from "./schedule";
 export * from "./service";
 export * from "./session";
 export * from "./session-frames";

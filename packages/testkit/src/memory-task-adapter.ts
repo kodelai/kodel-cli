@@ -6,15 +6,21 @@
  * adapter conformance suite.
  */
 import {
+  applyLinkPatch,
+  blockedBy,
   type CallOptions,
   type Comment,
+  dependencyRefs,
   type FieldInfo,
   type FieldValue,
+  findCycle,
+  hasLinkPatch,
   KodelError,
   type NewTask,
   needsApproval,
   type StatusInfo,
   type SubtaskRef,
+  spellCycle,
   TASK_CONTRACT,
   TASK_LIMITS,
   type Task,
@@ -81,7 +87,12 @@ interface Row {
   created_in_run?: string;
   agent_edited_at?: string;
   approved_at?: string;
+  depends_on: string[];
+  /** The conflicts written on this task; the other side reads them too. */
+  conflicts_with: string[];
 }
+
+const DECLINED = "Won't Do";
 
 const invalid = (message: string) => new KodelError("INVALID_TASK", message);
 
@@ -102,6 +113,7 @@ export class MemoryTaskAdapter implements TaskAdapter {
       priority: true,
       types: false,
       provenance: true,
+      links: true,
       ...options.capabilities,
     };
   }
@@ -224,7 +236,56 @@ export class MemoryTaskAdapter implements TaskAdapter {
       if (row.agent_edited_at !== undefined) task.agent_edited_at = row.agent_edited_at;
       if (row.approved_at !== undefined) task.approved_at = row.approved_at;
     }
+    if (this.capabilities.links === true) this.addLinks(task, row);
     return task;
+  }
+
+  private conflictsOf(row: Row): string[] {
+    const both = new Set(row.conflicts_with);
+    for (const other of this.rows.values()) {
+      if (other.conflicts_with.includes(row.key)) both.add(other.key);
+    }
+    both.delete(row.key);
+    return [...both].sort();
+  }
+
+  private addLinks(task: Task | TaskSummary, row: Row): void {
+    if (row.depends_on.length > 0) {
+      task.depends_on = [...row.depends_on];
+      task.dependencies = dependencyRefs(row.depends_on, (key) => {
+        const dependency = this.rows.get(key);
+        if (dependency === undefined) return undefined;
+        return {
+          closed: this.stateOf(dependency) === "done",
+          declined: dependency.status === DECLINED,
+          needs_approval: this.capabilities.provenance === true && needsApproval(dependency),
+        };
+      });
+      const by = this.stateOf(row) === "done" ? [] : blockedBy(task);
+      if (by.length > 0) task.blocked_by = by;
+    }
+    const blocks = [...this.rows.values()]
+      .filter(
+        (r) =>
+          this.stateOf(row) !== "done" &&
+          this.stateOf(r) !== "done" &&
+          r.depends_on.includes(row.key),
+      )
+      .map((r) => r.key)
+      .sort();
+    if (blocks.length > 0) task.blocks = blocks;
+    const conflicts = this.conflictsOf(row);
+    if (conflicts.length > 0) task.conflicts_with = conflicts;
+  }
+
+  private linkKey(typed: string, what: string): string {
+    const row = this.find(typed);
+    if (!row) throw new KodelError("TASK_NOT_FOUND", `there is no task "${typed}" (${what})`);
+    return row.key;
+  }
+
+  private noLinks(): KodelError {
+    return new KodelError("TASK_UNSUPPORTED", "this tracker has no task links");
   }
 
   private rank(row: Row): number {
@@ -259,6 +320,8 @@ export class MemoryTaskAdapter implements TaskAdapter {
     if (this.capabilities.runs !== "none") s.run_count = row.runs.length;
     if (needsApproval(task)) s.needs_approval = true;
     if (task.created_in_run !== undefined) s.created_in_run = task.created_in_run;
+    s.created_at = task.created_at;
+    if (this.capabilities.links === true) this.addLinks(s, row);
     const shown = Object.fromEntries(
       Object.entries(row.fields).filter(([name]) => FIELDS.find((f) => f.name === name)?.summary),
     );
@@ -277,6 +340,14 @@ export class MemoryTaskAdapter implements TaskAdapter {
     if (input.priority !== undefined) this.checkPriority(input.priority);
     if (input.fields !== undefined) this.checkFields(input.fields);
     if (input.parent !== undefined) this.parentOf(input.parent);
+    const linked = input.depends_on !== undefined || input.conflicts_with !== undefined;
+    if (linked && this.capabilities.links !== true) throw this.noLinks();
+    const dependsOn = [
+      ...new Set((input.depends_on ?? []).map((k) => this.linkKey(k, "depends_on"))),
+    ];
+    const conflictsWith = [
+      ...new Set((input.conflicts_with ?? []).map((k) => this.linkKey(k, "conflicts_with"))),
+    ];
     this.seq += 1;
     const at = this.now();
     const row: Row = {
@@ -290,6 +361,8 @@ export class MemoryTaskAdapter implements TaskAdapter {
       fields: { ...(input.fields ?? {}) },
       created_at: at,
       updated_at: at,
+      depends_on: dependsOn,
+      conflicts_with: conflictsWith,
     };
     if (input.body !== undefined) row.body = input.body;
     if (input.priority !== undefined) row.priority = input.priority;
@@ -397,6 +470,58 @@ export class MemoryTaskAdapter implements TaskAdapter {
         );
       }
     }
+    let links: { depends_on: string[]; conflicts_with: string[] } | undefined;
+    let dropped: string[] = [];
+    if (hasLinkPatch(patch)) {
+      if (this.capabilities.links !== true) throw this.noLinks();
+      const known = (keys: string[] | undefined) => keys?.map((k) => this.find(k)?.key ?? k);
+      const shown = this.conflictsOf(row);
+      const next = applyLinkPatch(
+        { depends_on: row.depends_on, conflicts_with: shown },
+        {
+          ...(patch.clear === undefined ? {} : { clear: patch.clear }),
+          ...Object.fromEntries(
+            (
+              [
+                "depends_on",
+                "conflicts_with",
+                "add_depends_on",
+                "remove_depends_on",
+                "add_conflicts_with",
+                "remove_conflicts_with",
+              ] as const
+            ).flatMap((name) => (patch[name] === undefined ? [] : [[name, known(patch[name])]])),
+          ),
+        },
+      );
+      const addedDependencies = next.depends_on.filter((k) => !row.depends_on.includes(k));
+      const addedConflicts = next.conflicts_with.filter((k) => !shown.includes(k));
+      for (const added of [...addedDependencies, ...addedConflicts]) {
+        if (added === row.key) throw invalid(`${row.key} cannot be linked to itself`);
+        if (!this.rows.has(added)) {
+          throw new KodelError("TASK_NOT_FOUND", `there is no task "${added}"`);
+        }
+      }
+      if (
+        next.depends_on.length > TASK_LIMITS.links ||
+        next.conflicts_with.length > TASK_LIMITS.links
+      ) {
+        throw invalid(`a link list takes at most ${TASK_LIMITS.links} tasks`);
+      }
+      if (addedDependencies.length > 0) {
+        const cycle = findCycle(row.key, next.depends_on, (k) => this.rows.get(k)?.depends_on);
+        if (cycle !== undefined) {
+          throw invalid(`that would make a cycle of depends_on: ${spellCycle(cycle)}`);
+        }
+      }
+      links = {
+        depends_on: next.depends_on,
+        conflicts_with: next.conflicts_with.filter(
+          (k) => row.conflicts_with.includes(k) || addedConflicts.includes(k),
+        ),
+      };
+      dropped = shown.filter((k) => !next.conflicts_with.includes(k));
+    }
     const wasDone = this.stateOf(row) === "done";
     const before = {
       title: row.title,
@@ -414,13 +539,22 @@ export class MemoryTaskAdapter implements TaskAdapter {
       row.runs.push(patch.add_run);
     if (newParent) row.parent = newParent.key;
     if (patch.fields !== undefined) Object.assign(row.fields, patch.fields);
+    if (links !== undefined) {
+      row.depends_on = links.depends_on;
+      row.conflicts_with = links.conflicts_with;
+      for (const key of dropped) {
+        const other = this.rows.get(key);
+        if (other) other.conflicts_with = other.conflicts_with.filter((k) => k !== row.key);
+      }
+    }
     for (const name of patch.clear ?? []) {
       if (name === "body") delete row.body;
       else if (name === "priority") delete row.priority;
       else if (name === "parent") delete row.parent;
       else if (name === "type")
         throw new KodelError("TASK_UNSUPPORTED", "this tracker has no task types");
-      else delete row.fields[name.slice("fields.".length)];
+      else if (name !== "depends_on" && name !== "conflicts_with")
+        delete row.fields[name.slice("fields.".length)];
     }
     row.updated_at = this.now();
     if (

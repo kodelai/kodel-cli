@@ -1613,6 +1613,8 @@ Examples:
     .option("--comment <text>", "a note to add")
     .option("--run <id>", "the pipeline run the task was found in")
     .option("--parent <key>", "make it a subtask of this task")
+    .option("--depends-on <key>", "a task it waits for; repeat for more", collect)
+    .option("--conflicts-with <key>", "a task it must not run beside; repeat for more", collect)
     .option("--field <name=value>", "a tracker field; repeat for more", collect)
     .action(async (title: string, opts: Record<string, string | string[] | undefined>) => {
       const service = await tasksService();
@@ -1623,6 +1625,8 @@ Examples:
       if (typeof opts.comment === "string") input.comment = opts.comment;
       if (typeof opts.run === "string") input.run = opts.run;
       if (typeof opts.parent === "string") input.parent = opts.parent;
+      if (Array.isArray(opts.dependsOn)) input.depends_on = opts.dependsOn;
+      if (Array.isArray(opts.conflictsWith)) input.conflicts_with = opts.conflictsWith;
       const fields = fieldsOf(opts.field as string[] | undefined);
       if (fields) input.fields = fields;
       if (!byPerson()) input.created_by = "agent";
@@ -1713,9 +1717,23 @@ Examples:
     .option("--comment <text>", "a note to add (it never replaces an earlier one)")
     .option("--add-run <id>", "attach a pipeline run")
     .option("--parent <key>", "move it under another task")
+    .option("--depends-on <key>", "the tasks it waits for, as the whole list; repeat", collect)
+    .option("--add-depends-on <key>", "a task it waits for; repeat for more", collect)
+    .option("--remove-depends-on <key>", "a task it no longer waits for; repeat", collect)
+    .option(
+      "--conflicts-with <key>",
+      "the tasks it must not run beside, as the whole list; repeat",
+      collect,
+    )
+    .option("--add-conflicts-with <key>", "a task it must not run beside; repeat", collect)
+    .option(
+      "--remove-conflicts-with <key>",
+      "a task it may run beside again (removed on both tasks); repeat",
+      collect,
+    )
     .option(
       "--clear <name>",
-      "empty a field: body, priority, type, parent or fields.<name>",
+      "empty a field: body, priority, type, parent, depends_on, conflicts_with or fields.<name>",
       collect,
     )
     .option("--field <name=value>", "a tracker field; repeat for more", collect)
@@ -1731,6 +1749,14 @@ Examples:
       if (typeof opts.addRun === "string") patch.add_run = opts.addRun;
       if (typeof opts.parent === "string") patch.parent = opts.parent;
       if (Array.isArray(opts.clear)) patch.clear = opts.clear;
+      if (Array.isArray(opts.dependsOn)) patch.depends_on = opts.dependsOn;
+      if (Array.isArray(opts.addDependsOn)) patch.add_depends_on = opts.addDependsOn;
+      if (Array.isArray(opts.removeDependsOn)) patch.remove_depends_on = opts.removeDependsOn;
+      if (Array.isArray(opts.conflictsWith)) patch.conflicts_with = opts.conflictsWith;
+      if (Array.isArray(opts.addConflictsWith)) patch.add_conflicts_with = opts.addConflictsWith;
+      if (Array.isArray(opts.removeConflictsWith)) {
+        patch.remove_conflicts_with = opts.removeConflictsWith;
+      }
       const fields = fieldsOf(opts.field as string[] | undefined);
       if (fields) patch.fields = fields;
       if (!byPerson()) patch.by_agent = true;
