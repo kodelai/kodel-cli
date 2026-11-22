@@ -3,7 +3,7 @@
 //   bun decide.ts <root> <state dir> <run id> <node> approved|rejected
 import { basename, dirname, join } from "node:path";
 
-const MAIN = process.env.EKAV_MAIN ?? "/Users/tyurin23/Code/KodelAI/etude";
+const MAIN = process.env.EKAV_MAIN ?? join(import.meta.dir, "../..");
 const { LocalPipelineHost } = await import(join(MAIN, "packages/local/src/index.ts"));
 const [root, state, runId, node, decision] = process.argv.slice(2);
 if (!root || basename(root) !== "project" || !basename(dirname(root)).startsWith("ekav-")) {

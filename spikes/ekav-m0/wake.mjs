@@ -8,6 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   ALLOWED,
+  ARTIFACT,
   agentEnv,
   CLAUDE,
   DENIED,
@@ -124,19 +125,8 @@ console.log(
   `the session went on by itself after the decision (called pipeline_next_step, no key typed): ${woke ? "YES" : "NO"}`,
 );
 console.log(
-  sh(
-    "node",
-    [
-      path.join(
-        process.env.EKAV_MAIN ?? "/Users/tyurin23/Code/KodelAI/etude",
-        "packages/cli/dist/kodel.js",
-      ),
-      "--root",
-      p.root,
-      "status",
-      runId,
-    ],
-    { env: { ...agentEnv(), KODEL_STATE_DIR: p.state } },
-  ).slice(0, 400),
+  sh("node", [ARTIFACT, "--root", p.root, "status", runId], {
+    env: { ...agentEnv(), KODEL_STATE_DIR: p.state },
+  }).slice(0, 400),
 );
 await quit(s);

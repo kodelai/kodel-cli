@@ -362,7 +362,7 @@ The serve rule (`pipeline-core/test/serve-plan.test.ts`, `serve-resume.test.ts`;
 | Decided, worker alive, no agent line for 2 min: one `not_moving` line per decision, no action; none when the run waits for the person again (two gates in a row) | `t44_not_moving_is_logged_and_nothing_is_typed`, `t44_not_moving_skips_a_run_that_waits_again` |
 | The text of T-44 in `docs/serve.md` is the revised one and the tests assert no line of the old one ("more worker processes than `max_workers`") | `t44_docs_carry_the_revised_text` (`cli/test/docs.test.ts`) |
 | No agent line 2 min after the start: one `no_first_call` | `t44_no_first_call_is_logged_once` |
-| The daemon asks the run's answer each cycle only for a run with a live terminal worker, and reads its journal at most once a minute; a failed read keeps both places; `finish` calls `stop` once and a failure is logged | `t44_daemon_reads_live_runs_sparingly`, `t44_daemon_finishes_through_the_launcher` |
+| The daemon asks the run's answer each cycle only for a run with a live terminal worker, and reads its journal at most once a minute; a failed read keeps both places; `finish` calls `stop` once a cycle: a failure is logged and tried again on the next cycle, and a session that is stopped is not finished again | `t44_daemon_reads_live_runs_sparingly`, `t44_daemon_finishes_through_the_launcher` |
 | An active daemon and an open TUI: only the daemon finishes and resumes; without one the TUI finishes, and only a run of this checkout whose state it read as ended | `t44_tui_leaves_finish_to_an_active_daemon`, `t45_tui_never_finishes_an_unreadable_or_foreign_run` (`cli/test/tui-worker.test.ts`) |
 
 The TUI (`cli/test/tui-run.test.ts` with a fake terminal and a fake child, unless named):
@@ -944,8 +944,8 @@ Steps 2 and 3 (the agent record, the group rule, the wait command):
   (`tests/pty/worker-terminal.test.ts`, steps 6 and 11; until then the same is shown on real processes of a
   pipes session by `tA_real_group_orphan_is_seen_and_stopped`); `tA_terminal_tail_*` (step 11).
 - **`t45_wait_command_finds_the_run_under_a_state_dir`** builds the artifact itself, as the fork test of the
-  same folder does. It was written without being run on the built file (the implementation steps do not
-  build); its scenario was run once against the source entry.
+  same folder does. It was first written without being run on the built file; the review fixes ran it
+  there (see "After the review" below).
 
 Steps 4 and 5 (the profile, the config):
 
@@ -1009,11 +1009,20 @@ Steps 6, 6a, 7 and 8 (the launcher, the guard, the serve rule, the daemon):
   `agent prune` to `AGENT_HUMAN_COMMANDS`, and the row of `cli/test/human-only.test.ts` then asks for
   their arguments. `tui` asks for a person through the same `requireHuman` and is not in the registry: it
   is a screen, not a decision, and no deny pattern is written against the word.
-- **The fixture `fixtures/session-formats/v1/worker-print-before-t45/` is composed, not taken from a
-  holder:** the two files have the shape the format-1 writer gives a pipes session (the shape of
-  `session.json` and `status-exited.json` beside it, which a real holder wrote) with the argv the launcher
-  gave a `claude -p` worker before this change, and no `agent.json`. No build from before the change was
-  run to write it. The test reads it with the real adapter (`PipesSessionAdapter.list`).
+- **The fixture `fixtures/session-formats/v1/worker-print-before-t45/` is taken from a real holder of the
+  build before the change** (it was first composed by hand; the review sent that back). How: the source of
+  commit d055fd6 was put in a scratch folder (`git archive d055fd6 | tar -x`, `bun install
+  --frozen-lockfile`), and a script there made that build's `createSessionWorkerLauncher` over its
+  `PipesSessionAdapter` (the holder is that build's `session-holder-entry.ts`), with a `claude` on `PATH`
+  that is a three-line shell script (it prints one `result` line and exits 0, as a print worker does when
+  its turn is over at a gate; no model ran), and called `launcher.start` for the run `r_0mw53d7fj_o2lc` with
+  the conversation id and the title the test uses. `session.json` and `status.json` of the session were
+  copied when it had exited, masked as `scripts/take-session-fixtures.mjs` masks (the id, pids, times,
+  identity values, the machine id, the paths; the paths inside the argv were already
+  `[REDACTED:high-entropy]`, written so by the holder). The other files of the session (`boot.txt`, the
+  output) are not kept. The record names a machine, so the test puts this machine's id in its copy: a
+  record of another machine is `FOREIGN` and is not resumed, which is right. The scratch folder was
+  removed.
 - **The trust probe** (`trustProbe` in `claude-worker.ts`, reached through the profile) reads
   `.claude.json` in `CLAUDE_CONFIG_DIR`, else in the home folder: `projects["<path>"].hasTrustDialogAccepted`
   for the worktrees folder or any folder above it (trust is inherited, spike criterion 1). Anything else is
@@ -1143,8 +1152,9 @@ Steps 10 and 11 (the commands, the tests):
   `--version`, nothing else of a probe is printed.
 - **`agent prune` with no `--older-than` removes every finished record** that the rule lets go; the runs
   are read once, and only when a record names one; a run that is not among them is "cannot be read".
-- **`agent exec -a`** is the short form of `--attach`. `exec` takes unknown options for the command it
-  runs, so a command that has an `-a` of its own is written after `--`.
+- **`agent exec -a`** is the short form of `--attach` only before the command (`exec --pty -a -- cat`).
+  After the command's first word it is the command's own, as it was before this change (`exec ls -a`
+  runs `ls -a`), with `--pty` too (`tA_exec_attach_starts_then_attaches`).
 - **AGENTS.md is changed in step 10** (the two lists of the person's commands, and `agent doctor` among
   what only reads), because `tA_agents_md_lists_attach` and the new
   `t45_agents_md_lists_the_registrys_human_only_commands` hold it to the registry. The rest of step 12's
@@ -1250,3 +1260,30 @@ Steps 12 and 13 (the docs, the follow-up):
 5. **Before a release, by hand** (`tests/README.md`, "Terminal workers: what the tests cannot show"): the
    real-PTY rows and the real-agent scenario that were written and not run, on the built file; Linux for
    spike criterion 10; a long conversation with compactions for criterion 8.
+
+After the review (the three blocking findings and the cheap minor ones):
+
+- **`kodel agent doctor` runs only the committed program.** `--version` is run for the program of
+  `terminal.command` only when the `engines` block is the committed one; for a block that differs, has no
+  committed version or cannot be compared, the program is looked up and named, its version is `unknown
+  (<program> is not run: …)`, and the sign-in probe (always the profile's own `claude`) runs only when
+  `claude` is on `PATH`. `t45_doctor_never_runs_an_uncommitted_terminal_command`.
+- **The tests that had not been run were run on the built file, outside the sandbox**
+  (`KODEL_REQUIRE_PTY=1`): `tests/pty/worker-terminal.test.ts`, `tests/pty/pty-session.test.ts`,
+  `tests/pty/attach-client.test.ts`, `tests/e2e/wait-command.test.ts`. One defect was in the test, not in
+  the code: the four TUI rows looked for text that is not ASCII (`◆ running`, `┃`, `·`) in the terminal's
+  output, which the harness keeps as a binary string; they now look for the bytes (`raw()`).
+- **The real-agent scenario** (`tests/agents/terminal-worker.test.ts`, claude 2.1.330) stopped at the trust
+  question in a fresh repository under `.kodel/worktrees` (a repository of its own does not inherit trust,
+  as the spike saw). It now builds its project at one fixed path (`KODEL_AGENT_TRUSTED_DIR`, else
+  `.kodel/worktrees/terminal-worker-project`) that a person trusts once, and fails at once with that
+  instruction when `claude` asks. It passed in the folder the person had trusted for the spike. Known and
+  left: `trustProbe` answers `trusted` for such a nested repository (a folder above it is trusted) while
+  `claude` asks; a run's worktree, which is what a worker starts in, is a git worktree and does inherit.
+- **The fixture `worker-print-before-t45/`** is now taken from the build before the change (above).
+- **Minor:** `sessionIdOf` of the argv reader takes no tail; the plain `agent start` gives its session the
+  environment a worker gets (no `CLAUDECODE`, `CLAUDE_CODE_*`); `exec -a` (above); AGENTS.md says when
+  `agent start` asks; the daemon drops the kept journal read of a run that left its list (no test: the map
+  is not seen from outside); the row of `t44_daemon_finishes_through_the_launcher` says what the code
+  does (a failed finish is tried again next cycle); the spike's scripts take this checkout unless
+  `EKAV_MAIN` names another, and its note opens with the final verdict.

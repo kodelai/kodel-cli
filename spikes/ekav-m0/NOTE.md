@@ -5,23 +5,27 @@ Throwaway code (`lib.mjs`, `start.mjs`, `gate.mjs`, `wake.mjs`, `resume.mjs`, `g
 `claude` 2.1.330, node 22.22.3, the built artifact `packages/cli/dist/kodel.js` of the main checkout (commit
 d055fd6, not older than the sources). Judged by the person; each answer is yes, no or unknown.
 
-**Read this first: the spike is not finished.** The `claude` of this machine is not signed in: every call
-answers `Failed to authenticate: this login reached its time limit and cannot be renewed. Run claude auth
-login` (`claude auth status --json`: `loggedIn: false`; the same with a clean environment and with the one
-of the session that ran the spike). Signing in is the person's act, so no turn of a model ran. What needs no
-model was run in full (1, 2, 3, 6, the idle half of 7, the mechanics of 8 and 9, 10 on macOS). What needs a
-model's turn is **unknown, not run**: 4, 5, 11, the other half of 7, and "the model holds the turns" of 8
-and 9. The scripts for them are written and their fixtures were tried; `sh run.sh` after `claude auth login`
-runs them (commands at the end). The plan's rule is that all but 7 and 9 must hold before step 2: with 4, 5
-and 11 unknown, and one half of 3 failed, **step 2 does not begin on this note.**
+**Verdict (final, 2026-11-22): every criterion but 7 and 9 holds, and 7 and 9 have answers, so step 2
+began.** 1 yes (a git worktree of a trusted root starts with no question; a separate repository asks, and no
+supported way to accept beforehand exists); 2 yes; 3 yes with the trailing newline after `--` (step 4 of the
+plan changed, the person chose option A); 4 yes; 5 yes, after 30 s and after an hour; 6 yes on this machine;
+7 `idleWrites: false`; 8 yes (a long conversation with natural compactions was not run); 9 yes, both ways;
+10 yes on macOS (Linux unknown); 11 yes.
 
-Two more limits of where it ran:
+The note is kept in the order it was written. The table below is the **first pass, made while `claude` was
+not signed in**: it answers what needs no model (1, 2, 3, 6, the idle half of 7, the mechanics of 8 and 9, 10)
+and says "unknown, not run" for what needs a model's turn (4, 5, 11, the other half of 7, the model's side
+of 8 and 9). Those were answered after the person signed in, in the sections that follow it: "Criterion 3,
+second half", "Signed-in run of `sh run.sh`" and "Criteria 4, 5, 11 in a trusted throwaway project". Where
+the table and a later section differ, the later section holds.
 
-- The run's worktree has no `node_modules`, so kodel from source was the main checkout's
-  (`/Users/tyurin23/Code/KodelAI/etude/packages/...`, the same commit), not the worktree's.
+Two limits of where the first pass ran:
+
+- The run's worktree had no `node_modules`, so kodel from source was the main checkout's (the same commit),
+  not the worktree's. The scripts now take this checkout unless `EKAV_MAIN` names another.
 - `node gate.mjs … shell` (the three `kodel gate` commands typed into the session with `!`, against a
-  throwaway run) was refused by the permission system of the session that ran the spike, and was not tried
-  another way.
+  throwaway run) was refused by the permission system of the session that ran the spike; it was run later
+  in the trusted throwaway project (criterion 11 below).
 
 ## Criteria
 

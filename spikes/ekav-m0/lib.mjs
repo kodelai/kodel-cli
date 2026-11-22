@@ -7,8 +7,9 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 
-// The checkout that has node_modules and the built artifact (the run's worktree has neither).
-export const MAIN = process.env.EKAV_MAIN ?? "/Users/tyurin23/Code/KodelAI/etude";
+// The checkout that has node_modules and the built artifact: this one, unless EKAV_MAIN names another
+// (the run's worktree had neither when the spike ran).
+export const MAIN = process.env.EKAV_MAIN ?? path.resolve(import.meta.dirname, "../..");
 export const ARTIFACT = path.join(MAIN, "packages/cli/dist/kodel.js");
 export const CLAUDE = process.env.EKAV_CLAUDE ?? "claude";
 export const MODEL = process.env.EKAV_MODEL ?? "haiku";

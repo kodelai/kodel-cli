@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 
-const MAIN = process.env.EKAV_MAIN ?? "/Users/tyurin23/Code/KodelAI/etude";
+const MAIN = process.env.EKAV_MAIN ?? join(import.meta.dir, "../..");
 const ARTIFACT = join(MAIN, "packages/cli/dist/kodel.js");
 const { PipesSessionAdapter, sessionDirOf } = await import(
   join(MAIN, "packages/local/src/index.ts")
