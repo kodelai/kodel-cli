@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
-import { parsePipeline } from "../src";
+import { defaultRegistry, parsePipeline, withAttachmentKinds } from "../src";
 
 const dir = new URL("../../../.kodel/pipelines/", import.meta.url);
 
@@ -11,9 +11,13 @@ describe("the pipelines we run on this repository", () => {
     expect(files.length).toBeGreaterThan(0);
   });
 
+  // The local host keeps attachments, so its pipelines may use the `attachment` check.
+  const registry = withAttachmentKinds(defaultRegistry());
   for (const file of files) {
     test(`${file} is a valid pipeline`, () => {
-      expect(() => parsePipeline(readFileSync(new URL(file, dir), "utf8"))).not.toThrow();
+      expect(() =>
+        parsePipeline(readFileSync(new URL(file, dir), "utf8"), { registry }),
+      ).not.toThrow();
     });
   }
 });
