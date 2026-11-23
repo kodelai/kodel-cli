@@ -65,7 +65,9 @@ import {
 const FRAME_MS = 100;
 
 /** What `prepareStart` answers: the pipelines to offer, or why `s` does nothing. */
-export type StartCheck = { ok: true; pipelines: string[] } | { ok: false; message: string };
+export type StartCheck =
+  /** `warning`: the task's links would hold it back from `kodel serve`; the question says so and still starts. */
+  { ok: true; pipelines: string[]; warning?: string } | { ok: false; message: string };
 
 /** What `startTask` and `resumeWorker` answer: the notice, and the run that got an agent. */
 export interface StartResult {
@@ -432,7 +434,7 @@ export async function runTui(
       prepare(effect.key)
         .then((check) => {
           model = check.ok
-            ? withStartReady(model, effect.seq, effect.key, check.pipelines)
+            ? withStartReady(model, effect.seq, effect.key, check.pipelines, check.warning)
             : withStartRefused(model, effect.seq, effect.key, check.message);
         })
         .catch((error: unknown) => {

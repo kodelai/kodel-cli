@@ -3,7 +3,13 @@
  * given has no way to write. What the tracker answers is not trusted: a row that is not what it should
  * be is dropped and counted, and a failure becomes a state, never a throw into the screen.
  */
-import { needsApproval, readState, type TaskState } from "@kodel-ai/pipeline-core";
+import {
+  type DependencyRef,
+  needsApproval,
+  readState,
+  TASK_LIMITS,
+  type TaskState,
+} from "@kodel-ai/pipeline-core";
 import { plain } from "../plain";
 
 /** How many tasks the Backlog block shows. A constant for now. */
@@ -23,6 +29,16 @@ export interface TaskRow {
   runCount: number;
   /** An agent made or changed the task and no person approved it since (`kodel task approve`). */
   waitsForApproval?: boolean;
+  /** The dependencies that hold the task back from `kodel serve`; absent when none does. */
+  blockedBy?: string[];
+}
+
+/** The links of a task as the card shows them and the start warning reads them. */
+export interface TaskLinkData {
+  dependsOn?: string[];
+  dependencies?: DependencyRef[];
+  blocks?: string[];
+  conflictsWith?: string[];
 }
 
 export interface TaskComment {
@@ -32,7 +48,7 @@ export interface TaskComment {
 }
 
 /** Everything the card of a task shows. */
-export interface TaskCardData {
+export interface TaskCardData extends TaskLinkData {
   key: string;
   title: string;
   state: TaskState;
@@ -40,6 +56,7 @@ export interface TaskCardData {
   priority?: string;
   parent?: string;
   waitsForApproval?: boolean;
+  blockedBy?: string[];
   runs: string[];
   body?: string;
   comments: TaskComment[];
@@ -108,6 +125,45 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 const text = (value: unknown): string | undefined =>
   typeof value === "string" && value !== "" ? value : undefined;
 
+/** A list of keys from a tracker: what is not a short string is dropped, and the list is bounded. */
+function keyList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const keys = value
+    .filter((k): k is string => typeof k === "string" && k !== "" && k.length <= TASK_LIMITS.key)
+    .slice(0, TASK_LIMITS.linksShown)
+    // A key is shown as it is: what could mislead a terminal is taken out here, once.
+    .map((k) => plain(k))
+    .filter((k) => k !== "");
+  return keys.length === 0 ? undefined : keys;
+}
+
+const DEPENDENCY_STATES = ["open", "done", "declined", "missing"] as const;
+
+/** The link fields of a task; a state the TUI does not know reads as `missing` (it blocks). */
+function parseLinks(raw: Record<string, unknown>): TaskLinkData {
+  const dependsOn = keyList(raw.depends_on);
+  const blocks = keyList(raw.blocks);
+  const conflictsWith = keyList(raw.conflicts_with);
+  const dependencies: DependencyRef[] = [];
+  if (Array.isArray(raw.dependencies)) {
+    for (const d of raw.dependencies.slice(0, TASK_LIMITS.linksShown)) {
+      if (!isObject(d)) continue;
+      const key = keyList([d.key])?.[0];
+      if (key === undefined) continue;
+      const state = DEPENDENCY_STATES.find((s) => s === d.state) ?? "missing";
+      dependencies.push(
+        d.needs_approval === true ? { key, state, needs_approval: true } : { key, state },
+      );
+    }
+  }
+  return {
+    ...(dependsOn === undefined ? {} : { dependsOn }),
+    ...(dependencies.length === 0 ? {} : { dependencies }),
+    ...(blocks === undefined ? {} : { blocks }),
+    ...(conflictsWith === undefined ? {} : { conflictsWith }),
+  };
+}
+
 export function parseRow(raw: unknown): TaskRow | undefined {
   if (!isObject(raw)) return undefined;
   const key = text(raw.key);
@@ -115,6 +171,7 @@ export function parseRow(raw: unknown): TaskRow | undefined {
   if (key === undefined || title === undefined || typeof raw.status !== "string") return undefined;
   const priority = text(raw.priority);
   const parent = text(raw.parent);
+  const blockedBy = keyList(raw.blocked_by);
   return {
     key,
     title,
@@ -124,6 +181,7 @@ export function parseRow(raw: unknown): TaskRow | undefined {
     ...(parent === undefined ? {} : { parent }),
     runCount: typeof raw.run_count === "number" ? raw.run_count : 0,
     ...(raw.needs_approval === true ? { waitsForApproval: true } : {}),
+    ...(blockedBy === undefined ? {} : { blockedBy }),
   };
 }
 
@@ -171,6 +229,8 @@ function parseCard(raw: unknown, subtasks: unknown): TaskCardData | undefined {
     ...(row.priority === undefined ? {} : { priority: row.priority }),
     ...(row.parent === undefined ? {} : { parent: row.parent }),
     ...(cardWaits(raw) ? { waitsForApproval: true } : {}),
+    ...(row.blockedBy === undefined ? {} : { blockedBy: row.blockedBy }),
+    ...parseLinks(raw),
     runs: Array.isArray(raw.runs)
       ? raw.runs.filter((r): r is string => typeof r === "string" && r !== "")
       : [],

@@ -17,6 +17,13 @@ import {
   yellow,
 } from "./ansi";
 import {
+  attachmentKey,
+  attachmentPlace,
+  projectPlace,
+  stepVersion,
+  versionAt,
+} from "./attachments";
+import {
   beginFlow,
   type Flow,
   flowBar,
@@ -26,7 +33,15 @@ import {
   flowKey,
   flowYieldsQuit,
 } from "./decision-flow";
-import { firstCode, moveCode, moveHunk, type Prepared, placeOf, prepare } from "./diffview";
+import {
+  type DiffRow,
+  firstCode,
+  moveCode,
+  moveHunk,
+  type Prepared,
+  placeOf,
+  prepare,
+} from "./diffview";
 import type { InputEvent } from "./input";
 import { renderLabel, rowLabels, sessionLine } from "./label";
 import type { Loaded } from "./load";
@@ -77,6 +92,7 @@ import {
 } from "./stats";
 import {
   activityBlock,
+  attachmentAt,
   CODE,
   COMMENTS,
   commentPlace,
@@ -183,6 +199,8 @@ export interface Model {
   instructions: boolean;
   /** The row of the opened file's diff the cursor is on; -1 until it has been read. */
   line: number;
+  /** The version of the opened attachment that is looked at; the latest when none was picked. */
+  version?: number;
   /** A comment being typed, or nothing. */
   input: Input | null;
   /** A comment on a task being typed, or nothing. It is the one thing this screen writes to a task. */
@@ -230,6 +248,8 @@ export interface StartQuestion {
   seq: number;
   /** The pipelines that load, once the loop answered; one is asked with `y`, several with a digit. */
   pipelines?: string[];
+  /** The task's links would hold it back from `kodel serve` (T-45): one more line of the question. */
+  warning?: string;
   /** The model's clock when the question appeared: `y` is ignored for `COMMENT_GUARD_MS` after it. */
   askedAt?: number;
 }
@@ -670,9 +690,24 @@ export function withProgress(m: Model, runId: string, progress: WorkerProgress):
 }
 
 /** The loop answered a `prepare_start`: the pipelines that load. A late answer, or one for another task, is dropped. */
-export function withStartReady(m: Model, seq: number, key: string, pipelines: string[]): Model {
+export function withStartReady(
+  m: Model,
+  seq: number,
+  key: string,
+  pipelines: string[],
+  warning?: string,
+): Model {
   if (m.start === null || m.start.seq !== seq || m.start.key !== key) return m;
-  return { ...m, start: { ...m.start, pipelines, askedAt: m.now }, notice: "" };
+  return {
+    ...m,
+    start: {
+      ...m.start,
+      pipelines,
+      askedAt: m.now,
+      ...(warning === undefined ? {} : { warning }),
+    },
+    notice: "",
+  };
 }
 
 /** The loop refused a `prepare_start` (the preflight): one notice, no question. */
@@ -1275,16 +1310,18 @@ function startWindowOf(m: Model, q: StartQuestion, cols: number, height: number)
   const buttons: { key: string; text: string }[] = [];
   let keys: string;
   let firstRow = 0;
+  const warning = q.warning === undefined ? [] : wrap(yellow(plain(q.warning)));
   if (offered.length === 1) {
     content.push(
       ...wrap(bold(`Start ${q.key} in a background agent (pipeline ${offered[0]})?`)),
+      ...warning,
       dim(named),
     );
     keys = `y start · ${CANCEL_WORDS}`;
     buttons.push({ key: "y", text: "[y Start]" });
   } else {
     const more = q.pipelines.length - offered.length;
-    content.push(...wrap(bold(`Start ${q.key} in a background agent with:`)));
+    content.push(...warning, ...wrap(bold(`Start ${q.key} in a background agent with:`)));
     firstRow = content.length;
     for (const [i, p] of offered.entries()) {
       content.push(`  ${bold(String(i + 1))} ${clip(p, inner - 4)}`);
@@ -2200,6 +2237,13 @@ function cardKey(m: Model, key: string, size: Size): Model | undefined {
   const tabs = visibleTabs(found.d);
   const onList = isListTab(m.tab) && !m.open;
   const inStep = m.open && m.tab === STEPS;
+  // An opened attachment: `[` and `]` go to its other versions, for a text and for an image alike.
+  const attached =
+    m.open && m.tab === CODE ? attachmentAt(found.d, tabState(m, found.d).cursor) : undefined;
+  if (attached !== undefined && (key === "[" || key === "]")) {
+    const version = stepVersion(attached, m.version, key === "]" ? 1 : -1);
+    return wantDiff({ ...m, version, line: -1, cardScroll: 0 }, found);
+  }
   const reading = openDiff(m, found);
   if (reading) {
     const moved = readingKey(m, key, reading, found.d.kind === "gate");
@@ -2239,11 +2283,14 @@ function cardKey(m: Model, key: string, size: Size): Model | undefined {
       return onList ? moveCursor(m, found.d, PAGE) : scrollCard(m, size, PAGE);
     case "enter":
       if (!onList || m.tab === COMMENTS || itemCount(found.d, m.tab) === 0) return m;
-      return wantDiff({ ...m, open: true, sub: 0, cardScroll: 0, line: -1 }, found);
+      return wantDiff({ ...withoutVersion(m), open: true, sub: 0, cardScroll: 0, line: -1 }, found);
     case "n":
     case "p":
       return m.open
-        ? wantDiff({ ...moveCursor(m, found.d, key === "n" ? 1 : -1), line: -1 }, found)
+        ? wantDiff(
+            { ...withoutVersion(moveCursor(m, found.d, key === "n" ? 1 : -1)), line: -1 },
+            found,
+          )
         : m;
     case "escape":
       return m.open ? { ...m, open: false, cardScroll: 0 } : { ...m, focus: "list", zoom: false };
@@ -2285,17 +2332,39 @@ function skeletonKey(m: Model, key: string, tabs: number[]): Model | undefined {
   }
 }
 
-/** The diff of the file that is open in the Code tab, once it has been read. */
-function openDiff(
-  m: Model,
-  found: { s: Session; d: GateDetail },
-): { p: Prepared; path: string } | undefined {
+/** The model with no version picked: another file or attachment is looked at from its latest. */
+function withoutVersion(m: Model): Model {
+  const { version: _version, ...rest } = m;
+  return rest;
+}
+
+/** What is read line by line in the Code tab: the diff, and where a comment on one of its rows is about. */
+interface Reading {
+  p: Prepared;
+  place(row: DiffRow): string;
+}
+
+/** The diff of the file, or of the version of an attachment, that is open in the Code tab, once it has been read. */
+function openDiff(m: Model, found: { s: Session; d: GateDetail }): Reading | undefined {
   if (m.tab !== CODE || !m.open) return undefined;
-  // The same file that is drawn: a list that has got shorter since leaves the cursor on the last.
-  const path = fileAt(found.d, Math.min(m.cursor, itemCount(found.d, CODE) - 1));
-  const diff = path === undefined ? undefined : m.diffs[diffKey(found.s.id, path)];
-  return path !== undefined && diff?.kind === "text"
-    ? { p: prepare(diff, diff.text, path), path }
+  // The same item that is drawn: a list that has got shorter since leaves the cursor on the last.
+  const cursor = Math.min(m.cursor, itemCount(found.d, CODE) - 1);
+  const path = fileAt(found.d, cursor);
+  if (path !== undefined) {
+    const diff = m.diffs[diffKey(found.s.id, path)];
+    return diff?.kind === "text"
+      ? { p: prepare(diff, diff.text, path), place: (row) => placeOf(projectPlace(path), row) }
+      : undefined;
+  }
+  const view = attachmentAt(found.d, cursor);
+  const version = view === undefined ? undefined : versionAt(view, m.version);
+  if (view === undefined || version === undefined) return undefined;
+  const diff = m.diffs[diffKey(found.s.id, attachmentKey(view.name, version.version))];
+  return diff?.kind === "text"
+    ? {
+        p: prepare(diff, diff.text, view.name),
+        place: (row) => attachmentPlace(view, version, row),
+      }
     : undefined;
 }
 
@@ -2303,10 +2372,10 @@ function openDiff(
 function readingKey(
   m: Model,
   key: string,
-  reading: { p: Prepared; path: string },
+  reading: Reading,
   canComment: boolean,
 ): Model | undefined {
-  const { p, path } = reading;
+  const { p } = reading;
   const at = m.line >= 0 ? m.line : firstCode(p);
   const go = (line: number): Model => ({ ...m, line });
   switch (key) {
@@ -2336,7 +2405,7 @@ function readingKey(
       return row
         ? {
             ...m,
-            input: { text: "", severity: "major", place: placeOf(path, row), openedAt: m.now },
+            input: { text: "", severity: "major", place: reading.place(row), openedAt: m.now },
             notice: "",
           }
         : undefined;
@@ -2349,8 +2418,17 @@ function readingKey(
 /** Open on a file in the Code tab: its diff is asked for, once. */
 function wantDiff(m: Model, found: { s: Session; d: GateDetail }): Model {
   if (m.tab !== CODE || !m.open) return m;
-  const path = fileAt(found.d, Math.min(m.cursor, itemCount(found.d, CODE) - 1));
-  if (path === undefined || diffKey(found.s.id, path) in m.diffs) return m;
+  const cursor = Math.min(m.cursor, itemCount(found.d, CODE) - 1);
+  let path = fileAt(found.d, cursor);
+  if (path === undefined) {
+    // A text version of an attachment is read the same way, under a key no file can have; an image,
+    // and a version whose stored file does not verify, have nothing to read.
+    const view = attachmentAt(found.d, cursor);
+    const version = view === undefined ? undefined : versionAt(view, m.version);
+    if (view === undefined || version?.type !== "text" || version.state !== "ok") return m;
+    path = attachmentKey(view.name, version.version);
+  }
+  if (diffKey(found.s.id, path) in m.diffs) return m;
   return { ...m, effects: [...m.effects, { type: "load_diff", runId: found.s.id, path }] };
 }
 
@@ -2359,7 +2437,7 @@ function toTab(m: Model, tab: number): Model {
   const scroll = tab === LOG ? Number.MAX_SAFE_INTEGER : 0;
   const found = detailOf(m);
   const cursor = found ? startCursor(found.d, tab) : 0;
-  return { ...m, tab, cursor, open: false, sub: 0, cardScroll: scroll, notice: "" };
+  return { ...withoutVersion(m), tab, cursor, open: false, sub: 0, cardScroll: scroll, notice: "" };
 }
 
 function toSub(m: Model, sub: number): Model {
@@ -2539,6 +2617,7 @@ function tabState(m: Model, d: GateDetail): TabState {
     open: m.open,
     sub: m.sub,
     line: m.line,
+    ...(m.version === undefined ? {} : { version: m.version }),
   };
 }
 
@@ -3068,6 +3147,12 @@ function hints(m: Model): string {
     if (!found) nav = `${bold("↑↓")} scroll   ${bold("Esc")} list`;
     else if (m.open && m.tab === STEPS) {
       nav = `${bold("←→")} result/changes/log   ${bold("n/p")} next/prev${comment}   ${bold("Esc")} back`;
+    } else if (
+      m.open &&
+      m.tab === CODE &&
+      attachmentAt(found.d, tabState(m, found.d).cursor) !== undefined
+    ) {
+      nav = `${bold("↑↓")} line   ${bold("[ ]")} version   ${bold("n/p")} next/prev${comment}   ${bold("Esc")} back`;
     } else if (m.open && m.tab === CODE) {
       nav = `${bold("↑↓")} line   ${bold("[ ]")} hunk   ${bold("n/p")} file${comment}   ${bold("Esc")} back`;
     } else if (m.open) {

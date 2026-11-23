@@ -13,13 +13,22 @@ import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  applyLinkPatch,
+  blockedBy,
+  buildGraph,
   type CallOptions,
   type Comment,
+  cycles,
+  dependencyRefs,
+  findCycle,
+  hasLinkPatch,
   KodelError,
+  type LinkPatch,
   type NewTask,
   needsApproval,
   type StatusInfo,
   type SubtaskRef,
+  spellCycle,
   TASK_CONTRACT,
   TASK_LIMITS,
   type Task,
@@ -27,6 +36,7 @@ import {
   type TaskAdapterCapabilities,
   type TaskAdapterContext,
   type TaskFilter,
+  type TaskLinks,
   type TaskPatch,
   type TaskProblem,
   type TaskSchema,
@@ -97,6 +107,7 @@ const CAPABILITIES: TaskAdapterCapabilities = {
   priority: true,
   types: false,
   provenance: true,
+  links: true,
 };
 
 const optionsSchema = z
@@ -126,6 +137,10 @@ export function parseLocalOptions(options: unknown): { prefix: string } {
   return parsed.data;
 }
 
+// A link list that is not a short list of short strings makes the file a problem, like any other
+// malformed field. A well-formed key that names no task does not: it blocks its own task only.
+const linkList = z.array(z.string().min(1).max(TASK_LIMITS.key)).max(TASK_LIMITS.links).optional();
+
 const recordSchema = z
   .object({
     v: z.number().int().min(1),
@@ -139,6 +154,8 @@ const recordSchema = z
       .array(z.object({ at: z.string(), text: z.string(), by: z.string().optional() }))
       .optional(),
     parent: z.string().optional(),
+    depends_on: linkList,
+    conflicts_with: linkList,
     runs: z.array(z.string()).optional(),
     created_at: z.string(),
     updated_at: z.string(),
@@ -161,6 +178,8 @@ const FIELD_ORDER = [
   "status",
   "comments",
   "parent",
+  "depends_on",
+  "conflicts_with",
   "runs",
   "created_at",
   "updated_at",
@@ -192,7 +211,15 @@ interface Loaded {
   /** The parent a task is shown under: none for an orphan or a member of a cycle. */
   parentOf: Map<string, string | undefined>;
   children: Map<string, Rec[]>;
+  /** The conflicts of a task read from both sides: its own list and every file that names it. */
+  conflicts: Map<string, Set<string>>;
+  /** The open tasks that depend on a task. */
+  dependents: Map<string, string[]>;
+  /** How many problems the cap of `problems` left out (its last line already says so). */
+  problemsOmitted: number;
 }
+
+const unique = (keys: readonly string[] | undefined): string[] => [...new Set(keys ?? [])];
 
 export interface LocalTaskAdapterOptions {
   /** `<store root>/tasks` is where the files are. */
@@ -409,12 +436,104 @@ export class LocalTaskAdapter implements TaskAdapter {
       if (kids) kids.push(record);
       else children.set(parent, [record]);
     }
+    let problemsOmitted = 0;
     if (problems.length > MAX_PROBLEMS) {
-      const more = problems.length - MAX_PROBLEMS;
+      problemsOmitted = problems.length - MAX_PROBLEMS;
       problems.length = MAX_PROBLEMS;
-      problems.push({ message: `and ${more} more problems` });
+      problems.push({ message: `and ${problemsOmitted} more problems` });
     }
-    return { records, problems, parentOf, children };
+    const conflicts = new Map<string, Set<string>>();
+    const dependents = new Map<string, string[]>();
+    const conflict = (a: string, b: string) => {
+      const known = conflicts.get(a);
+      if (known) known.add(b);
+      else conflicts.set(a, new Set([b]));
+    };
+    for (const [key, record] of records) {
+      for (const other of record.conflicts_with ?? []) {
+        if (other === key) continue;
+        conflict(key, other);
+        if (records.has(other)) conflict(other, key);
+      }
+      if (stateOf(record.status) === "done") continue;
+      for (const dependency of unique(record.depends_on)) {
+        const known = dependents.get(dependency);
+        if (known) known.push(key);
+        else dependents.set(dependency, [key]);
+      }
+    }
+    return { records, problems, parentOf, children, conflicts, dependents, problemsOmitted };
+  }
+
+  /** The links of a task as they are shown: its own lists and what the other files say about it. */
+  private linksOf(record: Rec, loaded: Loaded): TaskLinks {
+    const out: TaskLinks = {};
+    const dependsOn = unique(record.depends_on);
+    if (dependsOn.length > 0) {
+      out.depends_on = dependsOn;
+      out.dependencies = dependencyRefs(dependsOn, (key) => {
+        const dependency = loaded.records.get(key);
+        if (dependency === undefined) return undefined;
+        return {
+          closed: stateOf(dependency.status) === "done",
+          declined: dependency.status === "declined",
+          needs_approval: needsApproval(dependency),
+        };
+      });
+      // A finished task is held back by nothing, whatever its dependencies say.
+      const by = stateOf(record.status) === "done" ? [] : blockedBy(out);
+      if (by.length > 0) out.blocked_by = by;
+    }
+    // A finished task holds nobody back.
+    const blocks =
+      stateOf(record.status) === "done"
+        ? []
+        : [...(loaded.dependents.get(record.key) ?? [])].sort();
+    if (blocks.length > 0) out.blocks = blocks.slice(0, TASK_LIMITS.linksShown);
+    const conflicts = [
+      ...new Set([...unique(record.conflicts_with), ...(loaded.conflicts.get(record.key) ?? [])]),
+    ]
+      .filter((key) => key !== record.key)
+      .sort();
+    if (conflicts.length > 0) out.conflicts_with = conflicts.slice(0, TASK_LIMITS.linksShown);
+    return out;
+  }
+
+  /**
+   * What is wrong with the links, for `kodel task doctor` only: a link that names no task and a
+   * cycle hold back their own tasks, they do not make the list incomplete.
+   */
+  private linkProblems(loaded: Loaded): TaskProblem[] {
+    const problems: TaskProblem[] = [];
+    for (const [key, record] of loaded.records) {
+      for (const dependency of unique(record.depends_on)) {
+        if (loaded.records.has(dependency)) continue;
+        problems.push({
+          key,
+          message: `${key} depends on ${quoted(dependency)}, which is not here (is its branch merged?); kodel serve does not start ${key} until the link is removed`,
+        });
+      }
+      for (const other of unique(record.conflicts_with)) {
+        if (loaded.records.has(other)) continue;
+        problems.push({
+          key,
+          message: `${key} names a conflict with ${quoted(other)}, which is not here (is its branch merged?)`,
+        });
+      }
+    }
+    const graph = buildGraph([...loaded.records.values()]);
+    for (const group of cycles(graph)) {
+      const first = group[0] as string;
+      const members = new Set(group);
+      const inGroup = (key: string) =>
+        members.has(key) ? (graph.dependsOn.get(key) ?? []).filter((k) => members.has(k)) : [];
+      const cycle = findCycle(first, inGroup(first), inGroup) ?? [first, first];
+      problems.push({
+        key: first,
+        message: `a cycle of depends_on: ${spellCycle(cycle)} (two branches may have been merged); kodel serve starts none of them until one link is removed`,
+      });
+    }
+    return problems;
   }
 
   private order = (a: Rec, b: Rec): number =>
@@ -422,7 +541,7 @@ export class LocalTaskAdapter implements TaskAdapter {
     (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0) ||
     (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
 
-  private toTask(record: Rec, parent: string | undefined): Task {
+  private toTask(record: Rec, parent: string | undefined, links: TaskLinks = {}): Task {
     // Writes are bounded by the core's limits; what is read is bounded again, because a file a
     // person did not write through the tools may say anything.
     const comments: Comment[] = (record.comments ?? []).map((c) => {
@@ -454,7 +573,7 @@ export class LocalTaskAdapter implements TaskAdapter {
     if (record.agent_edited_at !== undefined)
       task.agent_edited_at = clip(record.agent_edited_at, 40);
     if (record.approved_at !== undefined) task.approved_at = clip(record.approved_at, 40);
-    return task;
+    return Object.assign(task, links);
   }
 
   private summary(record: Rec, loaded: Loaded): TaskSummary {
@@ -467,6 +586,8 @@ export class LocalTaskAdapter implements TaskAdapter {
       state: stateOf(record.status),
       priority: record.priority,
       run_count: (record.runs ?? []).length,
+      created_at: clip(record.created_at, 40),
+      ...this.linksOf(record, loaded),
     };
     const last = comments[comments.length - 1];
     if (last) s.comment = clip(last.text, TASK_LIMITS.comment);
@@ -534,6 +655,23 @@ export class LocalTaskAdapter implements TaskAdapter {
         throw new KodelError("TASK_NOT_FOUND", `there is no parent task "${input.parent}"`);
       }
     }
+    let linked: Loaded | undefined;
+    const links = { depends_on: [] as string[], conflicts_with: [] as string[] };
+    if (input.depends_on !== undefined || input.conflicts_with !== undefined) {
+      linked = await this.load();
+      for (const list of ["depends_on", "conflicts_with"] as const) {
+        for (const typed of unique(input[list])) {
+          const key = (await this.resolveKey(typed)) ?? typed;
+          if (!linked.records.has(key)) {
+            throw new KodelError("TASK_NOT_FOUND", `there is no task "${typed}" (${list})`);
+          }
+          if (!links[list].includes(key)) links[list].push(key);
+        }
+        if (links[list].length > TASK_LIMITS.links) {
+          throw invalid(`${list} takes at most ${TASK_LIMITS.links} tasks`);
+        }
+      }
+    }
     const at = this.now();
     await this.ensureDir();
     const existing = await this.names();
@@ -560,6 +698,8 @@ export class LocalTaskAdapter implements TaskAdapter {
       if (input.body !== undefined) record.body = input.body;
       if (input.comment !== undefined) record.comments = [{ at, text: input.comment }];
       if (parentKey !== undefined) record.parent = parentKey;
+      if (links.depends_on.length > 0) record.depends_on = links.depends_on;
+      if (links.conflicts_with.length > 0) record.conflicts_with = links.conflicts_with;
       if (input.run !== undefined) {
         record.runs = [input.run];
         // Whoever made it: the run it was found in is not a run that started it.
@@ -569,7 +709,11 @@ export class LocalTaskAdapter implements TaskAdapter {
       try {
         // `wx`: a key somebody took meanwhile is never overwritten.
         await writeFile(this.file(key), serialize(record), { flag: "wx" });
-        return this.toTask(record, record.parent);
+        return this.toTask(
+          record,
+          record.parent,
+          linked === undefined ? {} : this.linksOf(record, linked),
+        );
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         taken.add(suffix);
@@ -592,7 +736,7 @@ export class LocalTaskAdapter implements TaskAdapter {
     const loaded = await this.load();
     const kids = [...(loaded.children.get(key) ?? [])].sort(this.order);
     return {
-      task: this.toTask(read.record, loaded.parentOf.get(key)),
+      task: this.toTask(read.record, loaded.parentOf.get(key), this.linksOf(read.record, loaded)),
       subtasks: kids
         .slice(0, TASK_LIMITS.subtasks)
         .map((k) => ({ id: k.id, key: k.key, title: k.title })),
@@ -721,13 +865,106 @@ export class LocalTaskAdapter implements TaskAdapter {
       ))
     )
       return undefined;
-    return this.withLock(key, () => this.applyUpdate(key, patch));
+    const done = await this.withLock(key, () => this.applyUpdate(key, patch));
+    if (done === undefined) return undefined;
+    const { strip, record, ...out } = done;
+    if (strip.length === 0) return out;
+    // A conflict holds while either file names it, so a write that fails here leaves it in force
+    // and a repeat of the call finishes the removal. One lock at a time, never two.
+    for (const other of strip) await this.withLock(other, () => this.dropConflict(other, key));
+    return {
+      ...out,
+      task: this.toTask(record, record.parent, this.linksOf(record, await this.load())),
+    };
+  }
+
+  /** Takes the conflict with `key` out of the file of `other`, the other side of a removal. */
+  private async dropConflict(other: string, key: string): Promise<void> {
+    const read = await this.readFileRecord(other);
+    if (!read) return;
+    if ("problem" in read) {
+      throw new KodelError("TASK_ADAPTER_FAILED", `${other}.yaml ${read.problem}`);
+    }
+    const kept = (read.record.conflicts_with ?? []).filter((k) => k !== key);
+    if (kept.length === (read.record.conflicts_with ?? []).length) return;
+    const record: Rec = { ...read.record, updated_at: this.now() };
+    if (kept.length > 0) record.conflicts_with = kept;
+    else delete record.conflicts_with;
+    await this.writeRecord(other, record);
+  }
+
+  /**
+   * The link lists of the task after the patch, checked: an added key must be a task, never the task
+   * itself, and `depends_on` must not close a cycle. `strip` names the other files that hold a
+   * conflict the patch removes.
+   */
+  private async patchLinks(
+    key: string,
+    record: Rec,
+    patch: LinkPatch,
+    loaded: Loaded,
+  ): Promise<string[]> {
+    const normal = async (keys: string[] | undefined) =>
+      keys === undefined
+        ? undefined
+        : Promise.all(keys.map(async (k) => (await this.resolveKey(k)) ?? k));
+    const resolved: LinkPatch = { ...(patch.clear === undefined ? {} : { clear: patch.clear }) };
+    for (const name of [
+      "depends_on",
+      "conflicts_with",
+      "add_depends_on",
+      "remove_depends_on",
+      "add_conflicts_with",
+      "remove_conflicts_with",
+    ] as const) {
+      const keys = await normal(patch[name]);
+      if (keys !== undefined) resolved[name] = keys;
+    }
+    const ownDependsOn = unique(record.depends_on);
+    const ownConflicts = unique(record.conflicts_with).filter((k) => k !== key);
+    // What a person sees is the conflicts of both sides, so that is what set, add and remove act on.
+    const shown = [...new Set([...ownConflicts, ...[...(loaded.conflicts.get(key) ?? [])].sort()])];
+    const next = applyLinkPatch({ depends_on: ownDependsOn, conflicts_with: shown }, resolved);
+    const addedDependencies = next.depends_on.filter((k) => !ownDependsOn.includes(k));
+    const addedConflicts = next.conflicts_with.filter((k) => !shown.includes(k));
+    for (const added of [...addedDependencies, ...addedConflicts]) {
+      if (added === key) throw invalid(`${key} cannot be linked to itself`);
+      if (!loaded.records.has(added)) {
+        throw new KodelError("TASK_NOT_FOUND", `there is no task "${added}"`);
+      }
+    }
+    const kept = next.conflicts_with.filter(
+      (k) => ownConflicts.includes(k) || addedConflicts.includes(k),
+    );
+    for (const [name, list] of [
+      ["depends_on", next.depends_on],
+      ["conflicts_with", kept],
+    ] as const) {
+      if (list.length > TASK_LIMITS.links) {
+        throw invalid(`${name} takes at most ${TASK_LIMITS.links} tasks`);
+      }
+    }
+    if (addedDependencies.length > 0) {
+      const cycle = findCycle(key, next.depends_on, (k) => loaded.records.get(k)?.depends_on);
+      if (cycle !== undefined) {
+        throw invalid(`that would make a cycle of depends_on: ${spellCycle(cycle)}`);
+      }
+    }
+    if (next.depends_on.length > 0) record.depends_on = next.depends_on;
+    else delete record.depends_on;
+    if (kept.length > 0) record.conflicts_with = kept;
+    else delete record.conflicts_with;
+    return shown.filter(
+      (k) =>
+        !next.conflicts_with.includes(k) &&
+        loaded.records.get(k)?.conflicts_with?.includes(key) === true,
+    );
   }
 
   private async applyUpdate(
     key: string,
     patch: TaskPatch,
-  ): Promise<{ task: Task; open_subtasks?: number } | undefined> {
+  ): Promise<{ task: Task; open_subtasks?: number; strip: string[]; record: Rec } | undefined> {
     const read = await this.readFileRecord(key);
     if (!read) return undefined;
     if ("problem" in read) {
@@ -772,7 +1009,13 @@ export class LocalTaskAdapter implements TaskAdapter {
       else if (name === "priority") record.priority = DEFAULT_PRIORITY;
       else if (name === "parent") delete record.parent;
       else if (name === "type") throw this.unsupported("task types");
-      else throw this.unsupported("fields");
+      // The two link lists are cleared with the rest of the links, below.
+      else if (name !== "depends_on" && name !== "conflicts_with") throw this.unsupported("fields");
+    }
+    let strip: string[] = [];
+    if (hasLinkPatch(patch)) {
+      loaded ??= await this.load();
+      strip = await this.patchLinks(key, record, patch, loaded);
     }
     record.updated_at = at;
     if (
@@ -788,13 +1031,17 @@ export class LocalTaskAdapter implements TaskAdapter {
       record.agent_edited_at =
         approved !== undefined && Date.parse(approved) > Date.parse(at) ? approved : at;
     }
+    // A change of the links is not an edit that waits for approval (T-45): the mark above is about
+    // what the task says and whether it is closed, and a link only holds a start back.
     await this.writeRecord(key, record);
 
-    const out: { task: Task; open_subtasks?: number } = {
-      task: this.toTask(record, record.parent),
+    loaded = await this.load();
+    const out: { task: Task; open_subtasks?: number; strip: string[]; record: Rec } = {
+      task: this.toTask(record, record.parent, this.linksOf(record, loaded)),
+      strip,
+      record,
     };
     if (!wasDone && stateOf(record.status) === "done") {
-      loaded = await this.load();
       const open = (loaded.children.get(key) ?? []).filter(
         (k) => stateOf(k.status) !== "done",
       ).length;
@@ -858,7 +1105,7 @@ export class LocalTaskAdapter implements TaskAdapter {
       record.updated_at = at;
       await this.writeRecord(key, record);
       const loaded = await this.load();
-      return this.toTask(record, loaded.parentOf.get(key));
+      return this.toTask(record, loaded.parentOf.get(key), this.linksOf(record, loaded));
     });
   }
 
@@ -872,7 +1119,17 @@ export class LocalTaskAdapter implements TaskAdapter {
           : `the tasks folder cannot be created (${(error as NodeJS.ErrnoException).code ?? "error"})`;
       return [{ message: why }];
     }
-    return (await this.load()).problems;
+    const loaded = await this.load();
+    // load() already cut its own list and ended it with a summary line: count past that line, not with it.
+    const own = loaded.problemsOmitted > 0 ? loaded.problems.slice(0, -1) : loaded.problems;
+    const problems = [...own, ...this.linkProblems(loaded)];
+    let more = loaded.problemsOmitted;
+    if (problems.length > MAX_PROBLEMS) {
+      more += problems.length - MAX_PROBLEMS;
+      problems.length = MAX_PROBLEMS;
+    }
+    if (more > 0) problems.push({ message: `and ${more} more problems` });
+    return problems;
   }
 }
 

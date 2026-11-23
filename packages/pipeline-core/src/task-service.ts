@@ -7,6 +7,7 @@
  */
 import { KodelError } from "./errors";
 import { redactDeep, redactText } from "./redact";
+import { blockedBy, hasLinkPatch } from "./schedule/links";
 import { failure, type ToolResult } from "./service";
 import {
   type CallOptions,
@@ -14,12 +15,14 @@ import {
   checkName,
   checkResolvedKey,
   type FieldValue,
+  LINK_LISTS,
   type NewTask,
   OPEN_STATES,
   TASK_LIMITS,
   type Task,
   type TaskAdapter,
   type TaskFilter,
+  type TaskLinks,
   type TaskPatch,
   type TaskProblem,
   type TaskSchema,
@@ -190,6 +193,61 @@ export class TaskService {
     return checkResolvedKey(key);
   }
 
+  /**
+   * The keys of a link list as the tracker names them. A key that is added must resolve; one that is
+   * removed may name a task that is gone (a link left by a merge), so it is taken as typed then.
+   */
+  private async resolveLinks(what: string, keys: string[], removing: boolean): Promise<string[]> {
+    const out: string[] = [];
+    for (const typed of keys) {
+      const input = checkKeyInput(`a key of ${what}`, typed);
+      // A key is a name: one that redaction would change is a secret in the wrong place.
+      if (redactText(input) !== input) {
+        throw new KodelError("INVALID_TASK", `a key of ${what} looks like a secret`);
+      }
+      const found = await this.call((o) => this.adapter.resolveKey(input, o));
+      if (found === undefined && !removing) {
+        throw new KodelError("TASK_NOT_FOUND", `there is no task "${input}" (${what})`);
+      }
+      const key = found === undefined ? input : checkResolvedKey(found);
+      if (!out.includes(key)) out.push(key);
+    }
+    return out;
+  }
+
+  private async resolveLinkPatch<T extends NewTask | TaskPatch>(input: T, next: T): Promise<void> {
+    const patch = input as TaskPatch;
+    const target = next as TaskPatch;
+    for (const list of LINK_LISTS) {
+      const set = patch[list];
+      const add = patch[`add_${list}`];
+      const remove = patch[`remove_${list}`];
+      if (set !== undefined) target[list] = await this.resolveLinks(list, set, false);
+      if (add !== undefined) {
+        target[`add_${list}`] = await this.resolveLinks(`add_${list}`, add, false);
+      }
+      if (remove !== undefined) {
+        target[`remove_${list}`] = await this.resolveLinks(`remove_${list}`, remove, true);
+      }
+      const both = target[`add_${list}`]?.find((key) => target[`remove_${list}`]?.includes(key));
+      if (both !== undefined) {
+        throw new KodelError("INVALID_TASK", `"${both}" is both added to and removed from ${list}`);
+      }
+    }
+  }
+
+  /**
+   * `blocked_by` is the core's reading of what the tracker said about each dependency, so an adapter
+   * that declares links and does not fill `dependencies` blocks the task (fail closed).
+   */
+  private withBlocked<T extends TaskLinks & { state?: string }>(task: T): T {
+    if (this.adapter.capabilities.links !== true) return task;
+    // A finished task is held back by nothing, whatever its dependencies say.
+    const by = task.state === "done" ? [] : blockedBy(task);
+    const { blocked_by: _dropped, ...rest } = task;
+    return (by.length > 0 ? { ...rest, blocked_by: by } : rest) as T;
+  }
+
   /** The adapter is not asked for what it has said it cannot do. */
   private requireCapabilities(input: {
     parent?: string;
@@ -202,6 +260,9 @@ export class TaskService {
     type?: string;
   }): void {
     const caps = this.adapter.capabilities;
+    if (caps.links !== true && hasLinkPatch(input as TaskPatch)) {
+      throw this.unsupported("task links (depends_on, conflicts_with)");
+    }
     if (input.priority !== undefined && !caps.priority) throw this.unsupported("priorities");
     if (input.type !== undefined && !caps.types) throw this.unsupported("task types");
     if (input.parent !== undefined && !caps.subtasks) throw this.unsupported("subtasks (parent)");
@@ -265,9 +326,10 @@ export class TaskService {
       if (input.comment !== undefined) next.comment = redactText(input.comment);
       if (input.fields !== undefined) next.fields = redactFields(input.fields);
       if (input.parent !== undefined) next.parent = await this.resolve("parent", input.parent);
+      await this.resolveLinkPatch(input, next);
       try {
         const task = await this.call((o) => this.adapter.create(next, o));
-        return ok({ task });
+        return ok({ task: this.withBlocked(task) });
       } catch (error) {
         this.dropSchema(error);
         throw error;
@@ -301,7 +363,9 @@ export class TaskService {
       // An adapter that hands back more than it was asked for is bounded, not trusted.
       const over = answer.tasks.length > filter.limit;
       const out: Record<string, unknown> = {
-        tasks: over ? answer.tasks.slice(0, filter.limit) : answer.tasks,
+        tasks: (over ? answer.tasks.slice(0, filter.limit) : answer.tasks).map((task) =>
+          this.withBlocked(task),
+        ),
         truncated: answer.truncated || over,
         problems: cleanProblems(answer.problems),
       };
@@ -315,7 +379,7 @@ export class TaskService {
       const key = await this.resolve("key", input.key);
       const found = await this.call((o) => this.adapter.get(key, o));
       if (!found) throw new KodelError("TASK_NOT_FOUND", `there is no task "${redactText(key)}"`);
-      const task = { ...found.task };
+      const task = this.withBlocked({ ...found.task });
       if (task.comments && task.comments.length > TASK_LIMITS.comments) {
         task.comments = task.comments.slice(-TASK_LIMITS.comments);
         task.comments_truncated = true;
@@ -342,10 +406,11 @@ export class TaskService {
       if (patch.fields !== undefined) next.fields = redactFields(patch.fields);
       const key = await this.resolve("key", typed);
       if (patch.parent !== undefined) next.parent = await this.resolve("parent", patch.parent);
+      await this.resolveLinkPatch(patch, next);
       try {
         const done = await this.call((o) => this.adapter.update(key, next, o));
         if (!done) throw new KodelError("TASK_NOT_FOUND", `there is no task "${redactText(key)}"`);
-        const out: Record<string, unknown> = { task: done.task };
+        const out: Record<string, unknown> = { task: this.withBlocked(done.task) };
         if (done.open_subtasks !== undefined && done.open_subtasks > 0) {
           out.open_subtasks = done.open_subtasks;
         }

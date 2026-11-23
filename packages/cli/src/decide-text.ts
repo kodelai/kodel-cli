@@ -4,7 +4,12 @@
  * Everything here may come from the agent or from files it can write, so it goes through `plain`.
  */
 import type { ChangeReport, PendingFound } from "@kodel-ai/local";
-import type { PipelineSpec } from "@kodel-ai/pipeline-core";
+import {
+  type AttachmentInfo,
+  type GateAttachments,
+  NOT_SCANNED,
+  type PipelineSpec,
+} from "@kodel-ai/pipeline-core";
 import { formatChange } from "./format";
 import { plain } from "./plain";
 
@@ -73,6 +78,61 @@ export function gateChangesText(found: ChangeReport): string | undefined {
   }
   return undefined;
 }
+
+/** A size for a person: bytes, then KB and MB with one decimal. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * One attachment as a line: name, type, size, version, and what a person has to know about it (an
+ * image was not scanned for secrets; a stored file that is gone or was changed has no content). The
+ * name was written by an agent, so it goes through `plain` like everything else here.
+ */
+export function attachmentLine(info: AttachmentInfo, fresh = false): string {
+  const facts = [
+    info.type,
+    ...(info.lines === undefined ? [] : [`${info.lines} line(s)`]),
+    formatBytes(info.bytes),
+    `v${info.version}`,
+    `by ${plain(info.node)}`,
+    ...(info.scanned ? [] : [NOT_SCANNED]),
+    ...(info.state === "missing" ? ["THE STORED FILE IS MISSING"] : []),
+    ...(info.state === "changed" ? ["THE STORED FILE WAS CHANGED OUTSIDE KODEL"] : []),
+    ...(fresh ? ["new since the run stopped here"] : []),
+  ];
+  return `${plain(info.name)}  ${facts.join(", ")}`;
+}
+
+/**
+ * The attachments the run keeps, as their own group apart from the project files; nothing when it
+ * keeps none. `runId` adds how to read one in a terminal.
+ */
+export function gateAttachmentsText(
+  found: GateAttachments | undefined,
+  runId?: string,
+): string | undefined {
+  if (found === undefined || found.list.length === 0) return undefined;
+  const fresh = new Set(found.newSince);
+  const shown = found.list
+    .slice(0, SHOWN_FILES)
+    .map((info) => `  ${attachmentLine(info, fresh.has(info.name))}`);
+  const more =
+    found.list.length > SHOWN_FILES ? [`  and ${found.list.length - SHOWN_FILES} more`] : [];
+  return [
+    `${found.list.length} attachment(s) kept with the run (not project files):`,
+    ...shown,
+    ...more,
+    ...(runId === undefined
+      ? []
+      : [`  read one with: kodel attachment show ${plain(runId)} <name>`]),
+  ].join("\n");
+}
+
+/** Said when an approval is refused because a version was written after the person looked. */
+export const ATTACHMENTS_MOVED = "an attachment was written while you were reading; look again";
 
 /** The comments the agent recorded as the person's: they go back with a rejection, in the agent's wording. */
 export function gateCommentsText(comments: { csv: string; count: number }): string {

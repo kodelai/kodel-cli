@@ -73,7 +73,7 @@ export async function runScenario(
       ? { scenario: scenario.id, engine: engine.name, ok: true }
       : { scenario: scenario.id, engine: engine.name, ok: false, divergence };
 
-  const spec = loadPipeline(scenario.pipeline, options.root);
+  const spec = loadPipeline(scenario.pipeline, options.root, engine.registry);
   const matchers = createMatchers(options.matchers);
   const problems = validateScenario(scenario, spec, options.matchers);
   if (problems.length > 0) {

@@ -246,6 +246,8 @@ export interface View {
   focused: boolean;
   path: string;
   comments: Comment[];
+  /** What a comment about a row is about, when it is not a line of a project file (`placeOf`). */
+  place?: (row: DiffRow) => string;
 }
 
 export interface Viewed {
@@ -321,7 +323,7 @@ function rowLines(p: Prepared, i: number, o: View): string[] {
     return `${gutter}${body}`;
   });
   const styled = shown ? lines.map((l) => (o.focused ? inverse(stripAnsi(l)) : bold(l))) : lines;
-  const place = placeOf(o.path, row);
+  const place = o.place ? o.place(row) : placeOf(o.path, row);
   for (const c of o.comments.filter((x) => x.location === place)) {
     for (const [k, text] of wrapText(c.description, Math.max(10, o.width - w - 12)).entries()) {
       styled.push(

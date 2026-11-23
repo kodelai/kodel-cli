@@ -1986,3 +1986,280 @@ describe("the start lock (T-44)", () => {
     expect(started.status).toBe("started");
   });
 });
+
+describe("task links in the daemon (T-45)", () => {
+  const ROOMY = [
+    "serve:",
+    "  enabled: true",
+    "  max_runs: 4",
+    "  max_workers: 4",
+    "  start:",
+    "    - pipeline: gated",
+  ];
+  const linked = async (w: World, title: string, links: Record<string, string[]>) => {
+    const made = await w.service.create({ title, ...links });
+    if (!made.ok) throw new Error(JSON.stringify(made));
+    return (made.task as Task).key;
+  };
+  const approveTask = async (w: World, key: string) => {
+    const answer = await w.service.approve({ key, seen: (await w.task(key)).updated_at });
+    expect(answer.ok).toBe(true);
+  };
+
+  test("t45_agent_closing_a_dependency_does_not_unblock", async () => {
+    await project({ serve: ROOMY });
+    const w = await world();
+    for (const status of ["done", "declined"]) {
+      const b = await w.make(`Dependency (${status})`);
+      const a = await linked(w, `Waits for it (${status})`, { depends_on: [b] });
+      const before = starts(w.launcher).length;
+      // An agent closes the dependency through the tools: that releases nothing.
+      const closed = await w.service.update({ key: b, status, by_agent: true });
+      expect(closed.ok).toBe(true);
+      tick();
+      await w.daemon.cycle();
+      tick();
+      await w.daemon.cycle();
+      expect(starts(w.launcher)).toHaveLength(before);
+      expect((await w.task(a)).runs).toEqual([]);
+      expect(w.daemon.memory().attempts).toEqual({});
+      // The person approves the dependency: the next cycle starts the dependent.
+      await approveTask(w, b);
+      tick();
+      await w.daemon.cycle();
+      expect(starts(w.launcher)).toHaveLength(before + 1);
+      expect((await w.task(a)).runs).toHaveLength(1);
+      if (status === "declined") {
+        expect(
+          w.lines.some((l) => l.includes(`started past a declined dependency: ${a}: ${b}`)),
+        ).toBe(true);
+      }
+      // Finish the run so the next round has room.
+      await w.approve(await w.runOf(a));
+      tick();
+      await w.daemon.cycle();
+    }
+  }, 30_000);
+
+  test("t45_run_closing_a_dependency_unblocks", async () => {
+    await project({ serve: ROOMY });
+    const w = await world();
+    const b = await w.make("Dependency");
+    const a = await linked(w, "Waits for it", { depends_on: [b] });
+    await w.daemon.cycle();
+    // Only the dependency starts; the dependent is not tried and uses no attempt.
+    expect(starts(w.launcher)).toHaveLength(1);
+    const runB = await w.runOf(b);
+    expect((await w.task(a)).runs).toEqual([]);
+    tick();
+    await w.daemon.cycle();
+    expect(starts(w.launcher)).toHaveLength(1);
+    expect(w.daemon.memory().attempts).toEqual({});
+    // The run completes: the engine closes the task, with no mark, and the dependent goes.
+    await w.approve(runB);
+    tick();
+    await w.daemon.cycle();
+    expect((await w.state(runB)).status).toBe("completed");
+    expect((await w.task(b)).state).toBe("done");
+    expect((await w.task(b)).agent_edited_at).toBeUndefined();
+    tick();
+    await w.daemon.cycle();
+    expect(starts(w.launcher)).toHaveLength(2);
+    expect((await w.task(a)).runs).toHaveLength(1);
+  }, 30_000);
+
+  test("t45_unapproved_agent_made_dependency_blocks_when_done", async () => {
+    await project({
+      serve: [...ROOMY.slice(0, 5), "    - pipeline: gated", "      match: { approval: any }"],
+    });
+    const w = await world();
+    // An agent made the dependency and nobody approved it; the rule takes it all the same.
+    const made = await w.service.create({ title: "An agent's dependency", created_by: "agent" });
+    if (!made.ok) throw new Error(JSON.stringify(made));
+    const b = (made.task as Task).key;
+    await w.daemon.cycle();
+    const runB = await w.runOf(b);
+    await w.approve(runB);
+    tick();
+    await w.daemon.cycle();
+    expect((await w.task(b)).state).toBe("done");
+    // Under a rule that requires approval, a dependent waits until the dependency is approved.
+    await writeConfig({ serve: ROOMY });
+    const strict = w.newDaemon();
+    const a = await linked(w, "Waits for it", { depends_on: [b] });
+    tick();
+    await strict.cycle();
+    expect((await w.task(a)).runs).toEqual([]);
+    await approveTask(w, b);
+    tick();
+    await strict.cycle();
+    expect((await w.task(a)).runs).toHaveLength(1);
+  }, 30_000);
+
+  test("t45_conflicting_tasks_are_never_started_together", async () => {
+    await project({ serve: ROOMY });
+    const w = await world();
+    const a = await w.make("First");
+    // The older task goes first; made in the same instant, the two would go by their (random) keys.
+    tick(1_000);
+    const b = await linked(w, "Must not run beside the first", { conflicts_with: [a] });
+    const c = await w.make("Free");
+    await w.daemon.cycle();
+    expect((await w.task(a)).runs).toHaveLength(1);
+    expect((await w.task(c)).runs).toHaveLength(1);
+    expect((await w.task(b)).runs).toEqual([]);
+    // While the first run is open (it waits at its gate): still not.
+    tick();
+    await w.daemon.cycle();
+    expect((await w.task(b)).runs).toEqual([]);
+    await w.approve(await w.runOf(a));
+    tick();
+    await w.daemon.cycle();
+    tick();
+    await w.daemon.cycle();
+    expect((await w.task(b)).runs).toHaveLength(1);
+  }, 30_000);
+
+  test("t45_daemon_start_reads_the_links_again", async () => {
+    await project({ serve: ROOMY });
+    const w = await world();
+    const b = await w.make("Becomes a dependency");
+    expect((await w.service.update({ key: b, status: "progress" })).ok).toBe(true);
+    const a = await w.make("Ready when planned");
+    // Between the plan and the start somebody adds a dependency: the read under the lock sees it.
+    const port = serveTasksOf(w.service);
+    let changed = false;
+    const tasks: ServeTasksPort = {
+      capabilities: port.capabilities,
+      list: (filter) => port.list(filter),
+      comment: (key, text) => port.comment(key, text),
+      priorities: () => port.priorities(),
+      get: async (key) => {
+        if (!changed) {
+          changed = true;
+          const answer = await w.service.update({ key: a, add_depends_on: [b] });
+          expect(answer.ok).toBe(true);
+        }
+        return port.get(key);
+      },
+    };
+    const daemon = w.newDaemon({ tasks });
+    await daemon.cycle();
+    expect(starts(w.launcher)).toHaveLength(0);
+    expect((await w.task(a)).runs).toEqual([]);
+    // No attempt used: the task is not at fault.
+    expect(daemon.memory().attempts).toEqual({});
+    expect(w.lines).toContain(`not started: ${a}: ${a} waits for ${b} (open)`);
+  }, 30_000);
+
+  test("t45_no_links_reads_as_today", async () => {
+    await project({ serve: ROOMY });
+    const w = await world();
+    const port = serveTasksOf(w.service);
+    const reads: string[] = [];
+    const tasks: ServeTasksPort = {
+      capabilities: port.capabilities,
+      get: (key) => port.get(key),
+      comment: (key, text) => port.comment(key, text),
+      priorities: () => port.priorities(),
+      list: (filter) => {
+        reads.push(filter.state.join("+"));
+        return port.list(filter);
+      },
+    };
+    const daemon = w.newDaemon({ tasks });
+    const first = await w.make("First", { priority: "low" });
+    const second = await w.make("Second", { priority: "high" });
+    tick(1_000);
+    const third = await w.make("Third", { priority: "high" });
+    const plan = await daemon.plan();
+    if (plan.config !== "ok") throw new Error("the config does not load");
+    // No task has a link: one read of the unstarted tasks, and the order of the tracker's list.
+    expect(reads).toEqual(["todo"]);
+    expect(plan.plan.queues.starts.map((s) => s.key)).toEqual([second, third, first]);
+    expect(plan.plan.blocked_tasks).toEqual([]);
+
+    // One link: every open task is read as well, without the rule filter, for the order.
+    const answer = await w.service.update({ key: second, add_depends_on: [first] });
+    expect(answer.ok).toBe(true);
+    reads.length = 0;
+    const again = await daemon.plan();
+    if (again.config !== "ok") throw new Error("the config does not load");
+    expect(reads).toEqual(["todo", "todo+progress"]);
+    expect(again.plan.queues.starts).toEqual([
+      { key: first, reason: `priority high (raised by ${second}), unblocks 1` },
+      { key: third, reason: "priority high" },
+    ]);
+    expect(again.plan.blocked_tasks).toEqual([
+      { key: second, reason: `${second} waits for ${first} (open)` },
+    ]);
+  }, 30_000);
+
+  test("t45_too_many_open_tasks_starts_nothing", async () => {
+    await project({ serve: ROOMY });
+    const w = await world();
+    const a = await w.make("A");
+    await linked(w, "B", { depends_on: [a] });
+    const port = serveTasksOf(w.service);
+    const tasks: ServeTasksPort = {
+      capabilities: port.capabilities,
+      get: (key) => port.get(key),
+      comment: (key, text) => port.comment(key, text),
+      priorities: () => port.priorities(),
+      // The read of every open task never ends: more pages than a cycle reads.
+      list: async (filter) =>
+        filter.state.length === 1
+          ? port.list(filter)
+          : { tasks: [], next: "more", truncated: false, problems: [] },
+    };
+    const daemon = w.newDaemon({ tasks });
+    await daemon.cycle();
+    expect(starts(w.launcher)).toHaveLength(0);
+    expect(w.lines.join("\n")).toContain("close tasks or remove the links");
+    // The same project without the link is read as before and starts.
+    const clean = await world({ launcher: w.launcher });
+    const listed = await clean.service.list({});
+    if (!listed.ok) throw new Error("the list failed");
+    for (const row of listed.tasks as { key: string; depends_on?: string[] }[]) {
+      if (row.depends_on) await clean.service.update({ key: row.key, clear: ["depends_on"] });
+    }
+    tick();
+    await clean.newDaemon({ tasks }).cycle();
+    expect(starts(w.launcher).length).toBeGreaterThan(0);
+  }, 30_000);
+
+  test("t45_unreadable_run_holds_back_conflicting_tasks", async () => {
+    await project({ serve: ROOMY });
+    const w = await world();
+    // A run somebody started in a session, with no worker record, whose state can no longer be read.
+    const outside = await w.host.start({ pipeline: "gated", task: "outside", restart: false });
+    const statePath = join(storeRoot(), "runs", outside.run.runId, "state.json");
+    const raw = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>;
+    await writeFile(statePath, JSON.stringify({ ...raw, v: 99 }));
+    const other = await w.make("Other");
+    expect((await w.service.update({ key: other, status: "progress" })).ok).toBe(true);
+    const conflicting = await linked(w, "Has a conflict", { conflicts_with: [other] });
+    const free = await w.make("Has none");
+    // A fresh host: no run is cached.
+    const fresh = await world({ host: newHost(), launcher: w.launcher });
+    await fresh.daemon.cycle();
+    expect((await fresh.task(free)).runs).toHaveLength(1);
+    expect((await fresh.task(conflicting)).runs).toEqual([]);
+    const plan = await fresh.daemon.plan();
+    if (plan.config !== "ok") throw new Error("the config does not load");
+    expect(plan.plan.blocked_tasks).toEqual([
+      {
+        key: conflicting,
+        reason: `${conflicting} has conflicts and run ${outside.run.runId} cannot be read`,
+      },
+    ]);
+    // A run of another checkout that cannot be read holds nothing back.
+    const foreign: ServeHostPort = Object.assign(Object.create(fresh.host) as LocalPipelineHost, {
+      foreignRootOf: (meta: { runId: string }) =>
+        meta.runId === outside.run.runId ? "/another/checkout" : undefined,
+    });
+    tick();
+    await fresh.newDaemon({ host: foreign }).cycle();
+    expect((await fresh.task(conflicting)).runs).toHaveLength(1);
+  }, 30_000);
+});

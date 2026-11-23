@@ -3,6 +3,7 @@
  * No file system, process, network or clock access: those come in through adapters.
  */
 export * from "./agent-history";
+export * from "./attachments";
 export * from "./canonical";
 export * from "./changes";
 export * from "./checks";
@@ -30,6 +31,7 @@ export * from "./result";
 export * from "./run";
 export * from "./run-id";
 export * from "./run-task";
+export * from "./schedule";
 export * from "./service";
 export * from "./session";
 export * from "./session-frames";

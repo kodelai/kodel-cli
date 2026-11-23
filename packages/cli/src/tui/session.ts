@@ -258,6 +258,33 @@ export interface AgentWords {
   step?: string;
 }
 
+/** One version of an attachment the run keeps (T-45), as the card shows it. */
+export interface AttachmentVersionView {
+  version: number;
+  /** `text`, or the kind of image. */
+  type: string;
+  bytes: number;
+  lines?: number;
+  /** The step that wrote it. */
+  node: string;
+  attempt: number;
+  at: number;
+  /** False for an image: it was stored as given, not scanned for secrets. */
+  scanned: boolean;
+  /** `missing` and `changed` have nothing to show: the stored file is not what the run recorded. */
+  state: "ok" | "missing" | "changed";
+  /** For an image whose stored file verifies: where it is, for the person to open. */
+  path?: string;
+}
+
+/** An attachment of the run: every version of one name, oldest first. */
+export interface AttachmentView {
+  name: string;
+  versions: AttachmentVersionView[];
+  /** A version was written since the run stopped at the gate. */
+  fresh?: boolean;
+}
+
 /** Everything the card of a run waiting at a human step shows beyond the list row. */
 export interface GateDetail {
   /** A run waiting at a human step, or one that is going on: the second has no question to answer. */
@@ -277,6 +304,8 @@ export interface GateDetail {
   changes: ChangeSummary;
   /** Files that changed after the checks passed: the agent kept working. */
   changedAfterChecks: string[];
+  /** What the run keeps besides the project files, by name; absent on a host that keeps none. */
+  attachments?: AttachmentView[];
   comments: Comment[];
   metrics: Metrics;
   /** What the agent said and the tools it called, when its log can be read. */

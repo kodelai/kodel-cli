@@ -22,6 +22,9 @@ paths = [
   # PEM headers that the terminal tail and replay tests feed through the redaction, and a made-up checkout key.
   '''^packages/pipeline-core/test/session-attach\.test\.ts$''',
   '''^packages/local/test/session-pty\.test\.ts$''',
+  # A made-up key that the attachment check must count as one stored line (it was renamed once).
+  '''^packages/local/test/run-attachments-check\.test\.ts$''',
+  '''^packages/local/test/attachments-check\.test\.ts$''',
 ]
 
 # Both must hold: this file and this value, so another value in the same file is still checked.

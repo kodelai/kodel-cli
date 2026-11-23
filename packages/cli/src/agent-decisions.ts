@@ -7,6 +7,7 @@
  */
 import {
   type AgentDecision,
+  attachmentAnswer,
   failure,
   type PipelineService,
   type ToolResult,
@@ -90,6 +91,37 @@ export function createAgentDecider(humans: HumanHost, dialog: DialogState): Agen
           "the engine could not tell what changed since the step was reached; approving needs confirm_unverified: true, and only if the person said to approve anyway",
         );
       }
+      // What is approved is what the person was told about: the attachments of the waiting answer
+      // the agent passed on. A missing fingerprint, or one from before a version was written, is
+      // refused with the answer as it is now, so the agent tells the person what is new.
+      let seen: { attachments: string | undefined } | undefined;
+      if (approved && run.gateAttachments) {
+        const now = await run.gateAttachments(node);
+        // What the decision is held against once more, under the run's lock.
+        seen = { attachments: now.fingerprint };
+        if (now.fingerprint !== undefined && input.attachments_fingerprint !== now.fingerprint) {
+          const fresh = await service.nextStep({ run_id: input.run_id }).catch(() => undefined);
+          const { ok: _ok, ...next } = fresh?.ok ? fresh : { ok: true };
+          const newSince = new Set(now.newSince);
+          return failure(
+            "INVALID_ARGUMENTS",
+            input.attachments_fingerprint === undefined
+              ? "the run keeps attachments: approving needs attachments_fingerprint, the one of the answer the person decided on (details has it as it is now, with the attachments it stands for); tell the person about the attachments first"
+              : "an attachment was written since the answer the person decided on; tell them what is new (details has the attachments as they are now) and decide again only if they say so",
+            undefined,
+            {
+              // Also here, not only in `next`: with a sibling step open the answer is that step,
+              // which lists no attachments.
+              attachments_fingerprint: now.fingerprint,
+              attachments: now.list.map((info) => ({
+                ...attachmentAnswer(info),
+                ...(newSince.has(info.name) ? { new: true } : {}),
+              })),
+              next,
+            },
+          );
+        }
+      }
       const reason = input.reason?.trim() ?? "";
       if (!approved && reason === "" && !(await run.gateResults(node))) {
         return failure("INVALID_ARGUMENTS", "a rejection needs a reason");
@@ -101,7 +133,13 @@ export function createAgentDecider(humans: HumanHost, dialog: DialogState): Agen
       dialog.deciding++;
       let done: Awaited<ReturnType<typeof run.decideHuman>>;
       try {
-        done = await run.decideHuman(node, input.decision, reason === "" ? undefined : reason, by);
+        done = await run.decideHuman(
+          node,
+          input.decision,
+          reason === "" ? undefined : reason,
+          by,
+          seen,
+        );
       } finally {
         dialog.deciding--;
       }
