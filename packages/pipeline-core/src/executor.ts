@@ -5,6 +5,7 @@
  */
 import type { z } from "zod";
 import { stableJson } from "./canonical";
+import type { ExecutorRole } from "./tool-roles";
 
 export const EXECUTOR_SOURCES = [
   /** From the protocol itself (the MCP handshake). */
@@ -29,6 +30,12 @@ export interface Sourced<T> {
 export interface Caller {
   name: string;
   version: string;
+  /**
+   * The role of the server the call came through (5M9D): the server's own, set by the service, never
+   * read from a tool's arguments. A caller with only a role (an empty `name`) is a connection whose
+   * client did not name itself.
+   */
+  role?: ExecutorRole;
 }
 
 /** What one call or one record knows about who acted. Every part is optional: no value is made up. */
@@ -42,6 +49,12 @@ export interface ExecutorRecord {
    * session can write, so it decides nothing.
    */
   session_name?: Sourced<string>;
+  /**
+   * The role of the server behind the call: `worker`, `manager`, or `all` for a server started with no
+   * role. Written only for a format whose `capabilities.executorRole` says so; information, it decides
+   * nothing.
+   */
+  role?: ExecutorRole;
 }
 
 /** The engine that wrote a run's records. Written once, at the start of a run. */
@@ -57,6 +70,8 @@ export interface EngineRecord {
   instructions_hash?: string;
   /** Hash of the tools the agent was given: names, descriptions and arguments. */
   tools_hash?: string;
+  /** The role of the server that started the run; see `ExecutorRecord.role`. */
+  role?: ExecutorRole;
 }
 
 /** Longest value kept from outside: a name or an id is short, and a long one is an attack or a bug. */
@@ -142,20 +157,24 @@ export function sameExecutor(
  * is zod v3's own (the project is pinned to v3); a field without one still hashes, as `unknown`.
  */
 export function toolsFingerprint(
-  tools: readonly { name: string; description: string; shape: z.ZodRawShape }[],
+  tools: readonly { name: string; description: string; shape: z.ZodRawShape; readOnly?: boolean }[],
+  /** What the set was chosen by (5M9D); a host that has no roles leaves it out. */
+  header?: { role: ExecutorRole; readOnly: boolean },
 ): string {
+  const list = tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    ...(tool.readOnly === undefined ? {} : { read_only: tool.readOnly }),
+    arguments: Object.entries(tool.shape)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([name, field]) => ({
+        name,
+        type: (field._def as { typeName?: string }).typeName ?? "unknown",
+        optional: field.isOptional(),
+        description: field.description ?? "",
+      })),
+  }));
   return stableJson(
-    tools.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      arguments: Object.entries(tool.shape)
-        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-        .map(([name, field]) => ({
-          name,
-          type: (field._def as { typeName?: string }).typeName ?? "unknown",
-          optional: field.isOptional(),
-          description: field.description ?? "",
-        })),
-    })),
+    header === undefined ? list : { role: header.role, read_only: header.readOnly, tools: list },
   );
 }

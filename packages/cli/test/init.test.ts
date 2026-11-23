@@ -6,7 +6,7 @@ import { defaultRegistry, docTopics } from "@kodel-ai/pipeline-core";
 import { TOOLS } from "@kodel-ai/pipeline-core/mcp";
 import { runCli } from "../src/cli";
 import type { Choice } from "../src/init";
-import { AGENTS } from "../src/init/agents";
+import { AGENTS, keptRoleFlags } from "../src/init/agents";
 import type { Change } from "../src/init/files";
 import { installSkills, SKILLS, type Skill } from "../src/init/skills";
 
@@ -183,6 +183,78 @@ describe("kodel init", () => {
     await init({}, "--agent", "claude-code,opencode", "--force");
     expect((await json(".mcp.json")).mcpServers.kodel).toEqual({ command: "kodel", args: ["mcp"] });
     expect((await json("opencode.json")).mcp.kodel.command).toEqual(["kodel", "mcp"]);
+  });
+
+  test("5m9d_init_keeps_the_role_flags_of_an_existing_server", async () => {
+    // The person narrowed what their agent is served; a rewrite of the entry must not widen it again.
+    await writeFile(
+      join(dir, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          kodel: { command: "kodel", args: ["mcp", "--role", "manager", "--read-only"] },
+        },
+      }),
+    );
+    await writeFile(
+      join(dir, "opencode.json"),
+      JSON.stringify({
+        mcp: { kodel: { type: "local", command: ["kodel", "mcp", "--read-only"], enabled: true } },
+      }),
+    );
+    await mkdir(join(dir, ".codex"), { recursive: true });
+    await writeFile(
+      join(dir, ".codex", "config.toml"),
+      '# kodel:begin\n[mcp_servers.kodel]\ncommand = "kodel"\nargs = ["mcp","--role","worker"]\n# kodel:end\n',
+    );
+    // An entry that only adds the flags is ours: nothing is skipped, and nothing is lost.
+    const first = await init({}, "--agent", "claude-code,codex,opencode");
+    expect((await json(".mcp.json")).mcpServers.kodel.args).toEqual([
+      "mcp",
+      "--role",
+      "manager",
+      "--read-only",
+    ]);
+    expect((await json("opencode.json")).mcp.kodel.command).toEqual([
+      "kodel",
+      "mcp",
+      "--read-only",
+    ]);
+    // The Codex block is rewritten on every run and keeps them too.
+    expect(await read(".codex/config.toml")).toContain('args = ["mcp","--role","worker"]');
+    expect(first.out).toContain("kept --role manager --read-only");
+    expect(first.out).toContain("kept --role worker");
+    // With `--force` and another way to start kodel the entries are rewritten, the flags stay.
+    const forced = await init(
+      {},
+      "--agent",
+      "claude-code,codex,opencode",
+      "--force",
+      "--server-command",
+      "bun run kodel",
+    );
+    expect((await json(".mcp.json")).mcpServers.kodel).toEqual({
+      command: "bun",
+      args: ["run", "kodel", "mcp", "--role", "manager", "--read-only"],
+    });
+    expect((await json("opencode.json")).mcp.kodel.command).toEqual([
+      "bun",
+      "run",
+      "kodel",
+      "mcp",
+      "--read-only",
+    ]);
+    expect(await read(".codex/config.toml")).toContain(
+      'args = ["run","kodel","mcp","--role","worker"]',
+    );
+    expect(forced.out).toContain("kept --role manager --read-only");
+    // A value that is not a role is not carried over, and a flag before `mcp` is not the server's.
+    expect(keptRoleFlags(["mcp", "--role", "admin"])).toEqual([]);
+    expect(keptRoleFlags(["--read-only", "mcp"])).toEqual([]);
+    expect(keptRoleFlags(["x", "mcp", "--no-decisions", "--role", "worker"])).toEqual([
+      "--role",
+      "worker",
+    ]);
+    expect(keptRoleFlags(undefined)).toEqual([]);
   });
 
   test("an_old_grant_written_by_an_earlier_init_stays", async () => {

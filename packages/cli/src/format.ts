@@ -368,6 +368,14 @@ export function formatReport(
     const again = report.tracker_task.restarted ? " (restarted: the task had been done)" : "";
     lines.push(`tracker task: ${plain(report.tracker_task.key)}${again}`);
   }
+  if (report.server_roles !== undefined) {
+    const { started_by, steps } = report.server_roles;
+    const parts = [
+      ...(started_by === undefined ? [] : [`started by ${started_by}`]),
+      ...(steps.length === 0 ? [] : [`steps served by ${steps.join(", ")}`]),
+    ];
+    lines.push(`server role: ${parts.join("; ")}`);
+  }
   lines.push(
     `total ${formatDuration(report.total_s)}: work ${formatDuration(report.work_s)}, ` +
       `waiting for a person ${formatDuration(report.waiting_s)}` +

@@ -3,8 +3,10 @@
  * SDK version belong to the host; this only says which tools exist and what each one does.
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
 import type { PipelineService, ToolResult } from "../service";
-import { invokeTool, type ToolDescriptor, toolsFor } from "./tools";
+import type { ServerRole } from "../tool-roles";
+import { invokeTool, keepOnly, type ToolDescriptor, toolsFor } from "./tools";
 
 /** A tool call that has been answered, as the host sees it before the agent does. */
 export interface ToolCall {
@@ -27,23 +29,42 @@ export interface RegisterOptions {
   afterTool?: AfterTool;
   /** Tools the host adds to the usual ones (the decisions the config lets the agent make). */
   extraTools?: ToolDescriptor[];
+  /** The role the server was started with: some tools read differently on the manager. */
+  role?: ServerRole;
+  /**
+   * The names the server serves (5M9D). A tool outside it is not registered and is not in the list the
+   * dispatcher searches, so a call that names it is refused whether the client listed it or not.
+   * Absent: every tool.
+   */
+  only?: readonly string[];
 }
 
+/** Registers the pipeline tools the server serves and returns exactly those. */
 export function registerPipelineTools(
   server: McpServer,
   service: PipelineService,
   options: RegisterOptions = {},
-): void {
-  const tools = [...toolsFor(options), ...(options.extraTools ?? [])];
+): ToolDescriptor[] {
+  const tools = keepOnly(
+    [
+      ...toolsFor({
+        ...(options.taskLink === undefined ? {} : { taskLink: options.taskLink }),
+        ...(options.role === undefined ? {} : { role: options.role }),
+        ...(options.only === undefined ? {} : { served: options.only }),
+      }),
+      ...(options.extraTools ?? []),
+    ],
+    options.only,
+  );
   for (const tool of tools) {
     server.registerTool(
       tool.name,
       {
         title: tool.title,
         description: tool.description,
-        inputSchema: tool.shape,
+        inputSchema: tool.strict === true ? z.object(tool.shape).strict() : tool.shape,
         annotations: { readOnlyHint: tool.readOnly, idempotentHint: tool.idempotent },
-      },
+      } as never,
       (async (args: Record<string, unknown>, extra: { signal: AbortSignal }) => {
         let result = await invokeTool(service, tool.name, args, tools);
         if (options.afterTool) {
@@ -59,4 +80,5 @@ export function registerPipelineTools(
       }) as never,
     );
   }
+  return tools;
 }

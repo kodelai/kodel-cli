@@ -280,8 +280,8 @@ is `{ value, source }`, and a part that cannot be observed is left out, never gu
 
 | where | what |
 | --- | --- |
-| `run_started.engine` | `version`, `commit`, `record_version`, `meta_version`, `contract_version`, `instructions_hash`, `tools_hash` |
-| `run_started.executor`, `agent_completed.executor`, `step_served.executor` | `client` (name and version), `session`, `model`, `session_name` |
+| `run_started.engine` | `version`, `commit`, `record_version`, `meta_version`, `contract_version`, `instructions_hash`, `tools_hash`, `role` |
+| `run_started.executor`, `agent_completed.executor`, `step_served.executor` | `client` (name and version), `session`, `model`, `session_name`, `role` |
 | `agent_completed.engine_version` | only when the engine that completed the step is not the one that started the run |
 
 | source | meaning |
@@ -295,6 +295,12 @@ Strings from outside are stripped of control characters and cut at 200 character
 everything else it writes. `contract_version`, `instructions_hash` and `tools_hash` are there when the host knows what
 the agent was served; they change when the instructions or a tool (its name,
 description or arguments) change. With `history.executor: false` none of these fields is written.
+
+`role` is the role of the server the call came through (`docs/mcp-roles.md`): `worker`, `manager`, or `all` for a
+server started with no role. It is the server's own, never an argument of a tool. It is written for runs of format 2
+only, and `kodel report`, `history_run_details` and `manager_run_report` show it as `server_roles` (the role that
+started the run, and the roles that served or completed its steps). `tools_hash` covers the role, `--read-only`, the
+read-only mark of each tool and the final set of tools, the task tools included.
 
 ### The name of the session (`session_name`)
 
@@ -738,7 +744,9 @@ the pass stops, and the next one starts again from the cursor.
 
 ## History tools (`history_runs`, `history_run_details`, `history_agent_log`, `history_stats`)
 
-Four read-only tools of the MCP server let the agent read what past runs of the project did. They read the run's state and
+Four read-only tools of the MCP server let the agent read what past runs of the project did. A server started with
+`--role worker` (a background worker's, and any server under `KODEL_ENGINE`) does not serve them; a manager and a server
+with no role do (`docs/mcp-roles.md`). They read the run's state and
 journal and the stored agent log; they write nothing, take no lock and never open a run for work. They are served by every
 host; a host that keeps no history it can read answers `HISTORY_UNAVAILABLE`. Runs of another checkout of the project
 (`storage: home` shares one history between clones) are never listed, and the other tools answer `UNKNOWN_RUN` for them.

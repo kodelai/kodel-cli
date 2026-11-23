@@ -255,3 +255,60 @@ run was taken with `node scripts/take-format-fixture.mjs v2-model <run dir>`.
 - `r_0mwplbn3u_f9l6` (finished): `plan`, then `review` (asks for `sonnet`) and `build` (asks for `opus`) at once, each taken with a
   claim token and handed in by its worker (`worker_models` `claude-sonnet-5-5` and `claude-opus-4-8`), then the join `merge`.
 
+
+## `v2-roles/`
+
+Two runs of run-state format 2 whose records carry the role of the server (TASK-5M9D, `docs/mcp-roles.md`).
+Format 2 is amended in place for it (capability `executorRole`; `role` on the `engine` and `executor` records of
+the journal, nothing in the state; see `docs/run-formats.md`). They were made by `bun
+scripts/take-v2-roles-fixture.mjs`, which starts two real `kodel mcp` servers from the sources over stdio in a
+scratch git repository, one with no role and one with `--role worker`, and drives them with the MCP client; the
+script played the agent (the two steps of the pipeline have no checks). No `CLAUDE*` variable and no
+`KODEL_ENGINE` reached the servers, so no record names a session, and `history.agent_log`, `usage` and
+`tool_calls` are off in the scratch project. The `engine` record is the source build's (`version` of
+`packages/cli/package.json`, `commit` `dev`); the client the servers observed is the script
+(`take-v2-roles-fixture`).
+
+- `r_0mwsbvbls_qkaa` (finished): started through the server with no role (`run_started.engine.role` and
+  `executor.role` are `all`, and so is the first `step_served`), then both steps handed in through the worker's
+  server (`agent_completed.executor.role` is `worker`, and so is the `step_served` of `ship`).
+- `r_0mwsbvf52_q1cs` (open): started through the worker's server and left `running` at `write` #1, served.
+
+They were taken with `node scripts/take-format-fixture.mjs v2-roles <run dir> <run dir>`; the workdir is the
+placeholder `/kodel-fixture/workdir/<run id>` and there is no `seal.json`. The tests open both (`status`,
+`report`, whose `server_roles` lists the roles), write them back as they were read, continue the open one in
+format 2, and check that the run decides and reports the same with the key stripped.
+
+## `v2-manager/`
+
+Three open runs of run-state format 2 whose journal holds a decision an agent made for the person (TASK-5M9D,
+`docs/mcp-roles.md`, `docs/decisions.md`). A decision made through a manager's server carries `decided_via:
+manager` beside `decided_by: agent` on its `gate_decided` or `pipeline_accepted` record; `kodel serve` reads
+the key and resumes the run's worker after it, as after a person's decision. Format 2 is amended in place for it
+(journal records only, nothing in the state; see `docs/run-formats.md`). They were made by `bun
+scripts/take-v2-manager-fixture.mjs`, which starts real `kodel mcp` servers from the sources over stdio in a
+scratch git repository whose config has `decisions: { agent: { gate: true, pipeline_change: true } }`: one with
+`--role worker`, one with `--role manager` and one with no role, each driven by the MCP client; the script
+played the agents (the agent steps have no checks). No `CLAUDE*` variable and no `KODEL_ENGINE` reached the
+servers, so no record names a session, and `history.agent_log`, `usage` and `tool_calls` are off in the scratch
+project. The `engine` record is the source build's; the client the servers observed is the script
+(`take-v2-manager-fixture`).
+
+- `r_0mwtbx5bv_kyns` (open): `write` handed in through the worker's server, then the gate `approve` approved
+  through the manager's server (`gate_decided` with `decided_by: agent`, `decided_via: manager`). Nothing was
+  served after the decision: the run is `running` at `ship` #1 with nobody on it.
+- `r_0mwtbx7v2_cye8` (open): the worker's server took a proposed change of the run's pipeline
+  (`pipeline_change_proposed`) and the worker called `pipeline_complete_step`; the journal holds no hand-in,
+  the run waited for the change at `write`. The change was accepted through the manager's server
+  (`pipeline_accepted` with `decided_by: agent`, `decided_via: manager`); the run is `running` at `write` #1 on
+  the new version (two files in `specs/`).
+- `r_0mwtbx9p5_lbl7` (open): the same gate approved by an agent through the server with no role, where the run
+  is worked: `gate_decided` has `decided_by: agent` and no `decided_via`, and the answer served `ship` to that
+  agent (`step_served` with `executor.role` `all`).
+
+They were taken with `node scripts/take-format-fixture.mjs v2-manager <run dir> <run dir> <run dir>`; the
+workdir is the placeholder `/kodel-fixture/workdir/<run id>` and there is no `seal.json`. The tests open them
+(`status`, `report`, whose `agent_decisions` lists the decision), write them back as they were read, continue
+the first one to its end in format 2, check that the run reports the same with the key stripped, and plan the
+resume of each as `kodel serve` does: the first two are resumed, the third is not (`agent_decided`), and the
+first with the key stripped (what an older kodel reads) is not either.

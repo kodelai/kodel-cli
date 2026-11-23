@@ -14,6 +14,7 @@ import {
   TOOL_CALLS_RECORD_FORMAT,
   UNATTRIBUTED_KEY,
 } from "./tool-calls-record";
+import { MANAGER_TOOL_NAMES } from "./tool-roles";
 
 /**
  * The tools of the engine whose names start with `pipeline_` (the tool registry's, and the decision tools), by name: a
@@ -61,7 +62,11 @@ export function splitToolName(name: string): { server?: string; tool: string } {
 /** Whether the tool is one of the engine's own, by the name of the tool and whatever the server is called. */
 export function isOwnTool(name: string): boolean {
   const tool = splitToolName(name).tool;
-  return PIPELINE_TOOL_NAMES.includes(tool) || HISTORY_TOOL_NAMES.includes(tool);
+  return (
+    PIPELINE_TOOL_NAMES.includes(tool) ||
+    HISTORY_TOOL_NAMES.includes(tool) ||
+    MANAGER_TOOL_NAMES.includes(tool)
+  );
 }
 
 // ── where a call belongs ────────────────────────────────────────────────────

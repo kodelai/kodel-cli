@@ -779,6 +779,14 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
         say(`resumed: run ${action.runId} was resumed already (kodel agent ls)`);
         return;
       }
+      // The config does not let the worker's server start (an unusable `mcp` block): nothing was
+      // spawned and the run is not at fault, so this is not one of its attempts (5M9D).
+      if (error instanceof KodelError && error.code === "CONFIG_INVALID") {
+        say(
+          `not resumed: run ${action.runId}: ${messageOf(error)}; fix the config, the resume is tried again and no attempt is counted`,
+        );
+        return;
+      }
       const tried = memory.resume_attempts?.[key];
       const count = (tried?.count ?? 0) + 1;
       memory.resume_attempts = {

@@ -76,7 +76,7 @@ function refusal(fn: () => unknown): KodelError {
 }
 
 describe("t41 the codecs read and write the golden runs unchanged", () => {
-  for (const format of ["v1", "v1-open", "v2", "v2-worker"]) {
+  for (const format of ["v1", "v1-open", "v2", "v2-worker", "v2-roles", "v2-manager"]) {
     test(`t41_${format.replace("-", "_")}_round_trip_on_real_fixtures`, () => {
       const runs = fixtureRuns(format);
       expect(runs.length).toBeGreaterThan(0);
@@ -1026,5 +1026,201 @@ describe("t43 the format-2 run with steps that ask for a model", () => {
     expect(refusal(() => encodeRunState({ ...state, v: 1 } as RunState)).code).toBe(
       "UNSUPPORTED_FORMAT_FEATURE",
     );
+  });
+});
+
+describe("5m9d the role of the server on the records of a run", () => {
+  const FINISHED = "r_0mwsbvbls_qkaa";
+  const OPEN = "r_0mwsbvf52_q1cs";
+  const load = (id: string) => {
+    const run = fixtureRuns("v2-roles").find((r) => r.id === id);
+    if (run === undefined) throw new Error(`no fixture run ${id}`);
+    return {
+      run,
+      state: readRunState(run.state, run.id),
+      journal: run.journal.map((line) => decodeJournalRecord(JSON.parse(line))),
+    };
+  };
+  const roleOf = (value: unknown) => (value as { role?: unknown } | undefined)?.role;
+
+  test("5m9d_role_fixture_round_trips", () => {
+    // Two runs made by real `kodel mcp` servers (`scripts/take-v2-roles-fixture.mjs`): one started by a
+    // server with no role and worked by a worker's, one started by the worker's and left open.
+    expect(
+      fixtureRuns("v2-roles")
+        .map((r) => r.id)
+        .sort(),
+    ).toEqual([FINISHED, OPEN]);
+    for (const id of [FINISHED, OPEN]) {
+      const { run, state, journal } = load(id);
+      expect(state.v).toBe(2);
+      expect(canonical(encodeRunState(state))).toBe(canonical(JSON.parse(run.state)));
+      journal.forEach((record, i) => {
+        expect(canonical(encodeJournalRecord(record))).toBe(
+          canonical(JSON.parse(run.journal[i] as string)),
+        );
+      });
+    }
+    const finished = load(FINISHED);
+    const started = finished.journal.find((r) => r.event === "run_started");
+    expect(roleOf(started?.engine)).toBe("all");
+    expect(roleOf(started?.executor)).toBe("all");
+    expect(
+      finished.journal.filter((r) => r.event === "agent_completed").map((r) => roleOf(r.executor)),
+    ).toEqual(["worker", "worker"]);
+    expect(summarizeRun(finished.state, finished.journal).server_roles).toEqual({
+      started_by: "all",
+      steps: ["all", "worker"],
+    });
+    const open = load(OPEN);
+    expect(open.state.status).toBe("running");
+    expect(summarizeRun(open.state, open.journal).server_roles).toEqual({
+      started_by: "worker",
+      steps: ["worker"],
+    });
+    // The role lives in journal records only: the state has no key for it.
+    expect(finished.run.state).not.toContain('"role"');
+    // The older fixtures of format 2 carry no role and report none.
+    for (const format of ["v2", "v2-worker", "v2-model", "v2-engine"]) {
+      for (const run of fixtureRuns(format)) {
+        const journal = run.journal.map((line) => decodeJournalRecord(JSON.parse(line)));
+        expect(summarizeRun(readRunState(run.state, run.id), journal).server_roles).toBeUndefined();
+      }
+    }
+  });
+
+  test("5m9d_the_role_decides_nothing", () => {
+    // An engine that ignores the key decides the same: the open run goes on to the same state and the
+    // same records, apart from the key itself, whether its hand-in carries a role or not.
+    const { run, state } = load(OPEN);
+    const specFile = readdirSync(join(run.dir, "specs")).find((name) => name.endsWith(".yaml"));
+    const spec = parsePipeline(readFileSync(join(run.dir, "specs", specFile ?? ""), "utf8"));
+    const client = { value: { name: "agent", version: "1" }, source: "observed" as const };
+    const handIn = (executor: Record<string, unknown>): RunEvent =>
+      ({ type: "agent_completed", node: "write", attempt: 1, executor }) as RunEvent;
+    const strip = (records: readonly JournalRecord[]) =>
+      records.map((record) => {
+        const out: Record<string, unknown> = { ...record };
+        for (const field of ["executor", "engine"]) {
+          const nested = out[field] as Record<string, unknown> | undefined;
+          if (nested === undefined) continue;
+          const { role: _role, ...rest } = nested;
+          out[field] = rest;
+        }
+        return out as JournalRecord;
+      });
+    const decided = (["worker", "manager", "all", undefined] as const).map((role) => {
+      const result = decide(
+        spec,
+        state,
+        handIn(role === undefined ? { client } : { role, client }),
+        9,
+      );
+      if (!result.ok) throw result.error;
+      return { state: canonical(result.state), journal: canonical(strip(result.journal)) };
+    });
+    const [first, ...others] = decided;
+    if (first === undefined) throw new Error("nothing was decided");
+    expect(others).toHaveLength(3);
+    for (const other of others) expect(other).toEqual(first);
+    // The same over the records that are there: with the key stripped the run reports the same.
+    const finished = load(FINISHED);
+    const { server_roles: _roles, ...rest } = summarizeRun(finished.state, finished.journal);
+    expect(canonical(summarizeRun(finished.state, strip(finished.journal)))).toBe(canonical(rest));
+  });
+
+  test("5m9d_manager_decision_fixture_round_trips", () => {
+    // Three open runs made by real `kodel mcp` servers with `decisions.agent` on
+    // (`scripts/take-v2-manager-fixture.mjs`): a gate and a pipeline change decided through a manager's
+    // server, and a gate decided by an agent where the run is worked.
+    const GATE = "r_0mwtbx5bv_kyns";
+    const CHANGE = "r_0mwtbx7v2_cye8";
+    const OWN = "r_0mwtbx9p5_lbl7";
+    const runs = fixtureRuns("v2-manager");
+    expect(runs.map((r) => r.id).sort()).toEqual([GATE, CHANGE, OWN]);
+    const read = (id: string) => {
+      const run = runs.find((r) => r.id === id);
+      if (run === undefined) throw new Error(`no fixture run ${id}`);
+      const state = readRunState(run.state, run.id);
+      const journal = run.journal.map((line) => decodeJournalRecord(JSON.parse(line)));
+      // Read and written back as it was, the key with it.
+      expect(state.v).toBe(2);
+      expect(canonical(encodeRunState(state))).toBe(canonical(JSON.parse(run.state)));
+      journal.forEach((record, i) => {
+        expect(canonical(encodeJournalRecord(record))).toBe(
+          canonical(JSON.parse(run.journal[i] as string)),
+        );
+      });
+      // The mark lives in the journal only: the state has no key for it.
+      expect(run.state).not.toContain("decided_");
+      return { run, state, journal };
+    };
+    const decisionsOf = (journal: readonly JournalRecord[]) =>
+      journal
+        .filter((r) => r.decided_by !== undefined)
+        .map((r) => ({ event: r.event, by: r.decided_by, via: r.decided_via }));
+    const gate = read(GATE);
+    expect(decisionsOf(gate.journal)).toEqual([
+      { event: "gate_decided", by: "agent", via: "manager" },
+    ]);
+    const change = read(CHANGE);
+    expect(decisionsOf(change.journal)).toEqual([
+      { event: "pipeline_accepted", by: "agent", via: "manager" },
+    ]);
+    const own = read(OWN);
+    expect(decisionsOf(own.journal)).toEqual([
+      { event: "gate_decided", by: "agent", via: undefined },
+    ]);
+    expect(own.run.journal.join("\n")).not.toContain("decided_via");
+
+    // `status` and `report`: the runs are open, and the report says what the agent decided.
+    for (const { state } of [gate, change, own]) expect(state.status).toBe("running");
+    expect(summarizeRun(gate.state, gate.journal).agent_decisions).toEqual([
+      {
+        at: expect.any(Number),
+        what: "gate",
+        node: "approve",
+        decision: "approved",
+        instruction: "approve it",
+      },
+    ]);
+    expect(summarizeRun(change.state, change.journal).agent_decisions).toEqual([
+      { at: expect.any(Number), what: "pipeline_change", instruction: "accept the change" },
+    ]);
+
+    // The key decides nothing in the run (rule 5): with it stripped the run reports the same.
+    const strip = (records: readonly JournalRecord[]) =>
+      records.map((record) => {
+        const { decided_via: _via, ...rest } = record;
+        return rest as JournalRecord;
+      });
+    for (const { state, journal } of [gate, change]) {
+      expect(strip(journal)).not.toEqual(journal);
+      expect(canonical(summarizeRun(state, strip(journal)))).toBe(
+        canonical(summarizeRun(state, journal)),
+      );
+    }
+    // `decide()` works from the state, which has no such key: the open step is handed in and the run
+    // ends in format 2.
+    const specFile = readdirSync(join(gate.run.dir, "specs")).find((n) => n.endsWith(".yaml"));
+    const spec = parsePipeline(readFileSync(join(gate.run.dir, "specs", specFile ?? ""), "utf8"));
+    const handIn = { type: "agent_completed", node: "ship", attempt: 1 } as RunEvent;
+    const afterManager = decide(spec, gate.state, handIn, 9);
+    if (!afterManager.ok) throw afterManager.error;
+    expect(afterManager.state.status).toBe("completed");
+    expect(afterManager.journal.every((r) => r.v === 2)).toBe(true);
+  });
+
+  test("5m9d_format_1_holds_no_role", () => {
+    expect(capabilitiesOf(2).executorRole).toBe(true);
+    expect(capabilitiesOf(1).executorRole).toBe(false);
+    // The encoder of format 1 refuses the key before anything is written; the host leaves it out.
+    const base = { v: 1, seq: 3, ts: 3, event: "agent_completed", node: "a", attempt: 1 };
+    for (const field of ["executor", "engine"]) {
+      const record = { ...base, [field]: { role: "worker" } } as unknown as JournalRecord;
+      expect(refusal(() => encodeJournalRecord(record)).code).toBe("UNSUPPORTED_FORMAT_FEATURE");
+    }
+    const plain = { ...base, executor: { client: { value: { name: "a", version: "1" } } } };
+    expect(encodeJournalRecord(plain as unknown as JournalRecord)).toEqual(plain);
   });
 });

@@ -3,7 +3,8 @@
  * its card (`packages/cli/test/worker-resume.test.ts`); `kodel serve` acts on them.
  */
 import { describe, expect, test } from "bun:test";
-import type { JournalRecord } from "../src";
+import { readFileSync } from "node:fs";
+import { decodeJournalRecord, type JournalRecord, readRunState } from "../src";
 import {
   decisionOf,
   NOT_A_SIGN_OF_LIFE,
@@ -151,6 +152,109 @@ describe("t44 the resume verdicts", () => {
       { event: "gate_decided", node: "g", decision: "approved", decided_by: "agent" },
     ]);
     expect(verdict(run({}, byAgent), worker())).toBe("agent_decided");
+  });
+
+  test("t44_5m9d_a_decision_through_a_manager_is_resumed_like_a_persons", () => {
+    // The agent that decided works no step of the run (it is connected as a manager), so nobody goes
+    // on by itself: the worker is resumed. The mark alone does it; without `decided_by` it is nothing.
+    const decided = (extra: Record<string, unknown>) =>
+      build([
+        { event: "run_started" },
+        { event: "node_entered", node: "plan" },
+        { event: "gate_waiting", node: "g" },
+        { event: "gate_decided", node: "g", decision: "approved", ...extra },
+      ]);
+    const viaManager = decided({ decided_by: "agent", decided_via: "manager" });
+    expect(decisionOf(viaManager).decision).toMatchObject({ byAgent: true, viaManager: true });
+    expect(verdict(run({}, viaManager), worker())).toBe("resume");
+    expect(
+      verdict(run({}, decided({ decided_by: "agent", decided_via: "worker" })), worker()),
+    ).toBe("agent_decided");
+    expect(decisionOf(decided({ decided_via: "manager" })).decision?.viaManager).toBeUndefined();
+    // A step served since the decision still stops the daemon's resume, as for a person's decision.
+    const moved = [
+      ...viaManager,
+      ...build([{ event: "step_served", node: "impl" }]).map((r) => ({ ...r, seq: 5, ts: 6_000 })),
+    ];
+    expect(verdict(run({}, moved), worker())).toBe("moved");
+  });
+
+  test("t44_5m9d_manager_decision_fixture_is_resumed_like_a_persons", () => {
+    // The same rule over the runs real servers wrote (`fixtures/formats/v2-manager/`,
+    // `scripts/take-v2-manager-fixture.mjs`): the stored key is what the daemon reads.
+    const load = (id: string) => {
+      const dir = new URL(`../../../fixtures/formats/v2-manager/${id}/`, import.meta.url).pathname;
+      const state = readRunState(readFileSync(`${dir}state.json`, "utf8"), id);
+      const journal = readFileSync(`${dir}journal.jsonl`, "utf8")
+        .split("\n")
+        .filter((line) => line.trim())
+        .map((line) => decodeJournalRecord(JSON.parse(line)));
+      return { id, state, journal };
+    };
+    /** The daemon's view of the run, and its worker that exited at the last wait. */
+    const planned = (
+      { id, state, journal }: ReturnType<typeof load>,
+      records: readonly JournalRecord[] = journal,
+    ) => {
+      const marks = decisionOf(records);
+      const view: ResumeRunView = {
+        runId: id,
+        status: state.status,
+        waitsForPerson: false,
+        marks,
+      };
+      const at = worker({
+        name: `kw-${id}`,
+        started: journal[0]?.ts ?? 0,
+        since: marks.lastWait?.ts ?? 0,
+      });
+      return { marks, verdict: resumeVerdict(view, at, { refuseMoved: true }) };
+    };
+
+    // A gate approved through a manager's server: nobody was served since, the worker is resumed.
+    const gate = load("r_0mwtbx5bv_kyns");
+    const gateDecision = gate.journal.find((r) => r.event === "gate_decided");
+    expect(gateDecision).toMatchObject({ decided_by: "agent", decided_via: "manager" });
+    const gatePlan = planned(gate);
+    expect(gatePlan.marks.decision).toMatchObject({
+      kind: "gate",
+      node: "approve",
+      outcome: "approved",
+      byAgent: true,
+      viaManager: true,
+    });
+    expect(gatePlan.marks.moved).toBe(false);
+    expect(gatePlan.verdict).toMatchObject({ kind: "resume", seq: gateDecision?.seq });
+
+    // A pipeline change accepted through a manager's server: the same.
+    const change = load("r_0mwtbx7v2_cye8");
+    const accepted = change.journal.find((r) => r.event === "pipeline_accepted");
+    expect(accepted).toMatchObject({ decided_by: "agent", decided_via: "manager" });
+    const changePlan = planned(change);
+    expect(changePlan.marks.decision).toMatchObject({
+      kind: "pipeline_change",
+      outcome: "accepted",
+      byAgent: true,
+      viaManager: true,
+    });
+    expect(changePlan.verdict).toMatchObject({ kind: "resume", seq: accepted?.seq });
+
+    // A gate an agent approved where the run is worked carries no `decided_via`: that agent goes on
+    // itself, and the worker is not resumed.
+    const own = load("r_0mwtbx9p5_lbl7");
+    const ownDecision = own.journal.find((r) => r.event === "gate_decided");
+    expect(ownDecision?.decided_by).toBe("agent");
+    expect(ownDecision?.decided_via).toBeUndefined();
+    const ownPlan = planned(own);
+    expect(ownPlan.marks.decision?.viaManager).toBeUndefined();
+    expect(why(ownPlan.verdict)).toBe("agent_decided");
+
+    // What an older kodel reads, which does not know the key: an agent's own decision, no resume.
+    const stripped = gate.journal.map((record) => {
+      const { decided_via: _via, ...rest } = record;
+      return rest as JournalRecord;
+    });
+    expect(why(planned(gate, stripped).verdict)).toBe("agent_decided");
   });
 
   test("t44_resume_verdict_already_resumed", () => {

@@ -33,6 +33,7 @@ import { defaultRegistry, type Registry } from "./registry";
 import { renderTemplate } from "./render";
 import type { Decision, RunState } from "./run";
 import { runSlug, validateTitle } from "./slug";
+import type { ExecutorRole } from "./tool-roles";
 import { BASELINE_VERSION, MAX_SUPPORTED_MAJOR } from "./version";
 
 // ── what a host provides ────────────────────────────────────────────────────
@@ -165,6 +166,11 @@ export interface RunHandle {
     options?: { replace?: boolean },
   ): Promise<StepResult>;
   feedback(input: FeedbackInput): Promise<Decision>;
+  /**
+   * What `nextStep` would answer, read-only: nothing is written, restarted or recorded as served. A
+   * host that has no such read leaves it out, and the service then has no state to show.
+   */
+  inspect?(): Promise<NextStep>;
   /** The pipeline the run is on now: its text as it was kept, parsed, and its hash. */
   pinnedPipeline(): Promise<{ yaml: string; spec: PipelineSpec; hash: string }>;
   /**
@@ -301,6 +307,8 @@ export interface ServedSurface {
   instructions: string;
   tools: string;
   contract_version: number;
+  /** The role the server was started with, `all` for none (5M9D); kept with the run's records. */
+  role?: ExecutorRole;
 }
 
 export interface ServiceOptions {
@@ -335,8 +343,16 @@ export class PipelineService {
     this.surface = options.surface;
   }
 
-  private who(): { caller?: Caller } {
+  /** Who the transport says is calling, with the role of this server on it. */
+  private callerNow(): Caller | undefined {
     const caller = this.caller();
+    const role = this.surface?.role;
+    if (role === undefined) return caller;
+    return { name: caller?.name ?? "", version: caller?.version ?? "", role };
+  }
+
+  private who(): { caller?: Caller } {
+    const caller = this.callerNow();
     return caller === undefined ? {} : { caller };
   }
 
@@ -667,6 +683,23 @@ export class PipelineService {
   }
 
   /**
+   * The run as it is, for a caller that works no step (a manager after it decided): read with the
+   * host's read-only look, so no step is served to anyone and no engine work is touched.
+   */
+  inspect(input: { run_id: string }): Promise<ToolResult> {
+    return guarded(async () => {
+      const run = await this.run(input.run_id);
+      if (run.inspect === undefined) {
+        throw new KodelError(
+          "HISTORY_UNAVAILABLE",
+          "this host cannot look at a run without serving it",
+        );
+      }
+      return { ok: true, ...(await run.inspect()) };
+    });
+  }
+
+  /**
    * A worker takes a step. With `node_slug` that step; without, the next free one. The answer carries
    * the `claim_token` to complete the step with, or says the step is `taken`.
    */
@@ -765,7 +798,7 @@ export class PipelineService {
         input.attempt,
         input.summary,
         input.outcome,
-        this.caller(),
+        this.callerNow(),
         input.claim_token,
       );
       if (!decision.ok)

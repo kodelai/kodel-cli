@@ -683,6 +683,7 @@ export async function detailsAnswer(host: HistoryHost, input: DetailsInput): Pro
             format: data.format,
             ...(report.workdir === undefined ? {} : { workdir: report.workdir }),
             ...(report.tracker_task === undefined ? {} : { tracker_task: report.tracker_task }),
+            ...(report.server_roles === undefined ? {} : { server_roles: report.server_roles }),
           },
           task_size: taskSizeBlock(report),
           pipeline_changes: (() => {
@@ -1147,3 +1148,10 @@ export async function statsAnswer(host: HistoryHost, input: StatsInput): Promise
     ...(omitted > 0 && Array.isArray(kept.nodes) ? { nodes_omitted: omitted } : {}),
   };
 }
+
+/** The scrub of the history answers (redact, then cut, keys too), for the other read tools built like them. */
+export const historyScrub: <T>(value: T, redact: (text: string) => string, max?: number) => T =
+  scrub;
+
+/** The bytes of a value as the client is sent it. */
+export const historyBytes = sizeOf;

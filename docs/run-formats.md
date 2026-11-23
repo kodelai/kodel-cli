@@ -169,6 +169,47 @@ report is built.
   `agent_completed` (`worker_models`, see `docs/history.md`, "Requested and observed model"); that change
   is made in place in format 2 too.
 
+## The role of the server (TASK-5M9D)
+
+`kodel mcp` can be started with a role (`docs/mcp-roles.md`), and a run records which server was behind it:
+`run_started.engine.role`, and `executor.role` on `run_started`, `step_served` and `agent_completed`, are
+`worker`, `manager`, or `all` for a server started with no role. A gate or a pipeline change an agent decided
+through a manager's server carries `decided_via: manager` beside `decided_by: agent`. All of it is in journal
+records only: `state.json` has no new key.
+
+- Format 2 is amended in place, with no new version (rule 5). No decision of the run reads these keys: `decide()`
+  works from the state, and the journal is only appended to. An engine of format 2 that ignores them decides
+  every step the same way, and an older engine that goes on with the run never rewrites a journal line, so it
+  cannot drop a key and the newer engine decides the same after it. The capability is `executorRole`.
+- A run in flight is unaffected: its records already written are not rewritten, and the ones written from now
+  on carry the role. A run started before the update reports the roles of its later steps only.
+- A run of format 1 records no role (`executorRole` is false for it): the host leaves the key out, the run
+  goes on as before, and `status` and `report` show no role for it. The encoder of format 1 refuses the key,
+  so it cannot be written there by mistake. Nothing offers `kodel migrate` for it.
+- `decided_via` is read by `kodel serve` and the TUI, not by the run: after a decision made through a manager
+  the run's worker is resumed, as after a person's decision. An older kodel that does not know the key reads
+  the decision as an agent's own and does not resume the worker; continue such a run with any agent.
+- A run worked by servers of two roles may journal one more `step_served` for a step: the record is deduped by
+  what the agent was shown, and a text that differs by role is another record. That is bookkeeping of the
+  history; it counts toward the cap on served records, and when the cap is reached records stop, steps do not.
+- `engine.tools_hash` has new values: it now covers the role, `--read-only`, the read-only mark of each tool
+  and the final set with the task tools. `engine.contract_version` is 6.
+- Was format 2 published? The registry lists `@kodel-ai/kodel` `0.1.0-beta.0` (2026-10-25, `latest`) and
+  `0.1.0-beta.1` (2026-10-28, `beta`), asked on 2026-11-22. Which of them wrote format 2 was not established
+  from the registry, and the amendment does not depend on it: the argument above holds for a published format
+  too.
+
+Golden fixture: `fixtures/formats/v2-roles/`, two runs made by real `kodel mcp` servers (one with no role, one
+with `--role worker`), one finished and one open (`scripts/take-v2-roles-fixture.mjs`).
+`fixtures/formats/v2-manager/` holds `decided_via`: three open runs made by real servers with `decisions.agent`
+on, a gate and a pipeline change decided through a `--role manager` server and a gate decided by an agent
+where the run is worked (`scripts/take-v2-manager-fixture.mjs`).
+
+Release note, on its own line because it was found while planning and not asked for: `pipeline_next_step` is
+now listed with `readOnlyHint: false`. It restarts engine work whose owner is gone and records what the agent
+was shown, so it is not served by a `--read-only` server; a client that approves read-only tools by itself
+will ask for it.
+
 ## When the formats change again
 
 A change of a stored format ships a codec for the previous one, a real fixture and the tests, and

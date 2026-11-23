@@ -9,6 +9,7 @@ export * from "./executor";
 export * from "./git";
 export * from "./host";
 export * from "./integrity";
+export * from "./manager";
 export * from "./pipeline-host";
 export * from "./process-group";
 export * from "./process-table";

@@ -70,6 +70,11 @@ A task is started when all of these hold:
 - its latest comment is not the daemon's give-up;
 - both limits have room, and starts are not paused.
 
+The launcher's preflight also works out the tools of the worker's own server (`kodel mcp --role worker`) from the
+config. If they do not resolve (an `mcp` block that cannot be used, `docs/mcp-roles.md`), nothing is started: a
+worker whose server would not start would run with no kodel tool. The daemon reads the whole config every cycle,
+so with such a block it is `idle` with the reason, in its log and in `kodel serve --status`.
+
 Tasks go in the tracker's priority order, then its list order, across all the rules: a rule decides only
 whether a task is taken and with which pipeline. The pipeline of every rule must load, or nothing starts. A start is what `s` does in the TUI: a run
 through the host with the task's key, then one worker for it, from the `HEAD` of the checkout at that moment.
@@ -140,6 +145,12 @@ A resume whose launch fails (no `claude`, not signed in) is tried again 60 secon
 before any start, as a resume waiting for a worker place does. After three failures the daemon logs
 `resume_failed` once and does not try that decision
 again: continue the run with any agent (`pipeline_next_step`), or stop the daemon and resume it in the TUI.
+
+A resume the config refuses (the `mcp` block cannot be used, so the worker's server would not start) spawns
+nothing and is not one of the three: it is tried again every cycle until the config is fixed.
+
+A decision an agent made through a manager's server (`decided_via: manager`, `docs/mcp-roles.md`) is resumed like
+yours: that agent works no step of the run. A decision an agent made where the run is worked is not, as before.
 
 Removing a resume's record (`kodel agent rm`) frees its name, so that decision may be resumed again.
 Removing every record of a run takes the run away from the daemon: it is not resumed and nothing is launched

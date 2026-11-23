@@ -38,19 +38,60 @@ async function foreignRefusal(run: HumanRun, runId: string): Promise<ToolResult 
       );
 }
 
-/** The run as it is after the decision, with the mark that the agent made it. */
+/** The tool the agent sees a waiting decision with: where a run is worked, or on a manager. */
+export type LookWith = "pipeline_next_step" | "manager_inbox";
+
+/** What a manager is told of the run after its decision: where it stands, and no step to do. */
+function shortState(step: Record<string, unknown>): Record<string, unknown> {
+  const at = (value: unknown) =>
+    typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+  if ("done" in step) return { status: step.run_status };
+  if ("waiting" in step) {
+    const waiting = at(step.waiting);
+    return { waits_for_person: waiting.reason, node_slug: waiting.node_slug };
+  }
+  if ("node" in step) return { open_step: at(step.node).slug };
+  return { engine_working: true };
+}
+
+/**
+ * The run as it is after the decision, with the mark that the agent made it. Where the run is worked
+ * the answer is the next step, as `pipeline_next_step` gives it. On a manager it is read without
+ * serving anything (`inspect`): a `step_served` written here would read as the worker's own progress,
+ * and `kodel serve` would then not resume the worker (5M9D).
+ */
 async function after(
   service: PipelineService,
   runId: string,
   what: Record<string, unknown>,
+  lookWith: LookWith,
 ): Promise<ToolResult> {
+  if (lookWith === "manager_inbox") {
+    const seen = await service.inspect({ run_id: runId }).catch(() => undefined);
+    if (!seen?.ok) return { ok: true, decided_by: "agent", ...what };
+    const { ok: _ok, ...step } = seen;
+    return {
+      ok: true,
+      decided_by: "agent",
+      ...what,
+      run: shortState(step),
+      note: "No step is handed to you: the agent that works the run goes on with it. manager_inbox shows what waits now.",
+    };
+  }
   const fresh = await service.nextStep({ run_id: runId }).catch(() => undefined);
   if (!fresh?.ok) return { ok: true, decided_by: "agent", ...what };
   const { ok: _ok, ...next } = fresh;
   return { ok: true, decided_by: "agent", ...what, next };
 }
 
-export function createAgentDecider(humans: HumanHost, dialog: DialogState): AgentDecider {
+export function createAgentDecider(
+  humans: HumanHost,
+  dialog: DialogState,
+  options: { lookWith?: LookWith } = {},
+): AgentDecider {
+  const lookWith = options.lookWith ?? "pipeline_next_step";
+  // Journaled with the decision: a manager works no step, so `kodel serve` still resumes the worker.
+  const via = lookWith === "manager_inbox" ? { viaManager: true as const } : {};
   return {
     async decideGate(service, input) {
       if (dialog.open > 0) return dialogOpen();
@@ -70,7 +111,7 @@ export function createAgentDecider(humans: HumanHost, dialog: DialogState): Agen
       if (visit.attempt !== input.attempt) {
         return failure(
           "ATTEMPT_MISMATCH",
-          `the step is at attempt ${visit.attempt}, not ${input.attempt}; look at the run again with pipeline_next_step`,
+          `the step is at attempt ${visit.attempt}, not ${input.attempt}; look at the run again with ${lookWith}`,
         );
       }
       if (await blockingChange(run, state)) {
@@ -94,7 +135,7 @@ export function createAgentDecider(humans: HumanHost, dialog: DialogState): Agen
       if (!approved && reason === "" && !(await run.gateResults(node))) {
         return failure("INVALID_ARGUMENTS", "a rejection needs a reason");
       }
-      const by: AgentDecision = { instruction: input.instruction };
+      const by: AgentDecision = { instruction: input.instruction, ...via };
       // A dialog may have opened while the checks above ran; the person's form comes first. Looking
       // and claiming happen in one tick, so a dialog that starts later is skipped, not shown twice.
       if (dialog.open > 0) return dialogOpen();
@@ -106,7 +147,7 @@ export function createAgentDecider(humans: HumanHost, dialog: DialogState): Agen
         dialog.deciding--;
       }
       if (!done.ok) return failure(done.error.code, done.error.message);
-      return after(service, input.run_id, { decision: input.decision, node_slug: node });
+      return after(service, input.run_id, { decision: input.decision, node_slug: node }, lookWith);
     },
 
     async acceptChange(service, input) {
@@ -122,7 +163,7 @@ export function createAgentDecider(humans: HumanHost, dialog: DialogState): Agen
       if (found.hash !== input.change_hash) {
         return failure(
           "INVALID_ARGUMENTS",
-          "change_hash is not the change that waits now; look at the run again with pipeline_next_step and tell the person what it changes",
+          `change_hash is not the change that waits now; look at the run again with ${lookWith} and tell the person what it changes`,
         );
       }
       if (found.info.refused !== undefined) {
@@ -141,13 +182,13 @@ export function createAgentDecider(humans: HumanHost, dialog: DialogState): Agen
           text: found.text,
           standing: found.info.standing,
           ...(reason === "" ? {} : { reason }),
-          byAgent: { instruction: input.instruction },
+          byAgent: { instruction: input.instruction, ...via },
         });
       } finally {
         dialog.deciding--;
       }
       if (!done.ok) return failure(done.error.code, done.error.message);
-      return after(service, input.run_id, { accepted: found.hash });
+      return after(service, input.run_id, { accepted: found.hash }, lookWith);
     },
   };
 }

@@ -651,17 +651,18 @@ describe("t42 the consumers of a failure's source, and the pins", () => {
 
   test("t42_contract_snapshot", async () => {
     // The contract the agent sees did not change with engine steps: its version, and a hash of every
-    // tool's name, description and arguments (with and without the task link), as on main before T-42.
+    // tool's name, description, read-only mark and arguments (with and without the task link). The
+    // values are those of 5M9D (contract 6: the mark is hashed, and `pipeline_next_step` is a write).
     const { createHash } = await import("node:crypto");
     const { CONTRACT_VERSION, HISTORY_TOOLS, toolsFor } = await import("../src/mcp");
     const { toolsFingerprint } = await import("../src");
-    expect(CONTRACT_VERSION).toBe(5);
+    expect(CONTRACT_VERSION).toBe(6);
     const hash = (taskLink: boolean) =>
       createHash("sha256")
         .update(toolsFingerprint([...toolsFor({ taskLink }), ...HISTORY_TOOLS]))
         .digest("hex");
-    expect(hash(false)).toBe("bb8bffc9c72361121b6b781f809bdc2c23de1521fefd8f3a6f7695d40ba54b43");
-    expect(hash(true)).toBe("099cb9108e3d78b3e3aa17630b7f677e417263824f9fb368b226c32e9df7c442");
+    expect(hash(false)).toBe("5fcb9db034a712520d5908b06f4daf87c4323b08cabda355df69567df92d9f7e");
+    expect(hash(true)).toBe("56ba0ebfe32a180a610546f7016d00df086c22b9a370757deea527081ca40cc7");
   });
 
   test("t42_error_codes_unchanged", async () => {

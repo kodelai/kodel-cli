@@ -151,7 +151,7 @@ describe("t40 the docs of forks", () => {
         "one worker per free step",
         "`open_steps`",
         "`also_waiting`",
-        "pipeline_next_step only reads; it never takes a step",
+        "pipeline_next_step never takes a step",
       ]) {
         expect(text, phrase).toContain(phrase);
       }

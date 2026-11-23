@@ -421,6 +421,8 @@ export function agentEnv(
   for (const key of Object.keys(env)) {
     if (key.startsWith("KODEL_AGENT_")) delete env[key];
   }
+  // The agent under test is the person's own: under the engine's mark its server would be a worker (5M9D).
+  delete env.KODEL_ENGINE;
   return env;
 }
 

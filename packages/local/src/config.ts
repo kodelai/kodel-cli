@@ -22,6 +22,8 @@ import {
   MAX_TOOL_PREVIEW_CHARS,
   parseVersion,
   pricesOverrideSchema,
+  type RoleOverrides,
+  roleOverridesProblem,
   TASK_ON_RUN_MODES,
   type TaskOnRunMode,
 } from "@kodel-ai/pipeline-core";
@@ -126,6 +128,11 @@ export interface ProjectConfig {
    * rules the daemon starts nothing and only resumes and watches.
    */
   serve: ServeRules;
+  /**
+   * Which tools each role of `kodel mcp` serves, over the built-in lists (5M9D). The person's block:
+   * the agent never edits it. A block that cannot be used stops `kodel mcp`.
+   */
+  mcp: { roles: RoleOverrides };
 }
 
 export { DEFAULT_AGENTS };
@@ -293,6 +300,34 @@ export function serveRulesOf(given: z.infer<typeof serveSchema> | undefined): Se
   };
 }
 
+const toolNames = z.array(z.string().min(1).max(64)).max(64);
+const roleOverrideSchema = z
+  .object({ add: toolNames.optional(), remove: toolNames.optional() })
+  .strict();
+
+// Strict at every level: a misspelled role or key must not leave a tool served that the person removed.
+const mcpSchema = z
+  .object({
+    roles: z
+      .object({ worker: roleOverrideSchema.optional(), manager: roleOverrideSchema.optional() })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+function mcpRolesOf(given: z.infer<typeof mcpSchema> | undefined): RoleOverrides {
+  const roles: RoleOverrides = {};
+  for (const role of ["worker", "manager"] as const) {
+    const override = given?.roles?.[role];
+    if (override === undefined) continue;
+    roles[role] = {
+      ...(override.add === undefined ? {} : { add: override.add }),
+      ...(override.remove === undefined ? {} : { remove: override.remove }),
+    };
+  }
+  return roles;
+}
+
 const configSchema = z
   .object({
     version: z.union([z.number(), z.string()]).optional(),
@@ -349,6 +384,7 @@ const configSchema = z
     project_id: z.string().optional(),
     engines: enginesSchema.optional(),
     serve: serveSchema.optional(),
+    mcp: mcpSchema.optional(),
   })
   .strict();
 
@@ -370,6 +406,49 @@ export async function loadAgentHints(storeRoot: string): Promise<AgentHintsConfi
   } catch {
     return { ...DEFAULT_AGENT_HINTS };
   }
+}
+
+/**
+ * Only the `mcp` block of the config in `storeRoot`: the overrides of the roles, none when there is no
+ * block. Unlike the other single-block readers it throws (`CONFIG_INVALID`) when the block cannot be
+ * used: a server must not serve more than the person wrote because of a typo. A problem in another
+ * block is not this reader's. A file that is not YAML at all stops only when it has a top-level `mcp:`
+ * line: the person narrowed the set and it cannot be read.
+ */
+export async function loadMcpRoles(storeRoot: string): Promise<RoleOverrides> {
+  const file = join(storeRoot, CONFIG_FILE);
+  let text: string;
+  try {
+    text = await readFile(file, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw invalid(
+      file,
+      `cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  let raw: unknown;
+  try {
+    raw = parse(text);
+  } catch (error) {
+    if (!/^mcp[ \t]*:/m.test(text)) return {};
+    throw invalid(
+      file,
+      `not valid YAML, so its mcp block cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (raw === null || typeof raw !== "object" || !Reflect.has(raw, "mcp")) return {};
+  const parsed = mcpSchema.safeParse(Reflect.get(raw, "mcp"));
+  if (!parsed.success) {
+    const first = parsed.error.issues[0];
+    const where = ["mcp", ...(first?.path ?? [])].join(".");
+    const keys = first && "keys" in first ? `: ${(first.keys as string[]).join(", ")}` : "";
+    throw invalid(file, `${first?.message ?? "invalid"}${keys} (at "${where}")`);
+  }
+  const roles = mcpRolesOf(parsed.data);
+  const problem = roleOverridesProblem(roles);
+  if (problem !== undefined) throw invalid(file, problem);
+  return roles;
 }
 
 /** Read the config in `storeRoot`; the defaults when there is no file. */
@@ -397,6 +476,7 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
         storage: "project",
         engines: {},
         serve: serveRulesOf(undefined),
+        mcp: { roles: {} },
       };
     }
     throw error;
@@ -456,6 +536,9 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
     if (error instanceof StoragePathsError) throw invalid(file, error.message);
     throw error;
   }
+  const mcpRoles = mcpRolesOf(parsed.data.mcp);
+  const mcpProblem = roleOverridesProblem(mcpRoles);
+  if (mcpProblem !== undefined) throw invalid(file, mcpProblem);
   let version: { version: string; major: number };
   try {
     version = parseVersion(parsed.data.version ?? 1);
@@ -501,6 +584,7 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
     ...(parsed.data.project_id === undefined ? {} : { project_id: parsed.data.project_id }),
     engines: parsed.data.engines ?? {},
     serve: serveRulesOf(parsed.data.serve),
+    mcp: { roles: mcpRoles },
   };
 }
 

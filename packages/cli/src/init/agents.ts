@@ -34,6 +34,32 @@ const MCP_NAME = "kodel";
 
 const CLAUDE_CODE_HINT = `Claude Code: make sure the "${MCP_NAME}" server is approved (Claude Code asks once, or list it in enabledMcpjsonServers; a non-interactive session cannot ask) and that its tools are allowed (permissions.allow: "mcp__${MCP_NAME}"). Put this in .claude/settings.local.json or ~/.claude/settings.json for yourself, or in .claude/settings.json to share it with the team; kodel init does not write it. An earlier kodel init may have added these to .claude/settings.json`;
 
+/**
+ * `--role <role>` and `--read-only` as an existing kodel server entry has them after `mcp` (5M9D): the
+ * person narrowed what their agent is served, and a rewrite of the entry must not widen it again.
+ */
+export function keptRoleFlags(existingArgs: unknown): string[] {
+  if (!Array.isArray(existingArgs)) return [];
+  const args = existingArgs.filter((arg): arg is string => typeof arg === "string");
+  const at = args.lastIndexOf("mcp");
+  if (at < 0) return [];
+  const after = args.slice(at + 1);
+  const kept: string[] = [];
+  const role = after.indexOf("--role");
+  const value = role < 0 ? undefined : after[role + 1];
+  if (value === "worker" || value === "manager") kept.push("--role", value);
+  if (after.includes("--read-only")) kept.push("--read-only");
+  return kept;
+}
+
+/** The server's args with the role flags of the entry it replaces, said once where the person reads it. */
+function withKept(ctx: Context, args: string[], existingArgs: unknown, where: string): string[] {
+  const kept = keptRoleFlags(existingArgs);
+  if (kept.length === 0) return args;
+  ctx.hints.push(`${where}: kept ${kept.join(" ")} of the kodel server that was set up`);
+  return [...args, ...kept];
+}
+
 /** Put our server entry in; one the person set up differently stays unless `--force`. */
 function setServer(
   ctx: Context,
@@ -59,12 +85,18 @@ const claudeCode: AgentAdapter = {
   skillsDir: ".claude/skills",
   async connect(ctx, server) {
     await editFile(ctx, ".mcp.json", (previous) =>
-      editJson(previous, (config) =>
-        setServer(ctx, objectAt(config, "mcpServers"), {
+      editJson(previous, (config) => {
+        const servers = objectAt(config, "mcpServers");
+        const existing = servers[MCP_NAME];
+        const before =
+          typeof existing === "object" && existing !== null
+            ? (existing as { args?: unknown }).args
+            : undefined;
+        return setServer(ctx, servers, {
           command: server.command,
-          args: server.args,
-        }),
-      ),
+          args: withKept(ctx, server.args, before, ".mcp.json"),
+        });
+      }),
     );
     // The person approves the server and allows its tools; init grants nothing to the agent.
     if (ctx.changes.at(-1)?.status !== "skipped") ctx.hints.push(CLAUDE_CODE_HINT);
@@ -83,13 +115,22 @@ const codex: AgentAdapter = {
   markers: [".codex"],
   skillsDir: ".agents/skills",
   async connect(ctx, server) {
-    // JSON strings are valid TOML basic strings.
-    const body = [
-      `[mcp_servers.${MCP_NAME}]`,
-      `command = ${JSON.stringify(server.command)}`,
-      `args = ${JSON.stringify(server.args)}`,
-    ].join("\n");
     await editFile(ctx, ".codex/config.toml", (previous) => {
+      // The block is rewritten on every run: the role flags a person added to it are read back first.
+      const block = new RegExp(`${CODEX_BEGIN}[\\s\\S]*?${CODEX_END}`).exec(previous ?? "")?.[0];
+      const line = /^args\s*=\s*(\[.*\])\s*$/m.exec(block ?? "")?.[1];
+      let before: unknown;
+      try {
+        before = line === undefined ? undefined : JSON.parse(line);
+      } catch {
+        before = undefined;
+      }
+      // JSON strings are valid TOML basic strings.
+      const body = [
+        `[mcp_servers.${MCP_NAME}]`,
+        `command = ${JSON.stringify(server.command)}`,
+        `args = ${JSON.stringify(withKept(ctx, server.args, before, ".codex/config.toml"))}`,
+      ].join("\n");
       const outside = (previous ?? "").replace(
         new RegExp(`${CODEX_BEGIN}[\\s\\S]*?${CODEX_END}`),
         "",
@@ -129,9 +170,15 @@ const opencode: AgentAdapter = {
     await editFile(ctx, "opencode.json", (previous) =>
       editJson(previous, (config) => {
         if (config.$schema === undefined) config.$schema = "https://opencode.ai/config.json";
-        return setServer(ctx, objectAt(config, "mcp"), {
+        const servers = objectAt(config, "mcp");
+        const existing = servers[MCP_NAME];
+        const before =
+          typeof existing === "object" && existing !== null
+            ? (existing as { command?: unknown }).command
+            : undefined;
+        return setServer(ctx, servers, {
           type: "local",
-          command: [server.command, ...server.args],
+          command: [server.command, ...withKept(ctx, server.args, before, "opencode.json")],
           enabled: true,
         });
       }),

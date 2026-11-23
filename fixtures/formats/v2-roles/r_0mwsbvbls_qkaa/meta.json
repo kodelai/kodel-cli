@@ -1,0 +1,11 @@
+{
+  "v": 2,
+  "runId": "r_0mwsbvbls_qkaa",
+  "pipeline": "two",
+  "task": "worked by two roles",
+  "slug": "worked-by-two-roles",
+  "specHash": "aa9bf79e22eca23c",
+  "createdAt": 1795381634944,
+  "workdir": "/kodel-fixture/workdir/r_0mwsbvbls_qkaa",
+  "branch": "kodel/r_0mwsbvbls_qkaa"
+}

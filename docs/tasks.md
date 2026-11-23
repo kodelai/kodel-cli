@@ -246,8 +246,9 @@ edits `.kodel/tasks/*.yaml` with a shell, an MCP server of an older build, or ta
   `y` counts only when the whole question is in view (the resume window too). The question is cancelled when the card
   moves to another task. It starts the task's run (the task text is the title, a blank line and the body; the task goes
   to `progress`) and a detached `claude -p` session named `kw-<run id>`, in the run's working directory, that
-  drives the run through its own `kodel mcp --no-decisions --no-wait-hint`: a server that serves no decision
-  tool and shows no dialog, whatever the project config allows an agent, and never offers `kodel wait`. The
+  drives the run through its own `kodel mcp --role worker --no-decisions --no-wait-hint`: a server that serves
+  the worker's tools only (`docs/mcp-roles.md`: no history tool and no `task_update`), no decision
+  tool and no dialog, whatever the project config allows an agent, and never offers `kodel wait`. The
   agent runs with `--permission-mode dontAsk`, an allowlist (the kodel tools its server serves, `Read`, `Write`,
   `Edit`, `Glob`, `Grep`, `Bash`, `Agent`) and a deny list (the two decision tools; `Bash` patterns for `gate`,
   `ack`, `seal`, `resume`, `migrate`, `wait r_*`, `pipeline changes apply|discard|restore`, `pipeline proposals
