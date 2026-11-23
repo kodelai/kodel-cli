@@ -1,4 +1,5 @@
 # The pipeline we use on this repository itself (dogfooding). Syntax: examples/pipelines/feature.yaml.
+# The plan is kept with the run, as its attachment `plan.md` (docs/attachments.md), not in the repository.
 name: dev
 description: Plan, implement and verify a change to Kodel, with a human gate on the plan and on the result.
 
@@ -14,41 +15,110 @@ nodes:
     outcomes: [nothing_to_change]
     prompt: |
       Task: {{task}}
-      Read AGENTS.md first. Explore the repository and write an implementation plan to
-      docs/plans/{{task.slug}}.md. Do not change any other file. If you can choose the model of a
-      subagent, do the exploring and the writing on the most capable one (fable).
+      Read AGENTS.md first. Explore the repository and write an implementation plan. Keep it with
+      the run, not in the repository: write it with `pipeline_attachment_write` as the attachment
+      `plan.md`, and change no file of the project. If you can choose the model of a subagent, do
+      the exploring and the writing on the most capable one (fable).
 
-      If you were sent back (the feedback holds a person's rejection or the findings of the plan
-      critique), make the plan again with every point of it answered: fix the plan, or say in the
-      section "Rejected review findings" why a point does not hold.
+      If you were sent back (the feedback holds a person's rejection, their comments or answers, or
+      the findings of the plan critique), read the latest version of `plan.md` with
+      `pipeline_attachment_read` and write a new version with every point answered: fix the plan,
+      or say in "Rejected review findings" why a point does not hold. An answer of the person to a
+      question Q-n moves to "Decisions" as D-n, and the question leaves "Open questions".
 
-      The person reading the plan has little time, so the file goes from what matters to what does
-      not, and the top of it fits on one screen. Use these sections, in this order:
+      Who reads it: the person decides at the gate from the top of the plan and has little time;
+      the one who implements reads to the end. So the plan goes from what matters to the details,
+      and the part above the line `---` fits on two screens.
 
-      1. `# <title>`, then `## TL;DR`: three to five lines: what is done, what it costs, what is risky.
-      2. `## Decisions needed`: every open question, each with the options, your recommendation and
-         what you will do if the person does not answer. "None" if there are none. Do not hide a
-         question in the steps.
-      3. `## Behaviour change`: what changes for a user of Kodel, in words.
-      4. `## Risks and invariants`: what may break. Go through the Principles and "Stored data and
-         compatibility" in AGENTS.md and say for each that applies how the plan keeps it (does a stored
-         format change? does pipeline-core get I/O? is anything a person decides now open to the
-         agent?).
-      5. `## Acceptance criteria and tests`: criteria that can be checked, and the name of the test for
-         each, with the decision id (`T-12`) in the name where one applies.
-      Then a line `---` and what is read only in doubt:
-      6. `## Steps`, 7. `## Affected files`, 8. `## Rejected review findings` (empty on the first pass),
-      9. `## Findings in the code` (what you found and the plan rests on, with paths).
+      Where to write what:
+      - Above the line (TL;DR, Open questions, Decisions, Behaviour change, Acceptance criteria):
+        the words of a user of Kodel: what changes and for whom. No file paths, function names or
+        line numbers there.
+      - Contracts: exact, as their consumer sees them: fields, types, an example.
+      - Below the line: the code: paths with lines, steps, the variants you rejected.
 
-      If you split the task or cut it down, say so in "Decisions needed". If, after looking, the task
-      needs no change (it is already done, or already true), write the plan file with only a TL;DR and
-      the evidence, and complete the step with the outcome nothing_to_change instead of the usual one.
-      Do not use it to skip work that is needed.
+      The plan, in this order. Do not reorder or rename the sections; a section that does not apply
+      is one line "none" with the reason.
+
+      ```
+      # <title>
+
+      - Task: <its key and title, or "none">
+      - Code: main@<sha7> the plan was written against
+      - Terms: every label the plan uses, in a few words each: AC (an acceptance criterion),
+        TC (a test case), Q (an open question), D (a decision of the person), STEP, R (a rejected
+        finding), X (deferred), and each task key, decision id (T-45) or step name you mention
+
+      ## TL;DR
+      Three to five lines: what is done, what it costs, what is risky.
+
+      ## Open questions
+      ### Q-1. <the question, as one sentence>
+      Context: what part of Kodel this is about and where the question comes from, so that it can be
+      understood without opening the code.
+      Why it matters: what goes differently for a user depending on the answer.
+      - A: ... -> what follows
+      - B: ... -> what follows
+      Recommendation: A, because ...
+      If you approve without answering: A.
+
+      ## Decisions
+      | ID | Decision | Was | Source |
+      Only the person's explicit answers (D-1 ... ; Was: Q-n; Source: the gate and the date).
+
+      ## Behaviour change
+      What changes for a user of Kodel, and what stays as it was.
+
+      ## Acceptance criteria
+      - AC-1: <a condition that can be checked> (source: the task / D-n)
+
+      ## Test cases
+      | ID | Scenario | AC | Level | Test name | Expected |
+      Level: unit / e2e / pty / agent / manual. Every AC has at least one TC. The test name carries
+      the decision id where one applies (t45_...). Expected says "red before the change" where the
+      test is written first.
+
+      ## Contracts
+      Only the subsections that apply, each with its compatibility with older runs, files and
+      clients: MCP tools (name, parameters, answer, error codes, what the model sees); stored
+      formats (`v`, codec, fixture, what a run in flight does); project config and pipeline file;
+      CLI and TUI output (the exact text).
+
+      ## Risks and invariants
+      | Risk | Impact | What we do |
+      Go through the Principles and "Stored data and compatibility" in AGENTS.md: a row for each that
+      applies (does a stored format change? does pipeline-core get I/O? is anything a person
+      decides now open to the agent?).
+
+      ---
+
+      ## Steps
+      - [ ] STEP-1: the tests TC-.., red on the current code
+      - [ ] STEP-2: <an atomic part that can be checked> (TC-..)
+
+      ## Change points
+      | Where (`path:line`) | Now | After |
+
+      ## Rejected review findings
+      - R-1: <the finding, with its role> -> why it does not hold. Empty on the first pass.
+
+      ## Deferred
+      | ID | What | When to come back |
+      Found along the way and out of scope, or set aside by the person (X-n).
+
+      ## Findings in the code
+      What you found and the plan rests on, with paths.
+      ```
+
+      IDs (AC, TC, Q, D, STEP, R, X) run through the whole plan and are never reused: an item taken
+      out stays as a line "AC-6: removed (D-4)".
+
+      If you split the task or cut it down, ask it as a question. If, after looking, the task needs no
+      change (it is already done, or already true), write `plan.md` with only the header, the TL;DR
+      and the evidence, and complete the step with the outcome nothing_to_change instead of the usual
+      one. Do not use it to skip work that is needed.
     checks:
-      - kind: diff
-        paths: ["docs/plans/{{task.slug}}.md"]
-        mode: changed_only
-        min_lines: 10
+      - { kind: attachment, name: plan.md, min_lines: 10 }
 
   # Several independent looks at the plan before the person reads it. The engine cannot see how many
   # subagents were run or on which model; the node asks for it and checks only the findings.
@@ -56,27 +126,29 @@ nodes:
     kind: agent
     fresh_context: true
     prompt: |
-      Critique the plan in docs/plans/{{task.slug}}.md against the task and AGENTS.md. Do not edit
-      the plan or any other file.
+      Critique the plan of this run, the attachment `plan.md` (read its latest version with
+      `pipeline_attachment_read`), against the task and AGENTS.md. Do not write the plan or any file.
 
       Run one subagent per role below, in parallel, each on the model named for it if you can choose
-      it. Give each one only: the task ({{task}}), the path of the plan, AGENTS.md and its own role
-      text, not the other roles and not your own opinion of the plan.
+      it. Give each one only: the task ({{task}}), the text of the plan with its version, AGENTS.md and
+      its own role text, not the other roles and not your own opinion of the plan.
 
       - invariants (opus): check the plan against the Principles and the rules of "Stored data and
-        compatibility" in AGENTS.md. What does it break or leave open?
-      - tests (sonnet): for every step and every acceptance criterion there must be a named test, with
-        the decision id where one applies, and a way to show the decision wrong. What cannot be
+        compatibility" in AGENTS.md, and its "Contracts". What does it break or leave open?
+      - tests (sonnet): every AC has a TC, every STEP names its TCs, every TC has a test name with
+        the decision id where one applies and a way to show the decision wrong. What cannot be
         shown by a test?
       - gaps (fable): suppose the plan was approved and the change failed in use or in a neighbouring
         package (local, cli, the server contract, Windows and Node). What was not considered?
       - scope (sonnet): what in the plan is not needed for the task, what is missing for it, and
-        should the task be split?
+        should the task be split? Can every open question be understood without the code: does it
+        say what it is about, why it matters and what each option gives a user?
 
       Take what the subagents find as it is; do not soften it, merge it away or drop a finding that
       you disagree with. Send one row per finding, and start its description with the role in
-      brackets, for example `[gaps]`. A finding is a real problem or a question the plan does not
-      answer. If a role finds nothing, send no row for it.
+      brackets, for example `[gaps]`. Its location is `attachment:plan.md@<version>:<line>`, or a
+      project path when the finding is about the code. A finding is a real problem or a question
+      the plan does not answer. If a role finds nothing, send no row for it.
 
       Severity: blocker or critical only if building the plan as written would break an invariant of
       AGENTS.md, lose or change stored data, or run something twice or without a person's decision.
@@ -95,37 +167,43 @@ nodes:
   - slug: plan-fix
     kind: agent
     prompt: |
-      The critique of the plan docs/plans/{{task.slug}}.md found blocking problems (the feedback lists
-      the findings). Edit only that file. For every finding of the feedback either fix the plan, or
-      write in "Rejected review findings" what the finding was and why it does not hold, in one or
-      two lines. Never drop a finding silently. A finding that needs the person's call goes to
-      "Decisions needed", with your recommendation. Prefer the simplest design that meets the task:
-      if a finding shows a piece is only nice to have, cut it and say so in "Decisions needed".
-      Keep the order of the sections and the top of the file to one screen.
+      The critique of the plan (the run's attachment `plan.md`) found blocking problems (the feedback
+      lists the findings). Read its latest version with `pipeline_attachment_read` and write a new
+      version with `pipeline_attachment_write`; change no file of the project. For every finding
+      either fix the plan, or add a line R-n to "Rejected review findings": what the finding was and
+      why it does not hold, in one or two lines. Never drop a finding silently.
+
+      A finding that needs the person's call becomes a question Q-n in "Open questions", in the form
+      the plan uses: Context (what part of Kodel and where the question comes from, understood
+      without the code), Why it matters (what goes differently for a user), the options each with
+      what follows, Recommendation, and "If you approve without answering". Prefer the simplest
+      design that meets the task: if a finding shows a piece is only nice to have, cut it and ask it
+      as a question. Keep the sections, their order and the IDs; keep the part above `---` to two
+      screens.
     checks:
-      - kind: diff
-        paths: ["docs/plans/{{task.slug}}.md"]
-        mode: changed_only
+      - { kind: attachment, name: plan.md }
 
   - slug: plan-recheck
     kind: agent
     fresh_context: true
     prompt: |
-      Second look at the plan docs/plans/{{task.slug}}.md after it was reworked. The task is {{task}}.
-      Do not edit the plan or any other file. The feedback lists the findings of the first critique;
-      the plan's section "Rejected review findings" says what was answered and why.
+      Second look at the plan (the run's attachment `plan.md`; read its latest version with
+      `pipeline_attachment_read`) after it was reworked. The task is {{task}}. Do not write the plan
+      or any file. The feedback lists the findings of the first critique; the plan's "Rejected review
+      findings" says what was answered and why.
 
       Run one subagent per role (invariants: opus, tests: sonnet, gaps: fable, scope: sonnet), in
-      parallel. Give each one: the task, the path of the plan, AGENTS.md, the earlier findings, and
-      its role text (the same roles as the first critique). Each checks only two things:
+      parallel. Give each one: the task, the text of the plan with its version, AGENTS.md, the earlier
+      findings, and its role text (the same roles as the first critique). Each checks only two things:
       1. Is every earlier finding of its role answered: fixed in the plan, or rejected with a reason
          that holds?
       2. Does the rework itself introduce a problem?
       It does not open the plan from scratch, and it does not report a new angle on text that did not
       change.
 
-      Take what the subagents find as it is. Send one row per finding, and start its description with
-      the role in brackets. If a role finds nothing, send no row for it.
+      Take what the subagents find as it is. Send one row per finding, start its description with
+      the role in brackets, and give its location as `attachment:plan.md@<version>:<line>` or a
+      project path. If a role finds nothing, send no row for it.
 
       Severity: blocker or critical only if building the plan as written would break an invariant of
       AGENTS.md, lose or change stored data, or run something twice or without a person's decision.
@@ -143,31 +221,41 @@ nodes:
   - slug: plan-revise
     kind: agent
     prompt: |
-      Answer the critique of the plan docs/plans/{{task.slug}}.md (the findings are in the feedback
-      of the previous step). Edit only that file. For every finding either fix the plan, or write in
-      "Rejected review findings" what the finding was and why it does not hold, in one or two lines.
-      Never drop a finding silently. A finding that needs the person's call goes to "Decisions
-      needed", with your recommendation. Keep the order of the sections, and keep the top of the
-      file to one screen: the TL;DR must say what the critique changed.
+      Answer the critique of the plan (the run's attachment `plan.md`; the findings are in the
+      feedback of the previous step). Read its latest version with `pipeline_attachment_read` and
+      write a new version with `pipeline_attachment_write`; change no file of the project. For every
+      finding either fix the plan, or add a line R-n to "Rejected review findings": what the finding
+      was and why it does not hold, in one or two lines. Never drop a finding silently.
+
+      A finding that needs the person's call becomes a question Q-n in "Open questions", in the form
+      the plan uses: Context (what part of Kodel and where the question comes from, understood
+      without the code), Why it matters (what goes differently for a user), the options each with
+      what follows, Recommendation, and "If you approve without answering". Read every open question
+      once more as the person would, without the code, and add the context where it is missing.
+      Keep the sections, their order and the IDs; keep the part above `---` to two screens: the
+      TL;DR must say what the critique changed.
 
       Then, in your final message to the person, put:
-      1. The full absolute path of the plan file, as a link to open.
-      2. The "Decisions needed" section, copied, with the recommendations.
+      1. That the plan is the run's attachment `plan.md`, its version, and the command to read it:
+         `kodel attachment show <run id> plan.md`.
+      2. The "Open questions", copied whole: each with its context, options, recommendation and
+         what is taken without an answer.
       3. A summary of five lines at most: what is done, the main risks, what the critique found and
          what became of it, and what you rejected.
     checks:
-      - kind: diff
-        paths: ["docs/plans/{{task.slug}}.md"]
-        mode: changed_only
+      - { kind: attachment, name: plan.md }
 
   - slug: plan-approval
     kind: human
-    prompt: "Review the plan. Approve to start implementation, or reject with a reason."
+    prompt: "Review the plan. Approve to start implementation, or reject with a reason and your answers to the open questions."
     instructions: |
-      Read docs/plans/{{task.slug}}.md: does it solve the task, and are its steps and tests concrete enough to implement?
+      The plan is the run's attachment `plan.md` (the gate lists it beside the changed files). Does it
+      solve the task, and are its steps and tests concrete enough to implement?
       The message to the person at this gate must contain:
-      1. The full absolute path of the plan file, as a link to open.
-      2. The "Decisions needed" section, copied, each question with the recommendation and the default.
+      1. That the plan is the attachment `plan.md`, its version, and the command to read it:
+         `kodel attachment show <run id> plan.md`.
+      2. The "Open questions", copied whole: each with its context, options, the recommendation and
+         what is taken if the person approves without answering.
       3. A summary of five lines at most: what is done, the main risks, what the plan critique found and
          what became of it, and the findings that were rejected.
       The person reads the message first and goes into the plan only where in doubt.
@@ -182,7 +270,9 @@ nodes:
     prompt: |
       The plan says the task needs no change. Read it and check the evidence. Approve to end the
       run, or reject with what was missed, and the plan is made again.
-    instructions: "Read docs/plans/{{task.slug}}.md and check that its evidence shows the task really needs no change."
+    instructions: |
+      The plan is the run's attachment `plan.md` (`kodel attachment show <run id> plan.md`). Check
+      that its evidence shows the task really needs no change, and give the person the command to read it.
     results:
       columns:
         severity:    { enum: [blocker, critical, major, minor, info] }
@@ -192,7 +282,9 @@ nodes:
   - slug: impl
     kind: agent
     prompt: |
-      Implement the approved plan in docs/plans/{{task.slug}}.md.
+      Implement the approved plan: the run's attachment `plan.md` (read its latest version with
+      `pipeline_attachment_read`). An open question the person did not answer takes the answer the
+      plan gives for "If you approve without answering".
       Keep changes within the plan. Add or update tests for the changed behavior.
       Follow the conventions in AGENTS.md (English only, no `any`, Biome style).
 
@@ -206,8 +298,9 @@ nodes:
       from the sync step or from the pull request): commit your work on the run's branch
       (`git add -A && git commit -s`), then `git fetch origin main && git merge --signoff origin/main`
       and resolve the conflicts so that both sides' changes stay (what main added is not yours to
-      remove). Where the plan and main disagree, follow main and note it at the end of the plan file.
-      Then the checks run again. If the pull request already exists, publish only pushes to it.
+      remove). Where the plan and main disagree, follow main and note it in a new version of
+      `plan.md`, at its end. Then the checks run again. If the pull request already exists, publish
+      only pushes to it.
     checks:
       # since: run, so that a return to impl with nothing left to change (a flaky test) can finish again.
       - { kind: diff, since: run, paths: ["packages/**", "scripts/**", "examples/**", "skills/**", "adapters/**", "tests/**"] }
@@ -224,8 +317,9 @@ nodes:
     kind: agent
     fresh_context: true     # an independent look: not by the one who wrote the change
     prompt: |
-      Review the changes against the plan in docs/plans/{{task.slug}}.md and against AGENTS.md.
-      Report every problem as a finding.
+      Review the changes against the plan (the run's attachment `plan.md`; read its latest version
+      with `pipeline_attachment_read`) and against AGENTS.md. Check that every AC has its test and
+      every STEP is done. Report every problem as a finding.
     checks:
       - kind: result
         columns:
@@ -296,10 +390,10 @@ nodes:
     kind: agent
     prompt: |
       The person approved the change. Publish it, from the run's worktree.
-      1. Run `git status` and look at what changed. Commit everything the run changed: the code, the
-         plan docs/plans/{{task.slug}}.md, and the pipeline files in `.kodel/pipelines/` and `AGENTS.md`
-         if they changed. A file that does not belong to the task (a stray file, local settings, a
-         secret) is not committed: name it in your final message.
+      1. Run `git status` and look at what changed. Commit everything the run changed: the code, and
+         the pipeline files in `.kodel/pipelines/` and `AGENTS.md` if they changed. The plan stays
+         with the run and is not committed. A file that does not belong to the task (a stray file,
+         local settings, a secret) is not committed: name it in your final message.
       2. Commit with `git commit -s`. The message is in English: a short imperative subject and a body
          that says what changed and why, and ends with the attribution lines your instructions give.
       3. Push the branch of the run with `git push -u origin HEAD`. Never push to main.
