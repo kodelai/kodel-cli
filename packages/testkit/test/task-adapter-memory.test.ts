@@ -10,6 +10,7 @@ const PROFILES: [string, MemoryTaskOptions][] = [
     },
   ],
   ["a tracker without priorities", { capabilities: { priority: false } }],
+  ["a tracker without links", { capabilities: { links: false } }],
   [
     "no subtasks, no fields, runs only attachable, no comments",
     { capabilities: { subtasks: false, fields: false, runs: "attach", comment: "none" } },
@@ -27,6 +28,7 @@ for (const [name, options] of PROFILES) {
       };
       return {
         adapter: new MemoryTaskAdapter({ ...options, clock }),
+        unknownKey: "MEM-999",
         stopClock: () => {
           moving = false;
         },

@@ -21,6 +21,7 @@ import {
   type NextStep,
   needsApproval,
   type RedactRule,
+  readinessWords,
   redactText,
   SessionError,
   type Task,
@@ -156,6 +157,7 @@ export interface ServeTasksPort {
     priority: boolean;
     subtasks: boolean;
     provenance?: boolean;
+    links?: boolean;
   };
   /** One page; throws when the tracker fails. */
   list(filter: {
@@ -327,6 +329,21 @@ const taskTextOf = (task: { title: string; body?: string }): string => {
   return body === "" ? task.title : `${task.title}\n\n${body}`;
 };
 
+/** The links of a task for the plan (T-45); a task without any adds nothing. */
+function linksOf(
+  task: Pick<TaskSummary, "depends_on" | "dependencies" | "conflicts_with" | "blocks">,
+): Pick<ServeTaskView, "depends_on" | "dependencies" | "conflicts_with" | "blocks"> {
+  return {
+    ...(task.depends_on?.length ? { depends_on: task.depends_on } : {}),
+    ...(task.dependencies?.length ? { dependencies: task.dependencies } : {}),
+    ...(task.conflicts_with?.length ? { conflicts_with: task.conflicts_with } : {}),
+    ...(task.blocks?.length ? { blocks: task.blocks } : {}),
+  };
+}
+
+const hasLinks = (task: ServeTaskView): boolean =>
+  task.depends_on !== undefined || task.conflicts_with !== undefined || task.blocks !== undefined;
+
 function taskViewOf(task: TaskSummary): ServeTaskView {
   const runs = task.run_count ?? 0;
   return {
@@ -339,6 +356,8 @@ function taskViewOf(task: TaskSummary): ServeTaskView {
     ...(task.comment === undefined ? {} : { comment: task.comment }),
     ...(task.needs_approval === true ? { needs_approval: true } : {}),
     started_runs: Math.max(0, runs - (task.created_in_run === undefined ? 0 : 1)),
+    ...linksOf(task),
+    ...(task.created_at === undefined ? {} : { created_at: task.created_at }),
   };
 }
 
@@ -354,6 +373,8 @@ function fullTaskViewOf(task: Task): ServeTaskView {
     ...(last === undefined ? {} : { comment: last }),
     ...(needsApproval(task) ? { needs_approval: true } : {}),
     started_runs: task.runs.filter((r) => r !== task.created_in_run).length,
+    ...linksOf(task),
+    created_at: task.created_at,
   };
 }
 
@@ -447,6 +468,8 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
   const gatherRuns = async (): Promise<{
     runs: ServeRunView[];
     unreadable: ServeUnreadableRun[];
+    /** Runs of this checkout that cannot be read, have no worker record and are not known to have ended. */
+    unreadableOpen: string[];
   }> => {
     // An ended run's state is not read again: with many runs that would be every state file every cycle.
     const summaries = await deps.host
@@ -522,9 +545,14 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
       }
     }
     const unreadable: ServeUnreadableRun[] = [];
+    const unreadableOpen: string[] = [];
     for (const summary of broken) {
       const worker = workers.get(summary.meta.runId);
-      if (worker === undefined) continue;
+      if (worker === undefined) {
+        // It holds no place, but its task is not known: tasks with a conflict wait for it (T-45).
+        unreadableOpen.push(summary.meta.runId);
+        continue;
+      }
       const code = summary.unreadable?.code ?? "ERROR";
       const message = summary.unreadable?.message ?? "cannot read";
       const why = unreadableWhy(code, message);
@@ -618,7 +646,7 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
     // A run that left the list (it ended, or is another checkout's now) is not read here again.
     const listed = new Set(own.map((o) => o.runId));
     for (const runId of liveJournals.keys()) if (!listed.has(runId)) liveJournals.delete(runId);
-    return { runs, unreadable };
+    return { runs, unreadable, unreadableOpen };
   };
 
   /** Whether a start can happen at all, and why not. */
@@ -676,7 +704,13 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
   const listTasks = async (
     start: readonly ServeStartRule[],
   ): Promise<
-    | { ok: true; list: ServeTaskView[]; complete: boolean; priorities: string[] }
+    | {
+        ok: true;
+        list: ServeTaskView[];
+        complete: boolean;
+        priorities: string[];
+        graph?: ServeTaskView[];
+      }
     | { ok: false; reason: string }
   > => {
     const tasks = deps.tasks as ServeTasksPort;
@@ -715,7 +749,31 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
         cursor = answer.next;
       }
       const priorities = await tasks.priorities();
-      return { ok: true, list, complete, priorities };
+      // Only when a link exists: a project without links is read exactly as before. The order counts
+      // every open task, so they are read without the rule filter, under the same cap.
+      if (caps.links !== true || !list.some(hasLinks)) {
+        return { ok: true, list, complete, priorities };
+      }
+      const graph: ServeTaskView[] = [];
+      const open = { state: ["todo", "progress"] as TaskState[], limit: SERVE_TASK_PAGE };
+      cursor = undefined;
+      for (let page = 0; ; page++) {
+        if (page >= SERVE_TASK_PAGES) {
+          return {
+            ok: false,
+            reason: `more than ${SERVE_TASK_PAGE * SERVE_TASK_PAGES} open tasks and some have links; close tasks or remove the links`,
+          };
+        }
+        const answer = await tasks.list(cursor === undefined ? open : { ...open, cursor });
+        graph.push(...answer.tasks.map(taskViewOf));
+        if (answer.problems.length > 0) complete = false;
+        if (answer.next === undefined) {
+          if (answer.truncated) complete = false;
+          break;
+        }
+        cursor = answer.next;
+      }
+      return { ok: true, list, complete, priorities, graph };
     } catch (error) {
       return { ok: false, reason: `the task list cannot be read: ${messageOf(error)}` };
     }
@@ -728,7 +786,7 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
     forStatus: boolean,
   ): Promise<ServeInput> => {
     const serve = config.serve;
-    const { runs, unreadable } = await gatherRuns();
+    const { runs, unreadable, unreadableOpen } = await gatherRuns();
     let env: ServeInput["environment"] = { ok: true };
     let tasks: ServeInput["tasks"];
     const wanted =
@@ -743,7 +801,12 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
       if (env.ok) {
         const listed = await listTasks(serve.start);
         if (listed.ok) {
-          tasks = { list: listed.list, complete: listed.complete, priorities: listed.priorities };
+          tasks = {
+            list: listed.list,
+            complete: listed.complete,
+            priorities: listed.priorities,
+            ...(listed.graph === undefined ? {} : { graph: listed.graph }),
+          };
         } else {
           env = { ok: false, reason: listed.reason };
         }
@@ -755,6 +818,7 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
       runs,
       memory,
       unreadable,
+      ...(unreadableOpen.length === 0 ? {} : { unreadable_open: unreadableOpen }),
       quietFrom,
       ...(tasks === undefined ? {} : { tasks }),
       environment: env,
@@ -949,6 +1013,7 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
         let task: Task | undefined;
         let runs: ServeRunView[] = [];
         let unreadable: ServeUnreadableRun[] = [];
+        let unreadableOpen: string[] = [];
         try {
           task = await tasks.get(key).catch((error: unknown) => {
             throw new Error(`the task cannot be read: ${messageOf(error)}`);
@@ -957,6 +1022,7 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
             const read = await gatherRuns();
             runs = read.runs;
             unreadable = read.unreadable;
+            unreadableOpen = read.unreadableOpen;
           }
         } catch (error) {
           environmentProblem(messageOf(error));
@@ -984,10 +1050,14 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
           unreadable,
           limits: { max_workers: config.serve.max_workers, max_runs: config.serve.max_runs },
           approval: rule.match.approval,
+          unreadable_open: unreadableOpen,
         });
         if (!admitted.ok) {
           takeBack();
-          sayOnChange(`start:${key}`, `not started: ${key}: ${admitted.why}`);
+          sayOnChange(
+            `start:${key}`,
+            `not started: ${key}: ${admitted.links === undefined ? admitted.why : readinessWords(view, admitted.links)}`,
+          );
           return;
         }
         let outcome: Awaited<ReturnType<ServeHostPort["start"]>>;
@@ -1022,6 +1092,12 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
         try {
           const { name } = await deps.launcher.start({ runId, workdir, title: task.title });
           say(`started: ${key}: run ${runId} (agent ${name})`);
+          const declined = (view.dependencies ?? []).filter((d) => d.state === "declined");
+          if (declined.length > 0) {
+            say(
+              `started past a declined dependency: ${key}: ${declined.map((d) => d.key).join(", ")} was declined, not done`,
+            );
+          }
         } catch (error) {
           say(
             `not launched: ${key}: run ${runId} was made but no agent was started: ${messageOf(error)}`,

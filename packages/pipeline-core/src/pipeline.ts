@@ -483,6 +483,26 @@ export function validatePipeline(text: string, options: ParseOptions = {}): Pars
     for (const problem of handler.validateNode?.(node) ?? []) {
       c.add([...base, "slug"], `node "${node.slug}": ${problem}`);
     }
+    // A check only an agent can feed, on a node no agent works through the tools: it could never pass.
+    const fed = checks.find((check) => registry.check(check.kind)?.agentFed === true);
+    if (fed !== undefined) {
+      let needs: string | undefined;
+      try {
+        needs = handler.begin(params, (text) => text).needs;
+      } catch {
+        needs = undefined;
+      }
+      if (needs !== undefined && needs !== "agent") {
+        c.add(
+          [...base, "slug"],
+          `node "${node.slug}": a check of kind "${fed.kind}" needs a step an agent works through the tools; ${
+            needs === "session"
+              ? "a step with engine cannot feed it"
+              : "the engine runs this node itself"
+          }`,
+        );
+      }
+    }
     nodes.push(node);
   });
 

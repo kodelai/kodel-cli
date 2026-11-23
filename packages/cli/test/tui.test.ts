@@ -995,7 +995,8 @@ describe("tui card of a run waiting for approval", () => {
     // Left of the first tab is the list, as on the card that is read.
     expect(press(onCode, SIZE, "left", "left").focus).toBe("list");
     // The mark stays where it was put once the card lands.
-    expect(marked(withDetail(onCode, detailKey(gate()), detail()))).toContain("[Code 5]");
+    // (five files and the two attachments the sample run keeps)
+    expect(marked(withDetail(onCode, detailKey(gate()), detail()))).toContain("[Code 5+2]");
     // Tab still goes to the next screen; a and r, up and down, do what they did.
     expect(press(first, SIZE, "enter", "tab").section).toBe(1);
     expect(press(first, SIZE, "a").confirm).toBe("a");

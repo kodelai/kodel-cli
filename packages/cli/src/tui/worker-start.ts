@@ -11,6 +11,8 @@ import {
   type JournalRecord,
   KodelError,
   type RunState,
+  readinessWords,
+  ready,
   SessionError,
 } from "@kodel-ai/pipeline-core";
 import type { WorkerLauncher } from "../worker-launcher";
@@ -46,7 +48,7 @@ export interface StartHost {
   runSummaries(): Promise<
     { meta: { runId: string; root?: string }; state: RunState | undefined }[]
   >;
-  /** The root of another checkout that made the run, when it is not this one. */
+  /** The root of another checkout a run belongs to; `kodel serve` lets such a run hold nothing back. */
   foreignRootOf?(meta: { runId: string; root?: string }): string | undefined;
   /**
    * The lock `kodel serve` takes around its starts (TASK-G8KM, T-44), so the two never start one task
@@ -153,6 +155,44 @@ export function createWorkerOptions(
   const { host, tasks, launcher } = input;
   const caller: Caller = { name: "kodel-tui", version: input.version };
 
+  /**
+   * A start by hand is not held back by the task's links (T-45): the person is told what `kodel serve`
+   * would wait for and decides. A task or runs that cannot be read give no warning; the start reads them again.
+   */
+  const linkWarning = async (key: string): Promise<string | undefined> => {
+    const slot = await loadTask(tasks, key);
+    if (slot.status !== "ready") return undefined;
+    const { card } = slot;
+    if (card.dependsOn === undefined && card.conflictsWith === undefined) return undefined;
+    const openRunTasks = new Map<string, string>();
+    const unreadableRuns: string[] = [];
+    if (card.conflictsWith !== undefined) {
+      try {
+        for (const s of await host.runSummaries()) {
+          if (s.state === undefined) {
+            // As the daemon does: an unreadable run of another checkout holds nothing back.
+            if (host.foreignRootOf?.(s.meta) === undefined) unreadableRuns.push(s.meta.runId);
+          } else if (
+            s.state.taskKey !== undefined &&
+            (s.state.status === "running" || s.state.status === "paused")
+          ) {
+            openRunTasks.set(s.state.taskKey, s.meta.runId);
+          }
+        }
+      } catch {
+        return undefined;
+      }
+    }
+    const task = {
+      key,
+      ...(card.dependsOn === undefined ? {} : { depends_on: card.dependsOn }),
+      ...(card.dependencies === undefined ? {} : { dependencies: card.dependencies }),
+      ...(card.conflictsWith === undefined ? {} : { conflicts_with: card.conflictsWith }),
+    };
+    const verdict = ready({ task, openRunTasks, unreadableRuns });
+    return verdict.ok ? undefined : `${readinessWords(task, verdict)}: start it anyway?`;
+  };
+
   const prepareStart = async (key: string): Promise<StartCheck> => {
     const [link, listed] = await Promise.all([host.taskLink(), host.list()]);
     const pipelines = listed.pipelines.map((p) => p.name);
@@ -169,8 +209,14 @@ export function createWorkerOptions(
         reason: check.reason,
       };
     }
+    const warning = await linkWarning(key);
     // What a person's start is told once though it may go on (a folder whose trust is not known).
-    return { ok: true, pipelines, ...(check.note === undefined ? {} : { note: check.note }) };
+    return {
+      ok: true,
+      pipelines,
+      ...(warning === undefined ? {} : { warning }),
+      ...(check.note === undefined ? {} : { note: check.note }),
+    };
   };
 
   const startLocked = async (key: string, pipeline: string): Promise<StartResult> => {

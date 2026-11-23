@@ -79,6 +79,11 @@ const V2_WORKER_RUNS = [V2_WORKER_LOST, V2_WORKER_OPEN];
  * `scripts/take-v2-model-fixture.mjs`): the hand-in of each worker carries `worker_models`.
  */
 const V2_MODEL_RUN = "r_0mwplbn3u_f9l6";
+/**
+ * The format-2 run with attachments (T-45, `scripts/take-v2-attachment-fixture.mjs`): two versions of a plan (the
+ * first too short for the step's `attachment` check), a PNG, the gate and a later step.
+ */
+const V2_ATTACHMENT_RUN = "r_0mwrset3s_actm";
 /** The format-2 run that stands in for "a finished run of this engine" in the tests of how a run that is read behaves. */
 const V2_RUN = DEV_RUNS[1] as string;
 
@@ -177,10 +182,12 @@ describe("the golden runs of the stored formats", () => {
       "v1",
       "v1-open",
       "v2",
+      "v2-attachment",
       "v2-engine",
       "v2-model",
       "v2-worker",
     ]);
+    expect(await runIds("v2-attachment")).toEqual([V2_ATTACHMENT_RUN]);
     expect(await runIds("v1")).toEqual([...V1_RUNS].sort());
     expect(await runIds("v1-open")).toEqual([...V1_OPEN_RUNS].sort());
     expect(await runIds("v2")).toEqual([...V2_RUNS].sort());
@@ -277,7 +284,7 @@ describe("every stored format against the current engine", () => {
         V2_RUNS.length +
         V2_ENGINE_RUNS.length +
         V2_WORKER_RUNS.length +
-        1,
+        2,
     );
   });
 
@@ -290,8 +297,47 @@ describe("every stored format against the current engine", () => {
     await mkdir(join(copy, "v2"), { recursive: true });
     expect(await checkFormats(copy)).toEqual({
       opened:
-        V1_RUNS.length + V1_OPEN_RUNS.length + V2_ENGINE_RUNS.length + V2_WORKER_RUNS.length + 1,
+        V1_RUNS.length + V1_OPEN_RUNS.length + V2_ENGINE_RUNS.length + V2_WORKER_RUNS.length + 2,
     });
+  });
+
+  test("t45_v2_attachment_fixture_opens_and_its_attachments_read", async () => {
+    await copyRuns("v2-attachment");
+    const before = await hashTree(runsDir());
+    const run = await hostFor().open(V2_ATTACHMENT_RUN);
+    if (!run) throw new Error("the fixture does not open");
+    // the latest of each name, verified against the journal by the hash of the stored file
+    expect(
+      (await run.listAttachments()).map((a) => [a.name, a.version, a.type, a.scanned, a.state]),
+    ).toEqual([
+      ["plan.md", 2, "text", true, "ok"],
+      ["shot.png", 1, "png", false, "ok"],
+    ]);
+    // the history of the plan: the first version was too short for the check, the second passed
+    expect(
+      (await run.listAttachments({ name: "plan.md" })).map((a) => [a.version, a.attempt, a.lines]),
+    ).toEqual([
+      [1, 1, 2],
+      [2, 2, 5],
+    ]);
+    expect((await run.readAttachment({ name: "plan.md" })).content).toContain("3. Test it.");
+    expect((await run.readAttachment({ name: "plan.md", version: 1 })).content).toBe(
+      "# Plan\n1. Read the command.\n",
+    );
+    expect((await run.readAttachment({ name: "shot.png" })).content).toBeUndefined();
+    expect((await run.attachmentDiff("plan.md"))?.text).toContain("+3. Test it.");
+    const journal = await storeFor().readJournal(V2_ATTACHMENT_RUN);
+    const checks = journal.filter((r) => r.event === "check_finished" && r.node === "plan");
+    expect(checks.map((r) => r.passed)).toEqual([false, true]);
+    expect(String(checks[0]?.reason)).toContain("has 2 lines, at least 3 required");
+    // the kept pipeline names the check kind, and is read with it
+    expect((await run.currentSpec()).nodes[0]?.checks[0]).toMatchObject({
+      kind: "attachment",
+      params: { name: "plan.md", min_lines: 3 },
+    });
+    // the report and the status read it as any run; reading changes no byte
+    expect((await run.report()).runId).toBe(V2_ATTACHMENT_RUN);
+    expect(await hashTree(runsDir())).toEqual(before);
   });
 
   test("t44_v2_worker_fixtures_open_and_report_the_gone_worker", async () => {

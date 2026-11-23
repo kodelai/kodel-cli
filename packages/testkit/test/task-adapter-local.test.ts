@@ -32,6 +32,7 @@ describe("task adapter conformance: the local adapter, on real files", () => {
     });
     return {
       adapter,
+      unknownKey: "KDL-2222",
       stopClock: () => {
         moving = false;
       },

@@ -8,7 +8,10 @@
  * give-up comment on a task and a log line.
  */
 import type { RunStatus } from "../run";
-import { TASK_LIMITS, type TaskState } from "../tasks";
+import { order, startPolicy, workerPolicy } from "../schedule/queue";
+import { rank } from "../schedule/rank";
+import { type Readiness, readinessWords, ready } from "../schedule/ready";
+import { type DependencyRef, TASK_LIMITS, type TaskState } from "../tasks";
 import {
   type DecisionInfo,
   type ResumeNo,
@@ -54,6 +57,12 @@ export interface ServeTaskView {
   needs_approval?: boolean;
   /** Runs the tracker lists for the task besides `created_in_run`. */
   started_runs: number;
+  /** The links of the task (T-45), as the tracker reads them; absent when it has none. */
+  depends_on?: string[];
+  dependencies?: DependencyRef[];
+  conflicts_with?: string[];
+  blocks?: string[];
+  created_at?: string;
 }
 
 export interface ServeRunView {
@@ -123,7 +132,15 @@ export interface ServeInput {
   unreadable: ServeUnreadableRun[];
   /** The daemon's start or the last gap between two cycles, whichever is later. */
   quietFrom: number;
-  tasks?: { list: ServeTaskView[]; complete: boolean; priorities: string[] };
+  tasks?: {
+    list: ServeTaskView[];
+    complete: boolean;
+    priorities: string[];
+    /** Every open task, read without the rule filter when a listed task has a link: the order counts them all. */
+    graph?: ServeTaskView[];
+  };
+  /** Runs that cannot be read, have no worker record and are not known to have ended (T-45). */
+  unreadable_open?: string[];
   environment: { ok: true } | { ok: false; reason: string };
 }
 
@@ -190,6 +207,13 @@ export interface ServePlan {
   orphans: string[];
   /** Why no task is started: the environment, or the pause after dead workers; for `--status`. */
   blocked?: string;
+  /** Both queues in their order, with the reason of each place (T-46); for `--status`. */
+  queues: {
+    starts: { key: string; reason: string }[];
+    workers: { runId: string; reason: string }[];
+  };
+  /** Tasks a rule takes that their links hold back (T-45), with the reason; keys and run ids only. */
+  blocked_tasks: { key: string; reason: string }[];
 }
 
 export type Admission =
@@ -201,9 +225,13 @@ export type Admission =
         | "not_todo"
         | "has_run"
         | "not_approved"
+        | "blocked"
+        | "conflict"
         | "gave_up"
         | "max_runs"
         | "max_workers";
+      /** With `blocked` and `conflict`: what holds the task back. */
+      links?: Exclude<Readiness, { ok: true }>;
     };
 
 /** Attempts at a start before the daemon gives up on a task. */
@@ -303,6 +331,17 @@ export function servePlaces(
   return { workers, runs: held };
 }
 
+/** The open runs that name a task, whoever started them: task key to run id. */
+export function openRunTasks(runs: readonly ServeRunView[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const run of runs) {
+    if (isOpen(run) && run.taskKey !== undefined && !out.has(run.taskKey)) {
+      out.set(run.taskKey, run.runId);
+    }
+  }
+  return out;
+}
+
 /** Whether the task may be started now: by the rules every starter keeps, and by the limits when given. */
 export function admitStart(input: {
   task: ServeTaskView;
@@ -312,6 +351,10 @@ export function admitStart(input: {
   limits?: { max_workers: number; max_runs: number };
   /** The approval setting of the rule that took the task; without one, approval is required (fail closed). */
   approval?: ServeApproval;
+  /** Unreadable runs with no worker record that are not known to have ended. */
+  unreadable_open?: readonly string[];
+  /** Tasks started earlier in this cycle. */
+  started_now?: readonly string[];
 }): Admission {
   const { task, runs, limits } = input;
   if (task.state === "done") return { ok: false, why: "done" };
@@ -322,6 +365,17 @@ export function admitStart(input: {
   if (task.needs_approval === true && input.approval !== "any") {
     return { ok: false, why: "not_approved" };
   }
+  const links = ready({
+    task,
+    approval: input.approval ?? "required",
+    openRunTasks: openRunTasks(runs),
+    unreadableRuns: [
+      ...(input.unreadable ?? []).map((r) => r.runId),
+      ...(input.unreadable_open ?? []),
+    ],
+    startedNow: input.started_now ?? [],
+  });
+  if (!links.ok) return { ok: false, why: links.why, links };
   if (isGiveUpComment(task.comment)) return { ok: false, why: "gave_up" };
   if (limits !== undefined) {
     const now = servePlaces(runs, input.unreadable);
@@ -414,11 +468,6 @@ function goneReason(
   return worker.state === "lost" || worker.state === "killed" || worker.state === "exited"
     ? worker.state
     : undefined;
-}
-
-function priorityRank(priorities: readonly string[], priority: string | undefined): number {
-  const i = priority === undefined ? -1 : priorities.indexOf(priority);
-  return i < 0 ? priorities.length : i;
 }
 
 export function planServe(input: ServeInput): ServePlan {
@@ -689,10 +738,14 @@ export function planServe(input: ServeInput): ServePlan {
       });
     }
   }
-  resumable.sort((a, b) => a.ts - b.ts || a.seq - b.seq || a.run.runId.localeCompare(b.run.runId));
+  const workerQueue = order(
+    resumable.map((r) => ({ ...r, runId: r.run.runId })),
+    workerPolicy,
+    { priorities: [], ranks: new Map() },
+  );
   const resumes: ServeAction[] = [];
   const waitingResumes: string[] = [...retrying];
-  for (const r of resumable) {
+  for (const { entry: r } of workerQueue) {
     if (rules.enabled && workers < rules.max_workers) {
       resumes.push({ kind: "resume", runId: r.run.runId, seq: r.seq, sessionId: r.sessionId });
       workers += 1;
@@ -705,6 +758,8 @@ export function planServe(input: ServeInput): ServePlan {
   const giveUps: ServeAction[] = [];
   const starts: ServeAction[] = [];
   const waitingStarts: string[] = [];
+  const startQueue: { key: string; reason: string }[] = [];
+  const blockedTasks: { key: string; reason: string }[] = [];
   const starting = rules.start.length > 0;
   const incomplete =
     starting && input.tasks !== undefined && input.environment.ok && !input.tasks.complete;
@@ -720,21 +775,45 @@ export function planServe(input: ServeInput): ServePlan {
   if (starting && input.tasks !== undefined && input.environment.ok && !incomplete) {
     const priorities = input.tasks.priorities;
     // One order across every rule: the rule decides only whether the task is taken and its pipeline.
-    const candidates = input.tasks.list
-      .flatMap((task, order) => {
-        const rule = ruleFor(task, rules.start);
-        return rule !== undefined &&
-          admitStart({ task, runs, approval: rule.match.approval }).ok === true
-          ? [{ task, order, rule }]
-          : [];
-      })
-      .sort(
-        (a, b) =>
-          priorityRank(priorities, a.task.priority) - priorityRank(priorities, b.task.priority) ||
-          a.order - b.order,
-      );
+    // Tasks no rule takes still count for the order (they raise a priority); they are not started.
+    const ranks = rank(
+      (input.tasks.graph ?? input.tasks.list).map((task, place) => ({ ...task, order: place })),
+      priorities,
+    );
+    const admitted: {
+      key: string;
+      priority?: string;
+      task: ServeTaskView;
+      rule: ServeStartRule;
+    }[] = [];
+    for (const task of input.tasks.list) {
+      const rule = ruleFor(task, rules.start);
+      if (rule === undefined) continue;
+      const admission = admitStart({
+        task,
+        runs,
+        unreadable: input.unreadable,
+        approval: rule.match.approval,
+        ...(input.unreadable_open === undefined ? {} : { unreadable_open: input.unreadable_open }),
+      });
+      if (admission.ok) {
+        admitted.push({
+          key: task.key,
+          ...(task.priority === undefined ? {} : { priority: task.priority }),
+          task,
+          rule,
+        });
+      } else if (admission.links !== undefined) {
+        blockedTasks.push({ key: task.key, reason: readinessWords(task, admission.links) });
+      }
+    }
+    const candidates = order(admitted, startPolicy, { priorities, ranks });
+    /** Tasks started in this cycle and the tasks they must not run beside, to the task that holds them back. */
+    const startedNow: string[] = [];
+    const heldBack = new Map<string, string>();
     const queued: string[] = [];
-    for (const { task, rule } of candidates) {
+    for (const { entry, reason } of candidates) {
+      const { task, rule } = entry;
       const attempt = memory.attempts[task.key];
       if (attempt !== undefined && attempt.count >= START_ATTEMPTS) {
         // The attempts stay until the comment is written (the daemon clears them then).
@@ -748,8 +827,20 @@ export function planServe(input: ServeInput): ServePlan {
         }
         continue;
       }
+      startQueue.push({ key: task.key, reason });
       if (attempt !== undefined && now - attempt.last_at < START_RETRY_MS) {
         waitingStarts.push(task.key);
+        continue;
+      }
+      // Two tasks that conflict are never started in one cycle, whichever of them names the other.
+      const beside =
+        heldBack.get(task.key) ?? task.conflicts_with?.find((key) => startedNow.includes(key));
+      if (beside !== undefined) {
+        startQueue.pop();
+        blockedTasks.push({
+          key: task.key,
+          reason: readinessWords(task, { ok: false, why: "conflict", with: beside }),
+        });
         continue;
       }
       const room =
@@ -762,6 +853,10 @@ export function planServe(input: ServeInput): ServePlan {
         starts.push({ kind: "start", taskKey: task.key, pipeline: rule.pipeline });
         workers += 1;
         heldRuns.push(`task:${task.key}`);
+        startedNow.push(task.key);
+        for (const other of task.conflicts_with ?? []) {
+          if (!heldBack.has(other)) heldBack.set(other, task.key);
+        }
       } else {
         waitingStarts.push(task.key);
         queued.push(task.key);
@@ -802,5 +897,10 @@ export function planServe(input: ServeInput): ServePlan {
         : paused
           ? { blocked: pausedDetail }
           : {}),
+    queues: {
+      starts: startQueue,
+      workers: workerQueue.map(({ entry, reason }) => ({ runId: entry.runId, reason })),
+    },
+    blocked_tasks: blockedTasks,
   };
 }

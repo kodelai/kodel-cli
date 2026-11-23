@@ -1,5 +1,8 @@
 /** The card of a run waiting at a human step: the band on top, the tabs, and what each tab shows, as lines of text. */
+import { NOT_SCANNED } from "@kodel-ai/pipeline-core";
 import { DIGEST_LINES } from "../claude-stream";
+import { formatBytes } from "../decide-text";
+import { plain } from "../plain";
 import {
   bold,
   cyan,
@@ -14,10 +17,21 @@ import {
   wrapText,
   yellow,
 } from "./ansi";
+import {
+  attachmentCommentCount,
+  attachmentKey,
+  attachmentPlace,
+  fileCommentCount,
+  notesOnAttachments,
+  projectPlace,
+  versionAt,
+} from "./attachments";
 import { firstCode, prepare, viewDiff } from "./diffview";
 import { sessionLine } from "./label";
 import { capLines, headOf, parseBlocking, parseCommentsCsv } from "./reasons";
 import {
+  type AttachmentVersionView,
+  type AttachmentView,
   type Attempt,
   type DiffState,
   type Finding,
@@ -48,6 +62,8 @@ export interface TabState {
   sub: number;
   /** The row of the diff the cursor is on; -1 until the diff has been read. */
   line: number;
+  /** The version of the opened attachment that is looked at; the latest when none was picked. */
+  version?: number;
 }
 
 /**
@@ -69,7 +85,7 @@ export function isListTab(tab: number): boolean {
 }
 
 export function itemCount(d: GateDetail, tab: number): number {
-  if (tab === CODE) return d.changes.kind === "files" ? d.changes.files.length : 0;
+  if (tab === CODE) return fileCount(d) + (d.attachments?.length ?? 0);
   if (tab === STEPS) return d.visits.length;
   if (tab === COMMENTS) return d.comments.length;
   return 0;
@@ -106,9 +122,18 @@ export interface Content {
 
 export const diffKey = (runId: string, path: string): string => `${runId}:${path}`;
 
-/** The file the cursor is on in the Code tab. */
+const fileCount = (d: GateDetail): number =>
+  d.changes.kind === "files" ? d.changes.files.length : 0;
+
+/** The file the cursor is on in the Code tab; none when it is on an attachment. */
 export function fileAt(d: GateDetail, cursor: number): string | undefined {
   return d.changes.kind === "files" ? d.changes.files[cursor]?.[0] : undefined;
+}
+
+/** The attachment the cursor is on in the Code tab: the second group of its list, after the files. */
+export function attachmentAt(d: GateDetail, cursor: number): AttachmentView | undefined {
+  const at = cursor - fileCount(d);
+  return at < 0 ? undefined : d.attachments?.[at];
 }
 
 /** Where the cursor of a tab starts: at the latest step for a run that is going on, else at the top. */
@@ -120,7 +145,13 @@ export function startCursor(d: GateDetail, tab: number): number {
 
 /** Where a comment made now is about: the file or the step the person is looking at, else the gate. */
 export function commentPlace(d: GateDetail, st: TabState): string {
-  if (st.tab === CODE) return fileAt(d, st.cursor) ?? d.node;
+  if (st.tab === CODE) {
+    const file = fileAt(d, st.cursor);
+    if (file !== undefined) return projectPlace(file);
+    const view = attachmentAt(d, st.cursor);
+    const version = view === undefined ? undefined : versionAt(view, st.version);
+    return view !== undefined && version !== undefined ? attachmentPlace(view, version) : d.node;
+  }
   if (st.tab === STEPS) return d.visits[st.cursor]?.slug ?? d.node;
   return d.node;
 }
@@ -370,7 +401,10 @@ function tabText(d: GateDetail, i: number): { text: string; styled: string } {
   const name = TABS[i] ?? "";
   const both = (text: string, styled = text) => ({ text, styled });
   if (i === CODE) {
-    const n = d.changes.kind === "files" ? d.changes.totalFiles : 0;
+    const files = d.changes.kind === "files" ? d.changes.totalFiles : 0;
+    // The attachments are counted apart: `5+2` is five files and two attachments.
+    const kept = d.attachments?.length ?? 0;
+    const n = kept > 0 ? `${files}+${kept}` : String(files);
     const warn = d.changedAfterChecks.length > 0 || d.changes.kind === "unavailable";
     return both(`${name} ${n}${warn ? " ⚠" : ""}`, `${name} ${n}${warn ? ` ${yellow("⚠")}` : ""}`);
   }
@@ -511,12 +545,18 @@ function report(d: GateDetail, ctx: Context): Content {
 /** The files the run changed, with their line counts, as the Code tab counts them; the first few here. */
 function changedFiles(d: GateDetail, width: number): string[] {
   const c = d.changes;
-  if (c.kind === "none") return [dim("CHANGED FILES"), "No files changed."];
-  if (c.kind === "no_repo") return [dim("CHANGED FILES"), dim("This is not a git repository.")];
+  const kept = keptAttachments(d.attachments);
+  // Without a list of files the attachments are still named, as a group of their own.
+  const alone = kept === undefined ? [] : [dim(fit(`ATTACHMENTS · ${kept}`, width))];
+  if (c.kind === "none") return [dim("CHANGED FILES"), "No files changed.", ...alone];
+  if (c.kind === "no_repo") {
+    return [dim("CHANGED FILES"), dim("This is not a git repository."), ...alone];
+  }
   if (c.kind === "unavailable") {
     return [
       dim("CHANGED FILES"),
       ...wrapText(`Cannot tell what changed: ${c.reason}`, width).map(yellow),
+      ...alone,
     ];
   }
   const out = [
@@ -530,26 +570,141 @@ function changedFiles(d: GateDetail, width: number): string[] {
   if (c.files.length > CHANGED_ROWS) {
     out.push(dim(`  … ${c.files.length - CHANGED_ROWS} more under Code`));
   }
-  out.push(dim("  The Code tab opens each diff."));
+  out.push(
+    dim(
+      kept === undefined
+        ? "  The Code tab opens each diff."
+        : fit(`  ATTACHMENTS · ${kept}`, width),
+    ),
+  );
   return out;
 }
 
-function commentCount(d: GateDetail, path: string): number {
-  return d.comments.filter((c) => c.location === path || c.location.startsWith(`${path}:`)).length;
+/** The facts of a version in a few words: type, size, and what the person has to know of it. */
+function versionFacts(v: AttachmentVersionView): string {
+  return [
+    v.type,
+    ...(v.lines === undefined ? [] : [`${v.lines} line${v.lines === 1 ? "" : "s"}`]),
+    formatBytes(v.bytes),
+    ...(v.scanned ? [] : [NOT_SCANNED]),
+    ...(v.state === "missing" ? ["the stored file is missing"] : []),
+    ...(v.state === "changed" ? ["changed outside kodel"] : []),
+    `v${v.version}`,
+  ].join(" · ");
+}
+
+/**
+ * What the run keeps besides the project files, as the Report names it: one line under the changed
+ * files, so the decision stays in sight. The Code tab lists them with their versions.
+ */
+function keptAttachments(attachments: AttachmentView[] | undefined): string | undefined {
+  const n = attachments?.length ?? 0;
+  if (attachments === undefined || n === 0) return undefined;
+  const names = attachments.map((view) => `${plain(view.name)}${view.fresh ? " (new)" : ""}`);
+  return `${n} kept with the run: ${names.join(", ")}`;
+}
+
+/** The lines the Code tab says when there is no list of files to show. */
+function noFiles(d: GateDetail, width: number): string[] | undefined {
+  const c = d.changes;
+  if (c.kind === "none") return ["No files changed."];
+  if (c.kind === "no_repo") return [dim("This is not a git repository.")];
+  if (c.kind === "unavailable") {
+    return wrapText(`Cannot tell what changed: ${c.reason}`, width).map(yellow);
+  }
+  return undefined;
+}
+
+/** An opened attachment: a text as the diff from its version before, an image by its facts. */
+function openAttachment(d: GateDetail, view: AttachmentView, st: TabState, ctx: Context): Content {
+  const { width } = ctx;
+  const version = versionAt(view, st.version);
+  if (version === undefined) return { lines: [dim("This attachment has no version.")] };
+  const at = view.versions.findIndex((v) => v.version === version.version) + 1;
+  const n = attachmentCommentCount(d, view.name);
+  const out: string[] = [
+    `${dim("Code › attachment ›")} ${bold(tailFit(plain(view.name), width - 22))}`,
+    dim(
+      `version ${at} of ${view.versions.length} · written by ${plain(version.node)}${
+        version.attempt > 1 ? ` #${version.attempt}` : ""
+      }${view.versions.length > 1 ? " · [ ] other versions" : ""}`,
+    ),
+    dim(`${versionFacts(version)}${n > 0 ? ` · ${n} comment${n === 1 ? "" : "s"}` : ""}`),
+    "",
+  ];
+  const notes = notesOnAttachments(d);
+  if (version.state !== "ok") {
+    out.push(
+      ...wrapText(
+        version.state === "missing"
+          ? "The stored file of this version is missing: there is nothing to show."
+          : "The stored file of this version was changed outside kodel: it is not shown.",
+        width,
+      ).map(yellow),
+    );
+  } else if (version.type !== "text") {
+    // An image is never drawn and its bytes never printed: the person opens the stored file.
+    out.push(`  ${dim("type")}  ${version.type}`);
+    out.push(`  ${dim("size")}  ${formatBytes(version.bytes)}`);
+    out.push(`  ${yellow(NOT_SCANNED)}`);
+    if (version.path !== undefined) {
+      out.push(`  ${dim("file")}  ${plain(version.path)}`);
+      out.push(dim("  Open the file with a viewer; a comment here is about the whole image."));
+    }
+  } else {
+    const diff = ctx.diffs[diffKey(ctx.runId, attachmentKey(view.name, version.version))];
+    if (diff === undefined) out.push(dim("Reading the version…"));
+    else if (diff.kind === "missing") out.push(dim("This version cannot be shown."));
+    else if (diff.kind === "error")
+      out.push(...wrapText(`Cannot read the version: ${diff.message}`, width).map(red));
+    else {
+      const p = prepare(diff, diff.text, view.name);
+      const cursor = st.line >= 0 ? st.line : firstCode(p);
+      const seen = viewDiff(p, {
+        width,
+        cursor,
+        focused: ctx.focused,
+        path: attachmentPlace(view, version),
+        comments: notes,
+        place: (row) => attachmentPlace(view, version, row),
+      });
+      const head = out.length;
+      out.push(...seen.lines);
+      if (diff.truncated)
+        out.push(yellow("… the diff is cut here, it is longer than can be shown"));
+      return { lines: out.map((l) => fit(l, width)), anchor: head + seen.anchor };
+    }
+  }
+  // What was said of the version as a whole (an image takes only such comments).
+  const whole = attachmentPlace(view, version);
+  for (const c of notes.filter((x) => x.location === whole)) {
+    for (const [k, text] of wrapText(c.description, Math.max(10, width - 14)).entries()) {
+      out.push(
+        `  ${k === 0 ? yellow(`✎ ${c.severity}`) : " ".repeat(c.severity.length + 2)} ${dim(text)}`,
+      );
+    }
+  }
+  return { lines: out.map((l) => fit(l, width)) };
 }
 
 function code(d: GateDetail, st: TabState, ctx: Context): Content {
   const { width } = ctx;
   const c = d.changes;
-  if (c.kind === "none") return { lines: ["No files changed."] };
-  if (c.kind === "no_repo") return { lines: [dim("This is not a git repository.")] };
-  if (c.kind === "unavailable") {
-    return { lines: wrapText(`Cannot tell what changed: ${c.reason}`, width).map(yellow) };
+  const attachments = d.attachments ?? [];
+  const opened = st.open ? attachmentAt(d, st.cursor) : undefined;
+  if (opened !== undefined) return openAttachment(d, opened, st, ctx);
+  if (c.kind !== "files") {
+    const said = noFiles(d, width) ?? [];
+    if (attachments.length === 0) return { lines: said };
+    const out = [...said, ""];
+    const first = out.length + 1;
+    out.push(...attachmentRows(d, attachments, st, ctx, 0));
+    return { lines: out, anchor: first + st.cursor };
   }
   if (st.open) {
     const [file, lines] = c.files[st.cursor] ?? ["", 0];
     const out: string[] = [`${dim("Code ›")} ${bold(tailFit(file, width - 8))}`];
-    const n = commentCount(d, file);
+    const n = fileCommentCount(d, file);
     out.push(
       dim(
         `${lines} lines changed since the run began${n > 0 ? ` · ${n} comment${n === 1 ? "" : "s"}` : ""}`,
@@ -569,7 +724,7 @@ function code(d: GateDetail, st: TabState, ctx: Context): Content {
         width,
         cursor,
         focused: ctx.focused,
-        path: file,
+        path: projectPlace(file),
         comments: d.comments,
       });
       const head = out.length;
@@ -593,12 +748,40 @@ function code(d: GateDetail, st: TabState, ctx: Context): Content {
   }
   const first = out.length;
   for (const [i, [file, lines]] of c.files.entries()) {
-    const notes = commentCount(d, file);
+    const notes = fileCommentCount(d, file);
     const mark = notes > 0 ? ` ✎${notes}` : "";
     const text = `${i === st.cursor ? "▸" : " "} ${fit(tailFit(file, width - 14), width - 14)}${String(lines).padStart(5)}${mark.padEnd(5)}`;
     out.push(row(text, i === st.cursor, ctx.focused, width));
   }
-  return { lines: out, anchor: first + st.cursor };
+  if (attachments.length === 0) return { lines: out, anchor: first + st.cursor };
+  // The second group, under the same cursor: its rows follow the files'.
+  out.push("");
+  out.push(...attachmentRows(d, attachments, st, ctx, c.files.length));
+  const onAttachment = st.cursor >= c.files.length;
+  return { lines: out, anchor: first + st.cursor + (onAttachment ? 2 : 0) };
+}
+
+/** The rows of the attachments in the Code list, under a line that names the group. */
+function attachmentRows(
+  d: GateDetail,
+  attachments: AttachmentView[],
+  st: TabState,
+  ctx: Context,
+  offset: number,
+): string[] {
+  const { width } = ctx;
+  const n = attachments.length;
+  const out = [dim(`ATTACHMENTS · ${n} kept with the run · Enter opens one`)];
+  for (const [i, view] of attachments.entries()) {
+    const latest = view.versions.at(-1);
+    const notes = attachmentCommentCount(d, view.name);
+    const mark = notes > 0 ? ` ✎${notes}` : "";
+    const facts = latest === undefined ? "" : versionFacts(latest);
+    const selected = offset + i === st.cursor;
+    const text = `${selected ? "▸" : " "} ${fit(tailFit(plain(view.name), 18), 18)} ${fit(`${view.fresh ? "new · " : ""}${facts}`, Math.max(10, width - 26))}${mark.padEnd(5)}`;
+    out.push(row(text, selected, ctx.focused, width));
+  }
+  return out;
 }
 
 function visitNote(v: Visit): string {

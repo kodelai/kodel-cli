@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "node": "impl",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "f9d0c67487d03b92a00fab3cb22f8403590aa637033c25f41986b68cbecb3dea",
+  "answer": {
+    "slug": "impl",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "Do what the plan says."
+  }
+}

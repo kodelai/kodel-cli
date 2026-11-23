@@ -2,6 +2,7 @@
 export * from "./agent-log";
 export * from "./agent-log-ticker";
 export * from "./attach-server";
+export * from "./attachments";
 export * from "./command";
 export * from "./config";
 export * from "./engines";

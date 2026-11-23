@@ -65,10 +65,21 @@ export const TASK_LIMITS = {
   description: 300,
   summaryFields: 5,
   runs: 100,
+  /** Keys in `depends_on` and in `conflicts_with`, each. */
+  links: 20,
+  /** Keys an answer lists in `blocks` and in the conflicts read from both sides. */
+  linksShown: 100,
 } as const;
 
 /** What `clear` may name: the optional scalar fields, and `fields.<name>`. */
-export const CLEARABLE = ["body", "priority", "type", "parent"] as const;
+export const CLEARABLE = [
+  "body",
+  "priority",
+  "type",
+  "parent",
+  "depends_on",
+  "conflicts_with",
+] as const;
 const CLEAR_FIELD = /^fields\.(.{1,64})$/;
 
 // ── what an adapter describes ───────────────────────────────────────────────
@@ -123,7 +134,31 @@ export interface Comment {
   by?: string;
 }
 
-export interface Task {
+/** What a dependency is to the task that waits for it; `missing`: the key names no task that can be read. */
+export type DependencyState = "open" | "done" | "declined" | "missing";
+
+export interface DependencyRef {
+  key: string;
+  state: DependencyState;
+  /** The dependency is closed but waits for a person's approval, so it releases nothing yet. */
+  needs_approval?: true;
+}
+
+/** The links of a task (an adapter with `capabilities.links`); every list is absent when empty. */
+export interface TaskLinks {
+  /** Tasks this one waits for. */
+  depends_on?: string[];
+  /** The tracker's fact about each key of `depends_on`. */
+  dependencies?: DependencyRef[];
+  /** The dependencies that hold the task back now; absent when it is not blocked. */
+  blocked_by?: string[];
+  /** Open tasks that depend on this one. */
+  blocks?: string[];
+  /** Tasks that must not run beside this one, whichever task the link was written on. */
+  conflicts_with?: string[];
+}
+
+export interface Task extends TaskLinks {
   /** The tracker's immutable id, when it has one (the `local` adapter: the key suffix). */
   id?: string;
   /** What a person types; opaque to the core. */
@@ -165,7 +200,7 @@ export interface Task {
  * An explicit list of fields, not "Task minus ...": a heavy field added to `Task` later must not
  * reach the lists without somebody deciding it should.
  */
-export interface TaskSummary {
+export interface TaskSummary extends TaskLinks {
   id?: string;
   key: string;
   title: string;
@@ -184,6 +219,8 @@ export interface TaskSummary {
   /** `needsApproval` of the task; absent when it does not wait. */
   needs_approval?: boolean;
   created_in_run?: string;
+  /** ISO 8601; the order of `kodel serve` compares it as text. */
+  created_at?: string;
 }
 
 export interface SubtaskRef {
@@ -202,6 +239,8 @@ export interface NewTask {
   run?: string;
   parent?: string;
   fields?: Record<string, FieldValue>;
+  depends_on?: string[];
+  conflicts_with?: string[];
   /** Set by the caller of the service (the task tools), never taken from a tool's input. */
   created_by?: "agent";
 }
@@ -219,7 +258,14 @@ export interface TaskPatch {
   /** Moves the task under another parent. */
   parent?: string;
   fields?: Record<string, FieldValue>;
-  /** `body`, `priority`, `type`, `parent` or `fields.<name>`. */
+  /** Each sets the whole list; `add_*` and `remove_*` change it by a few keys. */
+  depends_on?: string[];
+  conflicts_with?: string[];
+  add_depends_on?: string[];
+  remove_depends_on?: string[];
+  add_conflicts_with?: string[];
+  remove_conflicts_with?: string[];
+  /** `body`, `priority`, `type`, `parent`, `depends_on`, `conflicts_with` or `fields.<name>`. */
   clear?: string[];
   /**
    * The change comes from an agent: a change of the title, body, status, priority or parent then
@@ -284,6 +330,11 @@ export interface TaskAdapterCapabilities {
    * and can `approve`. Off unless `true`.
    */
   provenance?: boolean;
+  /**
+   * The tracker keeps `depends_on` and `conflicts_with` and fills `dependencies`, `blocks` and the
+   * conflicts of both sides when it reads a task. Off unless `true`.
+   */
+  links?: boolean;
 }
 
 export interface CallOptions {
@@ -472,6 +523,57 @@ function fieldValue(name: string, raw: unknown): FieldValue {
   );
 }
 
+export const LINK_LISTS = ["depends_on", "conflicts_with"] as const;
+export type LinkList = (typeof LINK_LISTS)[number];
+export const LINK_PATCH_KEYS = [
+  "depends_on",
+  "conflicts_with",
+  "add_depends_on",
+  "remove_depends_on",
+  "add_conflicts_with",
+  "remove_conflicts_with",
+] as const;
+
+/** A list of task keys as a caller gave it: bounded, each a key input, none twice. */
+export function checkLinkKeys(what: string, value: unknown, allowEmpty = false): string[] {
+  if (!Array.isArray(value) || value.length > TASK_LIMITS.links) {
+    throw invalid(`${what} must be a list of at most ${TASK_LIMITS.links} task keys`);
+  }
+  if (value.length === 0 && !allowEmpty) {
+    throw invalid(`${what} must name at least one task`);
+  }
+  const keys = value.map((key) => checkKeyInput(`a key of ${what}`, key));
+  const seen = new Set<string>();
+  for (const key of keys) {
+    if (seen.has(key)) throw invalid(`"${key}" is listed twice in ${what}`);
+    seen.add(key);
+  }
+  return keys;
+}
+
+function validateLinkPatch(patch: TaskPatch): void {
+  for (const list of LINK_LISTS) {
+    const set = patch[list];
+    const add = patch[`add_${list}`];
+    const remove = patch[`remove_${list}`];
+    // An empty list is not a way to clear: `clear` is, so that nothing is emptied by accident.
+    if (set !== undefined) checkLinkKeys(list, set);
+    if (add !== undefined) checkLinkKeys(`add_${list}`, add);
+    if (remove !== undefined) checkLinkKeys(`remove_${list}`, remove);
+    if (set !== undefined && (add !== undefined || remove !== undefined)) {
+      throw invalid(
+        `${list} sets the whole list; do not give add_${list} or remove_${list} with it`,
+      );
+    }
+    if (add !== undefined && remove !== undefined) {
+      const removed = new Set(remove.map((key) => key.trim()));
+      const both = add.find((key) => removed.has(key.trim()));
+      if (both !== undefined)
+        throw invalid(`"${both.trim()}" is both added to and removed from ${list}`);
+    }
+  }
+}
+
 export function validateNewTask(input: NewTask): void {
   text("title", input.title, TASK_LIMITS.title, true);
   if (input.body !== undefined) {
@@ -485,6 +587,8 @@ export function validateNewTask(input: NewTask): void {
   if (input.run !== undefined) checkRunId("run", input.run);
   if (input.parent !== undefined) checkKeyInput("parent", input.parent);
   if (input.fields !== undefined) checkFields(input.fields);
+  if (input.depends_on !== undefined) checkLinkKeys("depends_on", input.depends_on);
+  if (input.conflicts_with !== undefined) checkLinkKeys("conflicts_with", input.conflicts_with);
   if (input.created_by !== undefined && input.created_by !== "agent") {
     throw invalid('created_by can only be "agent"');
   }
@@ -513,6 +617,7 @@ export function validatePatch(patch: TaskPatch): void {
   if (patch.add_run !== undefined) checkRunId("add_run", patch.add_run);
   if (patch.parent !== undefined) checkKeyInput("parent", patch.parent);
   if (patch.fields !== undefined) checkFields(patch.fields);
+  validateLinkPatch(patch);
   if (patch.clear !== undefined) {
     if (!Array.isArray(patch.clear) || patch.clear.length === 0 || patch.clear.length > 20) {
       throw invalid("clear must be a list of 1-20 names");
@@ -540,6 +645,13 @@ export function validatePatch(patch: TaskPatch): void {
                 ? patch.parent
                 : undefined;
       if (set !== undefined) throw invalid(`"${name}" is both set and cleared`);
+      if (name === "depends_on" || name === "conflicts_with") {
+        const touched =
+          patch[name] !== undefined ||
+          patch[`add_${name}`] !== undefined ||
+          patch[`remove_${name}`] !== undefined;
+        if (touched) throw invalid(`"${name}" is both changed and cleared`);
+      }
       if (
         name.startsWith("fields.") &&
         patch.fields &&

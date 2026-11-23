@@ -34,6 +34,7 @@ import {
   placeCall,
   placementFromJournal,
   proposalNameProblem,
+  type Registry,
   type ResultReport,
   type RunReport,
   type RunState,
@@ -50,11 +51,13 @@ import { loadConfig, type ProjectConfig, type WorktreeConfig } from "./config";
 import { GitSnapshotter, git } from "./git";
 import {
   engineStepsRefusal,
+  extraChecksOf,
   type HostOptions,
   hashSource,
   hashSpec,
   LocalHost,
   type LocalRun,
+  localRegistry,
   normalizeTask,
 } from "./host";
 import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integrity";
@@ -141,8 +144,13 @@ const stemOf = (file: string) => file.replace(/\.ya?ml$/, "");
 const sameStem = (file: string, name: string) => stemOf(file).toLowerCase() === name;
 
 /** What the agent is given when the person has to say which version of the pipeline the run uses. */
-function askWhich(found: Loaded, file: string, committedText: string): PipelineChoice {
-  const changes = diffNodes(parsePipeline(committedText), found.spec);
+function askWhich(
+  found: Loaded,
+  file: string,
+  committedText: string,
+  registry: Registry,
+): PipelineChoice {
+  const changes = diffNodes(parsePipeline(committedText, { registry }), found.spec);
   const steps = changes.map((c) => `"${c.slug}" (${c.changes.join(", ")})`).join(", ");
   return {
     reason: "pipeline_uncommitted",
@@ -195,6 +203,10 @@ export interface PipelineProposalView {
 }
 
 export class LocalPipelineHost implements PipelineHost {
+  /** Runs keep attachments in their own folder (T-45). */
+  readonly attachments = true;
+  /** The kinds of this host: the built-in ones and the `attachment` check, unless the caller gave its own. */
+  readonly registry: Registry;
   private readonly dir: string;
   private readonly store: FileStore;
   private readonly storeRoot: string;
@@ -209,8 +221,10 @@ export class LocalPipelineHost implements PipelineHost {
   constructor(private readonly options: LocalPipelineHostOptions) {
     this.storeRoot = options.storeRoot ?? `${options.root}/.kodel`;
     this.dir = options.pipelinesDir ?? join(this.storeRoot, "pipelines");
+    this.registry = options.engine?.registry ?? localRegistry();
     this.store = new FileStore({
       root: this.storeRoot,
+      extraChecks: extraChecksOf(this.registry),
       ...(options.storage ? { place: options.storage } : {}),
       ...(options.rules ? { rules: options.rules } : {}),
       ...options.workerStartLock,
@@ -320,7 +334,7 @@ export class LocalPipelineHost implements PipelineHost {
     for (const file of files) {
       try {
         const source = await readFile(join(this.dir, file), "utf8");
-        const spec = parsePipeline(source);
+        const spec = parsePipeline(source, { registry: this.registry });
         const clash = loaded.find((l) => l.spec.name === spec.name);
         if (clash) {
           problems.push({
@@ -398,7 +412,7 @@ export class LocalPipelineHost implements PipelineHost {
     }
     let spec: PipelineSpec;
     try {
-      spec = parsePipeline(input.yaml);
+      spec = parsePipeline(input.yaml, { registry: this.registry });
     } catch (error) {
       if (error instanceof KodelError) {
         return { ok: false, code: error.code, message: error.message };
@@ -478,7 +492,7 @@ export class LocalPipelineHost implements PipelineHost {
     let unusable: string | undefined = hiddenCharacterProblem(record.yaml);
     if (unusable === undefined) {
       try {
-        spec = parsePipeline(record.yaml);
+        spec = parsePipeline(record.yaml, { registry: this.registry });
       } catch (error) {
         if (!(error instanceof KodelError)) throw error;
         unusable = `the stored text is not a pipeline this kodel reads (${error.message}); drop it`;
@@ -589,7 +603,7 @@ export class LocalPipelineHost implements PipelineHost {
   /** Why a pipeline with an engine step cannot be proposed or put in place by this kodel. */
   private engineRefusal(spec: PipelineSpec): KodelError | undefined {
     return engineStepsRefusal(spec, {
-      engine: this.options.engine ?? {},
+      engine: { ...this.options.engine, registry: this.registry },
       rules: this.options.rules ?? [],
       platform: this.options.platform ?? process.platform,
       offReason: this.options.engineStepsOffReason,
@@ -603,6 +617,7 @@ export class LocalPipelineHost implements PipelineHost {
     if (!host) {
       host = new LocalHost(spec, {
         ...this.options,
+        engine: { ...this.options.engine, registry: this.registry },
         agentLog: this.agentLog,
         ...(this.agentLogTickers === undefined ? {} : { agentLogTickers: this.agentLogTickers }),
         runTaskLink: () => this.taskLink(),
@@ -633,7 +648,10 @@ export class LocalPipelineHost implements PipelineHost {
       }
       if (committed === found.source) return undefined;
       try {
-        if (canonicalPipeline(parsePipeline(committed)) === canonicalPipeline(found.spec)) {
+        if (
+          canonicalPipeline(parsePipeline(committed, { registry: this.registry })) ===
+          canonicalPipeline(found.spec)
+        ) {
           return undefined;
         }
       } catch (error) {
@@ -697,7 +715,7 @@ export class LocalPipelineHost implements PipelineHost {
         } else {
           const choice = input.pipeline_version ?? (await projectConfig()).pipeline.uncommitted;
           if (choice === "ask") {
-            throw new ChoiceNeeded(askWhich(found, file, dirt.committed));
+            throw new ChoiceNeeded(askWhich(found, file, dirt.committed, this.registry));
           }
           if (choice === "working") {
             pipelineCopy = { path: file, text: found.source };
@@ -706,7 +724,7 @@ export class LocalPipelineHost implements PipelineHost {
           } else {
             found = {
               file: found.file,
-              spec: parsePipeline(dirt.committed),
+              spec: parsePipeline(dirt.committed, { registry: this.registry }),
               source: dirt.committed,
             };
           }

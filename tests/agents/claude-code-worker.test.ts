@@ -129,7 +129,7 @@ async function setup(prompt?: string) {
     intermediate: { exec: process.execPath, args: [entry] },
   });
   const servedTools = [
-    ...toolsFor({ taskLink: true }).map((t) => t.name),
+    ...toolsFor({ taskLink: true, attachments: true }).map((t) => t.name),
     ...HISTORY_TOOLS.map((t) => t.name),
     ...buildTaskTools({
       comment: "append",

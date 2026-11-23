@@ -223,6 +223,59 @@ describe("task_9pns the s key on a task", () => {
     expect(demo.notice).toBe("starting is not available in --demo");
   });
 
+  test("t45_tui_manual_start_warns_and_starts", () => {
+    // The loop answered with a warning: the task's links would hold it back from kodel serve.
+    const pressed = update(picked(), "s", WIDE);
+    const effect = effects(pressed).find((e) => e.type === "prepare_start");
+    if (effect?.type !== "prepare_start") throw new Error("no prepare_start");
+    const warning = "T-A1 waits for T-B7 (open): start it anyway?";
+    const m = withStartReady(clean(pressed), effect.seq, effect.key, ["dev"], warning);
+    const shown = screen(m);
+    expect(shown).toContain("Start T-A1 in a background agent (pipeline dev)?");
+    expect(shown).toContain(warning);
+    expect(shown).toContain("y start · Esc or any other key cancels");
+    // `y` starts it all the same; anything else starts nothing.
+    const yes = press(m, "y");
+    expect(startOf(yes)).toEqual({
+      type: "start_task",
+      key: "T-A1",
+      pipeline: "dev",
+      seq: effect.seq,
+    });
+    for (const other of ["n", "escape", "enter"]) {
+      const no = press(m, other);
+      expect(startOf(no)).toBeUndefined();
+      expect(no.start).toBeNull();
+      expect(no.notice).toBe("Cancelled.");
+    }
+    // With several pipelines the line stands above the picker, and a digit still chooses.
+    const several = withStartReady(
+      clean(pressed),
+      effect.seq,
+      effect.key,
+      ["dev", "fast"],
+      warning,
+    );
+    expect(screen(several)).toContain(warning);
+    expect(startOf(press(several, "2"))).toEqual({
+      type: "start_task",
+      key: "T-A1",
+      pipeline: "fast",
+      seq: effect.seq,
+    });
+    // What a tracker put in a key cannot reorder or fake a line of the question.
+    const hostile = withStartReady(
+      clean(pressed),
+      effect.seq,
+      effect.key,
+      ["dev"],
+      `T-A1 waits for ${ESC}[2J\u202eT-B7 (open): start it anyway?`,
+    );
+    for (const line of lines(hostile)) expect(line).not.toMatch(UNSAFE);
+    // Without a warning the question is as it was.
+    expect(screen(asked(picked()).m)).not.toContain("start it anyway");
+  });
+
   test("task_9pns_y_confirms_any_other_key_cancels", () => {
     const { m, key, seq } = asked(picked());
     // The question is a window in the middle of the screen, with the task's name and the keys on their own line.
@@ -2932,14 +2985,21 @@ describe("t45 the o key, the words of a terminal worker and the TUI's own finish
     // What a person's start is told once: in the question, under it, before the answer is given.
     const note =
       "whether /proj/.kodel/worktrees asks to trust the folder is not known; if it does, the agent waits at that question";
-    const asking = withStartReady(clean(pressed), effect.seq, effect.key, ["dev"], note);
+    const asking = withStartReady(clean(pressed), effect.seq, effect.key, ["dev"], undefined, note);
     const text = lines(asking, WIDER)
       .join(" ")
       .replace(/[│┃\s]+/g, " ");
     expect(text).toContain("Start T-A1 in a background agent (pipeline dev)?");
     expect(text).toContain("asks to trust the folder is not known");
     // A note cannot draw on the screen.
-    const unsafe = withStartReady(clean(pressed), effect.seq, effect.key, ["dev"], `a${ESC}[2Jb`);
+    const unsafe = withStartReady(
+      clean(pressed),
+      effect.seq,
+      effect.key,
+      ["dev"],
+      undefined,
+      `a${ESC}[2Jb`,
+    );
     for (const line of lines(unsafe, WIDER)) expect(UNSAFE.test(line)).toBe(false);
     // Without a note the window is as before.
     const plainAsk = withStartReady(clean(pressed), effect.seq, effect.key, ["dev"]);

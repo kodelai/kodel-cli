@@ -179,6 +179,20 @@ Fixtures: `fixtures/session-formats/v1/` (`agent-chosen.json`, `agent-resumed.js
 `worker-print-before-t45/`, the record of a print worker taken from the launcher and the holder of the build
 before this change), `fixtures/serve-formats/v1/serve-alive.json`.
 
+## Task links (TASK-9RZD, T-45, T-46)
+
+No run format, journal, session record or serve record changes. The task files of the `local` adapter gain
+two optional keys of format 1, `depends_on` and `conflicts_with` (`docs/tasks.md`); `v` stays 1 and a file
+without them reads as before. After the update:
+
+- a run in flight goes on as it was; a task without links is started and ordered as before (with the `local`
+  adapter the order is the same: priority, then `created_at`, then the key);
+- the task tools gain parameters (`TASK_TOOLS_VERSION` 2): an MCP server that was already running does not
+  offer them until the agent's session is restarted;
+- **a kodel from before this change ignores the links.** It keeps both keys when it rewrites a task file (at
+  the end of the file) and its `kodel serve` starts a task that a newer one would hold back. Update every
+  kodel that runs `kodel serve` on the repository before you rely on the links.
+
 ## A step that asks for a model (T-43)
 
 A node `model:` without `engine` asks the agent that drives the run to give the step to a subagent on that
@@ -196,6 +210,31 @@ report is built.
 - For a step that a fork's worker did, a later change adds one optional field to the journal event
   `agent_completed` (`worker_models`, see `docs/history.md`, "Requested and observed model"); that change
   is made in place in format 2 too.
+
+## Attachments (T-45)
+
+A step can keep files with the run (`docs/attachments.md`). Each stored version is one journal event,
+`attachment_written` (`node`, `attempt`, `name`, `version`, `ref`, `type`, `bytes`, `lines?`, `sha256`,
+`scanned`, `redacted?`, `claim?`, and the fork fields of the visit when the step is in a fork); the files are in the run's `attachments/` folder. The state has no new field: like
+every event, a write advances `state.seq` and nothing else, and the bounds and the history of a name are
+read from the journal.
+
+- A run of format 2 takes the event from now on, a run that was going when kodel was updated too. Format 2
+  is amended in place, with no new version (rule 5): an engine of format 2 that does not know the event
+  decides every step the same way, and has nothing to drop when it writes the run back.
+- A run of format 1 refuses the write before a file or a record is made (`UNSUPPORTED_FORMAT_FEATURE`, and
+  the answer offers `kodel migrate`), and refuses a pipeline with an `attachment` check in a proposal, an
+  accepted change and an edit of the file: it is the pipeline feature `attachment` of format 2.
+  `kodel migrate` leaves the `attachments/` folder alone.
+- **An older build of format 2 lacks the protection, not the run.** A kodel from before this change lists
+  no attachments and approves a gate without comparing them with what the person saw. It decides every
+  step as before; what it lacks is a check that did not exist when it was built. No published build writes
+  format 2, so this is a dev session that was not restarted after the update: restart it.
+- An older kodel that reads a run whose kept pipeline has the `attachment` check says the pipeline was
+  written by a newer kodel ("upgrade kodel"), never that it was modified.
+
+Golden fixture: `fixtures/formats/v2-attachment/`, one run with two versions of a text, a PNG and the check
+(`fixtures/formats/README.md`).
 
 ## When the formats change again
 

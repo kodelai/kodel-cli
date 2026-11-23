@@ -15,6 +15,7 @@ import {
   type CommandResult,
   LocalHost,
   type LocalRun,
+  localRegistry,
 } from "@kodel-ai/local";
 import {
   DEFAULT_STALE_MS,
@@ -47,6 +48,8 @@ function scenarioHistory(): HistoryConfig {
 
 export class LocalScenarioEngine implements ScenarioEngine {
   readonly name = "local";
+  /** The local host keeps attachments: its pipelines may use the `attachment` check. */
+  readonly registry = localRegistry();
   /** `agents.max_parallel` of the project, written to its config when set. */
   maxParallel: number | undefined;
 
@@ -60,6 +63,7 @@ export class LocalScenarioEngine implements ScenarioEngine {
   private parked = 0;
   private written = 0;
   private reported = new Set<string>();
+  private attached = new Set<string>();
   private feedbackCount = 0;
   /** Results of engine work the run refused, as the memory engine keeps them. */
   private readonly refused: RefusedFollowUp[] = [];
@@ -349,6 +353,16 @@ export class LocalScenarioEngine implements ScenarioEngine {
         this.reported.add(`${slug}#${attempt}`);
         // A report the engine rejects simply is not there when the check looks for it.
         await this.run.reportResult(slug, attempt, sent);
+      }
+      const attach = this.production(slug, attempt).attach ?? [];
+      if (attach.length > 0 && !this.attached.has(`${slug}#${attempt}`)) {
+        this.attached.add(`${slug}#${attempt}`);
+        for (const { name, content } of attach) {
+          // Like a report: one the engine refuses is not there when the check looks for it.
+          await this.run
+            .writeAttachment({ node: slug, attempt, name, content })
+            .catch(() => undefined);
+        }
       }
       if (this.context.agentMode !== "auto") return;
       const result = await this.run.completeStep(slug, attempt);

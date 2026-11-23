@@ -525,15 +525,74 @@ describe("t44 a dead worker in status and report", () => {
   });
 });
 
+describe("t46 kodel serve --status shows the queues", () => {
+  test("t46_status_prints_the_queues", async () => {
+    writeFileSync(
+      join(storeRoot(), "config.yaml"),
+      `worktree:\n  mode: auto\n${TASKS}serve:\n  enabled: false\n  max_workers: 1\n  max_runs: 1\n  start:\n    - pipeline: one\n`,
+    );
+    const opened = await openTaskService({ storeRoot: storeRoot() });
+    if (!opened) throw new Error("tasks are off");
+    // Shaped like a token; put together here so that no file holds one.
+    const secret = ["ghp", "abcdefghijklmnopqrstuvwxyz0123456789"].join("_");
+    const seed = async (input: Record<string, unknown>): Promise<string> => {
+      const made_ = await opened.service.create({ title: `A task ${secret}`, ...input });
+      if (!made_.ok) throw new Error(JSON.stringify(made_));
+      return (made_.task as { key: string }).key;
+    };
+    const low = await seed({ priority: "low" });
+    const normal = await seed({});
+    const high = await seed({ priority: "high", depends_on: [low] });
+    const other = await seed({ conflicts_with: [normal] });
+    const h = host();
+    // A run of the task `other` must not run beside, started in a session.
+    const going = await h.start({
+      pipeline: "one",
+      task: "going",
+      restart: true,
+      task_key: normal,
+      caller: { name: "kodel-tui", version: "0.0.0-test" },
+    });
+    const before = [...snapshot(dir), ...snapshot(stateDir)];
+    let out = "";
+    await printServeStatus({
+      root: dir,
+      dataDir: storeRoot(),
+      host: h,
+      launcher: new FakeLauncher(),
+      place: servePlace({ base: stateDir, root: dir }),
+      version: "0.0.0-test",
+      out: (t) => {
+        out += t;
+      },
+    });
+    // The low task goes first: the high task that waits for it raised it.
+    expect(out).toContain(
+      `start queue: 1. ${low}: priority high (raised by ${high}), unblocks 1\n`,
+    );
+    expect(out).not.toContain("start queue: 2.");
+    expect(out).toContain(`blocked:     ${high} waits for ${low} (open)\n`);
+    expect(out).toContain(
+      `blocked:     ${other} conflicts with ${normal} (run ${going.run.runId})\n`,
+    );
+    // The same as the plan says, and never a title.
+    expect(out).toContain(`if enabled:  start of ${low}\n`);
+    expect(out).not.toContain(secret);
+    expect(out).not.toContain("ghp_");
+    expect([...snapshot(dir), ...snapshot(stateDir)]).toEqual(before);
+  }, 30_000);
+});
+
 describe("t44 the decision id", () => {
   test("t44_test_names_carry_the_decision_id", () => {
     const repo = join(import.meta.dir, "../../..");
-    // The decision id as docs/serve.md names it; the test names carry it in lower case, without the dash.
-    const heading = readFileSync(join(repo, "docs/serve.md"), "utf8").match(
-      /^## Decision (T-\d+)\s*$/m,
-    );
-    expect(heading?.[1]).toBeDefined();
-    const prefix = (heading?.[1] ?? "").toLowerCase().replace("-", "");
+    // The decision ids as docs/serve.md names them (T-44, and T-45 and T-46 for the task links); the test
+    // names carry one of them in lower case, without the dash.
+    const headings = [
+      ...readFileSync(join(repo, "docs/serve.md"), "utf8").matchAll(/^## Decision (T-\d+)\s*$/gm),
+    ].map((m) => (m[1] ?? "").toLowerCase().replace("-", ""));
+    expect(headings).toContain("t44");
+    const prefix = new RegExp(`\\b(?:${headings.join("|")})_`);
     const files = [
       ...readdirSync(join(repo, "packages/pipeline-core/test"))
         .filter((f) => /^serve-.*\.test\.ts$/.test(f))
@@ -556,7 +615,7 @@ describe("t44 the decision id", () => {
       );
       const names = [...text.matchAll(pattern)].map((m) => m[2] ?? "");
       expect(names.length, file).toBeGreaterThan(0);
-      for (const name of names) expect(name, file).toContain(prefix);
+      for (const name of names) expect(name, file).toMatch(prefix);
     }
   });
 });

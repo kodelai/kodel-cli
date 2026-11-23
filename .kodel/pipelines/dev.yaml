@@ -235,11 +235,13 @@ nodes:
         fail_when: { severity: [blocker, critical, major] }
         on_fail: blocking_findings
 
+  # The files run one after another and sum to about 18 minutes on a developer machine (no file
+  # hangs: the slowest takes about 90 s), so 900 s was too short.
   - slug: test
     kind: command
     command: "bun test"
-    expected_duration: 360
-    timeout: 900
+    expected_duration: 1100
+    timeout: 1800
 
   - slug: build
     kind: command

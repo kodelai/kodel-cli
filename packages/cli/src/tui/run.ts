@@ -70,7 +70,8 @@ const FRAME_MS = 100;
  * or why `s` does nothing (`reason`: what keeps an agent from starting here, for the task's row).
  */
 export type StartCheck =
-  | { ok: true; pipelines: string[]; note?: string }
+  /** `warning`: the task's links would hold it back from `kodel serve`; the question says so and still starts. */
+  | { ok: true; pipelines: string[]; warning?: string; note?: string }
   | { ok: false; message: string; reason?: string };
 
 /** The child that has the terminal while the screen is away (`kodel agent attach`). */
@@ -528,7 +529,14 @@ export async function runTui(
       prepare(effect.key)
         .then((check) => {
           model = check.ok
-            ? withStartReady(model, effect.seq, effect.key, check.pipelines, check.note)
+            ? withStartReady(
+                model,
+                effect.seq,
+                effect.key,
+                check.pipelines,
+                check.warning,
+                check.note,
+              )
             : withStartRefused(model, effect.seq, effect.key, check.message, check.reason);
         })
         .catch((error: unknown) => {

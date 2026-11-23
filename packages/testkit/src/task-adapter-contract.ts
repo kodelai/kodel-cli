@@ -24,6 +24,8 @@ export interface ContractSubject {
   adapter: TaskAdapter;
   /** What every `create` needs besides a title (an adapter whose tracker demands a field). */
   newTask?: Partial<NewTask>;
+  /** A key the adapter resolves that names no task; without it the unknown-key part of the link cases is skipped. */
+  unknownKey?: string;
   /** Makes the adapter's clock stand still from now on; a subject without it skips the cases that need it. */
   stopClock?: () => void;
   dispose?: () => Promise<void> | void;
@@ -619,6 +621,291 @@ export function taskAdapterContract(
       assert(
         edited && needsApproval(edited.task),
         "an agent's edit in the millisecond of the approval does not wait",
+      );
+    },
+  );
+
+  // ── links (T-45) ────────────────────────────────────────────────────────────
+
+  const same = (a: readonly string[] | undefined, b: readonly string[]) =>
+    JSON.stringify(a ?? []) === JSON.stringify(b);
+  const read = async (adapter: TaskAdapter, key: string): Promise<Task> => {
+    const found = await adapter.get(key, o());
+    assert(found, `${key} cannot be read`);
+    return found.task;
+  };
+  /** Closes a task by the moves its workflow allows (through a status in progress where it must). */
+  const close = async (adapter: TaskAdapter, key: string, byAgent = false): Promise<Task> => {
+    for (let step = 0; step < 5; step += 1) {
+      const schema = await adapter.schema({ key }, o());
+      const allowed = schema.transitions?.map((t) => t.to);
+      const offered = schema.statuses.filter(
+        (s) => allowed === undefined || allowed.includes(s.name),
+      );
+      const next =
+        offered.find((s) => s.state === "done") ?? offered.find((s) => s.state === "progress");
+      assert(next, "the workflow offers no way to a status in state done");
+      const moved = await adapter.update(
+        key,
+        byAgent ? { status: next.name, by_agent: true } : { status: next.name },
+        o(),
+      );
+      assert(moved, `${key} cannot be moved`);
+      if (moved.task.state === "done") return moved.task;
+    }
+    throw new Error("conformance: the task did not reach a status in state done");
+  };
+
+  add(
+    "t45_links_set_add_remove_clear_and_read: get and list show depends_on, dependencies, blocked_by, blocks",
+    async ({ adapter }, { create }) => {
+      if (adapter.capabilities.links !== true) return;
+      const a = await create("First");
+      const b = await create("Second");
+      const c = await create("Waits for the others", { depends_on: [a.key] });
+      assert(same(c.depends_on, [a.key]), "create does not keep depends_on");
+      assert(
+        c.dependencies?.[0]?.key === a.key && c.dependencies[0].state === "open",
+        "create does not say the state of the dependency",
+      );
+      assert(same(c.blocked_by, [a.key]), "a task with an open dependency is not blocked_by it");
+      assert(
+        same((await read(adapter, a.key)).blocks, [c.key]),
+        "the dependency does not list what it blocks",
+      );
+
+      const added = await adapter.update(c.key, { add_depends_on: [b.key, a.key] }, o());
+      assert(same(added?.task.depends_on, [a.key, b.key]), "add_depends_on does not add once");
+      const removed = await adapter.update(c.key, { remove_depends_on: [a.key] }, o());
+      assert(same(removed?.task.depends_on, [b.key]), "remove_depends_on does not remove");
+      assert(
+        (await read(adapter, a.key)).blocks === undefined,
+        "a removed dependency still blocks",
+      );
+
+      const listed = (await listAll(adapter)).tasks.find((t) => t.key === c.key);
+      assert(listed, "the task is not listed");
+      assert(same(listed.depends_on, [b.key]), "list does not show depends_on");
+      assert(same(listed.blocked_by, [b.key]), "list does not show blocked_by");
+      assert(listed.dependencies?.[0]?.state === "open", "list does not show dependencies");
+
+      // Closed by a person (no `by_agent`): the dependent is released.
+      await close(adapter, b.key);
+      const released = await read(adapter, c.key);
+      assert(
+        released.dependencies?.[0]?.state === "done" ||
+          released.dependencies?.[0]?.state === "declined",
+        "a closed dependency is not said to be done",
+      );
+      assert(
+        released.dependencies?.[0]?.needs_approval === undefined,
+        "a person's close waits for approval",
+      );
+      assert(released.blocked_by === undefined, "a task whose dependency is done is still blocked");
+      assert((await read(adapter, b.key)).blocks === undefined, "a finished task still blocks");
+
+      const set = await adapter.update(c.key, { depends_on: [a.key] }, o());
+      assert(same(set?.task.depends_on, [a.key]), "depends_on does not set the whole list");
+      // Closed itself while its dependency is still open: nothing holds a finished task back.
+      const d = await create("Finished before its dependency", { depends_on: [a.key] });
+      await close(adapter, d.key);
+      assert(
+        (await read(adapter, d.key)).blocked_by === undefined,
+        "a finished task is said to be blocked",
+      );
+      const cleared = await adapter.update(c.key, { clear: ["depends_on"] }, o());
+      assert(cleared, "the task cannot be changed");
+      assert(cleared.task.depends_on === undefined, "clear does not empty depends_on");
+      assert(cleared.task.dependencies === undefined, "dependencies stay after a clear");
+      assert(cleared.task.blocked_by === undefined, "blocked_by stays after a clear");
+    },
+  );
+
+  add(
+    "t45_agent_closed_dependency_waits_for_approval: a dependency an agent closed releases nothing until approved",
+    async ({ adapter }, { create }) => {
+      const approve = adapter.approve;
+      if (adapter.capabilities.links !== true || adapter.capabilities.provenance !== true) return;
+      assert(approve !== undefined, "capabilities.provenance is on but there is no approve");
+      const b = await create("Closed by an agent");
+      const a = await create("Waits", { depends_on: [b.key] });
+      const closed = await close(adapter, b.key, true);
+      const waits = await read(adapter, a.key);
+      assert(
+        waits.dependencies?.[0]?.needs_approval === true,
+        "an agent's close does not wait for approval",
+      );
+      assert(same(waits.blocked_by, [b.key]), "an agent's close released the dependent");
+      await approve.call(adapter, b.key, closed.updated_at, o());
+      const released = await read(adapter, a.key);
+      assert(
+        released.dependencies?.[0]?.needs_approval === undefined,
+        "an approved dependency still waits",
+      );
+      assert(released.blocked_by === undefined, "an approved dependency still blocks");
+    },
+  );
+
+  add(
+    "t45_unknown_self_and_cycle_are_refused: nothing is written and the message spells the cycle",
+    async ({ adapter, unknownKey }, { create }) => {
+      if (adapter.capabilities.links !== true) return;
+      const a = await create("A");
+      const b = await create("B", { depends_on: [a.key] });
+      const c = await create("C", { depends_on: [b.key] });
+
+      const self = await rejection(
+        adapter.update(a.key, { add_depends_on: [a.key] }, o()),
+        "a link to itself",
+      );
+      assert(self.code === "INVALID_TASK", `a link to itself is ${self.code}`);
+      const selfConflict = await rejection(
+        adapter.update(a.key, { add_conflicts_with: [a.key] }, o()),
+        "a conflict with itself",
+      );
+      assert(
+        selfConflict.code === "INVALID_TASK",
+        `a conflict with itself is ${selfConflict.code}`,
+      );
+
+      const two = await rejection(
+        adapter.update(a.key, { add_depends_on: [b.key] }, o()),
+        "a cycle of two",
+      );
+      assert(two.code === "INVALID_TASK", `a cycle of two is ${two.code}`);
+      assert(
+        two.message.includes(`${a.key} -> ${b.key} -> ${a.key}`),
+        `the message does not spell the cycle: ${two.message}`,
+      );
+      const three = await rejection(
+        adapter.update(a.key, { depends_on: [c.key] }, o()),
+        "a cycle of three",
+      );
+      assert(three.code === "INVALID_TASK", `a cycle of three is ${three.code}`);
+      assert(
+        three.message.includes(`${a.key} -> ${c.key} -> ${b.key} -> ${a.key}`),
+        `the message does not spell the cycle: ${three.message}`,
+      );
+      assert((await read(adapter, a.key)).depends_on === undefined, "a refused link was written");
+
+      if (unknownKey === undefined) return;
+      for (const patch of [
+        { add_depends_on: [unknownKey] },
+        { depends_on: [b.key, unknownKey] },
+        { add_conflicts_with: [unknownKey] },
+      ]) {
+        const unknown = await rejection(
+          adapter.update(c.key, patch, o()),
+          "a link to an unknown task",
+        );
+        assert(unknown.code === "TASK_NOT_FOUND", `a link to an unknown task is ${unknown.code}`);
+        assert(unknown.message.includes(unknownKey), "the message does not name the key");
+      }
+      const made = await rejection(
+        create("D", { depends_on: [unknownKey] }),
+        "a new task with an unknown link",
+      );
+      assert(made.code === "TASK_NOT_FOUND", `a new task with an unknown link is ${made.code}`);
+      const after = await read(adapter, c.key);
+      assert(same(after.depends_on, [b.key]), "a refused patch changed depends_on");
+      assert(after.conflicts_with === undefined, "a refused patch changed conflicts_with");
+      // A key that is not there may still be named in a removal (a link left by a merge).
+      const gone = await adapter.update(c.key, { remove_depends_on: [unknownKey] }, o());
+      assert(same(gone?.task.depends_on, [b.key]), "removing an unknown key changed the list");
+    },
+  );
+
+  add(
+    "t45_conflicts_are_symmetric: a conflict set on one task shows on the other and is removed from either",
+    async ({ adapter }, { create }) => {
+      if (adapter.capabilities.links !== true) return;
+      const a = await create("A");
+      const b = await create("B");
+      const c = await create("C", { conflicts_with: [a.key] });
+      assert(same(c.conflicts_with, [a.key]), "create does not keep conflicts_with");
+      assert(
+        same((await read(adapter, a.key)).conflicts_with, [c.key]),
+        "the other side does not show it",
+      );
+
+      const set = await adapter.update(a.key, { add_conflicts_with: [b.key] }, o());
+      assert(
+        same(set?.task.conflicts_with, [b.key, c.key].sort()),
+        "add does not keep the other side's link",
+      );
+      assert(same((await read(adapter, b.key)).conflicts_with, [a.key]), "a conflict is one-sided");
+      const listed = (await listAll(adapter)).tasks.find((t) => t.key === b.key);
+      assert(
+        same(listed?.conflicts_with, [a.key]),
+        "list does not show the conflict of the other side",
+      );
+
+      // Removed on the side that did not set it.
+      const removed = await adapter.update(b.key, { remove_conflicts_with: [a.key] }, o());
+      assert(
+        removed?.task.conflicts_with === undefined,
+        "the removal left the conflict on this side",
+      );
+      assert(
+        same((await read(adapter, a.key)).conflicts_with, [c.key]),
+        "the removal left the conflict on the other side",
+      );
+
+      // Setting the whole list drops what is not in it, whichever task holds the link.
+      const replaced = await adapter.update(a.key, { conflicts_with: [b.key] }, o());
+      assert(
+        same(replaced?.task.conflicts_with, [b.key]),
+        "conflicts_with does not set the whole list",
+      );
+      assert(
+        (await read(adapter, c.key)).conflicts_with === undefined,
+        "a conflict that was replaced stays",
+      );
+      const cleared = await adapter.update(b.key, { clear: ["conflicts_with"] }, o());
+      assert(cleared?.task.conflicts_with === undefined, "clear does not empty conflicts_with");
+      assert(
+        (await read(adapter, a.key)).conflicts_with === undefined,
+        "clear left the other side",
+      );
+    },
+  );
+
+  add(
+    "t45_link_change_does_not_touch_the_approval_mark: an agent's change of links marks no task",
+    async ({ adapter }, { create }) => {
+      if (adapter.capabilities.links !== true || adapter.capabilities.provenance !== true) return;
+      const a = await create("A person's task");
+      const b = await create("Another");
+      const c = await create("A third", { conflicts_with: [a.key] });
+      for (const patch of [
+        { add_depends_on: [b.key] },
+        { add_conflicts_with: [b.key] },
+        { remove_conflicts_with: [c.key] },
+        { remove_depends_on: [b.key] },
+        { conflicts_with: [c.key] },
+        { clear: ["conflicts_with", "depends_on"] },
+      ]) {
+        const changed = await adapter.update(a.key, { ...patch, by_agent: true }, o());
+        assert(
+          changed && !needsApproval(changed.task),
+          `an agent's ${Object.keys(patch)[0]} marked the task`,
+        );
+        for (const other of [b.key, c.key]) {
+          assert(
+            !needsApproval(await read(adapter, other)),
+            `an agent's link change marked ${other}`,
+          );
+        }
+      }
+      // The same call still marks the task when it changes what the mark is about.
+      const edited = await adapter.update(
+        a.key,
+        { add_depends_on: [b.key], title: "Rewritten", by_agent: true },
+        o(),
+      );
+      assert(
+        edited && needsApproval(edited.task),
+        "an agent's edit with a link change does not wait",
       );
     },
   );

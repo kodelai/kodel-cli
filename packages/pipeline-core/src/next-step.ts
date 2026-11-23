@@ -194,6 +194,19 @@ export type NextStep =
          * tree, so `changes` may hold their writes too. Say so to the person; added by the host.
          */
         changes_note?: string;
+        /**
+         * The attachments the run keeps (T-45), the latest version of each name, apart from the project
+         * files: added by a host that keeps attachments, also when `changes` could not be told.
+         */
+        attachments?: Record<string, unknown>[];
+        /** How many more attachments the run keeps than `attachments` lists. */
+        attachments_omitted?: number;
+        /**
+         * What the attachments were when this answer was made. An agent that decides the gate for the
+         * person (`pipeline_decide_gate`) sends it back with an approval: a version written since is
+         * something the person has not seen.
+         */
+        attachments_fingerprint?: string;
         /** The other decisions that wait: name each of them to the person too. */
         also_waiting?: AlsoWaiting[];
       };

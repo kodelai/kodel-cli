@@ -720,6 +720,49 @@ const journalOf = (runId: string) =>
     .filter(Boolean)
     .map((l) => JSON.parse(l) as Record<string, unknown>);
 
+describe("t45 the start warning through a real host", () => {
+  test("t45_tui_manual_start_warns_and_starts_through_the_launcher", async () => {
+    const opened = await openTaskService({ storeRoot: storeRoot() });
+    if (!opened) throw new Error("tasks are off");
+    const seed = async (input: Record<string, unknown>): Promise<string> => {
+      const made_ = await opened.service.create({ title: "A task", ...input });
+      if (!made_.ok) throw new Error(JSON.stringify(made_));
+      return (made_.task as { key: string }).key;
+    };
+    const first = await seedTask("First");
+    const blocked = await seed({ title: "Waits for the first", depends_on: [first] });
+    const beside = await seed({ title: "Not beside the first", conflicts_with: [first] });
+    const launcher = new FakeLauncher();
+    const h = host();
+    const opts = await options(h, launcher);
+
+    // No links: no warning. A blocked task: one line, and the pipelines are offered all the same.
+    expect(await opts.prepareStart?.(first)).toEqual({ ok: true, pipelines: ["one"] });
+    expect(await opts.prepareStart?.(blocked)).toEqual({
+      ok: true,
+      pipelines: ["one"],
+      warning: `${blocked} waits for ${first} (open): start it anyway?`,
+    });
+    // A conflict warns only while the other task has an open run.
+    expect(await opts.prepareStart?.(beside)).toEqual({ ok: true, pipelines: ["one"] });
+    const going = await opts.startTask?.(first, "one");
+    expect(going?.ok).toBe(true);
+    expect(await opts.prepareStart?.(beside)).toEqual({
+      ok: true,
+      pipelines: ["one"],
+      warning: `${beside} conflicts with ${first} (run ${going?.runId}): start it anyway?`,
+    });
+
+    // The person said yes: a start by hand is not held back by the links.
+    const started = await opts.startTask?.(blocked, "one");
+    expect(started?.ok).toBe(true);
+    expect(await taskOf(blocked)).toMatchObject({ status: "progress", runs: [started?.runId] });
+    const second = await opts.startTask?.(beside, "one");
+    expect(second?.ok).toBe(true);
+    expect(launcher.starts).toHaveLength(3);
+  }, 30_000);
+});
+
 describe("task_9pns the start through a real host", () => {
   test("task_9pns_start_order_and_failures_started", async () => {
     const key = await seedTask("Add a flag", "The body of the task.\nTwo lines.");

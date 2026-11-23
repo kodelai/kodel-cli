@@ -4,7 +4,7 @@
  * DSL shape come from the server's orchestrator scenarios (KDL-666); this version is engine
  * independent and models our semantics: outcome labels, checks, visits, tool-level agent steps.
  */
-import type { PipelineSpec } from "@kodel-ai/pipeline-core";
+import type { PipelineSpec, Registry } from "@kodel-ai/pipeline-core";
 
 // ── inputs: what the world does ─────────────────────────────────────────────
 
@@ -24,6 +24,11 @@ export interface Production {
   restore?: string[];
   /** The result report the agent sends. Default: none sent. */
   result?: ResultReport;
+  /**
+   * The attachments the agent keeps with the run before it hands the step in (T-45), in order. Only an
+   * engine that keeps attachments takes them (the local one); any other leaves them out.
+   */
+  attach?: { name: string; content: string }[];
   /** Exit code of the node's own command (`command` nodes). Default: 0. */
   exit?: number;
   /** Exit codes of the node's `command` checks, in order. Default: 0 each. */
@@ -150,6 +155,8 @@ export interface StartContext {
 /** The one thing an engine under test implements. */
 export interface ScenarioEngine {
   readonly name: string;
+  /** The kinds of the engine, when it has more than the built-in ones: a scenario's pipeline is read with them. */
+  readonly registry?: Registry;
   start(context: StartContext): Promise<{ runId: string }>;
   applyEvent(event: ScenarioEvent): Promise<void>;
   /** Optional: engines that cannot take tool calls leave it out; such steps are reported. */
