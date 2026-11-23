@@ -31,8 +31,8 @@ const run = (program: string, args: string[], env: Record<string, string> = {}) 
     env: { PATH: process.env.PATH ?? "", ...env },
   });
 
-describe("t45 the scripted fake terminal agent", () => {
-  nodeTest("t45_fake_terminal_agent_answers_the_probes", () => {
+describe("t47 the scripted fake terminal agent", () => {
+  nodeTest("t47_fake_terminal_agent_answers_the_probes", () => {
     for (const wrapper of [false, true]) {
       const agent = writeFakeTerminalAgent({ dir: folder(), wrapper });
       const auth = run(agent.program, ["auth", "status", "--json"]);
@@ -44,7 +44,7 @@ describe("t45 the scripted fake terminal agent", () => {
     }
   });
 
-  nodeTest("t45_fake_terminal_agent_logs_its_start_and_acts_on_lines", () => {
+  nodeTest("t47_fake_terminal_agent_logs_its_start_and_acts_on_lines", () => {
     const dir = folder();
     const agent = writeFakeTerminalAgent({
       dir,
@@ -86,7 +86,7 @@ describe("t45 the scripted fake terminal agent", () => {
     expect(again.starts()[0]).toMatchObject({ session: UUID, resumed: true });
   });
 
-  nodeTest("t45_fake_terminal_agent_behind_a_wrapper", () => {
+  nodeTest("t47_fake_terminal_agent_behind_a_wrapper", () => {
     // The wrapper is the program; the agent behind it is another process and ends by its own script.
     const agent = writeFakeTerminalAgent({ dir: folder(), wrapper: true, startup: ["quit 0"] });
     const text = execFileSync(agent.program, ["--session-id", UUID], {

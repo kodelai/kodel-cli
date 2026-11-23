@@ -312,7 +312,7 @@ describe("task_9pns the claude profile", () => {
   test("task_9pns_session_id_from_argv_never_from_the_tail", () => {
     const first = { name: `kw-${RUN}`, command: `claude -p prompt --session-id ${UUID} --verbose` };
     expect(sessionIdOf([first])).toBe(UUID);
-    // What the agent printed is not an argument of the reader at all (T-45).
+    // What the agent printed is not an argument of the reader at all (T-47).
     expect(sessionIdOf.length).toBe(1);
     // No `--session-id`: the newest `-d` record's `--resume`.
     const d4 = { name: `kw-${RUN}-d4`, command: `claude -p p --resume ${OTHER}`, decisionSeq: 4 };
@@ -1217,7 +1217,7 @@ describe("t44 the launcher for kodel serve", () => {
     expect(timedOut?.lastOutputAt).toBeUndefined();
   });
 
-  test("t45_list_entry_keeps_mode_and_agent", () => {
+  test("t47_list_entry_keeps_mode_and_agent", () => {
     const raw = {
       id: "a_000000000_0001",
       name: `kw-${RUN}`,
@@ -1246,7 +1246,7 @@ describe("t44 the launcher for kodel serve", () => {
     }
   });
 
-  test("t45_child_alive_reaches_the_rule", async () => {
+  test("t47_child_alive_reaches_the_rule", async () => {
     const adapter = new ScriptedSessionAdapter();
     const launcher = createSessionWorkerLauncher(deps(adapter));
     await launcher.start({ runId: RUN, workdir: ROOT, title: "t" });
@@ -1330,12 +1330,12 @@ describe("t44 the launcher for kodel serve", () => {
   });
 });
 
-// ── The wait command of a worker that stays alive at a wait (TASK-EKAV, T-45) ─────────────────
+// ── The wait command of a worker that stays alive at a wait (TASK-EKAV, T-47) ─────────────────
 
-describe("t45 the worker's wait command", () => {
+describe("t47 the worker's wait command", () => {
   const SELF = { exec: "/usr/local/bin/node", args: ["/opt/kodel/dist/kodel.js"], root: ROOT };
 
-  test("t45_wait_command_carries_the_state_dir", () => {
+  test("t47_wait_command_carries_the_state_dir", () => {
     // Without a state dir of the starter: this very build, the project by its root, the run, the bound.
     expect(workerWaitCommand(SELF)).toBe(
       "/usr/local/bin/node /opt/kodel/dist/kodel.js --root /proj wait {run} --timeout 604800",
@@ -1368,7 +1368,7 @@ describe("t45 the worker's wait command", () => {
     ]);
   });
 
-  test("t45_wait_command_is_quoted_and_passes_the_deny_list", () => {
+  test("t47_wait_command_is_quoted_and_passes_the_deny_list", () => {
     expect(shellQuote("/plain/path-1.2_x")).toBe("/plain/path-1.2_x");
     expect(shellQuote("")).toBe("''");
     expect(shellQuote("two words")).toBe("'two words'");
@@ -1434,7 +1434,7 @@ describe("t45 the worker's wait command", () => {
     expect(waitCommandProblem({ ...SELF, root: "/work/{run}/proj" }, terminal)).toContain("{run}");
   });
 
-  test("t45_wait_timeout_is_the_sessions", () => {
+  test("t47_wait_timeout_is_the_sessions", () => {
     // One constant: the session of a terminal worker and the command it watches its run with end together.
     expect(WORKER_TERMINAL_TIMEOUT_MS).toBe(7 * 24 * 3_600_000);
     expect(
@@ -1523,8 +1523,8 @@ async function agentStart(agent: NonNullable<CliEnv["agent"]>, ...args: string[]
   return { code, out, err };
 }
 
-describe("t45 the launcher on the profile", () => {
-  test("t45_worker_terminal_spec", async () => {
+describe("t47 the launcher on the profile", () => {
+  test("t47_worker_terminal_spec", async () => {
     const adapter = new ScriptedSessionAdapter();
     let reads = 0;
     const engines = async () => {
@@ -1603,12 +1603,12 @@ describe("t45 the launcher on the profile", () => {
     expect(refused.starts).toBe(0);
   });
 
-  test("t45_worker_print_spec_is_todays", async () => {
+  test("t47_worker_print_spec_is_todays", async () => {
     const adapter = new ScriptedSessionAdapter();
     const launcher = createSessionWorkerLauncher(terminalDeps(adapter, {}, "print"));
     await launcher.start({ runId: RUN, workdir: WORKTREE, title: "Add a flag" });
     const { agent, ...spec } = adapter.specs[0] ?? { agent: undefined };
-    // Byte for byte the spec of the `claude -p` worker before T-45; only the `agent` record is new.
+    // Byte for byte the spec of the `claude -p` worker before T-47; only the `agent` record is new.
     expect(spec).toEqual({
       argv: [
         "claude",
@@ -1655,7 +1655,7 @@ describe("t45 the launcher on the profile", () => {
     expect(workerDenylist(ROOT, BASE)).toContain("Bash(*kodel* wait r_*)");
   });
 
-  test("t45_print_start_writes_the_agent_record", async () => {
+  test("t47_print_start_writes_the_agent_record", async () => {
     // The starter writes `agent.json` from `spec.agent` (`tA_agent_record_is_written_once`): a print
     // start gives it the engine and the chosen id like a terminal one, and so does a resume.
     const adapter = new ScriptedSessionAdapter();
@@ -1675,7 +1675,7 @@ describe("t45 the launcher on the profile", () => {
     expect(JSON.stringify(first.spec.agent)).not.toContain("Kodel run");
   });
 
-  test("t45_terminal_that_cannot_run_is_refused", async () => {
+  test("t47_terminal_that_cannot_run_is_refused", async () => {
     for (const [what, reason] of NO_PTY) {
       const adapter = new ScriptedSessionAdapter();
       const launcher = createSessionWorkerLauncher(
@@ -1701,7 +1701,7 @@ describe("t45 the launcher on the profile", () => {
     // The daemon asks the same preflight and uses no attempt: `t44_environment_no_claude_is_not_an_attempt`.
   });
 
-  test("t45_no_mechanism_is_switched_by_itself", async () => {
+  test("t47_no_mechanism_is_switched_by_itself", async () => {
     // `terminal` where no terminal runs: no print worker instead.
     const none = new ScriptedSessionAdapter();
     await expect(
@@ -1741,7 +1741,7 @@ describe("t45 the launcher on the profile", () => {
     expect(failing.specs.map((spec) => spec.mode)).toEqual(["pty"]);
   });
 
-  test("t45_holder_failure_is_a_failed_start", async () => {
+  test("t47_holder_failure_is_a_failed_start", async () => {
     // The holder cannot open the terminal: the start fails as any launch does, with the session's own error.
     const adapter = new ScriptedSessionAdapter();
     adapter.failStart = { code: "HOLDER_BOOT_FAILED" };
@@ -1762,7 +1762,7 @@ describe("t45 the launcher on the profile", () => {
     expect(adapter.specs.every((spec) => spec.mode === "pty")).toBe(true);
   });
 
-  test("t45_refusal_spells_the_migration_line", async () => {
+  test("t47_refusal_spells_the_migration_line", async () => {
     expect(WORKER_PRINT_MIGRATION_LINE).toBe("engines: { claude: { worker: print } }");
     const reason = NO_PTY[0]?.[1] ?? "";
     const probe = () => ({ ok: false as const, reason });
@@ -1784,7 +1784,7 @@ describe("t45 the launcher on the profile", () => {
     expect(adapter.specs[0]?.argv?.slice(0, 2)).toEqual(["claude", "-p"]);
   });
 
-  test("t45_dialog_still_refuses_every_worker", async () => {
+  test("t47_dialog_still_refuses_every_worker", async () => {
     for (const worker of ["terminal", "print"] as const) {
       const adapter = new ScriptedSessionAdapter();
       const launcher = createSessionWorkerLauncher(terminalDeps(adapter, {}, worker));
@@ -1824,7 +1824,7 @@ describe("t45 the launcher on the profile", () => {
     expect(await host().runSummaries()).toEqual([]);
   });
 
-  test("t45_every_starter_builds_the_same_spec", async () => {
+  test("t47_every_starter_builds_the_same_spec", async () => {
     // The TUI's start, with the launcher it was given, and what it asks of it.
     const tui = new ScriptedSessionAdapter();
     const real = createSessionWorkerLauncher(terminalDeps(tui));
@@ -1895,7 +1895,7 @@ describe("t45 the launcher on the profile", () => {
     expect(shape(third.specs[0], input3)).toEqual(shape(tui.specs[0], input));
   });
 
-  test("t45_one_caller_starts_workers", () => {
+  test("t47_one_caller_starts_workers", () => {
     // A worker's name is `workerNameOf(...)`; only the session launcher gives one to `adapter.start`.
     const roots = [join(import.meta.dir, "../src"), join(import.meta.dir, "../../local/src")];
     const files = roots.flatMap((root) =>
@@ -1913,7 +1913,7 @@ describe("t45 the launcher on the profile", () => {
     expect(cli.match(/createSessionWorkerLauncher/g)).toBeNull();
   });
 
-  test("t45_engine_choice_is_not_built", async () => {
+  test("t47_engine_choice_is_not_built", async () => {
     // `serve.start[].engine` is an unknown key: which engine a worker uses is the follow-up task's.
     const store = join(dir, ".kodel");
     writeFileSync(
@@ -1942,7 +1942,7 @@ describe("t45 the launcher on the profile", () => {
     expect(Object.keys(input)).toEqual(["runId", "workdir", "title"]);
   });
 
-  test("t45_trust_is_probed_for_the_worktrees_folder", async () => {
+  test("t47_trust_is_probed_for_the_worktrees_folder", async () => {
     const worktrees = "/proj/.kodel/worktrees";
     const reads: string[] = [];
     const answer = async (file: string | undefined, worker: "terminal" | "print" = "terminal") => {
@@ -1992,7 +1992,7 @@ describe("t45 the launcher on the profile", () => {
     expect(reads).toEqual([]);
   });
 
-  test("t45_preflight_blocks_an_unattended_start_when_trust_asks", async () => {
+  test("t47_preflight_blocks_an_unattended_start_when_trust_asks", async () => {
     const worktrees = "/proj/.kodel/worktrees";
     const check = (file: string | undefined, unattended: boolean) =>
       createSessionWorkerLauncher(
@@ -2022,7 +2022,7 @@ describe("t45 the launcher on the profile", () => {
     expect(await check(undefined, false)).toEqual({ ok: true });
   });
 
-  test("t45_engines_as_committed_refuse_a_start", async () => {
+  test("t47_engines_as_committed_refuse_a_start", async () => {
     const refusing = async (): Promise<UnattendedEngines> => ({
       ok: false,
       reason:
@@ -2064,8 +2064,8 @@ describe("t45 the launcher on the profile", () => {
   });
 });
 
-describe("t45 the default mechanism", () => {
-  test("t45_default_is_terminal_only_after_the_rule", async () => {
+describe("t47 the default mechanism", () => {
+  test("t47_default_is_terminal_only_after_the_rule", async () => {
     // The serve rule knows a worker that stays alive at a wait: it holds a run place and no worker
     // place there, and its session ending at the wait is no death.
     const waiting = {
@@ -2132,8 +2132,8 @@ describe("t45 the default mechanism", () => {
   });
 });
 
-describe("t45 the id of a worker's conversation", () => {
-  test("t45_session_id_is_the_chosen_one", async () => {
+describe("t47 the id of a worker's conversation", () => {
+  test("t47_session_id_is_the_chosen_one", async () => {
     // A terminal argv ends with the prompt, and a title may spell a flag: the id is the record's.
     const adapter = new ScriptedSessionAdapter();
     const launcher = createSessionWorkerLauncher(terminalDeps(adapter));
@@ -2168,7 +2168,7 @@ describe("t45 the id of a worker's conversation", () => {
     expect(workerStatusOf([entry({ agent: { engine: "claude" } })])?.sessionId).toBeUndefined();
   });
 
-  test("t45_session_id_never_from_the_screen", async () => {
+  test("t47_session_id_never_from_the_screen", async () => {
     for (const worker of ["terminal", "print"] as const) {
       const adapter = new ScriptedSessionAdapter();
       const launcher = createSessionWorkerLauncher(terminalDeps(adapter, {}, worker));
@@ -2186,7 +2186,7 @@ describe("t45 the id of a worker's conversation", () => {
     }
   });
 
-  test("t45_older_record_id_comes_from_its_argv", async () => {
+  test("t47_older_record_id_comes_from_its_argv", async () => {
     // A record from before the `agent` record existed: listed without one, its id read from its argv.
     const adapter = new ScriptedSessionAdapter();
     const launcher = createSessionWorkerLauncher(
@@ -2226,11 +2226,11 @@ describe("t45 the id of a worker's conversation", () => {
     expect(verdict).toEqual({ kind: "no", why: "no_session_id" });
   });
 
-  test("t45_inflight_print_worker_is_resumed_after_the_update", async () => {
-    // A `claude -p` worker record as a build before T-45 wrote it (no `agent.json`), exited at its gate.
+  test("t47_inflight_print_worker_is_resumed_after_the_update", async () => {
+    // A `claude -p` worker record as a build before T-47 wrote it (no `agent.json`), exited at its gate.
     const fixture = join(
       import.meta.dir,
-      "../../../fixtures/session-formats/v1/worker-print-before-t45",
+      "../../../fixtures/session-formats/v1/worker-print-before-t47",
     );
     expect(readdirSync(fixture).sort()).toEqual(["session.json", "status.json"]);
     const stateBase = mkdtempSync(join(tmpdir(), "kodel-worker-old-"));
@@ -2316,8 +2316,8 @@ describe("t45 the id of a worker's conversation", () => {
   });
 });
 
-describe("t45 one live worker a run", () => {
-  test("t45_one_live_worker_per_run_across_modes", async () => {
+describe("t47 one live worker a run", () => {
+  test("t47_one_live_worker_per_run_across_modes", async () => {
     // A print worker lives; the setting becomes `terminal`: no second agent for the run, by its name.
     const adapter = new NamedAdapter();
     const print = createSessionWorkerLauncher(terminalDeps(adapter, {}, "print"));
@@ -2358,7 +2358,7 @@ describe("t45 one live worker a run", () => {
     expect(adapter.sessions.size).toBe(1);
   });
 
-  test("t45_tui_and_daemon_resume_one_decision_once", async () => {
+  test("t47_tui_and_daemon_resume_one_decision_once", async () => {
     // Two launchers (the TUI's and the daemon's) over one set of records resume one decision.
     const adapter = new NamedAdapter();
     const tui = createSessionWorkerLauncher(terminalDeps(adapter));
@@ -2378,7 +2378,7 @@ describe("t45 one live worker a run", () => {
     await expect(daemon.resume(input)).rejects.toMatchObject({ code: "NAME_TAKEN" });
   });
 
-  test("t45_resume_stays_in_the_records_mode", async () => {
+  test("t47_resume_stays_in_the_records_mode", async () => {
     // A profile whose conversations do not cross: the resume is in the mode of the record that wrote it.
     const claude = agentProfile("claude") as AgentProfile;
     const profile: AgentProfile = { ...claude, resumeAcrossModes: false };
@@ -2396,7 +2396,7 @@ describe("t45 one live worker a run", () => {
     }
   });
 
-  test("t45_resume_across_modes_when_it_continues", async () => {
+  test("t47_resume_across_modes_when_it_continues", async () => {
     // claude continues a conversation across the two (spike criterion 9): the setting's mode is used.
     expect(agentProfile("claude")?.resumeAcrossModes).toBe(true);
     for (const [written, setting] of [
@@ -2417,7 +2417,7 @@ describe("t45 one live worker a run", () => {
     }
   });
 
-  test("t45_resume_refused_makes_no_record", async () => {
+  test("t47_resume_refused_makes_no_record", async () => {
     const adapter = new ScriptedSessionAdapter();
     const launcher = createSessionWorkerLauncher(terminalDeps(adapter, {}, "print"));
     await launcher.start({ runId: RUN, workdir: WORKTREE, title: "t" });
@@ -2441,7 +2441,7 @@ describe("t45 one live worker a run", () => {
     // The daemon counts each as one failed attempt, three at most: `t44_failed_resume_is_retried_then_given_up`.
   });
 
-  test("t45_nothing_types_into_a_session", async () => {
+  test("t47_nothing_types_into_a_session", async () => {
     const adapter = new TypingAdapter();
     const launcher = createSessionWorkerLauncher(terminalDeps(adapter));
     const port = serveLauncherOf(launcher);
@@ -2479,7 +2479,7 @@ describe("t45 one live worker a run", () => {
     ]);
   });
 
-  test("t45_finish_of_a_stopped_session_is_harmless", async () => {
+  test("t47_finish_of_a_stopped_session_is_harmless", async () => {
     const adapter = new ScriptedSessionAdapter();
     const launcher = createSessionWorkerLauncher(terminalDeps(adapter));
     // A run with no record.

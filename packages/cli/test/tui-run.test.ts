@@ -502,7 +502,7 @@ describe("task_g4jy_the_end_of_the_loop_is_safe", () => {
   });
 });
 
-// ── `o`: the terminal goes to the agent and comes back (TASK-EKAV, T-45) ─────
+// ── `o`: the terminal goes to the agent and comes back (TASK-EKAV, T-47) ─────
 
 const SCREEN_OFF = `${MOUSE_OFF}${PASTE_OFF}\u001b[?25h\u001b[?1049l`;
 const SCREEN_ON = `\u001b[?1049h\u001b[?25l\u001b[2J${PASTE_ON}`;
@@ -701,8 +701,8 @@ async function killStub(
   }
 }
 
-describe("t45 the screen hands its terminal to an agent and takes it back", () => {
-  test("t45_tui_returns_to_the_same_place", async () => {
+describe("t47 the screen hands its terminal to an agent and takes it back", () => {
+  test("t47_tui_returns_to_the_same_place", async () => {
     const table: { name: string; keys: string[]; mouse?: true }[] = [
       { name: "from the list, on the second run", keys: ["j"] },
       { name: "from an open card scrolled down", keys: ["j", "\r", " "] },
@@ -743,7 +743,7 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
     }
   });
 
-  test("t45_tui_same_place_when_the_agent_ended", async () => {
+  test("t47_tui_same_place_when_the_agent_ended", async () => {
     // The agent ended while the person was in it: the child ends by itself, with its own notice.
     const ended = opened();
     await wait(150);
@@ -806,7 +806,7 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
     );
   });
 
-  test("t45_tui_child_that_cannot_start_leaves_the_screen_alone", async () => {
+  test("t47_tui_child_that_cannot_start_leaves_the_screen_alone", async () => {
     let spawned = 0;
     const launcher = new FakeLauncher();
     const loop = opened({
@@ -880,7 +880,7 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
     expect(count(thrown.t.raw(), ALT_OFF)).toBe(1);
   });
 
-  test("t45_tui_same_place_when_the_run_is_gone", async () => {
+  test("t47_tui_same_place_when_the_run_is_gone", async () => {
     // The run left the list while the person was in its agent: the selection moves as on any refresh.
     const gone = async (through: "agent" | "refresh") => {
       const loop = opened();
@@ -902,7 +902,7 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
     expect(viaAgent.place).toEqual(viaRefresh.place);
   });
 
-  test("t45_tui_suspend_and_return_sequences", async () => {
+  test("t47_tui_suspend_and_return_sequences", async () => {
     const exitListeners = process.listenerCount("exit");
     const loop = opened({ mouse: true });
     await wait(150);
@@ -962,7 +962,7 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
     expect(process.listenerCount("exit")).toBe(exitListeners);
   });
 
-  test("t45_tui_reads_and_draws_nothing_while_away", async () => {
+  test("t47_tui_reads_and_draws_nothing_while_away", async () => {
     const loop = opened();
     await wait(150);
     await loop.keys("j");
@@ -992,7 +992,7 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
     expect(await loop.quit()).toBe(0);
   });
 
-  test("t45_tui_signal_while_attached_restores_once", async () => {
+  test("t47_tui_signal_while_attached_restores_once", async () => {
     for (const signal of ["SIGTERM", "SIGHUP", "SIGINT"] as const) {
       await killStub(async (kills) => {
         const loop = opened({ mouse: true });
@@ -1033,7 +1033,7 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
     expect(count(loop.t.raw(), ALT_OFF)).toBe(1);
   });
 
-  test("t45_tui_ignores_quit_while_away", async () => {
+  test("t47_tui_ignores_quit_while_away", async () => {
     const before = process.listenerCount("SIGQUIT");
     const loop = opened();
     await wait(150);
@@ -1060,7 +1060,7 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
     expect(process.listenerCount("SIGQUIT")).toBe(before);
   });
 
-  test("t45_tui_stop_and_continue_while_attached_ends_nothing", async () => {
+  test("t47_tui_stop_and_continue_while_attached_ends_nothing", async () => {
     await killStub(async (kills) => {
       const counts = () => ["SIGTSTP", "SIGCONT"].map((s) => process.listenerCount(s));
       const before = counts();
@@ -1090,7 +1090,7 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
     });
   });
 
-  test("t45_tui_drops_input_of_the_handover", async () => {
+  test("t47_tui_drops_input_of_the_handover", async () => {
     expect(HANDOVER_DROP_MS).toBe(150);
     // The loop's own window, not the short one of the other tests.
     const loop = opened({ handoverDropMs: undefined });
@@ -1116,7 +1116,7 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
     expect(await loop.quit()).toBe(0);
   });
 
-  test("t45_tui_returns_when_the_child_dies_midway", async () => {
+  test("t47_tui_returns_when_the_child_dies_midway", async () => {
     const ways: {
       name: string;
       end: AttachExit;
@@ -1218,7 +1218,7 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
     }
   });
 
-  test("t45_tui_o_checks_before_leaving", async () => {
+  test("t47_tui_o_checks_before_leaving", async () => {
     const never = () => {
       throw new Error("the child must not be started");
     };
@@ -1307,7 +1307,7 @@ describe("t45 the screen hands its terminal to an agent and takes it back", () =
     expect(await none.quit()).toBe(0);
   });
 
-  test("t45_tui_o_under_bun_is_refused_with_the_command", async () => {
+  test("t47_tui_o_under_bun_is_refused_with_the_command", async () => {
     expect(BUILT_KODEL).toBe("packages/cli/dist/kodel.js");
     let spawned = 0;
     const launcher = new FakeLauncher();

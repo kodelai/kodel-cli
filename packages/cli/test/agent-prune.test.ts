@@ -1,5 +1,5 @@
 /**
- * `kodel agent prune` (T-45): what it never removes, that it asks once, and that it reads each record
+ * `kodel agent prune` (T-47): what it never removes, that it asks once, and that it reads each record
  * again before it removes it. The rule and the command run over a fake adapter; the rows about the
  * adapter's own refusal, the name markers and a resume in progress run on the real one with real
  * (pipes) sessions.
@@ -80,8 +80,8 @@ const done = (id: string, over: Partial<SessionListEntry> = {}): SessionListEntr
 
 const rule = { now: NOW, olderThanMs: 0, runEnd: () => "unknown" as const };
 
-describe("t45 kodel agent prune: what stays", () => {
-  test("t45_prune_keeps_live", async () => {
+describe("t47 kodel agent prune: what stays", () => {
+  test("t47_prune_keeps_live", async () => {
     const sessions = new FakeSessions();
     sessions.add(done("a_000000001_live", { status: { state: "running" } }));
     sessions.add(done("a_000000002_strt", { status: { state: "starting" } }));
@@ -94,7 +94,7 @@ describe("t45 kodel agent prune: what stays", () => {
     expect(pruneKeeps(done("x", { status: { state: "running" } }), rule)).toBe("runs");
   });
 
-  test("t45_prune_keeps_unreadable", async () => {
+  test("t47_prune_keeps_unreadable", async () => {
     const sessions = new FakeSessions();
     for (const problem of ["CANNOT_READ", "FOREIGN", "NEWER_FORMAT"] as const) {
       sessions.add({ id: `a_00000000${problem.length}_prob`, status: { state: "lost" }, problem });
@@ -107,7 +107,7 @@ describe("t45 kodel agent prune: what stays", () => {
     expect(sessions.calls.filter((c) => c.startsWith("remove"))).toEqual([]);
   });
 
-  test("t45_prune_keeps_open_run", async () => {
+  test("t47_prune_keeps_open_run", async () => {
     for (const status of ["running", "paused"] as const) {
       const sessions = new FakeSessions();
       sessions.add(done("a_000000001_kw00", { name: `kw-${RUN}` }));
@@ -136,7 +136,7 @@ describe("t45 kodel agent prune: what stays", () => {
     expect(runOfRecord(undefined)).toBeUndefined();
   });
 
-  test("t45_prune_keeps_unknown_run", async () => {
+  test("t47_prune_keeps_unknown_run", async () => {
     const rows = () => {
       const sessions = new FakeSessions();
       sessions.add(done("a_000000001_kw00", { name: `kw-${RUN}` }));
@@ -165,7 +165,7 @@ describe("t45 kodel agent prune: what stays", () => {
     expect(plain.removed).toEqual(["a_000000009_done"]);
   });
 
-  test("t45_prune_keeps_younger_than_the_bound", async () => {
+  test("t47_prune_keeps_younger_than_the_bound", async () => {
     const sessions = new FakeSessions();
     sessions.add(done("a_000000001_old0", { status: { state: "exited", since: NOW - 8 * DAY } }));
     sessions.add(done("a_000000002_new0", { status: { state: "exited", since: NOW - 6 * DAY } }));
@@ -189,7 +189,7 @@ describe("t45 kodel agent prune: what stays", () => {
     }
   });
 
-  test("t45_prune_keeps_a_record_whose_child_runs", async () => {
+  test("t47_prune_keeps_a_record_whose_child_runs", async () => {
     const sessions = new FakeSessions();
     sessions.add(
       done("a_000000001_lost", {
@@ -211,8 +211,8 @@ describe("t45 kodel agent prune: what stays", () => {
   });
 });
 
-describe("t45 kodel agent prune: how it removes", () => {
-  test("t45_prune_confirms_once", async () => {
+describe("t47 kodel agent prune: how it removes", () => {
+  test("t47_prune_confirms_once", async () => {
     const sessions = new FakeSessions();
     for (const n of [1, 2, 3]) sessions.add(done(`a_00000000${n}_done`));
     // `--dry-run` asks nothing and removes nothing.
@@ -239,7 +239,7 @@ describe("t45 kodel agent prune: how it removes", () => {
     expect(single.seen.asked).toEqual(["Remove 1 finished agent?"]);
   });
 
-  test("t45_prune_reads_again_before_each_removal", async () => {
+  test("t47_prune_reads_again_before_each_removal", async () => {
     const sessions = new FakeSessions();
     sessions.add(done("a_000000001_done"));
     sessions.add(done("a_000000002_wake"));
@@ -268,7 +268,7 @@ describe("t45 kodel agent prune: how it removes", () => {
     ]);
   });
 
-  test("t45_prune_says_which_conversations_could_be_continued", async () => {
+  test("t47_prune_says_which_conversations_could_be_continued", async () => {
     const sessions = new FakeSessions();
     const claude = { engine: "claude", session: "0f4b1c2d-0000-4000-8000-000000000001" };
     sessions.add(done("a_000000001_conv", { name: "cc", mode: "pty", agent: claude }));
@@ -311,7 +311,7 @@ describe("t45 kodel agent prune: how it removes", () => {
   });
 });
 
-describe("t45 kodel agent prune on the real adapter", () => {
+describe("t47 kodel agent prune on the real adapter", () => {
   const entry = join(import.meta.dir, "../../local/src/session-holder-entry.ts");
   const made: string[] = [];
   let adapter: PipesSessionAdapter;
@@ -351,7 +351,7 @@ describe("t45 kodel agent prune on the real adapter", () => {
   });
   const names = () => readdirSync(adapter.place.namesDir).sort();
 
-  test("t45_prune_remove_refuses_a_live_record", async () => {
+  test("t47_prune_remove_refuses_a_live_record", async () => {
     make();
     const live = await adapter.start(sh("sleep 30", { name: "live", origin: "cli" }));
     const over = await adapter.start(sh("exit 0", { name: "over", origin: "cli" }));
@@ -380,7 +380,7 @@ describe("t45 kodel agent prune on the real adapter", () => {
     expect(names()).toEqual(["live.json"]);
   }, 60_000);
 
-  test("t45_prune_frees_cli_names_and_keeps_host_markers", async () => {
+  test("t47_prune_frees_cli_names_and_keeps_host_markers", async () => {
     make();
     const mine = await adapter.start(sh("exit 0", { name: "mine", origin: "cli" }));
     const step = await adapter.start(sh("exit 0", { name: "step-1", origin: "host" }));
@@ -397,7 +397,7 @@ describe("t45 kodel agent prune on the real adapter", () => {
     expect(again.id).not.toBe(mine.id);
   }, 60_000);
 
-  test("t45_prune_during_a_resume", async () => {
+  test("t47_prune_during_a_resume", async () => {
     make();
     const old = await adapter.start(sh("exit 0", { name: "cc", origin: "cli" }));
     await adapter.wait(old.id, { timeoutMs: 15_000 });

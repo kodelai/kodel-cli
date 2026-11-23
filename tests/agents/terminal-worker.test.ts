@@ -1,5 +1,5 @@
 /**
- * A worker in a terminal of its own, with the real `claude` (TASK-EKAV, T-45): started through the one
+ * A worker in a terminal of its own, with the real `claude` (TASK-EKAV, T-47): started through the one
  * launcher as `kodel serve` and the TUI start it, in a real PTY held by the built artifact on Node, with
  * the real `kodel mcp --no-decisions --wait-command …` behind it. It needs `claude` signed in, the built
  * artifact and a terminal, so it runs only with `KODEL_AGENT_TESTS=1` where `tests/pty` can run; anywhere
@@ -204,9 +204,9 @@ const journalOf = (dir: string, runId: string): Journal => {
 const count = (journal: Journal, event: string): number =>
   journal.filter((record) => record.event === event).length;
 
-describe("t45 a worker in a terminal with the real claude", () => {
+describe("t47 a worker in a terminal with the real claude", () => {
   scenario(
-    "t45_real_claude_terminal_worker_cannot_decide_its_gate",
+    "t47_real_claude_terminal_worker_cannot_decide_its_gate",
     async () => {
       const { dir, environment, adapter, launcher, host } = await setup();
       const profile = agentProfile("claude");

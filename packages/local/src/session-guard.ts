@@ -1,5 +1,5 @@
 /**
- * Whether a command runs inside a kodel agent session (T-45): the third guard of a person's commands.
+ * Whether a command runs inside a kodel agent session (T-47): the third guard of a person's commands.
  * An agent in a terminal of its own has a terminal, which a print worker never had, so "is there a
  * terminal" no longer tells an agent's command from a person's. This asks the process table instead:
  * the command is inside when one of its parent processes, up to the root, is the holder of a live

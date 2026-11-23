@@ -291,7 +291,7 @@ describe("task_9pns kodel mcp --no-decisions --no-wait-hint", () => {
   }, 40_000);
 });
 
-describe("t45 kodel mcp --wait-command", () => {
+describe("t47 kodel mcp --wait-command", () => {
   /** A person's decision at the gate, as the command makes it, in the environment the server has. */
   async function decide(dir: string, env: Record<string, string>, ...args: string[]) {
     let err = "";
@@ -319,7 +319,7 @@ describe("t45 kodel mcp --wait-command", () => {
     }
   }
 
-  test("t45_waiting_answers_spell_the_wait_command", async () => {
+  test("t47_waiting_answers_spell_the_wait_command", async () => {
     // The launcher's exact `--mcp-config` for a worker that stays alive at a wait, in a project that
     // turned the offer off for its own agents: the worker is offered its command all the same.
     const dir = makeRepo();
@@ -371,7 +371,7 @@ describe("t45 kodel mcp --wait-command", () => {
     }
   }, 60_000);
 
-  test("t45_wait_command_flag_needs_the_run", async () => {
+  test("t47_wait_command_flag_needs_the_run", async () => {
     const dir = makeRepo();
     let err = "";
     const code = await runCli(["--root", dir, "mcp", "--wait-command", "kodel wait"], {
@@ -390,8 +390,8 @@ describe("t45 kodel mcp --wait-command", () => {
   });
 });
 
-describe("t45 the server of a worker", () => {
-  test("t45_worker_server_serves_no_decision_tool", async () => {
+describe("t47 the server of a worker", () => {
+  test("t47_worker_server_serves_no_decision_tool", async () => {
     // The claude profile's exact server arguments, for a terminal worker (with its wait command) and for
     // a print worker, in a project whose config lets an agent decide: the server refuses both tools.
     const profile = agentProfile("claude");

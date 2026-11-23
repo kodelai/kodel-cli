@@ -1,5 +1,5 @@
 /**
- * `kodel agent start` (T-45, TASK-DSKQ): a person starts the coding agent in a terminal session of its own.
+ * `kodel agent start` (T-47, TASK-DSKQ): a person starts the coding agent in a terminal session of its own.
  *
  * - Plain: the profile's program with the person's prompt, in the project root. It is the person's own
  *   session and not a worker: no kodel server of ours, no permission flag, always a terminal.

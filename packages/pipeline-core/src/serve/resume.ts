@@ -197,7 +197,7 @@ export interface ServeWorkerView {
   stopped?: boolean;
   /** The session is over while its process still runs without a holder (`kodel agent ls`: "child still runs"). */
   childAlive?: boolean;
-  /** A session in a terminal of its own: it stays alive at a wait, so its end at one is no death (T-45). */
+  /** A session in a terminal of its own: it stays alive at a wait, so its end at one is no death (T-47). */
   terminal?: boolean;
   /** How the record ended, as it says (`stopped`, `timeout`, `holder_error`, `holder_gone`, …). */
   endedBy?: string;

@@ -78,7 +78,7 @@ export interface ServeRunView {
   noted: string[];
   /**
    * The run only waits for the person: its answer is a wait and no step is open for an agent. A live
-   * worker in a terminal of such a run is alive and not working (T-45).
+   * worker in a terminal of such a run is alive and not working (T-47).
    */
   idleAtWait?: boolean;
   /** When an agent last called the engine for this run (served, claimed or completed a step), by the journal. */

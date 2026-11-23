@@ -1,5 +1,5 @@
 /**
- * `kodel agent doctor` (T-45): whether a background agent can start here, and why not. Seven checks: the
+ * `kodel agent doctor` (T-47): whether a background agent can start here, and why not. Seven checks: the
  * platform; can a terminal run; the agent's program (found, its version, signed in; a program the
  * `engines` block names is run only when the block is the committed one); trust of the folder
  * the worktrees are made in; `decisions.dialog` and `decisions.agent`; the `engines` block against the

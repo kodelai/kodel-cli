@@ -1,5 +1,5 @@
 /**
- * The command that watches a run, as an answer names it (T-45): `kodel wait <run>` unless the host
+ * The command that watches a run, as an answer names it (T-47): `kodel wait <run>` unless the host
  * gives its own (a background agent in a terminal is told the very command its launcher built). Every
  * text that names the command takes the given one: the waiting answers, the note beside a waiting
  * decision, the two fork instructions and the server's instructions.
@@ -171,8 +171,8 @@ const answer = (
   more: NextStepOptions = {},
 ): string => JSON.stringify(nextStep(spec, state, 5_000, undefined, { ...options, ...more }));
 
-describe("t45 the wait command in the answers", () => {
-  test("t45_no_answer_of_a_worker_spells_a_bare_wait", () => {
+describe("t47 the wait command in the answers", () => {
+  test("t47_no_answer_of_a_worker_spells_a_bare_wait", () => {
     let named = 0;
     for (const row of ANSWERS) {
       const label = row[0];
@@ -211,7 +211,7 @@ describe("t45 the wait command in the answers", () => {
     }
   });
 
-  test("t45_instructions_spell_the_given_wait_command", () => {
+  test("t47_instructions_spell_the_given_wait_command", () => {
     const usual = serverInstructions();
     const given = serverInstructions({ waitCommand: TEMPLATE });
     const spelled = TEMPLATE.replace("{run}", "<run_id>");
@@ -228,7 +228,7 @@ describe("t45 the wait command in the answers", () => {
     expect(serverInstructions({ waitHint: false })).not.toContain("kodel wait");
   });
 
-  test("t45_default_wait_command_is_kodel_wait", () => {
+  test("t47_default_wait_command_is_kodel_wait", () => {
     expect(DEFAULT_WAIT_COMMAND).toBe("kodel wait {run}");
     expect(spellWaitCommand(DEFAULT_WAIT_COMMAND, RUN)).toBe(`kodel wait ${RUN}`);
     // every place of the run, and nothing read as a pattern

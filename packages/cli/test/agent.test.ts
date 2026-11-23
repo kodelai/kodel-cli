@@ -810,7 +810,7 @@ describe("kodel agent exec --pty --attach (TASK-K6MA)", () => {
     expect(gone.out).toContain("[killed: cc]\n");
   });
 
-  test("t45_agent_attach_keep_screen_reaches_the_client", async () => {
+  test("t47_agent_attach_keep_screen_reaches_the_client", async () => {
     // The TUI's `o` starts `agent attach <id> --keep-screen`; a person's own attach has no such flag.
     for (const flag of [[], ["--keep-screen"]]) {
       const sessions = new FakeSessions();

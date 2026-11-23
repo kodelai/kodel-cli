@@ -1,5 +1,5 @@
 /**
- * `kodel agent prune` (T-45): removes the finished agents in one go. It never removes a record that runs,
+ * `kodel agent prune` (T-47): removes the finished agents in one go. It never removes a record that runs,
  * one whose process still runs without a holder, one that cannot be read, nor the agent of a run that is
  * open or cannot be read (its record is what a resume after a decision needs). Each record is read again,
  * by its id, right before it is removed, and the adapter's own `remove` refuses a live one. The question

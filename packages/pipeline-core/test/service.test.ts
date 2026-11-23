@@ -1160,7 +1160,7 @@ describe("t40 steps through the tools", () => {
   });
 });
 
-describe("t45 the wait command of a connection", () => {
+describe("t47 the wait command of a connection", () => {
   // No `kodel wait` in it, so a bare one left in an answer is seen.
   const TEMPLATE =
     "env KODEL_STATE_DIR=/s /usr/bin/node '/opt/k dist/kodel.js' --root /proj wait {run} --timeout 604800";
@@ -1173,7 +1173,7 @@ describe("t45 the wait command of a connection", () => {
         ? Object.values(value).map(strings).join("\n")
         : "";
 
-  test("t45_service_puts_the_wait_command_in", async () => {
+  test("t47_service_puts_the_wait_command_in", async () => {
     const host = new FakeHost([feature]);
     const svc = new PipelineService(host, { waitBudgetMs: 0, waitCommand: TEMPLATE });
     const started = asOk(await svc.start({ task: "t" }));
@@ -1217,7 +1217,7 @@ describe("t45 the wait command of a connection", () => {
     for (const request of forkHost.requests) expect(request.waitCommand).toBe(MARK);
   });
 
-  test("t45_service_without_a_wait_command_is_as_it_was", async () => {
+  test("t47_service_without_a_wait_command_is_as_it_was", async () => {
     const { host, svc } = service();
     const runId = asOk(await svc.start({ task: "t" })).run_id as string;
     const done = asOk(await svc.completeStep({ run_id: runId, node_slug: "plan", attempt: 1 }));

@@ -72,7 +72,7 @@ an agent. No change of `v`.
 runs in a terminal or as a print process. The launcher takes the id of the conversation to continue from it,
 never from the screen or the tail. For a worker's record from before this file the id is read from the argv
 the record keeps (the last `--session-id`, else the last `--resume`), which the launcher wrote; nothing is
-written for such a record (fixture `worker-print-before-t45/`). A terminal record's argv is never read for an
+written for such a record (fixture `worker-print-before-t47/`). A terminal record's argv is never read for an
 id: its prompt comes last, and a prompt is a person's text.
 
 ### Continuing a finished agent: `kodel agent start --resume`

@@ -1,5 +1,5 @@
 /**
- * The profile table (T-45, TASK-EKAV step 4): the one `claude` entry, its argv in a terminal and as a
+ * The profile table (T-47, TASK-EKAV step 4): the one `claude` entry, its argv in a terminal and as a
  * print process, the prompt rule, the lists, and the argv read back before a start.
  */
 import { describe, expect, test } from "bun:test";
@@ -56,8 +56,8 @@ const refuses = (denied: readonly string[], command: string) =>
       ).test(command),
     );
 
-describe("t45 the profile table", () => {
-  test("t45_profiles_are_reached_by_name", () => {
+describe("t47 the profile table", () => {
+  test("t47_profiles_are_reached_by_name", () => {
     expect(Object.keys(AGENT_PROFILES)).toEqual(["claude"]);
     expect(agentProfile("claude")?.name).toBe("claude");
     for (const name of ["codex", "opencode", "constructor", "__proto__", ""]) {
@@ -72,9 +72,9 @@ describe("t45 the profile table", () => {
     expect(claude().terminalFlags).toBe(WORKER_ENGINES.claude?.terminalFlags as readonly string[]);
   });
 
-  test("t45_absent_worker_key_is_terminal", () => {
+  test("t47_absent_worker_key_is_terminal", () => {
     // It was `print` until the serve rule knew a worker that stays alive at a wait (the last commit of
-    // TASK-EKAV step 8 turned it; `t45_default_is_terminal_only_after_the_rule`). `print` is one
+    // TASK-EKAV step 8 turned it; `t47_default_is_terminal_only_after_the_rule`). `print` is one
     // committed line now.
     expect(DEFAULT_WORKER_MECHANISM).toBe("terminal");
     expect(workerMechanismOf(undefined)).toBe("terminal");
@@ -83,7 +83,7 @@ describe("t45 the profile table", () => {
     expect(workerMechanismOf({ worker: "print" })).toBe("print");
   });
 
-  test("t45_profile_prompt_cannot_name_a_subcommand", () => {
+  test("t47_profile_prompt_cannot_name_a_subcommand", () => {
     // A bare `doctor` or `mcp` is run by claude as its subcommand, also after `--`; with a newline at its
     // end it is a prompt (spikes/ekav-m0/NOTE.md, criterion 3).
     for (const prompt of ["doctor", "mcp", "Kodel run r_0abc_0000 exists and is yours to drive."]) {
@@ -108,7 +108,7 @@ describe("t45 the profile table", () => {
     expect(claude().sessionArgv({ resume: ID })).toEqual(["claude", "--resume", ID]);
   });
 
-  test("t45_claude_terminal_argv", () => {
+  test("t47_claude_terminal_argv", () => {
     const { allowed, denied } = lists(true);
     const argv = terminalArgv("go on");
     // The prompt is last, after `--` (step 4 as the spike changed it), and nothing makes it a print run.
@@ -139,7 +139,7 @@ describe("t45 the profile table", () => {
     expect(lists(false).denied.some((d) => d.includes("wait r_"))).toBe(true);
   });
 
-  test("t45_worker_print_argv_is_todays", () => {
+  test("t47_worker_print_argv_is_todays", () => {
     const input = { prompt: "go on", mcpConfig: "{}", ...lists(false), sessionId: ID };
     const argv = claude().workerArgv({ mechanism: "print", ...input });
     expect(argv).toEqual(workerArgv(input));
@@ -157,7 +157,7 @@ describe("t45 the profile table", () => {
     ).toEqual(argv);
   });
 
-  test("t45_engines_terminal_override", () => {
+  test("t47_engines_terminal_override", () => {
     const argv = terminalArgv("go on", {
       command: ["/opt/bin/claude-wrap", "--model", "opus", "--effort=high"],
     });
@@ -179,7 +179,7 @@ describe("t45 the profile table", () => {
     ]);
   });
 
-  test("t45_engines_terminal_allows_only_listed_flags", () => {
+  test("t47_engines_terminal_allows_only_listed_flags", () => {
     const rows: [string[], string][] = [
       [["claude", "--dangerously-skip-permissions"], '"--dangerously-skip-permissions"'],
       [["claude", "--permission-mode", "bypassPermissions"], '"--permission-mode"'],
@@ -213,7 +213,7 @@ describe("t45 the profile table", () => {
     }
   });
 
-  test("t45_final_argv_is_checked", () => {
+  test("t47_final_argv_is_checked", () => {
     const terminal = { mechanism: "terminal", program: "claude" } as const;
     const print = { mechanism: "print", program: "claude" } as const;
     const good = terminalArgv("go on", { command: ["claude", "--model", "opus", "--effort=high"] });
@@ -294,7 +294,7 @@ describe("t45 the profile table", () => {
     }
   });
 
-  test("t45_step_command_is_not_the_workers_program", async () => {
+  test("t47_step_command_is_not_the_workers_program", async () => {
     // The profile named `claude` may also be a step profile; its step `command` is the engine step's.
     const settings = {
       command: ["/opt/steps/reviewer", "-p", "--output-format", "json"],
@@ -337,8 +337,8 @@ describe("t45 the profile table", () => {
   });
 });
 
-describe("t45 the lists of a worker", () => {
-  test("t45_worker_lists_refuse_decisions", () => {
+describe("t47 the lists of a worker", () => {
+  test("t47_worker_lists_refuse_decisions", () => {
     for (const terminal of [true, false]) {
       const { allowed, denied } = lists(terminal);
       for (const tool of WORKER_DENIED) {
@@ -355,7 +355,7 @@ describe("t45 the lists of a worker", () => {
     }
   });
 
-  test("t45_every_human_only_command_is_denied", () => {
+  test("t47_every_human_only_command_is_denied", () => {
     // A table from the registry of the person's commands: every one, in every spelling of the binary,
     // plain and behind `env`, is covered by a deny pattern of both kinds of worker.
     expect(HUMAN_ONLY_COMMANDS.length).toBeGreaterThan(10);
@@ -383,7 +383,7 @@ describe("t45 the lists of a worker", () => {
     }
   });
 
-  test("t45_deny_list_refuses_no_honest_command", () => {
+  test("t47_deny_list_refuses_no_honest_command", () => {
     for (const terminal of [true, false]) {
       const { allowed, denied } = lists(terminal);
       for (const tool of allowed) expect(denied, tool).not.toContain(tool);
@@ -407,7 +407,7 @@ describe("t45 the lists of a worker", () => {
     expect(refuses(lists(true).denied, "kodel wait r_0abc_0000 --timeout 604800")).toBe(false);
   });
 
-  test("t45_every_denied_path_has_an_edit_rule", () => {
+  test("t47_every_denied_path_has_an_edit_rule", () => {
     // claude 2.1.330 reports a `Write(<path>)` deny rule as one that never matches and asks for
     // `Edit(<path>)`: the `Edit` rules are the ones that hold, so every path has one, in both spellings.
     for (const terminal of [true, false]) {
@@ -425,9 +425,9 @@ describe("t45 the lists of a worker", () => {
     }
   });
 
-  test("t45_terminal_worker_list_has_no_write_rule", () => {
+  test("t47_terminal_worker_list_has_no_write_rule", () => {
     // Each `Write(...)` rule is a warning line at the top of the worker's screen, so a terminal worker
-    // gets none. The print list keeps its `Write` twins: its spec stays what it was before T-45.
+    // gets none. The print list keeps its `Write` twins: its spec stays what it was before T-47.
     const terminal = lists(true).denied;
     const print = lists(false).denied;
     expect(terminal.filter((d) => d.startsWith("Write("))).toEqual([]);

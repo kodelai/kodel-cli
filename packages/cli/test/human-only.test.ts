@@ -1,5 +1,5 @@
 /**
- * The third guard of a person's commands (T-45): a command run inside a kodel agent session is refused
+ * The third guard of a person's commands (T-47): a command run inside a kodel agent session is refused
  * whatever its environment and its terminal say. A table from the registry of the person's commands, with
  * the probe injected; the probe itself is tested in `packages/local/test/session-guard.test.ts`.
  */
@@ -91,8 +91,8 @@ async function cli(opts: Opts, args: string[]) {
 
 const filesOf = (root: string) => (readdirSync(root, { recursive: true }) as string[]).sort();
 
-describe("t45 a person's commands inside an agent session", () => {
-  test("t45_persons_commands_refuse_inside_a_session", async () => {
+describe("t47 a person's commands inside an agent session", () => {
+  test("t47_persons_commands_refuse_inside_a_session", async () => {
     // Every command of the registry has its row, so a new one cannot be added without it.
     expect(Object.keys(ARGS).sort()).toEqual([...HUMAN_ONLY_COMMANDS].sort());
     const before = filesOf(dir);
@@ -120,7 +120,7 @@ describe("t45 a person's commands inside an agent session", () => {
     );
   });
 
-  test("t45_session_guard_reads_the_terminal_session", async () => {
+  test("t47_session_guard_reads_the_terminal_session", async () => {
     // No session among the parents (the command's parent is the root), but the leader of the terminal
     // it runs on is the process a session's holder started: the real probe says `inside`.
     const view: GuardView = {
@@ -145,7 +145,7 @@ describe("t45 a person's commands inside an agent session", () => {
 
   // Real processes and the real process table; skipped where the table cannot be read (a sandbox).
   test.skipIf(processIdentity(process.pid) === undefined || systemGuardView.rows() === undefined)(
-    "t45_session_guard_finds_a_session_of_another_state_base",
+    "t47_session_guard_finds_a_session_of_another_state_base",
     async () => {
       // The person uses `KODEL_STATE_DIR`: the session's record is written there. A session's
       // environment gets no `KODEL_*`, so a `kodel gate` its agent runs resolves the default state base
@@ -191,7 +191,7 @@ describe("t45 a person's commands inside an agent session", () => {
     60_000,
   );
 
-  test("t45_session_guard_lets_a_person_through", async () => {
+  test("t47_session_guard_lets_a_person_through", async () => {
     // No session among the parents: each command goes on to what it did before (here: there is no such
     // run, task or agent), and none speaks of a person.
     for (const command of HUMAN_ONLY_COMMANDS) {
@@ -205,7 +205,7 @@ describe("t45 a person's commands inside an agent session", () => {
     expect(plainGate.err).toContain(`there is no run "${RUN}"`);
   });
 
-  test("t45_session_guard_unreadable_table_keeps_the_old_guards", async () => {
+  test("t47_session_guard_unreadable_table_keeps_the_old_guards", async () => {
     const unknown = () => "unknown" as const;
     for (const command of HUMAN_ONLY_COMMANDS) {
       const args = ARGS[command] ?? [];

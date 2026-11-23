@@ -1043,7 +1043,7 @@ const ENDS: [string, Partial<ServeWorkerView>][] = [
 
 const kinds = (actions: ServeAction[]) => actions.map((a) => a.kind);
 
-describe("t44 a worker that stays alive at a wait (T-45)", () => {
+describe("t44 a worker that stays alive at a wait (T-47)", () => {
   test("t44_waiting_worker_holds_a_run_place_only", () => {
     const plan = planServe(input({ runs: [waitingWith("r_w")], tasks: tasks([]) }));
     expect(plan.counts).toMatchObject({ workers: 0, alive: 1, runs: ["r_w"] });

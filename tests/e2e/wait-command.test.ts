@@ -1,5 +1,5 @@
 /**
- * The wait command of a background agent on the built binary (T-45). The history is kept under the
+ * The wait command of a background agent on the built binary (T-47). The history is kept under the
  * state base (`storage: home`) and the starter has a state dir of its own (`KODEL_STATE_DIR`), which
  * the agent's shell does not have: the command the server's waiting answer spells, run as it is in the
  * agent's environment, finds the run and reports the person's decision. Like the fork test, this one
@@ -101,7 +101,7 @@ async function decide(root: string, env: Record<string, string>, runId: string):
   }
 }
 
-describe("t45 the wait command on the built binary", () => {
+describe("t47 the wait command on the built binary", () => {
   beforeAll(() => {
     const built = spawnSync("bun", ["run", "build"], {
       cwd: REPO,
@@ -114,7 +114,7 @@ describe("t45 the wait command on the built binary", () => {
     if (!existsSync(ARTIFACT)) throw new Error(`the build left no ${ARTIFACT}`);
   }, 120_000);
 
-  test("t45_wait_command_finds_the_run_under_a_state_dir", async () => {
+  test("t47_wait_command_finds_the_run_under_a_state_dir", async () => {
     const root = temp("kodel-e2e-wait-");
     const stateDir = temp("kodel-e2e-wait-state-");
     const home = temp("kodel-e2e-wait-home-");

@@ -278,7 +278,7 @@ describe("task_9pns the resume offer", () => {
       expect(over.offer).toBeUndefined();
       expect(whyOf(over)).toBe("the run is over");
     }
-    // A run that cannot be read is kept apart from one that failed (T-45): nothing is known of it.
+    // A run that cannot be read is kept apart from one that failed (T-47): nothing is known of it.
     const unread = resumeOffer(session(info, "unreadable"), worker(), false);
     expect(unread.offer).toBeUndefined();
     expect(whyOf(unread)).toBe("the run cannot be read");
@@ -436,11 +436,11 @@ describe("t44 the TUI and kodel serve share one rule", () => {
   });
 });
 
-describe("t45 the card of a worker in a terminal", () => {
+describe("t47 the card of a worker in a terminal", () => {
   /** The gate journal with an agent's line after the decision (seq 5, ts 6000). */
   const MOVED = [...GATE, ...build([{ event: "step_served" }]).map((r) => ({ ...r, seq: 5 }))];
 
-  test("t45_tui_offers_no_resume_while_the_child_lives", () => {
+  test("t47_tui_offers_no_resume_while_the_child_lives", () => {
     // The record says the session is over, but its process still runs without a holder: a resume
     // would put a second agent on the run. No offer, whatever else holds; the card names the command.
     for (const state of ["lost", "killed"] as const) {
@@ -503,7 +503,7 @@ describe("t45 the card of a worker in a terminal", () => {
     expect(dead.line).toBe("agent lost");
   });
 
-  test("t45_card_says_died_after_your_decision", () => {
+  test("t47_card_says_died_after_your_decision", () => {
     // It waited, the person decided, an agent's line follows the decision, and then the worker ended.
     const ends: Partial<WorkerStatus>[] = [
       { state: "exited", label: "exited (1)", exitCode: 1 },

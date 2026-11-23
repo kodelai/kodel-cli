@@ -1,5 +1,5 @@
 /**
- * The wait command of a connection against the real host (T-45): the command an answer spells is byte
+ * The wait command of a connection against the real host (T-47): the command an answer spells is byte
  * for byte the one the service was given, whatever the project's redaction rules match, and neither
  * the command nor the text of a waiting answer reaches a file of the run.
  */
@@ -117,8 +117,8 @@ async function stored(): Promise<{ path: string; text: string }[]> {
   return out;
 }
 
-describe("t45 the wait command and what is kept of an answer", () => {
-  test("t45_wait_command_is_not_changed_by_redaction", async () => {
+describe("t47 the wait command and what is kept of an answer", () => {
+  test("t47_wait_command_is_not_changed_by_redaction", async () => {
     const { service } = open(template());
     // the rules do match the command: it would not survive a redaction
     for (const rule of RULES) expect(template()).toMatch(new RegExp(rule.pattern.source));
@@ -160,7 +160,7 @@ describe("t45 the wait command and what is kept of an answer", () => {
     }
   }, 30_000);
 
-  test("t45_waiting_answer_text_is_not_journaled", async () => {
+  test("t47_waiting_answer_text_is_not_journaled", async () => {
     const { host, service } = open(template());
     const runId = String(ok(await service.start({ pipeline: "gate", task: "t" })).run_id);
     ok(await service.completeStep({ run_id: runId, node_slug: "work", attempt: 1 }));
@@ -196,7 +196,7 @@ describe("t45 the wait command and what is kept of an answer", () => {
     }
   }, 30_000);
 
-  test("t45_host_without_a_wait_command_answers_as_before", async () => {
+  test("t47_host_without_a_wait_command_answers_as_before", async () => {
     // The project's `agent_hints: { wait: false }` still applies to a connection with no command of its own.
     const { service } = open();
     const runId = String(ok(await service.start({ pipeline: "gate", task: "t" })).run_id);

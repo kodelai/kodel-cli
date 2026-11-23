@@ -104,7 +104,7 @@ describe("t44 the daemon's record", () => {
   });
 });
 
-describe("t44 the counts of the daemon's record (T-45)", () => {
+describe("t44 the counts of the daemon's record (T-47)", () => {
   test("t44_record_counts_working_and_alive", () => {
     // `workers` is the places used (the agents that are working); `alive` is the live processes.
     const record: ServeRecord = {
@@ -115,7 +115,7 @@ describe("t44 the counts of the daemon's record (T-45)", () => {
     const read = decodeServeRecord(JSON.parse(text));
     expect(read).toEqual({ ok: true, record });
     if (read.ok) expect(encodeServeRecord(read.record)).toBe(text);
-    // The fixture a daemon of this build wrote holds it; the one from before T-45 has none and reads as it was.
+    // The fixture a daemon of this build wrote holds it; the one from before T-47 has none and reads as it was.
     const fixture = (name: string) =>
       decodeServeRecord(JSON.parse(readFileSync(join(FIXTURES, "v1", name), "utf8")));
     const now = fixture("serve-alive.json");

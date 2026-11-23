@@ -9,12 +9,12 @@
   as in a sandbox; no build, or a build older than the sources) every test is skipped and the file prints
   `PTY tests skipped: N, <reason>`; with `KODEL_REQUIRE_PTY=1` (the CI `pty` job) they fail instead. The same job
   runs `bun test packages/local` with that variable, so the tests there that bind a unix socket cannot skip.
-  `pty/worker-terminal.test.ts` (T-45) runs a background agent of a run on a real terminal: the launcher, the
+  `pty/worker-terminal.test.ts` (T-47) runs a background agent of a run on a real terminal: the launcher, the
   TUI's `o` and the return to the same place, a worker's shell that cannot decide, an agent left behind a dead
   holder or a dead wrapper. Its agent is the scripted fake of `@kodel-ai/testkit` (`writeFakeTerminalAgent`: a
   Node program written as `claude` into a folder for `PATH`), so no model runs.
 - Tests that read the real process table (`ps`) skip where it cannot be read, as in a sandbox
-  (`t45_session_guard_finds_a_session_of_another_state_base` in `packages/cli/test/human-only.test.ts`, the
+  (`t47_session_guard_finds_a_session_of_another_state_base` in `packages/cli/test/human-only.test.ts`, the
   `tableTest` rows of `packages/local/test/session-pipes.test.ts`); `KODEL_REQUIRE_PROCTABLE=1` makes the
   latter fail instead.
 - `../fixtures/formats/`: golden fixtures per format version.
@@ -86,7 +86,7 @@ By default the sandbox says nothing about pipelines in its `CLAUDE.md`: the rule
 the server's own instructions, which is what these scenarios check.
 
 `claude-code-worker.test.ts` and `claude-code-serve.test.ts` run a print worker (`worker: print` in their
-project's config). `terminal-worker.test.ts` (T-45, `t45_real_claude_terminal_worker_cannot_decide_its_gate`)
+project's config). `terminal-worker.test.ts` (T-47, `t47_real_claude_terminal_worker_cannot_decide_its_gate`)
 runs the real `claude` as a terminal worker and needs a PTY besides `KODEL_AGENT_TESTS`: two gates in a row
 with `decisions.agent.gate` and `.pipeline_change` on; the worker stays `running`; told to approve with the
 tool, then to run `kodel gate <run> approve` and `env X=1 kodel gate …` in its shell, the gate stays undecided
@@ -102,7 +102,7 @@ trust. It therefore runs on a person's machine before a release, not nightly.
 The three instructions are typed into the worker's terminal by the test, as
 the person; kodel itself types nothing.
 
-## Terminal workers: what the tests cannot show (T-45)
+## Terminal workers: what the tests cannot show (T-47)
 
 Run before a release, on the built file (`node packages/cli/dist/kodel.js`), by a person:
 

@@ -88,10 +88,10 @@ and is not taken by a `required` rule may be taken by a later `any` rule
 (`t44_rule_approval_required_skips_and_any_takes_an_agents_task`,
 `t44_rule_with_approval_any_starts_an_agents_task_with_its_pipeline`).
 
-T-45 (below) revised T-44; `docs/serve.md`, "T-44 as revised by T-45", keeps the old lines and
+T-47 (below) revised T-44; `docs/serve.md`, "T-44 as revised by T-47", keeps the old lines and
 says why each was replaced.
 
-## A background agent in a terminal decides nothing either (T-45)
+## A background agent in a terminal decides nothing either (T-47)
 
 *Every background agent of a run, whether the TUI, `kodel serve` or `kodel agent start --pipeline` started it,
 is started by one launcher from one profile, as a terminal session a person can open and leave
@@ -154,7 +154,7 @@ What stays open, stated and not closed:
   kodel server, which may decide when `decisions.agent` is on, and shows its dialogs in its own terminal. The
   command says both.
 
-Test plan: the `t45_*` tests, the `tA_*` tests of the sessions and the real-terminal rows of
+Test plan: the `t47_*` tests, the `tA_*` tests of the sessions and the real-terminal rows of
 `tests/pty/worker-terminal.test.ts`. What they cannot show is in `tests/README.md`. The decision is refuted
 if: with `worker: terminal`, a worker started by the TUI or the daemon is not attachable, or a `-p` worker is
 started instead; a worker decides its own gate; after a detach or an ended agent the TUI is not where it was,

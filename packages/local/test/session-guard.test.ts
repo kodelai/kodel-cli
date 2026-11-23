@@ -1,5 +1,5 @@
 /**
- * The probe behind the third guard of a person's commands (T-45): is this command inside a kodel agent
+ * The probe behind the third guard of a person's commands (T-47): is this command inside a kodel agent
  * session? A fake process table and fake session records; the files of a real state base for the reader.
  */
 import { afterEach, describe, expect, test } from "bun:test";

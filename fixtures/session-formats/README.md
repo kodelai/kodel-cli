@@ -24,6 +24,6 @@ after a golden was written. `bun scripts/take-session-fixtures.mjs --check` writ
 again and fails when one differs from its golden. The CI `pty` job runs it; where no terminal exists a stale
 `*-pty.json` is not detected.
 
-`worker-print-before-t45/` is not written by the script: it is `session.json` and `status.json` of a print worker
-(`claude -p`, no `agent.json`) taken once from the launcher and the holder of the build before T-45 (commit
+`worker-print-before-t47/` is not written by the script: it is `session.json` and `status.json` of a print worker
+(`claude -p`, no `agent.json`) taken once from the launcher and the holder of the build before T-47 (commit
 d055fd6), with a shell script for `claude`, and masked the same way. It is never taken again.

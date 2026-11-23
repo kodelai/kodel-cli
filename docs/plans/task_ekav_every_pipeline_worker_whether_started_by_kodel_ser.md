@@ -62,7 +62,7 @@ Earlier answers: one run with the spike as a stop; K6MA in; all of DSKQ in; `kod
 `max_workers` goes on, and the daemon adds nothing while over and says so once; stop at once when the run
 ends; no fallback; a worker you stopped is not resumed by the daemon (the TUI offers `s`); `agent start
 --pipeline` makes a run with no task; key `o`; the override in `engines.<name>.terminal`, committed version
-only; kodel makes the run itself; test id T-45; `kodel mcp` by hand in `Bash` recorded as accepted in
+only; kodel makes the run itself; test id T-47; `kodel mcp` by hand in `Bash` recorded as accepted in
 `docs/decisions.md`; no automatic wake-up.
 
 ## Behaviour change
@@ -278,7 +278,7 @@ Stored data and compatibility:
   across modes; then the setting's mode is used. A mode that cannot run here refuses the resume with the
   reason: no record is made, it counts as one failed attempt, after three it is `resume_failed`.
 
-**T-44 is revised, not reworded in place.** `docs/serve.md` gets a section "T-44 as revised by T-45" that
+**T-44 is revised, not reworded in place.** `docs/serve.md` gets a section "T-44 as revised by T-47" that
 keeps the old lines, says which of them this decision replaced and why (a worker that stays alive at a
 gate), and carries the refutation of the revised text; the same entry belongs in your decision log (your
 local note, so that line is yours to add). What changes: `max_workers` is "agents that are working: a live
@@ -305,7 +305,7 @@ TUI plan one `finish` a cycle and the rest follow in the next ones.
 
 ## Acceptance criteria and tests
 
-Test ids: `t45_` this decision; `t44_` the serve rule; `tA_` is the placeholder id of D-A (TASK-HN8N) that
+Test ids: `t47_` this decision; `t44_` the serve rule; `tA_` is the placeholder id of D-A (TASK-HN8N) that
 `session-test-names.test.ts:9-19` demands of every test in a file named `session*`, `attach*` or `pty*`;
 `t42_` engine profiles. The CI `pty` job runs `tests/pty` with `KODEL_REQUIRE_PTY=1`.
 
@@ -313,28 +313,28 @@ The mechanism and the profiles (`cli/test/worker-launcher.test.ts`, `cli/test/ag
 
 | Criterion | Test |
 | --- | --- |
-| `worker: terminal` (and the absent key): `kw-<run>` as `mode: pty`, 7-day timeout, the `agent` record; `worker: print`: today's `-p` spec, byte-equal to the one before this change | `t45_worker_terminal_spec`, `t45_worker_print_spec_is_todays` |
-| `terminal` where no terminal runs (Bun, package missing, no binary): refused with that reason, `adapter.start` not called, no run made by the TUI or the daemon, the daemon uses no attempt; nothing starts in the other mode | `t45_terminal_that_cannot_run_is_refused` (a table), `t45_no_mechanism_is_switched_by_itself` |
-| The holder cannot open the terminal (`HOLDER_BOOT_FAILED`): the start fails as any failed launch (`not_started`), no pipes worker appears | `t45_holder_failure_is_a_failed_start` |
-| `worker:` or `terminal:` on a profile not named `claude` is refused when the config is read, and the message names the follow-up task; a step profile of another name with neither key loads as today | `t45_only_claude_is_a_worker` (`local/test/config-engines.test.ts`) |
-| A machine where `claude -p` works today and no terminal runs: the refusal names the line to commit (`engines: { claude: { worker: print } }`), and with it the start is today's | `t45_refusal_spells_the_migration_line` |
-| `decisions.dialog` on refuses a terminal worker and `agent start --pipeline` | `t45_dialog_still_refuses_every_worker` |
-| Claude terminal argv: prompt last, after `--`, no `-p`, `--session-id`, `--mcp-config` + `--strict-mcp-config`, `dontAsk`, both lists | `t45_claude_terminal_argv` |
-| No decision tool allowed, both denied; every command the CLI marks human-only (read from its registry, the new `agent start`, `agent prune`, `exec --attach` among them) is covered by a deny pattern in plain and `env X=…` spellings; no pattern matches an `mcp__kodel__*` tool or `git commit -m 'fix mcp'` in a worktree path | `t45_worker_lists_refuse_decisions`, `t45_every_human_only_command_is_denied` (a table from the registry), `t45_deny_list_refuses_no_honest_command` |
-| A `kodel mcp` started with the claude profile's exact server arguments, `decisions.agent.gate` on, refuses both decision tools | `t45_worker_server_serves_no_decision_tool` (`cli/test/mcp-no-decisions.test.ts`) |
-| The specs from the TUI path, the daemon path and `agent start --pipeline` are deep-equal for one run; each takes the `claude` profile by name from the one table; no other caller of `adapter.start` for a `kw-` name exists; `serve.start[].engine` is an unknown key and `agent start --engine` an unknown flag | `t45_every_starter_builds_the_same_spec`, `t45_one_caller_starts_workers`, `t45_engine_choice_is_not_built` |
-| The worker's server gets `--wait-command`; every `waiting` answer spells it with the run id (start it in the background and end the turn), also with `agent_hints: { wait: false }` and at a second gate; with `KODEL_STATE_DIR` set the spelling is `env KODEL_STATE_DIR=… <exec> … wait <run> --timeout 604800`; the spec's env has no `KODEL_*`; every part is shell-quoted (a root with spaces); the command in the answer is byte for byte the one the launcher built, also when a project redaction rule matches a part of its path (it is put in after the answer's text is redacted and holds nothing an agent wrote; `t45_wait_command_is_not_changed_by_redaction`; that the text of a waiting answer is written to no journal line is pinned by `t45_waiting_answer_text_is_not_journaled`); every place that spells the command uses the given one: the waiting answer (`next-step.ts:262`), the note of a `node` or `running` answer beside a waiting decision (`:940`), the two fork instructions that name it (`:291`, `:306`) and the server's instructions (`mcp/tools.ts:28`, `:93`), and a bare `kodel wait <run>` is in none of a worker's answers (`t45_no_answer_of_a_worker_spells_a_bare_wait`, a table of answer kinds); the timeout equals the session's (one constant); a root whose spelling trips the worker's own deny patterns (`…/kodel resume/…`) is refused by preflight with the reason | `t45_waiting_answers_spell_the_wait_command`, `t45_wait_command_carries_the_state_dir`, `t45_wait_command_is_quoted_and_passes_the_deny_list`, `t45_wait_timeout_is_the_sessions` |
-| Built artifact, `storage: home` and a state dir: the spelled command, run in the worker's environment, sees the decision | `t45_wait_command_finds_the_run_under_a_state_dir` (`tests/e2e`) |
-| The trust probe looks at the folder the worktrees are made in, before any run exists; "will ask" blocks a daemon start; unknown lets it go and logs once; a person's start goes on with a notice | `t45_trust_is_probed_for_the_worktrees_folder`, `t45_preflight_blocks_an_unattended_start_when_trust_asks` |
-| The id is the record's, chosen by the launcher and written by the starter, for a `print` start too; never from the screen or the tail; a session with no `agent` record (an older one) gets its id from its argv and nothing is written for it; argv without a valid id: `no_session_id`; `parseEntry` keeps `mode` and `agent` | `t45_session_id_is_the_chosen_one`, `t45_print_start_writes_the_agent_record`, `t45_session_id_never_from_the_screen`, `t45_older_record_id_comes_from_its_argv`, `t45_list_entry_keeps_mode_and_agent` |
-| A real `claude -p` worker record written before this change (`fixtures/session-formats/v1/worker-print-before-t45/`, no `agent.json`), exited at its gate, the run decided after the update: resumed once with `--resume <the id of its argv>`, its `max_runs` place kept until then | `t45_inflight_print_worker_is_resumed_after_the_update` (`cli/test/worker-launcher.test.ts`), `t44_older_print_worker_at_a_gate_keeps_its_place` (`pipeline-core/test/serve-resume.test.ts`) |
-| A person's command (each one of the registry) run with a live session's holder among its parents, with a terminal and with `KODEL_ENGINE` unset: refused with the session's words, nothing confirmed, nothing written; the same when only the terminal session's leader is a session's child; with no session among the parents it runs as today; the process table unreadable: the two old guards decide | `t45_persons_commands_refuse_inside_a_session` (a table from the registry), `t45_session_guard_reads_the_terminal_session`, `t45_session_guard_lets_a_person_through`, `t45_session_guard_unreadable_table_keeps_the_old_guards` (`cli/test/human-only.test.ts`), `tA_inside_session_probe` (`local/test/session-guard.test.ts`, a fake process table) |
-| Real PTY, built artifact: a fake agent in a terminal worker runs `kodel gate`, `env -u KODEL_ENGINE kodel gate`, `node <artifact> gate` and a gate through `sh -c` with the answer `y` typed on its terminal: each is refused and the gate stays undecided | `t45_real_worker_shell_cannot_decide` (`tests/pty/worker-terminal.test.ts`) |
-| One live worker per run across modes; a second start answers `NAME_TAKEN`; the TUI and the daemon resuming one decision at once: one session, the other gets `NAME_TAKEN` under the lock; a daemon resume racing a worker that goes on by itself: the records and the journal are read again inside the lock and nothing is started | `t45_one_live_worker_per_run_across_modes`, `t45_tui_and_daemon_resume_one_decision_once`, `t45_no_resume_for_a_worker_that_went_on` |
-| A resume stays in the mode of the record unless the spike says conversations cross; a mode that cannot run, or an unknown id, refuses: no record, one attempt counted | `t45_resume_stays_in_the_records_mode`, `t45_resume_across_modes_when_it_continues`, `t45_resume_refused_makes_no_record` |
-| Launcher, daemon cycle, TUI effects and `finish`: zero writes to a session's input | `t45_nothing_types_into_a_session` |
-| `finish` of a session that is already stopped or gone is no error | `t45_finish_of_a_stopped_session_is_harmless` |
-| A secret printed as a line by a terminal worker is not in `tail.txt` nor in the card's lines; a secret split by cursor moves stays (the documented limit, pinned so a change of it is seen); `agent.json` and `agent ls` hold no prompt and no argv text | `tA_terminal_tail_redacts_a_printed_secret`, `tA_terminal_tail_painted_secret_is_the_known_limit`, `tA_agent_record_holds_no_prompt` (`local/test/session-pty.test.ts`, `session-pipes.test.ts`), `t45_card_tail_lines_are_redacted` (`cli/test/tui-worker.test.ts`) |
+| `worker: terminal` (and the absent key): `kw-<run>` as `mode: pty`, 7-day timeout, the `agent` record; `worker: print`: today's `-p` spec, byte-equal to the one before this change | `t47_worker_terminal_spec`, `t47_worker_print_spec_is_todays` |
+| `terminal` where no terminal runs (Bun, package missing, no binary): refused with that reason, `adapter.start` not called, no run made by the TUI or the daemon, the daemon uses no attempt; nothing starts in the other mode | `t47_terminal_that_cannot_run_is_refused` (a table), `t47_no_mechanism_is_switched_by_itself` |
+| The holder cannot open the terminal (`HOLDER_BOOT_FAILED`): the start fails as any failed launch (`not_started`), no pipes worker appears | `t47_holder_failure_is_a_failed_start` |
+| `worker:` or `terminal:` on a profile not named `claude` is refused when the config is read, and the message names the follow-up task; a step profile of another name with neither key loads as today | `t47_only_claude_is_a_worker` (`local/test/config-engines.test.ts`) |
+| A machine where `claude -p` works today and no terminal runs: the refusal names the line to commit (`engines: { claude: { worker: print } }`), and with it the start is today's | `t47_refusal_spells_the_migration_line` |
+| `decisions.dialog` on refuses a terminal worker and `agent start --pipeline` | `t47_dialog_still_refuses_every_worker` |
+| Claude terminal argv: prompt last, after `--`, no `-p`, `--session-id`, `--mcp-config` + `--strict-mcp-config`, `dontAsk`, both lists | `t47_claude_terminal_argv` |
+| No decision tool allowed, both denied; every command the CLI marks human-only (read from its registry, the new `agent start`, `agent prune`, `exec --attach` among them) is covered by a deny pattern in plain and `env X=…` spellings; no pattern matches an `mcp__kodel__*` tool or `git commit -m 'fix mcp'` in a worktree path | `t47_worker_lists_refuse_decisions`, `t47_every_human_only_command_is_denied` (a table from the registry), `t47_deny_list_refuses_no_honest_command` |
+| A `kodel mcp` started with the claude profile's exact server arguments, `decisions.agent.gate` on, refuses both decision tools | `t47_worker_server_serves_no_decision_tool` (`cli/test/mcp-no-decisions.test.ts`) |
+| The specs from the TUI path, the daemon path and `agent start --pipeline` are deep-equal for one run; each takes the `claude` profile by name from the one table; no other caller of `adapter.start` for a `kw-` name exists; `serve.start[].engine` is an unknown key and `agent start --engine` an unknown flag | `t47_every_starter_builds_the_same_spec`, `t47_one_caller_starts_workers`, `t47_engine_choice_is_not_built` |
+| The worker's server gets `--wait-command`; every `waiting` answer spells it with the run id (start it in the background and end the turn), also with `agent_hints: { wait: false }` and at a second gate; with `KODEL_STATE_DIR` set the spelling is `env KODEL_STATE_DIR=… <exec> … wait <run> --timeout 604800`; the spec's env has no `KODEL_*`; every part is shell-quoted (a root with spaces); the command in the answer is byte for byte the one the launcher built, also when a project redaction rule matches a part of its path (it is put in after the answer's text is redacted and holds nothing an agent wrote; `t47_wait_command_is_not_changed_by_redaction`; that the text of a waiting answer is written to no journal line is pinned by `t47_waiting_answer_text_is_not_journaled`); every place that spells the command uses the given one: the waiting answer (`next-step.ts:262`), the note of a `node` or `running` answer beside a waiting decision (`:940`), the two fork instructions that name it (`:291`, `:306`) and the server's instructions (`mcp/tools.ts:28`, `:93`), and a bare `kodel wait <run>` is in none of a worker's answers (`t47_no_answer_of_a_worker_spells_a_bare_wait`, a table of answer kinds); the timeout equals the session's (one constant); a root whose spelling trips the worker's own deny patterns (`…/kodel resume/…`) is refused by preflight with the reason | `t47_waiting_answers_spell_the_wait_command`, `t47_wait_command_carries_the_state_dir`, `t47_wait_command_is_quoted_and_passes_the_deny_list`, `t47_wait_timeout_is_the_sessions` |
+| Built artifact, `storage: home` and a state dir: the spelled command, run in the worker's environment, sees the decision | `t47_wait_command_finds_the_run_under_a_state_dir` (`tests/e2e`) |
+| The trust probe looks at the folder the worktrees are made in, before any run exists; "will ask" blocks a daemon start; unknown lets it go and logs once; a person's start goes on with a notice | `t47_trust_is_probed_for_the_worktrees_folder`, `t47_preflight_blocks_an_unattended_start_when_trust_asks` |
+| The id is the record's, chosen by the launcher and written by the starter, for a `print` start too; never from the screen or the tail; a session with no `agent` record (an older one) gets its id from its argv and nothing is written for it; argv without a valid id: `no_session_id`; `parseEntry` keeps `mode` and `agent` | `t47_session_id_is_the_chosen_one`, `t47_print_start_writes_the_agent_record`, `t47_session_id_never_from_the_screen`, `t47_older_record_id_comes_from_its_argv`, `t47_list_entry_keeps_mode_and_agent` |
+| A real `claude -p` worker record written before this change (`fixtures/session-formats/v1/worker-print-before-t47/`, no `agent.json`), exited at its gate, the run decided after the update: resumed once with `--resume <the id of its argv>`, its `max_runs` place kept until then | `t47_inflight_print_worker_is_resumed_after_the_update` (`cli/test/worker-launcher.test.ts`), `t44_older_print_worker_at_a_gate_keeps_its_place` (`pipeline-core/test/serve-resume.test.ts`) |
+| A person's command (each one of the registry) run with a live session's holder among its parents, with a terminal and with `KODEL_ENGINE` unset: refused with the session's words, nothing confirmed, nothing written; the same when only the terminal session's leader is a session's child; with no session among the parents it runs as today; the process table unreadable: the two old guards decide | `t47_persons_commands_refuse_inside_a_session` (a table from the registry), `t47_session_guard_reads_the_terminal_session`, `t47_session_guard_lets_a_person_through`, `t47_session_guard_unreadable_table_keeps_the_old_guards` (`cli/test/human-only.test.ts`), `tA_inside_session_probe` (`local/test/session-guard.test.ts`, a fake process table) |
+| Real PTY, built artifact: a fake agent in a terminal worker runs `kodel gate`, `env -u KODEL_ENGINE kodel gate`, `node <artifact> gate` and a gate through `sh -c` with the answer `y` typed on its terminal: each is refused and the gate stays undecided | `t47_real_worker_shell_cannot_decide` (`tests/pty/worker-terminal.test.ts`) |
+| One live worker per run across modes; a second start answers `NAME_TAKEN`; the TUI and the daemon resuming one decision at once: one session, the other gets `NAME_TAKEN` under the lock; a daemon resume racing a worker that goes on by itself: the records and the journal are read again inside the lock and nothing is started | `t47_one_live_worker_per_run_across_modes`, `t47_tui_and_daemon_resume_one_decision_once`, `t47_no_resume_for_a_worker_that_went_on` |
+| A resume stays in the mode of the record unless the spike says conversations cross; a mode that cannot run, or an unknown id, refuses: no record, one attempt counted | `t47_resume_stays_in_the_records_mode`, `t47_resume_across_modes_when_it_continues`, `t47_resume_refused_makes_no_record` |
+| Launcher, daemon cycle, TUI effects and `finish`: zero writes to a session's input | `t47_nothing_types_into_a_session` |
+| `finish` of a session that is already stopped or gone is no error | `t47_finish_of_a_stopped_session_is_harmless` |
+| A secret printed as a line by a terminal worker is not in `tail.txt` nor in the card's lines; a secret split by cursor moves stays (the documented limit, pinned so a change of it is seen); `agent.json` and `agent ls` hold no prompt and no argv text | `tA_terminal_tail_redacts_a_printed_secret`, `tA_terminal_tail_painted_secret_is_the_known_limit`, `tA_agent_record_holds_no_prompt` (`local/test/session-pty.test.ts`, `session-pipes.test.ts`), `t47_card_tail_lines_are_redacted` (`cli/test/tui-worker.test.ts`) |
 
 The serve rule (`pipeline-core/test/serve-plan.test.ts`, `serve-resume.test.ts`; the daemon in
 `local/test/serve-daemon.test.ts`):
@@ -347,16 +347,16 @@ The serve rule (`pipeline-core/test/serve-plan.test.ts`, `serve-resume.test.ts`;
 | A decision wakes a waiting worker with `max_workers` full: no action against it, no start and no resume while over, one log line; when it reaches a wait the count falls and exactly one waiting start goes in that cycle | `t44_woken_worker_goes_on_and_the_daemon_adds_nothing`, `t44_count_recovers_and_one_start_follows` |
 | A pipes worker, a worker in `unknown` state, and a live worker of a run that cannot be read hold a worker place | `t44_only_a_known_waiting_terminal_worker_frees_its_place` |
 | **`lost` or `killed` with `childAlive`, terminal or print, at a wait or not, decided or not: verdict `child_alive`, no resume, no `finish`, no `gone` note, both places held, one log line with `kodel agent stop <id>`; after the person's stop (the child gone) the ordinary rules apply** | `t44_child_alive_is_never_resumed_or_finished`, `t44_child_alive_holds_both_places` (rows: a readable run, and a run that cannot be read, where today `unreadableHoldsRun` frees the place of every `lost` or `killed` worker, `plan.ts:225-226`), `t44_child_alive_then_stopped_follows_the_rules` |
-| The holder's child is gone but a process of its group lives (a wrapper that died, the agent behind it alive), for a record whose holder went away without recording its child's end: the record says `childAlive`; a record whose holder recorded the end (`exited`, `stopped`, `killed` by its timeout with a `kodel wait` left in the group) is not looked at and is resumed by the ordinary rule | `tA_child_alive_looks_at_the_process_group` (`local/test/session-pipes.test.ts`, a fake process table), `t45_real_orphan_behind_a_wrapper_is_not_doubled` (`tests/pty/worker-terminal.test.ts`) |
+| The holder's child is gone but a process of its group lives (a wrapper that died, the agent behind it alive), for a record whose holder went away without recording its child's end: the record says `childAlive`; a record whose holder recorded the end (`exited`, `stopped`, `killed` by its timeout with a `kodel wait` left in the group) is not looked at and is resumed by the ordinary rule | `tA_child_alive_looks_at_the_process_group` (`local/test/session-pipes.test.ts`, a fake process table), `t47_real_orphan_behind_a_wrapper_is_not_doubled` (`tests/pty/worker-terminal.test.ts`) |
 | A stranger is not a member: the group's number is now the pid of a process that is not the recorded child (its identity differs): not alive; the machine was restarted after the session began (boot time later than the record's start): not alive, and a run left at a gate by that restart is resumed after the decision; the table cannot be read: the group is not looked at, the recorded-child rule decides, one log line of the daemon; the table is read once for a listing with many records and not at all for one with no such record | `tA_child_alive_pgid_reuse`, `tA_child_alive_after_a_restart`, `tA_child_alive_unreadable_group`, `tA_group_table_is_read_once_per_listing` (`local/test/session-pipes.test.ts`), `t44_unreadable_process_table_is_logged_once` (`local/test/serve-daemon.test.ts`) |
-| `agent stop` of a record whose child is gone and whose group has members: a stop record is written, each member whose start time is unchanged is signalled (`SIGTERM`, then `SIGKILL`), a member whose pid was reused in between is not; then the record has no `childAlive`, `rm` and `prune` remove it and the resume rules apply; a stranger group is never signalled | `tA_stop_ends_a_group_only_orphan`, `tA_stop_never_signals_a_stranger_group`, `tA_rm_after_the_group_is_stopped` (`local/test/session-pipes.test.ts`), `t45_real_stop_ends_an_agent_behind_a_dead_wrapper` (`tests/pty/worker-terminal.test.ts`) |
+| `agent stop` of a record whose child is gone and whose group has members: a stop record is written, each member whose start time is unchanged is signalled (`SIGTERM`, then `SIGKILL`), a member whose pid was reused in between is not; then the record has no `childAlive`, `rm` and `prune` remove it and the resume rules apply; a stranger group is never signalled | `tA_stop_ends_a_group_only_orphan`, `tA_stop_never_signals_a_stranger_group`, `tA_rm_after_the_group_is_stopped` (`local/test/session-pipes.test.ts`), `t47_real_stop_ends_an_agent_behind_a_dead_wrapper` (`tests/pty/worker-terminal.test.ts`) |
 | A `lost` worker noticed only after the decision, with no output after it, and an agent's line after the decision: `moved`, no `gone` note, not counted dead; the same record with output after the decision: `not_at_wait` | `t44_lost_noticed_late_is_not_a_death` |
-| `childAlive` is carried from `agent ls --json` through `WorkerStatus` and `serveWorkerOf` to `ServeWorkerView`; the TUI's offer of `s resumes` is withheld for it | `t45_child_alive_reaches_the_rule` (`cli/test/worker-launcher.test.ts`), `t45_tui_offers_no_resume_while_the_child_lives` (`cli/test/worker-resume.test.ts`) |
-| Real PTY: the holder killed with `SIGKILL` while a fake agent that ignores the hangup lives on, the run decided: no second session is started; the holder and the agent both killed (a reboot), the state read again, the run decided: resumed once | `t45_real_orphan_is_not_doubled`, `t45_real_holder_and_agent_gone_at_a_wait_is_resumed` (`tests/pty/worker-terminal.test.ts`) |
+| `childAlive` is carried from `agent ls --json` through `WorkerStatus` and `serveWorkerOf` to `ServeWorkerView`; the TUI's offer of `s resumes` is withheld for it | `t47_child_alive_reaches_the_rule` (`cli/test/worker-launcher.test.ts`), `t47_tui_offers_no_resume_while_the_child_lives` (`cli/test/worker-resume.test.ts`) |
+| Real PTY: the holder killed with `SIGKILL` while a fake agent that ignores the hangup lives on, the run decided: no second session is started; the holder and the agent both killed (a reboot), the state read again, the run decided: resumed once | `t47_real_orphan_is_not_doubled`, `t47_real_holder_and_agent_gone_at_a_wait_is_resumed` (`tests/pty/worker-terminal.test.ts`) |
 | A terminal worker `exited`, `lost`, or `killed` by timeout or a holder error (child gone), while the run waited and before any decision: no note, not counted dead, keeps its `max_runs` place, resumed once after the decision; the same for one that ended after the decision with no agent line in the journal since (the same second, seconds later, days later) | `t44_worker_that_ended_at_a_wait_is_resumed` (a table of ends), `t44_ended_after_the_decision_without_going_on_is_resumed` |
 | The same worker stopped by a person: not resumed by the daemon, offered by the TUI | `t44_stopped_at_a_wait_is_left_to_the_person` |
 | The worker ended at W1 before D1, then another agent worked the run (an agent's line after D1): verdict `moved` as today, no note, not counted in `dead_in_a_row`, the place kept as today; the order is taken from the journal's sequence and the record's end, and an end in the same instant as the decision counts as before it; a decision recorded while the holder dies gives one of the two verdicts above, never a resume and a death together | `t44_ended_before_the_decision_and_moved_is_not_a_death`, `t44_same_instant_end_and_decision`, `t44_decision_while_the_holder_dies` |
-| W1, decision D1, an agent's line after D1 in the journal, then the worker exits or dies (its end after D1): `not_at_wait`, one `gone` note, counted in `dead_in_a_row`, its `max_runs` place freed, no resume with D1's prompt | `t44_worker_that_died_after_the_decision_is_dead`, `t45_card_says_died_after_your_decision` (`cli/test/worker-resume.test.ts`) |
+| W1, decision D1, an agent's line after D1 in the journal, then the worker exits or dies (its end after D1): `not_at_wait`, one `gone` note, counted in `dead_in_a_row`, its `max_runs` place freed, no resume with D1's prompt | `t44_worker_that_died_after_the_decision_is_dead`, `t47_card_says_died_after_your_decision` (`cli/test/worker-resume.test.ts`) |
 | A terminal worker with a step open, no output and no engine call for `stalled_after_s`: one `stalled` line; output alone, or an engine call alone, puts it off (a long step that prints is not stalled); none while the run waits for the person; a `print` worker by output, as today. With the profile's `idleWrites` set (the other answer of spike criterion 7): engine calls alone, and the line reads `no engine call for N s (it may be a long step)` | `t44_terminal_stalled_needs_no_output_and_no_call`, `t44_long_step_that_prints_is_not_stalled`, `t44_stalled_skips_a_worker_that_waits_with_the_person`, `t44_stalled_by_calls_alone_when_idle_writes` |
 | Run ended, terminal worker live: one `finish` in that cycle; three ended runs: one `finish` a cycle, three cycles; a start that waits for the lock meanwhile is served; run open, or open and unreadable: none; a live `print` worker of an ended run: none; a `-d<seq>` record is finished, an older ended record is left | `t44_finish_at_once_when_the_run_ended`, `t44_one_finish_a_cycle`, `t44_no_finish_for_an_open_or_unreadable_run`, `t44_finish_is_for_terminal_workers_only`, `t44_finish_takes_the_live_record` |
 | A stalled worker is listed by `--status` with the places it holds; the record's `workers` is the places used (the working agents, what an older reader shows beside `max_workers`) and `alive` the live processes; `--status` names both; the record round-trips and an older reader ignores `alive` | `t44_status_lists_stalled_workers`, `t44_status_names_working_and_alive` (`cli/test/serve.test.ts`), `t44_record_counts_working_and_alive` (`pipeline-core/test/serve-record.test.ts`) |
@@ -364,26 +364,26 @@ The serve rule (`pipeline-core/test/serve-plan.test.ts`, `serve-resume.test.ts`;
 | The text of T-44 in `docs/serve.md` is the revised one and the tests assert no line of the old one ("more worker processes than `max_workers`") | `t44_docs_carry_the_revised_text` (`cli/test/docs.test.ts`) |
 | No agent line 2 min after the start: one `no_first_call` | `t44_no_first_call_is_logged_once` |
 | The daemon asks the run's answer each cycle only for a run with a live terminal worker, and reads its journal at most once a minute; a failed read keeps both places; `finish` calls `stop` once a cycle: a failure is logged and tried again on the next cycle, and a session that is stopped is not finished again | `t44_daemon_reads_live_runs_sparingly`, `t44_daemon_finishes_through_the_launcher` |
-| An active daemon and an open TUI: only the daemon finishes and resumes; without one the TUI finishes, and only a run of this checkout whose state it read as ended | `t44_tui_leaves_finish_to_an_active_daemon`, `t45_tui_never_finishes_an_unreadable_or_foreign_run` (`cli/test/tui-worker.test.ts`) |
+| An active daemon and an open TUI: only the daemon finishes and resumes; without one the TUI finishes, and only a run of this checkout whose state it read as ended | `t44_tui_leaves_finish_to_an_active_daemon`, `t47_tui_never_finishes_an_unreadable_or_foreign_run` (`cli/test/tui-worker.test.ts`) |
 
 The TUI (`cli/test/tui-run.test.ts` with a fake terminal and a fake child, unless named):
 
 | Criterion | Test |
 | --- | --- |
-| `o` with an attachable worker: one effect, for the run's latest record; else a notice and no effect | `t45_tui_o_opens_the_latest_attachable_record` (`cli/test/tui-worker.test.ts`) |
-| After the return the model equals the one before `o` in section, tab, selected run, focus, card and its scroll, list scroll, filter, picked decision, zoom and mouse; only the data and the notice differ. From the list, from an open card scrolled down, from a filtered list | `t45_tui_returns_to_the_same_place` (a table) |
-| The same when the agent ended while attached, and when the child exits with an error | `t45_tui_same_place_when_the_agent_ended` |
-| The child cannot be started (`ENOENT`): the screen was not left, a notice says why | `t45_tui_child_that_cannot_start_leaves_the_screen_alone` |
-| The selected run left the list meanwhile: the selection moves as on a refresh, nothing else changes | `t45_tui_same_place_when_the_run_is_gone` |
-| Leaving: mouse off, paste off, cursor shown, alternate screen left, raw off, the data and resize listeners off, stdin paused; coming back: the reverse, one listener each, a reload, a full redraw; `suspend` does not mark the screen closed | `t45_tui_suspend_and_return_sequences` |
-| Keys typed and a resize while away reach no TUI handler and draw nothing; the first key after the return is handled once | `t45_tui_reads_and_draws_nothing_while_away` |
-| A signal, or the process ending, while away: the child is ended first, the terminal is restored once; `SIGQUIT` (a `Ctrl+\` that lands while the terminal is not raw, before the child is up or after it left) is taken and ignored while away; `SIGINT` to the group while attached ends no session; `SIGTSTP` from outside stops the TUI and the child and `SIGCONT` brings both back, with no session ended (`Ctrl+Z` typed while attached is a byte for the agent) | `t45_tui_signal_while_attached_restores_once`, `t45_tui_ignores_quit_while_away`, `t45_tui_stop_and_continue_while_attached_ends_nothing` |
-| Input that arrived during the handover is read and thrown away for 150 ms before the TUI listens again: a key typed then does nothing | `t45_tui_drops_input_of_the_handover` |
-| The child dies mid-way (the client crashes, the socket goes, the holder dies): the TUI returns to the same place with the notice | `t45_tui_returns_when_the_child_dies_midway` |
-| `o` on Windows, on a `print` worker, or in a TUI that runs under Bun, never leaves the screen; under Bun the notice spells `node <built kodel> agent attach <id>` | `t45_tui_o_checks_before_leaving`, `t45_tui_o_under_bun_is_refused_with_the_command` |
-| Real PTY: the outer terminal is resized while attached through the TUI: the agent's terminal gets the new size, and the TUI draws at it after the return | `t45_real_tui_resize_while_attached_reaches_the_agent` (`tests/pty/worker-terminal.test.ts`) |
-| Real PTY, built artifact, fake agent: `kodel tui`, move to the second run, open its card, `o`, type, `Ctrl+\`: the same run is selected and its card open, a key is taken, and the bytes after the return put the alternate screen, the hidden cursor and bracketed paste back on with the terminal raw; again with the agent ending while attached; again with `Ctrl+\` pressed twice in a row (the TUI lives) | `t45_real_tui_returns_to_the_same_place`, `t45_real_tui_returns_when_the_agent_ends`, `t45_real_tui_survives_a_double_detach_chord` (`tests/pty/worker-terminal.test.ts`) |
-| Real PTY: start through the launcher, attach, type, detach, the session runs, `finish` stops it and a background child of the agent is gone, modes reset | `t45_real_terminal_worker_attach_detach_finish` (same file) |
+| `o` with an attachable worker: one effect, for the run's latest record; else a notice and no effect | `t47_tui_o_opens_the_latest_attachable_record` (`cli/test/tui-worker.test.ts`) |
+| After the return the model equals the one before `o` in section, tab, selected run, focus, card and its scroll, list scroll, filter, picked decision, zoom and mouse; only the data and the notice differ. From the list, from an open card scrolled down, from a filtered list | `t47_tui_returns_to_the_same_place` (a table) |
+| The same when the agent ended while attached, and when the child exits with an error | `t47_tui_same_place_when_the_agent_ended` |
+| The child cannot be started (`ENOENT`): the screen was not left, a notice says why | `t47_tui_child_that_cannot_start_leaves_the_screen_alone` |
+| The selected run left the list meanwhile: the selection moves as on a refresh, nothing else changes | `t47_tui_same_place_when_the_run_is_gone` |
+| Leaving: mouse off, paste off, cursor shown, alternate screen left, raw off, the data and resize listeners off, stdin paused; coming back: the reverse, one listener each, a reload, a full redraw; `suspend` does not mark the screen closed | `t47_tui_suspend_and_return_sequences` |
+| Keys typed and a resize while away reach no TUI handler and draw nothing; the first key after the return is handled once | `t47_tui_reads_and_draws_nothing_while_away` |
+| A signal, or the process ending, while away: the child is ended first, the terminal is restored once; `SIGQUIT` (a `Ctrl+\` that lands while the terminal is not raw, before the child is up or after it left) is taken and ignored while away; `SIGINT` to the group while attached ends no session; `SIGTSTP` from outside stops the TUI and the child and `SIGCONT` brings both back, with no session ended (`Ctrl+Z` typed while attached is a byte for the agent) | `t47_tui_signal_while_attached_restores_once`, `t47_tui_ignores_quit_while_away`, `t47_tui_stop_and_continue_while_attached_ends_nothing` |
+| Input that arrived during the handover is read and thrown away for 150 ms before the TUI listens again: a key typed then does nothing | `t47_tui_drops_input_of_the_handover` |
+| The child dies mid-way (the client crashes, the socket goes, the holder dies): the TUI returns to the same place with the notice | `t47_tui_returns_when_the_child_dies_midway` |
+| `o` on Windows, on a `print` worker, or in a TUI that runs under Bun, never leaves the screen; under Bun the notice spells `node <built kodel> agent attach <id>` | `t47_tui_o_checks_before_leaving`, `t47_tui_o_under_bun_is_refused_with_the_command` |
+| Real PTY: the outer terminal is resized while attached through the TUI: the agent's terminal gets the new size, and the TUI draws at it after the return | `t47_real_tui_resize_while_attached_reaches_the_agent` (`tests/pty/worker-terminal.test.ts`) |
+| Real PTY, built artifact, fake agent: `kodel tui`, move to the second run, open its card, `o`, type, `Ctrl+\`: the same run is selected and its card open, a key is taken, and the bytes after the return put the alternate screen, the hidden cursor and bracketed paste back on with the terminal raw; again with the agent ending while attached; again with `Ctrl+\` pressed twice in a row (the TUI lives) | `t47_real_tui_returns_to_the_same_place`, `t47_real_tui_returns_when_the_agent_ends`, `t47_real_tui_survives_a_double_detach_chord` (`tests/pty/worker-terminal.test.ts`) |
+| Real PTY: start through the launcher, attach, type, detach, the session runs, `finish` stops it and a background child of the agent is gone, modes reset | `t47_real_terminal_worker_attach_detach_finish` (same file) |
 
 The record, the commands, the config:
 
@@ -391,26 +391,26 @@ The record, the commands, the config:
 | --- | --- |
 | `agent.json` round-trips (chosen, resumed, and a record with `source: "observed"` and another engine name built in the test); a newer `v` is refused; a bad `agent` in a spec is refused | `tA_agent_record_round_trips`, `tA_agent_record_newer_format_is_refused` (`pipeline-core/test/session-records.test.ts`), `tA_spec_agent_is_validated` (`pipeline-core/test/session.test.ts`) |
 | The starter writes it once; a reader that ignores the file derives the same status, lists and removes the session; an old session lists with `AGENT` empty; `agent ls` and `--json` show `MODE` and `AGENT`, and the hint for a stopped session that can be resumed | `tA_agent_record_is_written_once`, `tA_older_reader_ignores_the_agent_record` (`local/test/session-pipes.test.ts`), `tA_agent_ls_lists_mode_and_agent` (`cli/test/agent.test.ts`) |
-| `start --resume <name>`: a new terminal session with claude's resume argv, the same name, `resumes` set; the old record stays listed; `rm` of the old one keeps the name with the new | `t45_resume_keeps_the_name_and_links_the_old_record` (`cli/test/agent-start.test.ts`) |
+| `start --resume <name>`: a new terminal session with claude's resume argv, the same name, `resumes` set; the old record stays listed; `rm` of the old one keeps the name with the new | `t47_resume_keeps_the_name_and_links_the_old_record` (`cli/test/agent-start.test.ts`) |
 | (The crash tests use `faults`, a tests-only option of the local adapter that throws at a named step of a start.) The marker moves in one rename after the new record exists, only for a finished `cli` session; a failed resume puts the old marker back; a crash before the move leaves no dangling name; a plain `agent start --name` racing a resume gets `NAME_TAKEN` at every point; of two resumes one wins | `tA_name_marker_moves_only_for_a_finished_cli_session`, `tA_failed_resume_restores_the_marker`, `tA_no_dangling_name_after_a_crash_in_a_resume`, `tA_plain_start_never_takes_a_name_in_a_resume`, `tA_two_resumes_of_one_name_one_wins` (`local/test/session-pipes.test.ts`) |
-| Refused with a reason: a running session, a `lost` or `killed` one whose process still runs (the marker is not moved either: `tA_name_marker_is_not_moved_from_a_live_process`), one whose id is not known or whose `agent` record does not name `claude`, a `kw-` or host session, a pipes session | `t45_resume_refusals` (a table) |
-| `agent start --pipeline`: one run with no task, one `kw-` worker, under the start lock, no tracker write; `--name` refused; human-only | `t45_agent_start_with_pipeline_uses_the_launcher` (`cli/test/agent-start.test.ts`, as the next three) |
-| `agent start <prompt>`: the claude profile's command, the chosen id, the prompt; no kodel MCP config and no permission flag; `KODEL_ENGINE` set; prints the argv and the unattended hint; attaches unless `--bg` | `t45_agent_start_plain_prints_argv_and_attaches` |
-| The flags of `agent start`, one row each: `--pipeline` with `worker: terminal` attaches, with `--bg` does not; `--pipeline` with `worker: print` starts today's `-p` worker, attaches nothing and says so; `--pipeline` without a prompt, `--pipeline --name`, `--resume` with a prompt, with `--pipeline` or with `--name`: refused by name, nothing started; a plain start with `decisions.dialog` on is not refused and prints the line about dialogs; `--pipeline` with it on is refused | `t45_agent_start_flag_table` |
-| With `KODEL_STATE_DIR` set it prints the warning about the agent's own server | `t45_agent_start_plain_warns_about_the_state_dir` |
-| With `decisions.agent` on, a plain start says that this agent's kodel server may decide | `t45_agent_start_plain_says_what_its_server_may_decide` |
+| Refused with a reason: a running session, a `lost` or `killed` one whose process still runs (the marker is not moved either: `tA_name_marker_is_not_moved_from_a_live_process`), one whose id is not known or whose `agent` record does not name `claude`, a `kw-` or host session, a pipes session | `t47_resume_refusals` (a table) |
+| `agent start --pipeline`: one run with no task, one `kw-` worker, under the start lock, no tracker write; `--name` refused; human-only | `t47_agent_start_with_pipeline_uses_the_launcher` (`cli/test/agent-start.test.ts`, as the next three) |
+| `agent start <prompt>`: the claude profile's command, the chosen id, the prompt; no kodel MCP config and no permission flag; `KODEL_ENGINE` set; prints the argv and the unattended hint; attaches unless `--bg` | `t47_agent_start_plain_prints_argv_and_attaches` |
+| The flags of `agent start`, one row each: `--pipeline` with `worker: terminal` attaches, with `--bg` does not; `--pipeline` with `worker: print` starts today's `-p` worker, attaches nothing and says so; `--pipeline` without a prompt, `--pipeline --name`, `--resume` with a prompt, with `--pipeline` or with `--name`: refused by name, nothing started; a plain start with `decisions.dialog` on is not refused and prints the line about dialogs; `--pipeline` with it on is refused | `t47_agent_start_flag_table` |
+| With `KODEL_STATE_DIR` set it prints the warning about the agent's own server | `t47_agent_start_plain_warns_about_the_state_dir` |
+| With `decisions.agent` on, a plain start says that this agent's kodel server may decide | `t47_agent_start_plain_says_what_its_server_may_decide` |
 | `exec --pty --attach` prints `started`, then attaches; the exit code is the attach's; a command that ended before the attach gives `[ended: …]` and code 0; without `--pty` refused | `tA_exec_attach_starts_then_attaches`, `tA_exec_attach_of_a_command_that_already_ended` (`cli/test/agent.test.ts`), `tA_exec_attach_real_terminal` (`tests/pty/pty-session.test.ts`) |
-| `terminal.command` is `[<program>, then pairs of an allowed flag and its value]` (`--flag value` or `--flag=value`): element 0 is the program (a wrapper there is the person's committed choice, and the group rule above covers it); a bare word after it, a value that begins with `-`, any other flag, also in a short form, are refused by name; before the start the built argv is read back by the profile and every element must be the program, one of kodel's own fixed elements, or an allowed pair | `t45_engines_terminal_override`, `t45_engines_terminal_allows_only_listed_flags`, `t45_final_argv_is_checked` |
-| Only the `engines` block is compared with `HEAD` of the checkout: equal: used; a `serve` edit beside it: still used; a working-copy edit, a staged-only edit, a block in `HEAD` that the working copy removed: a daemon or TUI start is refused with "engines is used only as committed: commit .kodel/config.yaml or put the block back as it was", and `agent start` shows the difference and asks; a config that `HEAD` does not hold and git does not track, or no git: `worker:` is honoured and one line says so, `terminal.command` refuses a daemon or TUI start and is asked at `agent start`; a project root that is a subfolder of the git top level is found by its path from the top; `HEAD` is read once per start, inside the start lock; a commit a worker made on its run's branch changes nothing, one on the checkout's own branch does (the stated limit); git itself fails (not found, `safe.directory`, a locked index): a daemon or TUI start is refused with git's reason, `agent start` asks | `t45_engines_block_is_read_from_head` (a table), `t45_engines_head_reader_failure_refuses` |
-| A profile named `claude` with a step `command`: the worker's program is the profile's own `claude` (or `terminal.command[0]`), never the step command; an engine step still uses the step command | `t45_step_command_is_not_the_workers_program` (`cli/test/agent-profiles.test.ts`) |
-| The block parses (`worker`, `terminal.command`); a misspelled key or value is named; the committed fixture configs load unchanged; a schema without the keys answers `unknown key`; a profile without a step `command` refuses a step; the server's instructions and AGENTS.md name `engines` as the person's | `t42_worker_and_terminal_keys_parse`, `t42_present_engine_configs_still_load`, `t42_profile_without_step_command_is_refused_for_a_step` (`local/test/config-engines.test.ts`), `t45_instructions_name_engines` |
-| `prune` never removes: a live record; an unreadable, foreign or newer one; a `kw-` or `ke-` record whose run is open or cannot be read; a record younger than `--older-than` | `t45_prune_keeps_live`, `…_keeps_unreadable`, `…_keeps_open_run`, `…_keeps_unknown_run`, `…_keeps_younger_than_the_bound` (`cli/test/agent-prune.test.ts`, as the next) |
-| A record whose child still runs is kept; one that goes live between the re-read and the removal is kept by `remove` itself (`STILL_RUNNING`); a prune during a resume never removes the record a name marker is moving to | `t45_prune_keeps_a_record_whose_child_runs`, `t45_prune_remove_refuses_a_live_record`, `t45_prune_during_a_resume` |
-| It asks once with the count; `--dry-run` removes nothing; a host name marker stays and a `cli` one is freed with its record; a record that went live after the listing is skipped | `t45_prune_confirms_once`, `t45_prune_frees_cli_names_and_keeps_host_markers`, `t45_prune_reads_again_before_each_removal` |
-| `doctor`, one test per check: `t45_doctor_platform`, `_terminal_can_run`, `_claude_found_version_signed_in`, `_trust`, `_decisions_dialog_and_agent`, `_engines_block_and_head`, `_worker_can_start` (the verdict); it writes nothing (its own files and claude's files byte-equal), reads a malformed `~/.claude.json` as "unknown", prints yes, no or unknown and no probe output, exits 1 only when a worker cannot start | those seven, `t45_doctor_writes_nothing`, `t45_doctor_malformed_engine_files_are_unknown`, `t45_doctor_prints_no_account_data` (`cli/test/agent-doctor.test.ts`) |
-| The human-only walk knows `agent start`, `agent prune` and `exec --attach`; `agent doctor` is not human-only: it runs with `KODEL_ENGINE` set and no terminal, and the walk lists it as the agent's | the walk in `cli/test/agent.test.ts`, extended; `t45_doctor_runs_for_an_agent` (`cli/test/agent-doctor.test.ts`) |
-| The docs agree with the code: the human-only commands AGENTS.md lists are the registry's; AGENTS.md and the server's instructions name `engines` as the person's; `docs/changes.md` holds the migration line, the same constant the refusal prints | `t45_agents_md_lists_the_registrys_human_only_commands`, `t45_changes_doc_spells_the_migration_line` (`cli/test/docs.test.ts`) |
-| Real agent (skipped without `KODEL_AGENT_TESTS` or a PTY; it prints its version; the project is made inside the trusted checkout): two gates in a row with `decisions.agent.gate` and `.pipeline_change` on; the worker stays `running`; told to approve with the tool, then told to run `kodel gate <run> approve` and `env X=1 kodel gate …` in its shell, the gate stays undecided each time; a person's decision makes it go on in the same session, twice; the run completes and the session is stopped | `t45_real_claude_terminal_worker_cannot_decide_its_gate` (`tests/agents/terminal-worker.test.ts`) |
+| `terminal.command` is `[<program>, then pairs of an allowed flag and its value]` (`--flag value` or `--flag=value`): element 0 is the program (a wrapper there is the person's committed choice, and the group rule above covers it); a bare word after it, a value that begins with `-`, any other flag, also in a short form, are refused by name; before the start the built argv is read back by the profile and every element must be the program, one of kodel's own fixed elements, or an allowed pair | `t47_engines_terminal_override`, `t47_engines_terminal_allows_only_listed_flags`, `t47_final_argv_is_checked` |
+| Only the `engines` block is compared with `HEAD` of the checkout: equal: used; a `serve` edit beside it: still used; a working-copy edit, a staged-only edit, a block in `HEAD` that the working copy removed: a daemon or TUI start is refused with "engines is used only as committed: commit .kodel/config.yaml or put the block back as it was", and `agent start` shows the difference and asks; a config that `HEAD` does not hold and git does not track, or no git: `worker:` is honoured and one line says so, `terminal.command` refuses a daemon or TUI start and is asked at `agent start`; a project root that is a subfolder of the git top level is found by its path from the top; `HEAD` is read once per start, inside the start lock; a commit a worker made on its run's branch changes nothing, one on the checkout's own branch does (the stated limit); git itself fails (not found, `safe.directory`, a locked index): a daemon or TUI start is refused with git's reason, `agent start` asks | `t47_engines_block_is_read_from_head` (a table), `t47_engines_head_reader_failure_refuses` |
+| A profile named `claude` with a step `command`: the worker's program is the profile's own `claude` (or `terminal.command[0]`), never the step command; an engine step still uses the step command | `t47_step_command_is_not_the_workers_program` (`cli/test/agent-profiles.test.ts`) |
+| The block parses (`worker`, `terminal.command`); a misspelled key or value is named; the committed fixture configs load unchanged; a schema without the keys answers `unknown key`; a profile without a step `command` refuses a step; the server's instructions and AGENTS.md name `engines` as the person's | `t42_worker_and_terminal_keys_parse`, `t42_present_engine_configs_still_load`, `t42_profile_without_step_command_is_refused_for_a_step` (`local/test/config-engines.test.ts`), `t47_instructions_name_engines` |
+| `prune` never removes: a live record; an unreadable, foreign or newer one; a `kw-` or `ke-` record whose run is open or cannot be read; a record younger than `--older-than` | `t47_prune_keeps_live`, `…_keeps_unreadable`, `…_keeps_open_run`, `…_keeps_unknown_run`, `…_keeps_younger_than_the_bound` (`cli/test/agent-prune.test.ts`, as the next) |
+| A record whose child still runs is kept; one that goes live between the re-read and the removal is kept by `remove` itself (`STILL_RUNNING`); a prune during a resume never removes the record a name marker is moving to | `t47_prune_keeps_a_record_whose_child_runs`, `t47_prune_remove_refuses_a_live_record`, `t47_prune_during_a_resume` |
+| It asks once with the count; `--dry-run` removes nothing; a host name marker stays and a `cli` one is freed with its record; a record that went live after the listing is skipped | `t47_prune_confirms_once`, `t47_prune_frees_cli_names_and_keeps_host_markers`, `t47_prune_reads_again_before_each_removal` |
+| `doctor`, one test per check: `t47_doctor_platform`, `_terminal_can_run`, `_claude_found_version_signed_in`, `_trust`, `_decisions_dialog_and_agent`, `_engines_block_and_head`, `_worker_can_start` (the verdict); it writes nothing (its own files and claude's files byte-equal), reads a malformed `~/.claude.json` as "unknown", prints yes, no or unknown and no probe output, exits 1 only when a worker cannot start | those seven, `t47_doctor_writes_nothing`, `t47_doctor_malformed_engine_files_are_unknown`, `t47_doctor_prints_no_account_data` (`cli/test/agent-doctor.test.ts`) |
+| The human-only walk knows `agent start`, `agent prune` and `exec --attach`; `agent doctor` is not human-only: it runs with `KODEL_ENGINE` set and no terminal, and the walk lists it as the agent's | the walk in `cli/test/agent.test.ts`, extended; `t47_doctor_runs_for_an_agent` (`cli/test/agent-doctor.test.ts`) |
+| The docs agree with the code: the human-only commands AGENTS.md lists are the registry's; AGENTS.md and the server's instructions name `engines` as the person's; `docs/changes.md` holds the migration line, the same constant the refusal prints | `t47_agents_md_lists_the_registrys_human_only_commands`, `t47_changes_doc_spells_the_migration_line` (`cli/test/docs.test.ts`) |
+| Real agent (skipped without `KODEL_AGENT_TESTS` or a PTY; it prints its version; the project is made inside the trusted checkout): two gates in a row with `decisions.agent.gate` and `.pipeline_change` on; the worker stays `running`; told to approve with the tool, then told to run `kodel gate <run> approve` and `env X=1 kodel gate …` in its shell, the gate stays undecided each time; a person's decision makes it go on in the same session, twice; the run completes and the session is stopped | `t47_real_claude_terminal_worker_cannot_decide_its_gate` (`tests/agents/terminal-worker.test.ts`) |
 
 Tests that exist and change, because the default changes and T-44's text does (none is deleted; a test keeps
 its meaning or the decision is revisited):
@@ -424,11 +424,11 @@ its meaning or the decision is revisited):
   those that count workers against `max_workers` are read again against the revised text, and each either
   holds as it is (a `-p` worker exits at a wait, so "working" and "alive" are equal for it) or is listed in
   the pull request with the line of T-44 it now asserts.
-- `t45_default_is_terminal_only_after_the_rule` (`cli/test/worker-launcher.test.ts`) is the last test to go
+- `t47_default_is_terminal_only_after_the_rule` (`cli/test/worker-launcher.test.ts`) is the last test to go
   green (step 8): the absent key means `terminal`.
 
 Which tests answer which task: TASK-K6MA is closed by `tA_exec_attach_*`; TASK-DSKQ by `tA_agent_record_*`,
-`tA_agent_ls_lists_mode_and_agent`, `t45_resume_keeps_the_name_and_links_the_old_record`, `t45_resume_refusals`
+`tA_agent_ls_lists_mode_and_agent`, `t47_resume_keeps_the_name_and_links_the_old_record`, `t47_resume_refusals`
 and the marker tests; the rest is TASK-EKAV. The one thing the spike may answer either way (do conversations
 cross modes) is a capability field of the profile, and each value has its row, so the tests hold whichever
 way it comes out; so does what a stopped session writes (`idleWrites`, criterion 7). Every other criterion
@@ -447,7 +447,7 @@ started gives the notice with the command; `bun packages/cli/src/main.ts tui` re
 `s` with the Bun reason, and starts a `-p` worker after `worker: print` is committed; `worker: terminal` on a
 profile named `codex` is refused with the follow-up message.
 
-Refutation of T-45: with `worker: terminal`, a worker started by the TUI or the daemon is not attachable, or a
+Refutation of T-47: with `worker: terminal`, a worker started by the TUI or the daemon is not attachable, or a
 `-p` worker is started instead; a worker decides its own gate; after a detach or an ended agent the TUI is not
 where it was, or the terminal is broken; kodel types into a session; a decided run with a live worker neither
 goes on nor is reported within 2 minutes; a run left at a gate by a reboot is not resumed after the decision;
@@ -504,7 +504,7 @@ there, else on your machine before a release (`tests/README.md`).
        <artifact> gate` are each refused (by the deny list or by the guard of step 6a; the note says which).
 
    If one fails (the plan comes back to you with this, nothing is decided by me): 1 or 6: unattended starts
-   stay blocked by the probe and only a person's `s` starts a terminal worker (`t45_preflight_blocks_*`
+   stay blocked by the probe and only a person's `s` starts a terminal worker (`t47_preflight_blocks_*`
    already holds; `docs/serve.md` says so). 2, 3 or 4: no terminal worker can be made safe; the run stops.
    5: the wait in the foreground of step 13 is the only other way and it is not in this run; the run stops.
    8: neither the daemon's resume of a terminal worker nor `agent start --resume` can be built (both rest on
@@ -561,7 +561,7 @@ there, else on your machine before a release (`tests/README.md`).
    - interactive, with a prompt: `claude … -- "<prompt>\n"`: the prompt always ends with a newline and comes
      after `--`, because a one-word prompt that names a subcommand (`doctor`, `mcp`) is otherwise run as that
      subcommand (spike criterion 3, `spikes/ekav-m0/NOTE.md`; the person chose this fix); test
-     `t45_profile_prompt_cannot_name_a_subcommand` pins the argv for `doctor`, `mcp` and a sentence;
+     `t47_profile_prompt_cannot_name_a_subcommand` pins the argv for `doctor`, `mcp` and a sentence;
    - the id of the conversation: chosen, `--session-id <uuid>`; resume: `--resume <id>`;
    - our kodel server: `--mcp-config <json> --strict-mcp-config`;
    - never ask: `--permission-mode dontAsk`, with the allow list and the deny list (decision tools and
@@ -587,7 +587,7 @@ there, else on your machine before a release (`tests/README.md`).
    **Through steps 6 and 7 an absent key still means `print`** and only an explicit `worker: terminal`
    starts a terminal worker: with today's rule a live worker at a gate would hold a `max_workers` place and
    be called stalled, and a `lost` one would be `dead` and could get a second agent. The absent key becomes
-   `terminal` in the last commit of step 8, with `t45_default_is_terminal_only_after_the_rule`; steps 6, 7
+   `terminal` in the last commit of step 8, with `t47_default_is_terminal_only_after_the_rule`; steps 6, 7
    and 8 are merged together or not at all. `terminal`: `mode: "pty"`, `agent`, a first size (the starter's terminal, else
    120x40), `WORKER_TERMINAL_TIMEOUT_MS` (7 days). `preflight` refuses when the mechanism cannot run
    (`probePty`'s reason), when `claude` is not found or not signed in, and
@@ -680,7 +680,7 @@ there, else on your machine before a release (`tests/README.md`).
     session had no task tools, so it is for you to file, "Decisions needed" 1), the automatic wake-up, a group
     kill on a session's timeout (until then a `kodel wait` of a session killed by its 7-day timeout lives on
     to its own end). `docs/changes.md` gets the migration note of decision 1; `docs/serve.md` the section
-    "T-44 as revised by T-45", what `stalled` means for a terminal worker, and that a live worker keeps the
+    "T-44 as revised by T-47", what `stalled` means for a terminal worker, and that a live worker keeps the
     server of the build that started it; `docs/decisions.md` the three guards of a person's command and
     what stays open. Each step ends with its own tests green before the next begins; steps 2-5 gate 6;
     6, 6a, 7 and 8 land together (the default changes last, step 8) and gate 9 and 10.
@@ -936,18 +936,18 @@ Steps 2 and 3 (the agent record, the group rule, the wait command):
   after the host has kept what it keeps (`served/`), so the command and its paths reach no file of the run
   and no rule of the project can change it. The host does not redact the answer it hands to the agent
   today, and the project's rules are an option of the host, not of `kodel mcp`; the redaction test
-  (`t45_wait_command_is_not_changed_by_redaction`, `packages/local/test/wait-command.test.ts`) therefore
+  (`t47_wait_command_is_not_changed_by_redaction`, `packages/local/test/wait-command.test.ts`) therefore
   runs the real host with rules that match the command.
 - **Left to later steps because they need them:** the hint of `agent ls` for a stopped session that can be
   resumed (the command it names, `agent start --resume`, is step 10's); the id of a conversation taken from
   the `agent` record by the launcher, with the argv reader as the fallback and the fixture
-  `worker-print-before-t45/` (step 6; `sessionIdOf` is untouched, `parseEntry` now keeps `agent`); the
+  `worker-print-before-t47/` (step 6; `sessionIdOf` is untouched, `parseEntry` now keeps `agent`); the
   launcher's half of the wait command (the spec's environment, the preflight refusal through
   `waitCommandProblem`, `workerDenylist(…, { terminal: true })`, step 6); the real-PTY rows
-  `t45_real_orphan_behind_a_wrapper_is_not_doubled` and `t45_real_stop_ends_an_agent_behind_a_dead_wrapper`
+  `t47_real_orphan_behind_a_wrapper_is_not_doubled` and `t47_real_stop_ends_an_agent_behind_a_dead_wrapper`
   (`tests/pty/worker-terminal.test.ts`, steps 6 and 11; until then the same is shown on real processes of a
   pipes session by `tA_real_group_orphan_is_seen_and_stopped`); `tA_terminal_tail_*` (step 11).
-- **`t45_wait_command_finds_the_run_under_a_state_dir`** builds the artifact itself, as the fork test of the
+- **`t47_wait_command_finds_the_run_under_a_state_dir`** builds the artifact itself, as the fork test of the
   same folder does. It was first written without being run on the built file; the review fixes ran it
   there (see "After the review" below).
 
@@ -958,21 +958,21 @@ Steps 4 and 5 (the profile, the config):
   the config's schema lives there. The `claude` entry takes its `terminalFlags` from that list, so there is
   one list; the follow-up task adds a name to it and an entry to the table.
 - **The terminal argv has the prompt last** (`claude <flags> -- "<prompt>\n"`), as step 4 says after the
-  spike; the test row "prompt first" of `t45_claude_terminal_argv` is older than that and the test pins the
+  spike; the test row "prompt first" of `t47_claude_terminal_argv` is older than that and the test pins the
   new order. One thing follows for step 6: the reader of an id from a record's argv (`sessionIdOf`) takes
   the last `--session-id`, which was safe while the prompt (with the task's title) came before the flags.
   A terminal record always has its `agent` record, so its argv must never be read for the id.
 - **The launcher is not moved onto the profile yet** (step 6): `worker-launcher-session.ts` still calls the
   functions of `claude-worker.ts`. The entry (`claudeProfile`) wraps those same functions, and
   `workerMechanismOf`, `workerProgramOf` and `profile.workerArgvProblem` (the read-back of
-  `t45_final_argv_is_checked`) are there for it. `DEFAULT_WORKER_MECHANISM` is `"print"`; step 8 turns it,
-  and `t45_default_is_terminal_only_after_the_rule` (`cli/test/worker-launcher.test.ts`) is the test
+  `t47_final_argv_is_checked`) are there for it. `DEFAULT_WORKER_MECHANISM` is `"print"`; step 8 turns it,
+  and `t47_default_is_terminal_only_after_the_rule` (`cli/test/worker-launcher.test.ts`) is the test
   to change with it.
-- **`t45_every_human_only_command_is_denied` is not written here:** it is a table from the registry of
+- **`t47_every_human_only_command_is_denied` is not written here:** it is a table from the registry of
   human-only commands, which steps 6a and 10 make (today only the `agent` ones are a list). The two other
   list rows are in `cli/test/agent-profiles.test.ts`.
 - **`Write(<path>)` deny rules are kept** (the print spec stays byte-equal to today's) and every one has its
-  `Edit(<path>)` twin, which is the rule claude 2.1.330 honours (`t45_every_denied_path_has_an_edit_rule`).
+  `Edit(<path>)` twin, which is the rule claude 2.1.330 honours (`t47_every_denied_path_has_an_edit_rule`).
   A terminal worker will print claude's warning for each `Write` rule above its prompt; dropping them for
   the terminal list is a one-line change of `workerDenylist` if that is unwanted.
 - **The block as committed** is `enginesAgainstHead` (`packages/local/src/engines-head.ts`; one read of
@@ -994,26 +994,26 @@ Steps 6, 6a, 7 and 8 (the launcher, the guard, the serve rule, the daemon):
   `resumeStopped` and offers `s resumes`. A worker stopped outside a wait, and a stopped print worker, stay
   `dead` as before (no note: a person's stop is never one).
 - **The real-PTY rows are not written here** (`tests/pty/worker-terminal.test.ts`:
-  `t45_real_worker_shell_cannot_decide`, `t45_real_orphan_is_not_doubled`,
-  `t45_real_holder_and_agent_gone_at_a_wait_is_resumed`, `t45_real_orphan_behind_a_wrapper_is_not_doubled`,
-  `t45_real_stop_ends_an_agent_behind_a_dead_wrapper`, `t45_real_terminal_worker_attach_detach_finish`):
+  `t47_real_worker_shell_cannot_decide`, `t47_real_orphan_is_not_doubled`,
+  `t47_real_holder_and_agent_gone_at_a_wait_is_resumed`, `t47_real_orphan_behind_a_wrapper_is_not_doubled`,
+  `t47_real_stop_ends_an_agent_behind_a_dead_wrapper`, `t47_real_terminal_worker_attach_detach_finish`):
   they need the built artifact and the scripted fake terminal agent of step 11, and the implementation
-  steps do not build. Until then the same rules are shown offline (`t45_persons_commands_refuse_inside_a_session`
+  steps do not build. Until then the same rules are shown offline (`t47_persons_commands_refuse_inside_a_session`
   with the real probe on a fake table, `t44_child_alive_*`, `t44_worker_lost_at_a_gate_is_resumed_once_after_the_decision`,
-  `t45_finish_of_a_stopped_session_is_harmless`) and on real processes of a pipes session
+  `t47_finish_of_a_stopped_session_is_harmless`) and on real processes of a pipes session
   (`t44_serve_real_adapter_notes_a_killed_holder`, now read against the revised rule: `child_alive` and no
   note while the process runs, the note within one cycle of its end).
 - **Halves of rows that wait for step 10** (`kodel agent start` does not exist yet):
-  `t45_every_starter_builds_the_same_spec` compares the TUI's start with the daemon's port (the third
-  starter, `agent start --pipeline`, joins it there); `t45_engine_choice_is_not_built` pins
+  `t47_every_starter_builds_the_same_spec` compares the TUI's start with the daemon's port (the third
+  starter, `agent start --pipeline`, joins it there); `t47_engine_choice_is_not_built` pins
   `serve.start[].engine` as an unknown key (`agent start --engine` comes with the command);
-  `t45_dialog_still_refuses_every_worker` covers the launcher's preflight, with and without a task
-  (`noTask`). `t45_every_human_only_command_is_denied` is written (`cli/test/agent-profiles.test.ts`) over
+  `t47_dialog_still_refuses_every_worker` covers the launcher's preflight, with and without a task
+  (`noTask`). `t47_every_human_only_command_is_denied` is written (`cli/test/agent-profiles.test.ts`) over
   the registry `HUMAN_ONLY_COMMANDS` (`packages/cli/src/human-only.ts`); step 10 adds `agent start` and
   `agent prune` to `AGENT_HUMAN_COMMANDS`, and the row of `cli/test/human-only.test.ts` then asks for
   their arguments. `tui` asks for a person through the same `requireHuman` and is not in the registry: it
   is a screen, not a decision, and no deny pattern is written against the word.
-- **The fixture `fixtures/session-formats/v1/worker-print-before-t45/` is taken from a real holder of the
+- **The fixture `fixtures/session-formats/v1/worker-print-before-t47/` is taken from a real holder of the
   build before the change** (it was first composed by hand; the review sent that back). How: the source of
   commit d055fd6 was put in a scratch folder (`git archive d055fd6 | tar -x`, `bun install
   --frozen-lockfile`), and a script there made that build's `createSessionWorkerLauncher` over its
@@ -1058,8 +1058,9 @@ Steps 6, 6a, 7 and 8 (the launcher, the guard, the serve rule, the daemon):
 - **`counts.alive`** counts a record that cannot be read too (it holds a worker place: fail closed), so
   `alive` is never less than `workers`. The fixture `fixtures/serve-formats/v1/serve-alive.json` was
   written by `acquireServeRecord` and `writeCycle`; `serve.json` stays as a record from before the field.
-- **`t45_no_resume_for_a_worker_that_went_on` is in `local/test/serve-daemon.test.ts`**, whose test names
-  must carry `t44`: its name has both.
+- **`t47_no_resume_for_a_worker_that_went_on` is in `local/test/serve-daemon.test.ts`**, whose test names
+  must carry `t44`: its name has both. (After the merge of `main` the check wants the prefix of a decision of
+  `docs/serve.md` followed by `_`, so the name ends `(t44_resume_reads_again_under_the_lock)`.)
 - **The default is `terminal` from the last commit.** The tests that build `claude -p` say `worker: print`
   (the `deps` helper and the real-adapter rows of `cli/test/worker-launcher.test.ts`, the config and the
   launcher of `cli/test/serve.test.ts`, `tests/agents/claude-code-worker.test.ts`,
@@ -1073,8 +1074,8 @@ Steps 6, 6a, 7 and 8 (the launcher, the guard, the serve rule, the daemon):
 Step 9 (the TUI):
 
 - **The real-PTY rows of the TUI are written and were not run** (`tests/pty/worker-terminal.test.ts`:
-  `t45_real_tui_returns_to_the_same_place`, `t45_real_tui_returns_when_the_agent_ends`,
-  `t45_real_tui_survives_a_double_detach_chord`, `t45_real_tui_resize_while_attached_reaches_the_agent`):
+  `t47_real_tui_returns_to_the_same_place`, `t47_real_tui_returns_when_the_agent_ends`,
+  `t47_real_tui_survives_a_double_detach_chord`, `t47_real_tui_resize_while_attached_reaches_the_agent`):
   they need the built artifact, and the implementation steps do not build. Here they skip with `no built
   artifact`. The handover of a real terminal from the TUI to a child (the last line of "Not verified
   here") is therefore still shown by nothing but these four; run them after a build, outside the sandbox.
@@ -1161,22 +1162,22 @@ Steps 10 and 11 (the commands, the tests):
   runs `ls -a`), with `--pty` too (`tA_exec_attach_starts_then_attaches`).
 - **AGENTS.md is changed in step 10** (the two lists of the person's commands, and `agent doctor` among
   what only reads), because `tA_agents_md_lists_attach` and the new
-  `t45_agents_md_lists_the_registrys_human_only_commands` hold it to the registry. The rest of step 12's
-  text is not written. **`t44_docs_carry_the_revised_text` and `t45_changes_doc_spells_the_migration_line`
+  `t47_agents_md_lists_the_registrys_human_only_commands` hold it to the registry. The rest of step 12's
+  text is not written. **`t44_docs_carry_the_revised_text` and `t47_changes_doc_spells_the_migration_line`
   are left to step 12**: they assert text that step writes (`docs/serve.md` still has the old line).
 - **`launchRun` is the launch half shared by `s` and `agent start --pipeline`** (`tui/worker-start.ts`). A
   run with no task whose text is the text of a run that is going is not made twice: the command says so
   (`a run with this very task is already going`).
-- **`t45_worker_server_serves_no_decision_tool` is written here** (`cli/test/mcp-no-decisions.test.ts`):
+- **`t47_worker_server_serves_no_decision_tool` is written here** (`cli/test/mcp-no-decisions.test.ts`):
   step 6 left it out.
 - **The step-9 pipeline of `tests/pty/worker-terminal.test.ts` did not load** (a human step with no edge
   for `rejected`); the edge is added. Those four rows were never run, and are still not.
 - **Written and not run** (they need the built artifact, a PTY, or the real `claude`; typecheck only):
-  `tests/pty/worker-terminal.test.ts` (`t45_real_terminal_worker_attach_detach_finish`,
-  `t45_real_worker_shell_cannot_decide`, `t45_real_orphan_is_not_doubled`,
-  `t45_real_holder_and_agent_gone_at_a_wait_is_resumed`, `t45_real_orphan_behind_a_wrapper_is_not_doubled`,
-  `t45_real_stop_ends_an_agent_behind_a_dead_wrapper`), `tA_exec_attach_real_terminal`
-  (`tests/pty/pty-session.test.ts`) and `t45_real_claude_terminal_worker_cannot_decide_its_gate`
+  `tests/pty/worker-terminal.test.ts` (`t47_real_terminal_worker_attach_detach_finish`,
+  `t47_real_worker_shell_cannot_decide`, `t47_real_orphan_is_not_doubled`,
+  `t47_real_holder_and_agent_gone_at_a_wait_is_resumed`, `t47_real_orphan_behind_a_wrapper_is_not_doubled`,
+  `t47_real_stop_ends_an_agent_behind_a_dead_wrapper`), `tA_exec_attach_real_terminal`
+  (`tests/pty/pty-session.test.ts`) and `t47_real_claude_terminal_worker_cannot_decide_its_gate`
   (`tests/agents/terminal-worker.test.ts`). Run them after `bun run build`, outside the sandbox. In the
   real-PTY rows the resume after a decision is asked of the launcher (`launcher.resume`), which is what
   the daemon and the TUI call under the start lock; the rule that decides to ask is tested offline
@@ -1214,7 +1215,7 @@ The fix of the guard (step 6a), after steps 10 and 11:
   shell commands remain; Claude Code ends when its terminal hangs up (spike criterion 10).
 - **Tests:** `tA_inside_session_probe_knows_a_holder_of_another_state_base` (a fake table, no records; a
   person's command that only names the marker in its own arguments is outside) and
-  `t45_session_guard_finds_a_session_of_another_state_base` (`cli/test/human-only.test.ts`: a real session
+  `t47_session_guard_finds_a_session_of_another_state_base` (`cli/test/human-only.test.ts`: a real session
   of the real adapter under a state base of its own, whose child runs `env -u KODEL_ENGINE <kodel> gate`
   with a home folder that holds no state: refused with the session's words). The second reads the real
   process table and is skipped where that cannot be read (a sandbox); it was run outside one and passed.
@@ -1228,13 +1229,13 @@ Steps 12 and 13 (the docs, the follow-up):
 - **`docs/engines.md` is the page of engine steps**, which are off; the part about a background agent
   (`worker`, `terminal`) is a section of its own there and says that it is on. `docs/changes.md` is the page
   of the patches; the migration note of decision 1 is its last section, where the plan and
-  `t45_changes_doc_spells_the_migration_line` put it.
+  `t47_changes_doc_spells_the_migration_line` put it.
 - **`t44_docs_carry_the_revised_text`** reads the plan's row as: the section "Decision T-44" holds the
-  revised lines and none of the old ones; the section "T-44 as revised by T-45" keeps the old ones with what
+  revised lines and none of the old ones; the section "T-44 as revised by T-47" keeps the old ones with what
   replaced each and why; no other test file names an old line. A third docs test was added,
-  `t45_docs_name_the_guards_and_the_two_kinds_of_worker` (the refusal of the guard as printed, `kodel mcp`
+  `t47_docs_name_the_guards_and_the_two_kinds_of_worker` (the refusal of the guard as printed, `kodel mcp`
   by hand as accepted, a fork worker and a background agent in AGENTS.md).
-- **The decision log is the person's local note**: the entries T-45 and "T-44 as revised" are theirs to add;
+- **The decision log is the person's local note**: the entries T-47 and "T-44 as revised" are theirs to add;
   `docs/decisions.md` and `docs/serve.md` hold the English text.
 - **No task was created or closed in the tracker** (the brief of this step says so). They are listed below
   for the person.
@@ -1245,12 +1246,30 @@ Steps 12 and 13 (the docs, the follow-up):
   (only a git worktree of the trusted root did not). The scenario was never run; `tests/README.md` says to
   accept trust once for that folder if it stops there.
 
+### The merge of `main` and the decision's number
+
+- **The decision is T-47, not T-45.** `main` took T-45 (run attachments, task links) and T-46 (the base
+  start order of `kodel serve`) while this run was going, so the person renumbered this run's decision:
+  every `T-45` and `t45_…` of this plan, its tests, docs and comments reads `T-47` and `t47_…` now, and the
+  fixture folder is `fixtures/session-formats/v1/worker-print-before-t47/`. The `T-45`, `T-46`, `t45_…` and
+  `t46_…` that remain in the repository are `main`'s.
+- **Where the plan and `main` met, `main`'s shape was kept and this run's was added to it.** `StartCheck`
+  carries `main`'s `warning` (the task's links) beside this run's `note` and `reason`; `withStartReady`
+  keeps `main`'s fifth parameter (`warning`) and takes the preflight's `note` as a sixth, so the two rows of
+  `tui-worker.test.ts` that pass a note pass `undefined` before it; the start question shows the warning
+  above the question and the note under it. `kodel serve --status` lists this run's counts and stalled
+  workers, then `main`'s two queues and blocked tasks. The daemon's read of the runs answers `main`'s
+  `unreadableOpen` beside this run's cleanup of the journals it keeps for live workers. The refutation list
+  of T-44 in `docs/serve.md` is this run's revised one with `main`'s clause about links on its approval line.
+- **The pipeline's `test` step** takes `main`'s numbers (`timeout: 1800`, `expected_duration: 1100`), not the
+  1500 accepted during this run: the person agreed.
+
 ## Follow-up tasks (for the person to file; none is in the tracker)
 
 1. **Close TASK-K6MA** (`agent exec --pty --attach`; `tA_exec_attach_*`) **and TASK-DSKQ** (the stored id of
    an agent's conversation, `agent ls`, `agent start --resume`; `tA_agent_record_*`,
-   `tA_agent_ls_lists_mode_and_agent`, `t45_resume_keeps_the_name_and_links_the_old_record`,
-   `t45_resume_refusals`, the marker tests) once this run is merged.
+   `tA_agent_ls_lists_mode_and_agent`, `t47_resume_keeps_the_name_and_links_the_old_record`,
+   `t47_resume_refusals`, the marker tests) once this run is merged.
 2. **"Codex and opencode as engines (profiles, worker and agent start, their safety criteria)"**: the text
    of step 13 above is the task's body, as it stands (profiles and lifting the refusal of decision 2; a
    spike per engine with safety criteria; the rules that were codex's; an id that cannot be chosen and a
@@ -1271,7 +1290,7 @@ After the review (the three blocking findings and the cheap minor ones):
   `terminal.command` only when the `engines` block is the committed one; for a block that differs, has no
   committed version or cannot be compared, the program is looked up and named, its version is `unknown
   (<program> is not run: …)`, and the sign-in probe (always the profile's own `claude`) runs only when
-  `claude` is on `PATH`. `t45_doctor_never_runs_an_uncommitted_terminal_command`.
+  `claude` is on `PATH`. `t47_doctor_never_runs_an_uncommitted_terminal_command`.
 - **The tests that had not been run were run on the built file, outside the sandbox**
   (`KODEL_REQUIRE_PTY=1`): `tests/pty/worker-terminal.test.ts`, `tests/pty/pty-session.test.ts`,
   `tests/pty/attach-client.test.ts`, `tests/e2e/wait-command.test.ts`. One defect was in the test, not in
@@ -1284,7 +1303,7 @@ After the review (the three blocking findings and the cheap minor ones):
   instruction when `claude` asks. It passed in the folder the person had trusted for the spike. Known and
   left: `trustProbe` answers `trusted` for such a nested repository (a folder above it is trusted) while
   `claude` asks; a run's worktree, which is what a worker starts in, is a git worktree and does inherit.
-- **The fixture `worker-print-before-t45/`** is now taken from the build before the change (above).
+- **The fixture `worker-print-before-t47/`** is now taken from the build before the change (above).
 - **Minor:** `sessionIdOf` of the argv reader takes no tail; the plain `agent start` gives its session the
   environment a worker gets (no `CLAUDECODE`, `CLAUDE_CODE_*`); `exec -a` (above); AGENTS.md says when
   `agent start` asks; the daemon drops the kept journal read of a run that left its list (no test: the map
@@ -1304,8 +1323,8 @@ After the person tried it by hand (the final gate, five comments):
   run (only the committed program) and the exit code are as before; the notes above that say "ten lines"
   and quote `check: yes (detail)` describe the older wording. `decisions.agent` on is still a `✗` (the
   check is "off"), and its line says that nothing stops a worker. Tests:
-  `t45_doctor_marks_every_check_and_says_what_to_do`, `t45_doctor_verdict_stands_apart`,
-  `t45_doctor_colours_only_a_terminal_without_no_color`, `t45_doctor_value_cannot_fake_a_line_or_a_colour`,
+  `t47_doctor_marks_every_check_and_says_what_to_do`, `t47_doctor_verdict_stands_apart`,
+  `t47_doctor_colours_only_a_terminal_without_no_color`, `t47_doctor_value_cannot_fake_a_line_or_a_colour`,
   and the older rows read the new lines.
 - **`kodel agent ls` is `ID NAME STATE MODE AGENT CONVERSATION`.** `AGENT` is the engine, `CONVERSATION`
   the id of its conversation (whole for a UUID, cut at 36 characters for a longer id). The `COMMAND` column
@@ -1322,8 +1341,8 @@ After the person tried it by hand (the final gate, five comments):
 - **A terminal worker's deny list has no `Write(...)` rule** (the one-line change the note of steps 4 and 5
   left open): its paths are denied with `Edit(<path>)` alone, so claude prints no "never matches" warning
   above the prompt. The print list keeps both, and the print spec stays what it was. A plain `kodel agent
-  start` passes no deny list at all, so it had no such rule. `t45_terminal_worker_list_has_no_write_rule`;
-  `t45_every_denied_path_has_an_edit_rule` no longer asks for a `Write` rule.
+  start` passes no deny list at all, so it had no such rule. `t47_terminal_worker_list_has_no_write_rule`;
+  `t47_every_denied_path_has_an_edit_rule` no longer asks for a `Write` rule.
 - **`o` shows no shell.** The TUI no longer leaves its alternate screen when it gives the terminal away: it
   switches its own modes off, clears the screen and writes `opening <name>…` (`handoverScreen`). The child
   is `kodel agent attach <id> --keep-screen` (a hidden option; `AttachClientOptions.keepScreen`): it clears
@@ -1338,8 +1357,8 @@ After the person tried it by hand (the final gate, five comments):
   are as they were. The cost, said in `docs/tasks.md`: no terminal scrollback of the agent's output while
   it is opened from the TUI. Tests: the rows of `cli/test/tui-run.test.ts` (the alternate screen is left
   exactly once, at the end, on every path), `tA_attach_client_keeps_the_screen_of_its_starter`,
-  `tA_screen_switch_filter`, `t45_agent_attach_keep_screen_reaches_the_client`; on a real terminal, run on
+  `tA_screen_switch_filter`, `t47_agent_attach_keep_screen_reaches_the_client`; on a real terminal, run on
   the built file outside the sandbox: the four TUI rows of `tests/pty/worker-terminal.test.ts` (from `o`
   to the redraw no `ESC[?1049l` and no line of the client), the new
-  `t45_real_tui_keeps_its_screen_when_the_agent_switches_screens`, and
+  `t47_real_tui_keeps_its_screen_when_the_agent_switches_screens`, and
   `tA_attach_client_keep_screen_leaves_the_terminal_clean` (`tests/pty/attach-client.test.ts`).

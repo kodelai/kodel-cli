@@ -2049,7 +2049,7 @@ function countingHost(host: LocalPipelineHost) {
 
 const finishes = (launcher: ScriptedLauncher) => launcher.calls.filter((c) => c.kind === "finish");
 
-describe("kodel serve with workers that stay alive at a wait (T-45)", () => {
+describe("kodel serve with workers that stay alive at a wait (T-47)", () => {
   test("t44_daemon_reads_live_runs_sparingly", async () => {
     await project({
       serve: ["serve:", "  enabled: true", "  max_runs: 3", "  start:", "    - pipeline: gated"],
@@ -2206,8 +2206,9 @@ describe("kodel serve with workers that stay alive at a wait (T-45)", () => {
     expect(finishes(print)).toEqual([]);
   });
 
-  // The serve files carry t44 in every test name; this row is T-45's (the resume under the start lock).
-  test("t45_no_resume_for_a_worker_that_went_on (t44: the resume reads again under the lock)", async () => {
+  // The serve files carry a serve decision's id (`t44_`) in every test name; this row is T-47's (the resume
+  // under the start lock).
+  test("t47_no_resume_for_a_worker_that_went_on (t44_resume_reads_again_under_the_lock)", async () => {
     await project();
     const host = newHost();
     const counted = countingHost(host);

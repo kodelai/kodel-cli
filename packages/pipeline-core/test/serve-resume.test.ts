@@ -201,7 +201,7 @@ const ENDS: [string, Partial<ServeWorkerView>][] = [
   ["holder error", { state: "killed", label: "failed (could not start)", endedBy: "holder_error" }],
 ];
 
-describe("t44 a worker in a terminal that ended (T-45)", () => {
+describe("t44 a worker in a terminal that ended (T-47)", () => {
   test("t44_ended_after_the_decision_without_going_on_is_resumed", () => {
     // It was alive at the decision and ended after it, and no agent called the engine since: it never
     // went on, so it is resumed like one that ended at the wait. The same second, seconds, days later.

@@ -549,9 +549,9 @@ builds with this change:
 - a journal has a decision made by the daemon;
 - a run of format 1 is changed or refused because of a note.
 
-## T-44 as revised by T-45
+## T-44 as revised by T-47
 
-T-45 (`docs/decisions.md`) made a worker a terminal session that stays alive at a gate. T-44 was written for a
+T-47 (`docs/decisions.md`) made a worker a terminal session that stays alive at a gate. T-44 was written for a
 worker that exits at every wait, where "a worker process exists" and "an agent is working" were one thing.
 They are two now, so three lines of T-44's refutation and the meaning of one limit were replaced, and one
 line was added. The list above is the revised one. What it replaced, kept here as it was:

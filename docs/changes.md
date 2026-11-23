@@ -111,9 +111,9 @@ it (an attempt entered before the field) is judged against the run's current ver
 folder or the file and a file over 8 MB. The journal's `changes_recorded` says whether the file was meant to be
 there.
 
-## Migration: background agents run in a terminal by default (T-45)
+## Migration: background agents run in a terminal by default (T-47)
 
-Since T-45 a background agent of a run (`s` in `kodel tui`, `kodel serve`) is started in a terminal session of
+Since T-47 a background agent of a run (`s` in `kodel tui`, `kodel serve`) is started in a terminal session of
 its own when the project config does not say otherwise; before, it was always `claude -p`. A terminal session
 needs the built kodel on Node with its optional package `@lydell/node-pty`. Where none can run (kodel from
 source under Bun, the package or its binary missing), a start is now **refused** with the reason; nothing

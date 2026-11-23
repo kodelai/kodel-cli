@@ -151,7 +151,7 @@ already running when kodel was updated does not read the config again and does n
 makes (`docs/tasks.md`): restart the agents' sessions after the update. The four task keys the mark adds are
 optional and kept by an older kodel as they are.
 
-## Terminal workers (TASK-EKAV, T-45)
+## Terminal workers (TASK-EKAV, T-47)
 
 No run format changes: the state, the journal and the kept pipelines are as before.
 
@@ -176,7 +176,7 @@ No run format changes: the state, the journal and the kept pipelines are as befo
   build for the daemon, the TUI and the workers of a checkout.
 
 Fixtures: `fixtures/session-formats/v1/` (`agent-chosen.json`, `agent-resumed.json`, and
-`worker-print-before-t45/`, the record of a print worker taken from the launcher and the holder of the build
+`worker-print-before-t47/`, the record of a print worker taken from the launcher and the holder of the build
 before this change), `fixtures/serve-formats/v1/serve-alive.json`.
 
 ## Task links (TASK-9RZD, T-45, T-46)

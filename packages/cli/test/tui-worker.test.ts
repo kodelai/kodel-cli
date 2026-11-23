@@ -2799,12 +2799,12 @@ describe("t44 the TUI with kodel serve", () => {
   });
 });
 
-describe("t45 the o key, the words of a terminal worker and the TUI's own finish", () => {
+describe("t47 the o key, the words of a terminal worker and the TUI's own finish", () => {
   const terminal = (runId: string, over: Partial<WorkerStatus> = {}) =>
     worker(runId, { terminal: true, ...over });
   const attachOf = (m: Model) => effects(m).filter((e) => e.type === "attach_worker");
 
-  test("t45_tui_o_opens_the_latest_attachable_record", () => {
+  test("t47_tui_o_opens_the_latest_attachable_record", () => {
     // The run's latest record is the resumed one: that is the one opened, once, from the list and the card.
     const latest = terminal("r_1", {
       id: "a_000000002_fake",
@@ -2879,7 +2879,7 @@ describe("t45 the o key, the words of a terminal worker and the TUI's own finish
     }
   });
 
-  test("t45_tui_row_and_card_words_of_a_terminal_worker", () => {
+  test("t47_tui_row_and_card_words_of_a_terminal_worker", () => {
     // At a gate a terminal worker stays: the card and the row say that it waits with the person.
     const waits = withWorkers(
       model([session("r_1", "waiting", { lastWait: WAIT })]),
@@ -2974,7 +2974,7 @@ describe("t45 the o key, the words of a terminal worker and the TUI's own finish
     expect(unread.offers.r_1).toEqual({ line: "agent running", why: "the run cannot be read" });
   });
 
-  test("t45_tui_shows_the_preflight_note_and_a_refused_start_on_the_row", () => {
+  test("t47_tui_shows_the_preflight_note_and_a_refused_start_on_the_row", () => {
     const base = press(
       model([session("r_1", "running")], ready([row("T-A1"), row("T-A2")])),
       "down",
@@ -3125,7 +3125,7 @@ describe("t45 the o key, the words of a terminal worker and the TUI's own finish
     await held.quit();
   });
 
-  test("t45_tui_never_finishes_an_unreadable_or_foreign_run", async () => {
+  test("t47_tui_never_finishes_an_unreadable_or_foreign_run", async () => {
     const live = { r_1: terminal("r_1") };
     const off = { kind: "off" } as const;
     // The pure rule: only a run of this checkout read as ended, with a live agent in a terminal.
@@ -3223,7 +3223,7 @@ describe("t45 the o key, the words of a terminal worker and the TUI's own finish
     expect(finisher.calls).toEqual(["finish r_1", "finish r_1", "finish r_1"]);
   });
 
-  test("t45_card_tail_lines_are_redacted", async () => {
+  test("t47_card_tail_lines_are_redacted", async () => {
     // A terminal has no event stream: the card shows the last lines of its tail, which the launcher
     // redacts by the project's rules and strips of everything that could draw.
     const RUN = "r_0mw53d7fj_o2lc";

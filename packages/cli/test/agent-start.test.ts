@@ -1,5 +1,5 @@
 /**
- * `kodel agent start` (T-45, TASK-DSKQ): a person's own agent in a terminal session, the agent of a new
+ * `kodel agent start` (T-47, TASK-DSKQ): a person's own agent in a terminal session, the agent of a new
  * run through the one launcher (`--pipeline`), and the resume of a finished agent under its name
  * (`--resume`). The commands run through `runCli` with the session adapter, the attach client, the
  * probes and the launcher given by the test; the run of `--pipeline` is made by the real host.
@@ -150,8 +150,8 @@ const stopped = (over: Partial<SessionListEntry> = {}): SessionListEntry => ({
   ...over,
 });
 
-describe("t45 kodel agent start, a person's own agent", () => {
-  test("t45_agent_start_plain_prints_argv_and_attaches", async () => {
+describe("t47 kodel agent start, a person's own agent", () => {
+  test("t47_agent_start_plain_prints_argv_and_attaches", async () => {
     const sessions = new FakeSessions();
     const r = await start({ sessions }, "--name", "CC", "fix", "the", "login");
     expect(r.code, r.err).toBe(0);
@@ -264,7 +264,7 @@ describe("t45 kodel agent start, a person's own agent", () => {
     expect(none.specs).toEqual([]);
   });
 
-  test("t45_agent_start_plain_shows_an_engines_block_that_is_not_committed_and_asks", async () => {
+  test("t47_agent_start_plain_shows_an_engines_block_that_is_not_committed_and_asks", async () => {
     const engines: EnginesAgainstHead = {
       state: "differs",
       head: {},
@@ -311,7 +311,7 @@ describe("t45 kodel agent start, a person's own agent", () => {
     expect((committed.sessions as FakeSessions).specs[0]?.mode).toBe("pty");
   });
 
-  test("t45_agent_start_plain_warns_about_the_state_dir", async () => {
+  test("t47_agent_start_plain_warns_about_the_state_dir", async () => {
     const withDir = await start(
       { environment: { PATH: "/usr/bin", HOME: "/home/u", KODEL_STATE_DIR: "/tmp/state-x" } },
       "--bg",
@@ -324,7 +324,7 @@ describe("t45 kodel agent start, a person's own agent", () => {
     expect(without.out).not.toContain("KODEL_STATE_DIR");
   });
 
-  test("t45_agent_start_plain_says_what_its_server_may_decide", async () => {
+  test("t47_agent_start_plain_says_what_its_server_may_decide", async () => {
     project("decisions:\n  agent:\n    gate: true\n");
     const on = await start({}, "--bg", "hello");
     expect(on.code, on.err).toBe(0);
@@ -403,8 +403,8 @@ function sessionLauncher(
     });
 }
 
-describe("t45 kodel agent start --pipeline", () => {
-  test("t45_agent_start_with_pipeline_uses_the_launcher", async () => {
+describe("t47 kodel agent start --pipeline", () => {
+  test("t47_agent_start_with_pipeline_uses_the_launcher", async () => {
     // A launcher that looks, at the start, whether the start lock is held.
     let lockHeld: boolean | undefined;
     const preflights: PreflightInput[] = [];
@@ -485,7 +485,7 @@ describe("t45 kodel agent start --pipeline", () => {
     expect(launcher.starts.length).toBe(1);
   });
 
-  test("t45_agent_start_flag_table", async () => {
+  test("t47_agent_start_flag_table", async () => {
     // `--pipeline` with `worker: terminal` attaches to the worker; with `--bg` it does not.
     const term = new AttachableScripted();
     const seen = { engines: [] as (UnattendedEngines | undefined)[] };
@@ -617,8 +617,8 @@ describe("t45 kodel agent start --pipeline", () => {
   });
 });
 
-describe("t45 kodel agent start --resume", () => {
-  test("t45_resume_keeps_the_name_and_links_the_old_record", async () => {
+describe("t47 kodel agent start --resume", () => {
+  test("t47_resume_keeps_the_name_and_links_the_old_record", async () => {
     const sessions = new FakeSessions();
     sessions.add(stopped());
     const r = await start({ sessions }, "--resume", "CC", "--bg");
@@ -695,7 +695,7 @@ describe("t45 kodel agent start --resume", () => {
     expect(resumeHints([stopped({ status: { state: "running" } })])).toEqual([]);
   });
 
-  test("t45_resume_refusals", async () => {
+  test("t47_resume_refusals", async () => {
     const rows: [string, SessionListEntry, string][] = [
       ["a running session", stopped({ status: { state: "running" } }), "still runs"],
       ["a starting session", stopped({ status: { state: "starting" } }), "still runs"],

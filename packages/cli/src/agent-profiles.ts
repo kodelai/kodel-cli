@@ -1,5 +1,5 @@
 /**
- * The agents kodel can start as a program of their own (T-45): a table of profiles by name. A profile is
+ * The agents kodel can start as a program of their own (T-47): a table of profiles by name. A profile is
  * everything that is one agent's: its argv in a terminal and as a print process, how its conversation is
  * named and resumed, how it is pointed at its kodel server, its tool lists, and what the spike showed of
  * it. The launcher and the commands reach an agent through `agentProfile(name)` only, so another agent is

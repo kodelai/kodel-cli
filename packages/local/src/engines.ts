@@ -61,7 +61,7 @@ export const WORKER_MECHANISMS = ["terminal", "print"] as const;
 export type WorkerMechanism = (typeof WORKER_MECHANISMS)[number];
 
 /**
- * The engines that can be a worker (T-45), and the flags the person's `terminal.command` may add for each.
+ * The engines that can be a worker (T-47), and the flags the person's `terminal.command` may add for each.
  * Everything else on that command is refused: it is an argv kodel starts unattended, with its own flags
  * (the permission mode, the tool lists, the one MCP server) beside it.
  */
@@ -128,7 +128,7 @@ export const engineProfileSchema = z
      * after `--`. Absent on a profile that only says how a worker is started: such a profile runs no step.
      */
     command: z.array(z.string().min(1)).min(1).optional(),
-    /** How a background worker of a run is started (T-45). Only on a profile that can be a worker. */
+    /** How a background worker of a run is started (T-47). Only on a profile that can be a worker. */
     worker: z.enum(WORKER_MECHANISMS).optional(),
     /** The program of a terminal worker and the flags the person adds to it (`parseTerminalCommand`). */
     terminal: z

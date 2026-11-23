@@ -1,5 +1,5 @@
 /**
- * What the loop does for `o` (TASK-EKAV, T-45): the checks made while the screen still stands, and the
+ * What the loop does for `o` (TASK-EKAV, T-47): the checks made while the screen still stands, and the
  * child that has the terminal while it is away. The child is `kodel agent attach <id> --keep-screen` with
  * the terminal inherited: the screen reads its input as text, and a terminal needs bytes. The flag keeps
  * the child on the alternate screen the TUI is on, so the shell behind is not seen while one program

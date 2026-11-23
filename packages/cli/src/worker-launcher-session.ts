@@ -1,5 +1,5 @@
 /**
- * The launcher that starts real sessions (TASK-9PNS, T-45): a worker is the agent of a profile
+ * The launcher that starts real sessions (TASK-9PNS, T-47): a worker is the agent of a profile
  * (`agent-profiles.ts`), started the way the profile's `worker:` key says (in a terminal of its own, or
  * as a print process), held by a kodel session record named `kw-<run>` (`kw-<run>-d<seq>` after a
  * decision). Nothing switches between the two by itself: where the chosen one cannot run the start is

@@ -1,5 +1,5 @@
 /**
- * Workers in a terminal of their own, on a real terminal (TASK-EKAV, T-45), in two parts.
+ * Workers in a terminal of their own, on a real terminal (TASK-EKAV, T-47), in two parts.
  *
  * The TUI's `o`: the built `kodel tui` on Node in a terminal of the test's own, two runs of a project,
  * and for each run a session `kw-<run>` in a terminal of its own with a shell script standing for the
@@ -208,7 +208,7 @@ async function quits(term: Term): Promise<void> {
 
 describe("the TUI hands its terminal to a run's agent and takes it back", () => {
   ptyTest(
-    "t45_real_tui_returns_to_the_same_place",
+    "t47_real_tui_returns_to_the_same_place",
     async () => {
       const s = await scene("echo agent-of-$RUN-ready; exec cat");
       const run = await onSecondCard(s.term, s.runs);
@@ -239,7 +239,7 @@ describe("the TUI hands its terminal to a run's agent and takes it back", () => 
   );
 
   ptyTest(
-    "t45_real_tui_returns_when_the_agent_ends",
+    "t47_real_tui_returns_when_the_agent_ends",
     async () => {
       const s = await scene("echo agent-of-$RUN-ready; read line; exit 3");
       const run = await onSecondCard(s.term, s.runs);
@@ -259,7 +259,7 @@ describe("the TUI hands its terminal to a run's agent and takes it back", () => 
   );
 
   ptyTest(
-    "t45_real_tui_survives_a_double_detach_chord",
+    "t47_real_tui_survives_a_double_detach_chord",
     async () => {
       const s = await scene("echo agent-of-$RUN-ready; exec cat");
       const run = await onSecondCard(s.term, s.runs);
@@ -281,7 +281,7 @@ describe("the TUI hands its terminal to a run's agent and takes it back", () => 
   );
 
   ptyTest(
-    "t45_real_tui_keeps_its_screen_when_the_agent_switches_screens",
+    "t47_real_tui_keeps_its_screen_when_the_agent_switches_screens",
     async () => {
       // The agent's program enters an alternate screen of its own, and leaves it when it ends: neither
       // switch reaches the terminal, which stays on the one the TUI keeps.
@@ -306,7 +306,7 @@ describe("the TUI hands its terminal to a run's agent and takes it back", () => 
   );
 
   ptyTest(
-    "t45_real_tui_resize_while_attached_reaches_the_agent",
+    "t47_real_tui_resize_while_attached_reaches_the_agent",
     async () => {
       const s = await scene(
         "trap 'echo \"size:$(stty size)\"' WINCH; echo agent-of-$RUN-ready; while :; do sleep 0.1; done",
@@ -544,7 +544,7 @@ const workerNames = async (s: WorkerScene): Promise<string[]> =>
 
 describe("a worker in a terminal of its own, started through the launcher", () => {
   ptyTest(
-    "t45_real_terminal_worker_attach_detach_finish",
+    "t47_real_terminal_worker_attach_detach_finish",
     async () => {
       const s = await workerScene({ modes: true });
       const run = await s.run("attach to the worker");
@@ -617,7 +617,7 @@ describe("a worker in a terminal of its own, started through the launcher", () =
   );
 
   ptyTest(
-    "t45_real_worker_shell_cannot_decide",
+    "t47_real_worker_shell_cannot_decide",
     async () => {
       const s = await workerScene();
       const run = await s.run("decide for me", true);
@@ -665,7 +665,7 @@ describe("a worker in a terminal of its own, started through the launcher", () =
   );
 
   ptyTest(
-    "t45_real_orphan_is_not_doubled",
+    "t47_real_orphan_is_not_doubled",
     async () => {
       const s = await workerScene({ ignoreHangup: true });
       const run = await s.run("outlive the holder", true);
@@ -713,7 +713,7 @@ describe("a worker in a terminal of its own, started through the launcher", () =
   );
 
   ptyTest(
-    "t45_real_holder_and_agent_gone_at_a_wait_is_resumed",
+    "t47_real_holder_and_agent_gone_at_a_wait_is_resumed",
     async () => {
       const s = await workerScene();
       const run = await s.run("come back after a reboot", true);
@@ -789,7 +789,7 @@ describe("a worker in a terminal of its own, started through the launcher", () =
   }
 
   ptyTest(
-    "t45_real_orphan_behind_a_wrapper_is_not_doubled",
+    "t47_real_orphan_behind_a_wrapper_is_not_doubled",
     async () => {
       const { s, run, worker } = await behindADeadWrapper("stay behind the wrapper");
       // The recorded child is gone; a process of its group runs: the session is not over.
@@ -814,7 +814,7 @@ describe("a worker in a terminal of its own, started through the launcher", () =
   );
 
   ptyTest(
-    "t45_real_stop_ends_an_agent_behind_a_dead_wrapper",
+    "t47_real_stop_ends_an_agent_behind_a_dead_wrapper",
     async () => {
       const { s, run, worker } = await behindADeadWrapper("be stopped behind the wrapper");
       expect((await s.adapter.status(worker.id)).childAlive).toBe(true);

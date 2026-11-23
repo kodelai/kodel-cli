@@ -40,7 +40,7 @@ export const serveRecordSchema = z
     /**
      * `workers`: the worker places used (the agents that are working), what a reader shows beside
      * `max_workers`. `alive`: the live worker processes, those that only wait with the person among
-     * them; absent in a record written before T-45, and ignored by a reader from before it.
+     * them; absent in a record written before T-47, and ignored by a reader from before it.
      */
     counts: z
       .object({

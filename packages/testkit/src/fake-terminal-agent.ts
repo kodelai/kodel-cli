@@ -1,5 +1,5 @@
 /**
- * A scripted fake terminal agent (T-45): a program that stands for an interactive coding agent in a
+ * A scripted fake terminal agent (T-47): a program that stands for an interactive coding agent in a
  * terminal session, for the tests that start a worker through the real launcher on a real PTY. It is
  * written to a folder as the agent's own program name (`claude`), so the launcher finds it on `PATH`
  * and starts it with the argv of the real profile; it runs on plain Node.

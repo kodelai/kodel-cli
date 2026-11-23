@@ -1,5 +1,5 @@
 /**
- * The worker keys of the `engines:` block (T-45, TASK-EKAV step 5): `worker`, `terminal.command`, who may
+ * The worker keys of the `engines:` block (T-47, TASK-EKAV step 5): `worker`, `terminal.command`, who may
  * carry them, and the block as committed (`HEAD` of the checkout) for a start nobody watches.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -109,7 +109,7 @@ describe("t42 the worker keys of a profile", () => {
     }
   });
 
-  test("t45_engines_terminal_command_grammar_is_checked_when_the_config_is_read", async () => {
+  test("t47_engines_terminal_command_grammar_is_checked_when_the_config_is_read", async () => {
     const rows: [string, string][] = [
       ["[claude, --dangerously-skip-permissions]", 'the flag "--dangerously-skip-permissions"'],
       ["[claude, --permission-mode, bypassPermissions]", 'the flag "--permission-mode"'],
@@ -182,7 +182,7 @@ describe("t42 the worker keys of a profile", () => {
     expect(run.ok && run.launch.argv).toEqual(["review", "--", "p"]);
   });
 
-  test("t45_only_claude_is_a_worker", async () => {
+  test("t47_only_claude_is_a_worker", async () => {
     for (const name of ["codex", "opencode", "reviewer", "claude-2"]) {
       for (const keys of [
         "    worker: terminal\n",
@@ -209,7 +209,7 @@ describe("t42 the worker keys of a profile", () => {
     });
   });
 
-  test("t45_instructions_name_engines", () => {
+  test("t47_instructions_name_engines", () => {
     for (const options of [{}, { dialog: true }, { decisions: { gate: true } }]) {
       const text = serverInstructions(options);
       expect(text).toMatch(/`engines` block of the project config[^\n]*is the person's/);
@@ -247,8 +247,8 @@ async function project(sub = "", committed?: string): Promise<{ root: string; st
   return { root, store };
 }
 
-describe("t45 the engines block is used as committed", () => {
-  test("t45_engines_block_is_read_from_head", async () => {
+describe("t47 the engines block is used as committed", () => {
+  test("t47_engines_block_is_read_from_head", async () => {
     const { root, store } = await project("", TERMINAL);
     const against = () => enginesAgainstHead({ root, storeRoot: store });
     const unattended = async () => unattendedEngines(await against());
@@ -323,7 +323,7 @@ describe("t45 the engines block is used as committed", () => {
     expect(shown).not.toContain("sk-secret");
   });
 
-  test("t45_engines_block_is_read_from_head: a project in a subfolder of the repository", async () => {
+  test("t47_engines_block_is_read_from_head: a project in a subfolder of the repository", async () => {
     const { root, store } = await project("apps/web", TERMINAL);
     // Another config at the top of the repository is not this project's.
     await mkdir(join(dir, ".kodel"));
@@ -338,7 +338,7 @@ describe("t45 the engines block is used as committed", () => {
     expect(unattendedEngines(await enginesAgainstHead({ root, storeRoot: store })).ok).toBe(false);
   });
 
-  test("t45_engines_block_is_read_from_head: a config with no committed version", async () => {
+  test("t47_engines_block_is_read_from_head: a config with no committed version", async () => {
     const note =
       "engines.claude.worker: terminal is taken from a .kodel/config.yaml that git does not track (there is no committed version to hold it to)";
     expect(COMMIT_TO_USE_TERMINAL_COMMAND).toBe(
@@ -412,7 +412,7 @@ describe("t45 the engines block is used as committed", () => {
     expect(unattendedEngines(found)).toEqual({ ok: false, reason: ENGINES_ONLY_AS_COMMITTED });
   });
 
-  test("t45_engines_block_is_read_from_head: HEAD is read once, and a committed file that cannot be read differs", async () => {
+  test("t47_engines_block_is_read_from_head: HEAD is read once, and a committed file that cannot be read differs", async () => {
     const store = join(dir, ".kodel");
     await mkdir(store);
     await write(TERMINAL, store);
@@ -448,7 +448,7 @@ describe("t45 the engines block is used as committed", () => {
     expect(reads).toBe(0);
   });
 
-  test("t45_engines_head_reader_failure_refuses", async () => {
+  test("t47_engines_head_reader_failure_refuses", async () => {
     const store = join(dir, ".kodel");
     await mkdir(store);
     await write(TERMINAL, store);
@@ -532,7 +532,7 @@ describe("t45 the engines block is used as committed", () => {
     expect(await tracked(dir, file)).toEqual({ kind: "not_committed" });
   });
 
-  test("t45_engines_head_reader_failure_refuses: a real repository git refuses to read", async () => {
+  test("t47_engines_head_reader_failure_refuses: a real repository git refuses to read", async () => {
     const { root, store } = await project("", TERMINAL);
     // A `HEAD` that names no commit git can read: git's own words, not "untracked".
     await writeFile(join(dir, ".git", "HEAD"), "garbage\n");

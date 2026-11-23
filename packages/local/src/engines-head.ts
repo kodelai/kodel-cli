@@ -1,5 +1,5 @@
 /**
- * The `engines:` block as committed (T-45). A worker's shell can write `.kodel/config.yaml`, and that
+ * The `engines:` block as committed (T-47). A worker's shell can write `.kodel/config.yaml`, and that
  * block names the program of the next unattended start, so a start by the daemon or the TUI uses the
  * block only when the working copy's equals the one in `HEAD` of the checkout. Only this block is
  * compared (an edit of `serve` beside it changes nothing), parsed, so a comment or the order of keys is

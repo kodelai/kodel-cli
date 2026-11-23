@@ -148,7 +148,7 @@ Run in the run's worktree (a trusted folder) with `node start.mjs <tag> <worktre
 
 Answer: `--` alone does not help; a trailing newline does, in either position. Step 4 changes: the profile
 always ends the prompt with `\n` (when it does not already end with one) and passes it after `--`; test
-`t45_profile_prompt_cannot_name_a_subcommand` pins the argv for `doctor`, `mcp` and a sentence. The newline is
+`t47_profile_prompt_cannot_name_a_subcommand` pins the argv for `doctor`, `mcp` and a sentence. The newline is
 kept by claude in the transcript (`"doctor\n"`), which changes nothing the engine reads.
 
 Side effect seen: the spiked sessions do real work in the folder they start in (one ran `bun install` in the

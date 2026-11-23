@@ -1,6 +1,6 @@
 /**
- * The docs agree with the code (T-45): what AGENTS.md tells an agent not to run is the registry of the
- * person's commands, no more and no less; `docs/serve.md` carries T-44 as T-45 revised it; and
+ * The docs agree with the code (T-47): what AGENTS.md tells an agent not to run is the registry of the
+ * person's commands, no more and no less; `docs/serve.md` carries T-44 as T-47 revised it; and
  * `docs/changes.md` spells the line the refusal of a terminal start prints.
  */
 import { describe, expect, test } from "bun:test";
@@ -25,8 +25,8 @@ const commandsOf = (text: string): string[] =>
     return last.split("|").map((verb) => [...words, verb].join(" "));
   });
 
-describe("t45 the docs and the registry of the person's commands", () => {
-  test("t45_agents_md_lists_the_registrys_human_only_commands", () => {
+describe("t47 the docs and the registry of the person's commands", () => {
+  test("t47_agents_md_lists_the_registrys_human_only_commands", () => {
     // The rule an agent reads: from "Do not run" to the colon that ends the list.
     const rule = /^- Do not run ([\s\S]*?): they\s+refuse/m.exec(agentsMd)?.[1] ?? "";
     expect(commandsOf(rule).sort()).toEqual([...HUMAN_ONLY_COMMANDS].sort());
@@ -46,7 +46,7 @@ describe("t45 the docs and the registry of the person's commands", () => {
   test("t44_docs_carry_the_revised_text", () => {
     const serve = read("docs/serve.md");
     const decisionAt = serve.indexOf("\n## Decision T-44\n");
-    const revisionAt = serve.indexOf("\n## T-44 as revised by T-45\n");
+    const revisionAt = serve.indexOf("\n## T-44 as revised by T-47\n");
     expect(decisionAt).toBeGreaterThan(0);
     expect(revisionAt).toBeGreaterThan(decisionAt);
     // The decision's own text is the revised one, and holds no line of the old one.
@@ -97,7 +97,7 @@ describe("t45 the docs and the registry of the person's commands", () => {
     }
   });
 
-  test("t45_changes_doc_spells_the_migration_line", () => {
+  test("t47_changes_doc_spells_the_migration_line", () => {
     // One constant: what the refusal of a terminal start prints is what the docs tell a person to commit.
     expect(WORKER_PRINT_MIGRATION_LINE).toBe("engines: { claude: { worker: print } }");
     expect(terminalRefusal("no terminal here")).toContain(WORKER_PRINT_MIGRATION_LINE);
@@ -109,7 +109,7 @@ describe("t45 the docs and the registry of the person's commands", () => {
     }
   });
 
-  test("t45_docs_name_the_guards_and_the_two_kinds_of_worker", () => {
+  test("t47_docs_name_the_guards_and_the_two_kinds_of_worker", () => {
     // The refusal of the session guard is quoted as the command prints it, and what stays open is said.
     const decisions = flat(read("docs/decisions.md"));
     expect(decisions).toContain(INSIDE_SESSION_REFUSAL);

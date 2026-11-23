@@ -1,5 +1,5 @@
 /**
- * `kodel agent doctor` (T-45): one test per check, and what holds for all of them: it only reads, it
+ * `kodel agent doctor` (T-47): one test per check, and what holds for all of them: it only reads, it
  * prints kodel's own words (a mark a check, and what to do) and nothing a probe printed, it is the agent's to run, and
  * it exits 1 only when a worker cannot start.
  */
@@ -162,8 +162,8 @@ async function doctor(setup: Setup = {}) {
   return { ok, out, lines, checks, row, answer, fix, execs, lookups, reads, preflights };
 }
 
-describe("t45 kodel agent doctor: the seven checks", () => {
-  test("t45_doctor_platform", async () => {
+describe("t47 kodel agent doctor: the seven checks", () => {
+  test("t47_doctor_platform", async () => {
     expect((await doctor()).answer("platform supported")).toBe("yes (darwin)");
     expect((await doctor({ platform: "linux" })).answer("platform supported")).toBe("yes (linux)");
     const windows = await doctor({
@@ -174,7 +174,7 @@ describe("t45 kodel agent doctor: the seven checks", () => {
     expect(windows.ok).toBe(false);
   });
 
-  test("t45_doctor_terminal_can_run", async () => {
+  test("t47_doctor_terminal_can_run", async () => {
     expect((await doctor()).answer("a terminal session can run")).toBe("yes");
     const reason = "a terminal session cannot run under Bun: use the built kodel on Node";
     const none = await doctor({ pty: { ok: false, reason } });
@@ -184,7 +184,7 @@ describe("t45 kodel agent doctor: the seven checks", () => {
     expect(none.ok).toBe(true);
   });
 
-  test("t45_doctor_claude_found_version_signed_in", async () => {
+  test("t47_doctor_claude_found_version_signed_in", async () => {
     const found = await doctor();
     expect(found.answer("claude found")).toBe("yes (/usr/bin/claude)");
     expect(found.answer("claude version")).toBe("yes (2.1.330)");
@@ -223,7 +223,7 @@ describe("t45 kodel agent doctor: the seven checks", () => {
     expect(other.execs[0]).toEqual(["/opt/claude-wrapper", "--version"]);
   });
 
-  test("t45_doctor_never_runs_an_uncommitted_terminal_command", async () => {
+  test("t47_doctor_never_runs_an_uncommitted_terminal_command", async () => {
     // A worker's shell can write the config; a person who runs doctor must not run what it put there.
     const engines = { claude: { terminal: { command: ["/tmp/planted"] } } };
     const states: EnginesAgainstHead[] = [
@@ -263,7 +263,7 @@ describe("t45 kodel agent doctor: the seven checks", () => {
     expect(own.execs[0]).toEqual(["claude", "--version"]);
   });
 
-  test("t45_doctor_trust", async () => {
+  test("t47_doctor_trust", async () => {
     const trusted = await doctor();
     expect(trusted.answer("worktrees folder trusted")).toBe(`yes (${WORKTREES})`);
     // The folder the worktrees are made in is what is asked about, in claude's own file.
@@ -281,7 +281,7 @@ describe("t45 kodel agent doctor: the seven checks", () => {
     expect(unknown.fix("worktrees folder trusted")).toContain("if claude asks");
   });
 
-  test("t45_doctor_decisions_dialog_and_agent", async () => {
+  test("t47_doctor_decisions_dialog_and_agent", async () => {
     const off = await doctor();
     expect(off.answer("decisions.dialog off")).toBe("yes");
     expect(off.answer("decisions.agent off")).toBe("yes");
@@ -304,7 +304,7 @@ describe("t45 kodel agent doctor: the seven checks", () => {
     expect(broken.ok).toBe(false);
   });
 
-  test("t45_doctor_engines_block_and_head", async () => {
+  test("t47_doctor_engines_block_and_head", async () => {
     expect((await doctor()).answer("engines block as committed")).toBe("yes (worker: terminal)");
     const print = await doctor({
       engines: { state: "committed", engines: { claude: { worker: "print" } } },
@@ -343,7 +343,7 @@ describe("t45 kodel agent doctor: the seven checks", () => {
     expect(secret.out).not.toContain("s3cr3t-value");
   });
 
-  test("t45_doctor_worker_can_start", async () => {
+  test("t47_doctor_worker_can_start", async () => {
     const yes = await doctor();
     expect(yes.ok).toBe(true);
     expect(yes.answer("a worker can start")).toBe("yes");
@@ -397,7 +397,7 @@ describe("t45 kodel agent doctor: the seven checks", () => {
   });
 });
 
-describe("t45 kodel agent doctor: how the report reads", () => {
+describe("t47 kodel agent doctor: how the report reads", () => {
   const broken = () =>
     doctor({
       claude: "/usr/bin/claude",
@@ -409,7 +409,7 @@ describe("t45 kodel agent doctor: how the report reads", () => {
       preflight: () => ({ ok: false, reason: "the project asks decisions in a dialog" }),
     });
 
-  test("t45_doctor_marks_every_check_and_says_what_to_do", async () => {
+  test("t47_doctor_marks_every_check_and_says_what_to_do", async () => {
     const r = await broken();
     // One mark a check: what holds, what does not, what cannot be told.
     expect(r.checks.map((c) => `${DOCTOR_MARKS[c.answer]} ${c.check}`)).toEqual([
@@ -441,7 +441,7 @@ describe("t45 kodel agent doctor: how the report reads", () => {
     expect(fine.out).not.toMatch(/[✗?]/);
   });
 
-  test("t45_doctor_verdict_stands_apart", async () => {
+  test("t47_doctor_verdict_stands_apart", async () => {
     for (const r of [await doctor(), await broken()]) {
       const all = r.out.split("\n");
       const at = all.findIndex((l) => /^[✓✗] a worker can/.test(l));
@@ -466,7 +466,7 @@ describe("t45 kodel agent doctor: how the report reads", () => {
     ]);
   });
 
-  test("t45_doctor_colours_only_a_terminal_without_no_color", async () => {
+  test("t47_doctor_colours_only_a_terminal_without_no_color", async () => {
     const ESC = String.fromCharCode(27);
     const plainOut = (await broken()).out;
     expect(plainOut).not.toContain(ESC);
@@ -509,7 +509,7 @@ describe("t45 kodel agent doctor: how the report reads", () => {
     expect(stripped).toBe(same.out);
   });
 
-  test("t45_doctor_value_cannot_fake_a_line_or_a_colour", async () => {
+  test("t47_doctor_value_cannot_fake_a_line_or_a_colour", async () => {
     const ESC = String.fromCharCode(27);
     const r = await doctor({
       terminal: true,
@@ -523,8 +523,8 @@ describe("t45 kodel agent doctor: how the report reads", () => {
   });
 });
 
-describe("t45 kodel agent doctor: what holds for every check", () => {
-  test("t45_doctor_malformed_engine_files_are_unknown", async () => {
+describe("t47 kodel agent doctor: what holds for every check", () => {
+  test("t47_doctor_malformed_engine_files_are_unknown", async () => {
     for (const claudeJson of [
       "{ not json",
       "[]",
@@ -540,7 +540,7 @@ describe("t45 kodel agent doctor: what holds for every check", () => {
     }
   });
 
-  test("t45_doctor_prints_no_account_data", async () => {
+  test("t47_doctor_prints_no_account_data", async () => {
     const r = await doctor({ version: `2.1.330 (Claude Code) ${ACCOUNT}` });
     expect(r.answer("claude signed in")).toBe("yes");
     expect(r.out).not.toContain(ACCOUNT);
@@ -554,7 +554,7 @@ describe("t45 kodel agent doctor: what holds for every check", () => {
   });
 });
 
-describe("t45 kodel agent doctor through the command", () => {
+describe("t47 kodel agent doctor through the command", () => {
   let dir: string;
   let state: string;
   let home: string;
@@ -633,7 +633,7 @@ describe("t45 kodel agent doctor through the command", () => {
     return { code, out, err, asked };
   }
 
-  test("t45_doctor_writes_nothing", async () => {
+  test("t47_doctor_writes_nothing", async () => {
     const before = snapshot();
     const r = await cli({});
     // `claude` is not on this PATH: no worker can start, and that is the one reason for exit 1.
@@ -655,7 +655,7 @@ describe("t45 kodel agent doctor through the command", () => {
     expect(snapshot()).toEqual(before);
   });
 
-  test("t45_doctor_runs_for_an_agent", async () => {
+  test("t47_doctor_runs_for_an_agent", async () => {
     // The engine's mark, no terminal, inside an agent session: every guard of a person's command
     // would refuse here. `doctor` is not one of them.
     const launcher = new FakeLauncher();

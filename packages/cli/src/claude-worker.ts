@@ -4,7 +4,7 @@
  * `--mcp-config` that points it at its own `kodel mcp --no-decisions --no-wait-hint` (or, for a worker
  * that stays alive at a wait, `--wait-command <the command it watches its run with>`), the two tool
  * lists Claude Code enforces, the auth probe, the two prompts and the environment markers. In a terminal
- * of its own (T-45) the same program runs without `-p`, its prompt last. All of it is reached through
+ * of its own (T-47) the same program runs without `-p`, its prompt last. All of it is reached through
  * `claudeProfile`, the `claude` entry of `agent-profiles.ts`; another agent is another entry there, and
  * `WorkerLauncher`, the TUI and `kodel mcp`'s flags do not know which agent runs.
  */
@@ -490,7 +490,7 @@ function lastFlag(command: string | undefined, flag: string): string | undefined
 }
 
 /**
- * The session id of a run's worker whose records have no `agent` record (written before T-45), from their
+ * The session id of a run's worker whose records have no `agent` record (written before T-47), from their
  * argv: the last `--session-id` of the first record (the prompt, with the title, precedes the flags, so a
  * title holding `--session-id <other>` does not win), else the last `--resume` of the newest `-d` record
  * that has one. Nothing the agent printed is read for it. Neither: none.
