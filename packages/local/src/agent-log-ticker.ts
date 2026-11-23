@@ -1,8 +1,9 @@
 /**
  * The timer that copies the agent's log while a run goes. One per run, in the process that serves the MCP tools:
  * the first call of the run it sees starts it, and it stops when the run is not running, when the copy has been
- * given up (a state that cannot be read, three times in a row), when the timer has used the copies it may
- * journal, and when the process is stopped. A timer never keeps the process alive and never throws.
+ * given up (a state that cannot be read or a pass given up as stalled, three times with no good pass between; a
+ * tick skipped because a pass is in flight or the lock is held neither counts nor resets), when the timer has used
+ * the copies it may journal, and when the process is stopped. A timer never keeps the process alive and never throws.
  *
  * It is not started by the commands a person runs (`status`, `report`, `wait`, `gate`): the host that serves them
  * has no registry, so there is nothing to start.
@@ -114,7 +115,8 @@ export class AgentLogTickers {
           }
           this.stop(runId);
         }
-      } else {
+      } else if (result.skipped !== "in_flight" && result.skipped !== "busy") {
+        // A pass that did not run says nothing about the copy either way: it neither counts nor resets.
         entry.failures = 0;
       }
     } catch {

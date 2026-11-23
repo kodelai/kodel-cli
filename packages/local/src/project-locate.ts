@@ -8,10 +8,11 @@
  * the main checkout, where the runs, the tasks and the config live. Whatever git says is trusted no
  * further than that: a `gitdir:` file is never read here, and anything unexpected means "work in place".
  */
-import { lstat, realpath } from "node:fs/promises";
+import { lstat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { git } from "./git";
+import { realPath } from "./real-path";
 
 export const DATA_DIR = ".kodel";
 
@@ -57,7 +58,7 @@ export const hasMarker = async (dir: string) =>
 
 async function realOrSelf(path: string): Promise<string> {
   try {
-    return await realpath(path);
+    return await realPath(path);
   } catch {
     return resolve(path);
   }

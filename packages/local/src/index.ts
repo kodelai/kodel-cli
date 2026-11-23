@@ -14,6 +14,7 @@ export * from "./pipeline-host";
 export * from "./process-group";
 export * from "./process-table";
 export * from "./project-root";
+export * from "./real-path";
 export * from "./serve";
 export * from "./session-env";
 export * from "./session-finder";

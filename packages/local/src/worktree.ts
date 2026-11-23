@@ -9,12 +9,13 @@
  * worktree it is already in; it is checked against what git itself lists, and a hint that does not
  * check out is not an error, it just means a new worktree is made.
  */
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { KodelError } from "@kodel-ai/pipeline-core";
 import { DEFAULT_WORKTREE, type WorktreeConfig } from "./config";
 import { git, readHead } from "./git";
+import { realPath } from "./real-path";
 
 export interface Workdir {
   /** Absolute, as the file system names it (symbolic links resolved). */
@@ -62,7 +63,7 @@ const isInside = (parent: string, child: string): boolean => {
 async function realOfFuture(path: string): Promise<string> {
   const absolute = resolve(path);
   try {
-    return await realpath(absolute);
+    return await realPath(absolute);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     const parent = resolve(absolute, "..");
@@ -73,7 +74,7 @@ async function realOfFuture(path: string): Promise<string> {
 
 async function commonDir(cwd: string): Promise<string> {
   const { stdout } = await git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd);
-  return realpath(stdout.trim());
+  return realPath(stdout.trim());
 }
 
 /** The worktrees git lists for the repository at `cwd`, the main one first. */
@@ -87,7 +88,7 @@ async function listWorktrees(cwd: string): Promise<string[]> {
 
 async function isListed(listed: string[], dir: string): Promise<boolean> {
   for (const path of listed) {
-    if (sameDir(await realpath(path).catch(() => path), dir)) return true;
+    if (sameDir(await realPath(path).catch(() => path), dir)) return true;
   }
   return false;
 }
@@ -126,12 +127,12 @@ export class GitWorktreeProvider implements WorkdirProvider {
   private async reusable(callerCwd: string): Promise<Workdir | undefined> {
     try {
       if (!isAbsolute(callerCwd)) return undefined;
-      const { stdout } = await git(["rev-parse", "--show-toplevel"], await realpath(callerCwd));
-      const top = await realpath(stdout.trim());
+      const { stdout } = await git(["rev-parse", "--show-toplevel"], await realPath(callerCwd));
+      const top = await realPath(stdout.trim());
       const [main, ...linked] = await listWorktrees(this.root);
-      if (main === undefined || sameDir(top, await realpath(main))) return undefined;
+      if (main === undefined || sameDir(top, await realPath(main))) return undefined;
       const { stdout: rootTop } = await git(["rev-parse", "--show-toplevel"], this.root);
-      if (sameDir(top, await realpath(rootTop.trim()))) return undefined;
+      if (sameDir(top, await realPath(rootTop.trim()))) return undefined;
       if (!(await isListed(linked, top))) return undefined;
       if (!sameDir(await commonDir(top), await commonDir(this.root))) return undefined;
       // Only the folder the person set aside for worktrees: their own feature worktrees are not ours to run in.
@@ -144,7 +145,7 @@ export class GitWorktreeProvider implements WorkdirProvider {
   }
 
   private async resolveDir(): Promise<string> {
-    const root = await realpath(this.root);
+    const root = await realPath(this.root);
     const dir = await realOfFuture(
       isAbsolute(this.config.dir) ? this.config.dir : join(root, this.config.dir),
     );
@@ -179,7 +180,7 @@ export class GitWorktreeProvider implements WorkdirProvider {
       });
       made = true;
       const workdir: Workdir = {
-        path: await realpath(path),
+        path: await realPath(path),
         branch,
         created: true,
         ...(base === undefined ? {} : { base }),
@@ -214,7 +215,7 @@ export class GitWorktreeProvider implements WorkdirProvider {
   async verify(workdir: string): Promise<void> {
     let actual: string;
     try {
-      actual = await realpath(workdir);
+      actual = await realPath(workdir);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         throw new KodelError(

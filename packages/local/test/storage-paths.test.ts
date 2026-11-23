@@ -262,6 +262,33 @@ describe("making the place", () => {
     await expect(stat(join(real, "projects", "demo-bbbb2222", "runs"))).resolves.toBeDefined();
   });
 
+  test("task_7bh9_place_link_check_unchanged", async () => {
+    if (process.platform === "win32") return;
+    // The base is reached through a link, and the folders are compared by the real paths the promise form gives.
+    const real = join(dir, "realbase");
+    await mkdir(join(real, "projects"), { recursive: true });
+    const linked = join(dir, "linkedbase");
+    await symlink(real, linked);
+    // a link that stays inside the base (by its real path) is let through
+    await mkdir(join(real, "elsewhere"));
+    await symlink(join(linked, "elsewhere"), join(real, "projects", "demo-aaaa1111"));
+    const inside = homePlace({ root: "/p", projectId: "demo-aaaa1111", base: linked });
+    await ensurePlace(inside);
+    expect(await realpath(inside.runsRoot)).toBe(join(await realpath(real), "elsewhere", "runs"));
+    // one that leaves it is refused, and the message names the real base
+    const outside = join(dir, "outside");
+    await mkdir(outside);
+    await symlink(outside, join(real, "projects", "demo-bbbb2222"));
+    const leaving = homePlace({ root: "/p", projectId: "demo-bbbb2222", base: linked });
+    await expect(ensurePlace(leaving)).rejects.toThrow(StoragePathsError);
+    await expect(ensurePlace(leaving)).rejects.toThrow(await realpath(real));
+    // a link to nowhere is an error of the file system with its code, not a pass
+    await symlink(join(dir, "nowhere"), join(real, "projects", "demo-cccc3333"));
+    await expect(
+      ensurePlace(homePlace({ root: "/p", projectId: "demo-cccc3333", base: linked })),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   test("two places made at once both end up 0700", async () => {
     const base = join(dir, "kodel");
     const places = ["demo-aaaa1111", "demo-bbbb2222", "demo-cccc3333"].map((projectId) =>

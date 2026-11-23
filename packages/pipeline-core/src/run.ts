@@ -540,6 +540,7 @@ export const AGENT_LOG_FAILURES = [
   "stored_copy_changed",
   "tick_cap",
   "unreadable",
+  "stalled",
 ] as const;
 export type AgentLogFailure = (typeof AGENT_LOG_FAILURES)[number];
 

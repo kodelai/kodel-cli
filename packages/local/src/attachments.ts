@@ -5,20 +5,12 @@
  */
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
-import {
-  type FileHandle,
-  mkdir,
-  mkdtemp,
-  open,
-  realpath,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { type FileHandle, mkdir, mkdtemp, open, rm, stat, writeFile } from "node:fs/promises";
 import { devNull, tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { type AttachmentImageType, type AttachmentType, KodelError } from "@kodel-ai/pipeline-core";
 import { NO_HOOKS, SAFE_CONFIG } from "./git";
+import { realPath } from "./real-path";
 
 /** Tests step in between the open and the checks, where a swap of the file would happen. */
 export interface AttachmentHooks {
@@ -96,8 +88,8 @@ export async function readWorkdirFile(
     let real: string;
     let root: string;
     try {
-      real = await realpath(target);
-      root = await realpath(cwd);
+      real = await realPath(target);
+      root = await realPath(cwd);
     } catch {
       throw outside;
     }
@@ -272,7 +264,7 @@ export async function diffTexts(
   if (before === after) return cut(wholeText(after, " "));
   let dir: string | undefined;
   try {
-    dir = await realpath(await mkdtemp(join(tmpdir(), "kodel-attachment-diff-")));
+    dir = await realPath(await mkdtemp(join(tmpdir(), "kodel-attachment-diff-")));
     await mkdir(join(dir, "a"));
     await mkdir(join(dir, "b"));
     await writeFile(join(dir, "a", options.name), before);

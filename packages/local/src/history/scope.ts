@@ -3,10 +3,11 @@
  * contents: a collector looks only at the sessions of a Kodel project, the project being a directory tree
  * with the Kodel marker (`findProjectRoot`), its worktrees included.
  */
-import { readdir, realpath, stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { basename, join, resolve, sep } from "node:path";
 import { KodelError } from "@kodel-ai/pipeline-core";
 import { git } from "../git";
+import { realPath } from "../real-path";
 
 const FOLDS_CASE = process.platform === "win32" || process.platform === "darwin";
 const comparable = (path: string): string =>
@@ -20,7 +21,7 @@ export function isInside(parent: string, child: string): boolean {
 
 export async function realOrSelf(path: string): Promise<string> {
   try {
-    return await realpath(path);
+    return await realPath(path);
   } catch {
     return resolve(path);
   }
