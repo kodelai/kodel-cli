@@ -806,6 +806,7 @@ export class LocalPipelineHost implements PipelineHost {
     let stopped = 0;
     for (const run of this.runs.values()) stopped += run.stop();
     this.agentLogTickers?.stopAll();
+    this.agentLog.stop();
     return stopped;
   }
 

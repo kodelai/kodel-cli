@@ -8,7 +8,7 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { mkdir, readFile, realpath } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import {
@@ -131,6 +131,7 @@ import {
 import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integrity";
 import { patchBetween } from "./patch";
 import { MAX_PATCH_KB, PATCH_READ_MARGIN } from "./patch-text";
+import { realPath } from "./real-path";
 import { fitServed, promptHashOf, type ServedNode, servedKeyOf } from "./served";
 import { RunStartCache } from "./session-finder";
 import { type StoragePlace, scrubHome } from "./storage-paths";
@@ -1231,7 +1232,7 @@ export class LocalRun {
     };
     if (!inside(base, path)) return undefined;
     try {
-      if (!inside(await realpath(base), await realpath(path))) return undefined;
+      if (!inside(await realPath(base), await realPath(path))) return undefined;
     } catch {
       return undefined;
     }
@@ -3560,7 +3561,9 @@ export class LocalRun {
         },
       })
       .catch(() => undefined);
-    if (!counted) {
+    // A pass given up may have started the count; what it read is not known to have been recorded.
+    const stalled = copied?.failures.includes("stalled") === true;
+    if (!counted || stalled) {
       // Said once: what the pass would have read is read by the next one, the cursor did not move. A step the copy
       // had nothing to do with (the run is over, or it is not at an agent step) has nothing to say either.
       // The lock was busy or lost before the count could run: nothing was read, so it is `busy`. A copy that throws no longer stops the count (it runs after the copy under the same lock, and the copy tells its own failure).

@@ -52,6 +52,29 @@ import type { FileStore } from "./store";
 
 /** A pass stops reading after this long and keeps what it has: a big log catches up over several passes. */
 export const PASS_BUDGET_MS = 30_000;
+/**
+ * One pass is given up after this long: it leaves the passes in flight and the run is told `stalled`. Its lock is
+ * not let go (the pass may still be writing); the takeover of a stale lock frees it.
+ */
+export const PASS_LIMIT_MS = 60_000;
+/** The end of a step waits this long for a pass in flight, then is completed without a copy. */
+export const STEP_IN_FLIGHT_WAIT_MS = 5_000;
+/** The wait for the record of a pass given up, and for the hook index when a timer is started. */
+export const GIVE_UP_WAIT_MS = 2_000;
+
+/** The timers of the limits, so that tests fire them by hand. */
+export interface PassTimers {
+  setTimeout: (fn: () => void, ms: number) => unknown;
+  clearTimeout: (handle: unknown) => void;
+}
+
+export const SYSTEM_PASS_TIMERS: PassTimers = {
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
+const LIMIT = Symbol("limit");
+
 /** Room kept free for the mark that says events were left out. */
 const MARKER_RESERVE = 320;
 const ID_OK = /^[A-Za-z0-9._:-]{1,200}$/;
@@ -97,6 +120,11 @@ export interface AgentLogWriterOptions {
   collector?: (configDir: string) => AgentHistoryCollector;
   /** How long one pass may read before it keeps what it has. */
   budgetMs?: number;
+  /** How long one pass may take before it is given up; a value that is not positive means the default. */
+  passLimitMs?: number;
+  /** How long the end of a step waits for a pass in flight. */
+  stepWaitMs?: number;
+  timers?: PassTimers;
 }
 
 export interface CaptureInput {
@@ -162,6 +190,10 @@ export function eventKey(event: HistoryEvent, runId: string): string {
 export class AgentLogWriter {
   private readonly now: () => number;
   private readonly budgetMs: number;
+  readonly passLimitMs: number;
+  readonly stepWaitMs: number;
+  readonly timers: PassTimers;
+  private readonly liveTimers = new Set<unknown>();
   private readonly memos = new Map<string, StreamMemo>();
   private readonly inFlight = new Map<string, Promise<unknown>>();
   private readonly collectors = new Map<string, AgentHistoryCollector>();
@@ -171,6 +203,34 @@ export class AgentLogWriter {
     this.finder = new SessionFinder({ root: options.root, env: options.env });
     this.now = options.now ?? Date.now;
     this.budgetMs = options.budgetMs ?? PASS_BUDGET_MS;
+    const limit = options.passLimitMs;
+    this.passLimitMs = limit !== undefined && limit > 0 ? limit : PASS_LIMIT_MS;
+    this.stepWaitMs = options.stepWaitMs ?? STEP_IN_FLIGHT_WAIT_MS;
+    this.timers = options.timers ?? SYSTEM_PASS_TIMERS;
+  }
+
+  /** A limit of `ms`: `fired` settles when it is reached, and never after `clear()` or `stop()`. */
+  private limit(ms: number): { fired: Promise<typeof LIMIT>; clear: () => void } {
+    let handle: unknown;
+    const fired = new Promise<typeof LIMIT>((resolve) => {
+      handle = this.timers.setTimeout(() => {
+        this.liveTimers.delete(handle);
+        resolve(LIMIT);
+      }, ms);
+    });
+    this.liveTimers.add(handle);
+    return {
+      fired,
+      clear: () => {
+        if (this.liveTimers.delete(handle)) this.timers.clearTimeout(handle);
+      },
+    };
+  }
+
+  /** Clear the timers of the limits, so that a process that is closing does not stay up for them. */
+  stop(): void {
+    for (const handle of this.liveTimers) this.timers.clearTimeout(handle);
+    this.liveTimers.clear();
   }
 
   /** Let go of what is kept for a run that has ended. */
@@ -185,18 +245,36 @@ export class AgentLogWriter {
   }
 
   /** Whether the environment or the hook index names a session at all: with none, there is nothing to copy. */
-  hasCandidates(): Promise<boolean> {
-    return this.finder.hasCandidates();
+  async hasCandidates(): Promise<boolean> {
+    // The read of the hook index is bounded: the start of a timer must not wait for a call that never answers.
+    const limit = this.limit(GIVE_UP_WAIT_MS);
+    try {
+      const found = await Promise.race([this.finder.hasCandidates(), limit.fired]);
+      return found === LIMIT ? false : found;
+    } finally {
+      limit.clear();
+    }
   }
 
-  /** Waits until no pass of this run is going on in this process. */
-  async idle(runId: string): Promise<void> {
-    for (
-      let running = this.inFlight.get(runId);
-      running !== undefined;
-      running = this.inFlight.get(runId)
-    ) {
-      await running.catch(() => undefined);
+  /**
+   * Waits until no pass of this run is going on in this process, for `limitMs` at most when it is given. Says
+   * whether one is still going on.
+   */
+  async idle(runId: string, limitMs?: number): Promise<boolean> {
+    const limit = limitMs === undefined ? undefined : this.limit(limitMs);
+    try {
+      for (
+        let running = this.inFlight.get(runId);
+        running !== undefined;
+        running = this.inFlight.get(runId)
+      ) {
+        const settled = running.catch(() => undefined);
+        if (limit === undefined) await settled;
+        else if ((await Promise.race([settled, limit.fired])) === LIMIT) return true;
+      }
+      return false;
+    } finally {
+      limit?.clear();
     }
   }
 
@@ -231,18 +309,35 @@ export class AgentLogWriter {
    */
   async capture(run: AgentLogRun, input: CaptureInput): Promise<CaptureResult> {
     const result: CaptureResult = { saved: 0, streams: [], failures: [] };
-    // The timer gives way to a pass that is going on; the end of a step waits for it, since that copy must be made.
+    // The timer gives way to a pass that is going on. The end of a step waits for it, but not for long: a pass that
+    // never ends must not hold the step, so past the wait the step is completed without a copy.
     if (this.inFlight.has(run.runId)) {
       if (input.why === "tick") return { ...result, skipped: "in_flight" };
-      await this.idle(run.runId);
+      if (await this.idle(run.runId, this.stepWaitMs)) return { ...result, skipped: "in_flight" };
     }
     const work = this.run(run, input, result);
     this.inFlight.set(run.runId, work);
+    const limit = this.limit(this.passLimitMs);
     try {
-      return await work;
+      const made = await Promise.race([work, limit.fired]);
+      if (made !== LIMIT) return made;
     } finally {
+      limit.clear();
       if (this.inFlight.get(run.runId) === work) this.inFlight.delete(run.runId);
     }
+    // Given up. The pass keeps its lock, since it may still be writing: letting it go here would let a second
+    // writer in beside it. The record is bounded as well, so that telling of a stall cannot itself hang the answer.
+    work.catch(() => undefined);
+    const told = this.limit(GIVE_UP_WAIT_MS);
+    try {
+      await Promise.race([
+        run.apply({ type: "agent_log_failed", reason: "stalled" }).catch(() => undefined),
+        told.fired,
+      ]);
+    } finally {
+      told.clear();
+    }
+    return { saved: 0, streams: [], failures: ["stalled"], errored: true };
   }
 
   private async run(
@@ -606,6 +701,9 @@ export class AgentLogWriter {
       };
       const appended = await store.appendAgentLog(run.runId, session, expect, text);
       if (!appended.ok) {
+        // Only the holder of the lock may conclude this: after a takeover the newer pass has extended the stream,
+        // and a stop set here would stop its copies too.
+        if (!(await lock.stillHeld())) return "abort";
         memo.checkpoint = undefined;
         memo.stopped = "stored_copy_changed";
         await this.fail(run, ctx.result, "stored_copy_changed", session);

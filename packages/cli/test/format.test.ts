@@ -279,6 +279,7 @@ describe("t3bk2 the line about the agent's log", () => {
       "refused",
       "unreadable",
       "tick_cap",
+      "stalled",
     ] as const) {
       const line = agentLogLine({ ...none, failed: [reason] });
       expect(line).toContain(reason);

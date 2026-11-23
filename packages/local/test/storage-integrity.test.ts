@@ -1,6 +1,17 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -216,6 +227,34 @@ describe("the key and the directory of the hashes", () => {
     expect(await exists(join(dir, ".kodel", "runs", run.runId, "state.json"))).toBe(true);
     expect(await exists(join(base, "projects"))).toBe(false);
     expect(await run.integrityStatus()).toBe("ok");
+  });
+
+  test("task_7bh9_integrity_key_unchanged", async () => {
+    // The key of the hash folder is made from the real path the promise form gives: through a link to the
+    // root, and before `.kodel` exists (the nearest parent that does is resolved, the rest is added).
+    const bare = await mkdtemp(join(tmpdir(), "kodel-storage-int-bare-"));
+    const link = `${bare}-link`;
+    await symlink(bare, link);
+    try {
+      const keyOf = async (storeRoot: string) => {
+        const integrity = new FileIntegrity(hashes, storeRoot);
+        await integrity.set("r_000000001_aaaa", "a".repeat(64));
+        const made = await readdir(hashes);
+        await rm(join(hashes, made[0] as string), { recursive: true });
+        expect(made).toHaveLength(1);
+        return made[0];
+      };
+      const before = sha256(join(await realpath(bare), ".kodel")).slice(0, 16);
+      expect(await keyOf(join(link, ".kodel"))).toBe(before);
+      expect(await keyOf(join(bare, ".kodel"))).toBe(before);
+      await mkdir(join(bare, ".kodel"));
+      const after = sha256(await realpath(join(link, ".kodel"))).slice(0, 16);
+      expect(after).toBe(before);
+      expect(await keyOf(join(link, ".kodel"))).toBe(after);
+    } finally {
+      await rm(link, { force: true });
+      await rm(bare, { recursive: true, force: true });
+    }
   });
 
   test("storage_default_hash_dir_separate_from_history", () => {

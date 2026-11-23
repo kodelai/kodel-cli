@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { cp, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
-import { findProjectRoot, NO_PROJECT_MESSAGE } from "../src";
+import { canonicalRoot, findProjectRoot, locateProject, NO_PROJECT_MESSAGE } from "../src";
 
 const cleanup: string[] = [];
 afterEach(async () => {
@@ -326,5 +326,37 @@ describe("tXJPC_find_project_root", () => {
     expect(found.root).toBe(main);
     // The repository bounds the walk, so it did not climb past a git boundary.
     expect(found.climbed).toBeUndefined();
+  });
+});
+
+describe("task_7bh9 the root is the one the promise form of realpath gives", () => {
+  test("task_7bh9_located_root_unchanged", async () => {
+    // `temp()` is not used: the unresolved temporary folder is the point (`/var` and `/private/var` on macOS)
+    const raw = await mkdtemp(join(tmpdir(), "kodel-root-raw-"));
+    cleanup.push(raw);
+    const main = join(raw, "main");
+    await initRepo(main);
+    await mark(main);
+    await mkdir(join(main, "src"), { recursive: true });
+    await writeFile(join(main, "src", "a.txt"), "a");
+    commitAll(main);
+    const linked = join(raw, "linked");
+    git(main, "worktree", "add", "-q", "-b", "side", linked);
+    const link = join(raw, "link");
+    await symlink(main, link);
+    const real = await realpath(main);
+
+    const cwds = [main, join(main, "src"), link, join(link, "src"), linked, join(linked, "src")];
+    // a spelling in another case is the same folder where the system folds case
+    if (process.platform === "darwin") cwds.push(join(raw, "MAIN"), join(raw, "MAIN", "SRC"));
+    for (const cwd of cwds) {
+      const found = await locateProject(cwd, { home: "/nonexistent" });
+      expect(found?.root, cwd).toBe(real);
+      expect(found?.dataDir, cwd).toBe(join(real, ".kodel"));
+    }
+    for (const root of [main, link, linked]) expect(await canonicalRoot(root), root).toBe(real);
+    if (process.platform === "darwin") expect(await canonicalRoot(join(raw, "MAIN"))).toBe(real);
+    // a root that is not there is its own resolved spelling, as before
+    expect(await canonicalRoot(join(raw, "missing"))).toBe(join(raw, "missing"));
   });
 });

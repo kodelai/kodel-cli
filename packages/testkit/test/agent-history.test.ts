@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, test } from "bun:test";
-import { appendFile, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claudeCodeCollector } from "@kodel-ai/local/history";
@@ -175,6 +175,36 @@ describe("vh9g history collector contract: the fake agent proves the interface i
     };
     const { expect } = await import("bun:test");
     expect(await read("1.4.0")).toEqual(await read("2.0.0"));
+  });
+
+  test("task_7bh9_fake_agent_reads_through_a_symlinked_root", async () => {
+    const { expect } = await import("bun:test");
+    const subject = await fakeSubject("2.0.0");
+    const link = join(base, "link-to-project");
+    await symlink(subject.projectRoot, link);
+    // the session is named through the link and the project by its real path, and the other way round:
+    // both are brought to one spelling before they are compared
+    for (const [root, at] of [
+      [subject.projectRoot, link],
+      [link, subject.projectRoot],
+    ] as const) {
+      const ref = {
+        agent: "fake-agent",
+        session_id: "s1",
+        project_root: root,
+        path: join(at, FAKE_DIR, "s1.json"),
+      };
+      let events = 0;
+      for await (const _ of subject.collector.read(ref)) events += 1;
+      expect(events).toBeGreaterThan(0);
+    }
+    // and a session of another project is still refused through the link
+    const foreign = { ...subject.foreignRef, project_root: link };
+    await expect(
+      (async () => {
+        for await (const _ of subject.collector.read(foreign)) void _;
+      })(),
+    ).rejects.toMatchObject({ code: "HISTORY_PATH_OUTSIDE_PROJECT" });
   });
 
   test("vh9g_overlap_and_additive_usage_are_both_expressible", async () => {

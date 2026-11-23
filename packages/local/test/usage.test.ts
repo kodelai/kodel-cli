@@ -18,6 +18,7 @@ import {
   defaultAgentLog,
   defaultHistory,
   defaultPricing,
+  defaultToolCalls,
   defaultUsage,
   type HistoryConfig,
   type JournalRecord,
@@ -33,9 +34,14 @@ import {
   type AgentLogRun,
   AgentLogWriter,
   FileStore,
+  GIVE_UP_WAIT_MS,
   LocalPipelineHost,
   type LocalRun,
+  PASS_LIMIT_MS,
+  type PassTimers,
   STEP_END_LOG_WAIT_MS,
+  STEP_IN_FLIGHT_WAIT_MS,
+  ToolCallsWriter,
   UsageWriter,
 } from "../src";
 import { claudeCodeCollector } from "../src/history/claude-code/collector";
@@ -102,6 +108,10 @@ interface RigOptions {
    */
   sleep?: (ms: number) => Promise<void>;
   stepWaitMs?: number;
+  /** Record tool calls as well (off in these tests unless asked for). */
+  toolCalls?: boolean;
+  /** The writer of the agent's log and its store, when a test needs its own (timers, a clock for the lock). */
+  agentLogWith?: (env: () => NodeJS.ProcessEnv) => { store: FileStore; writer: AgentLogWriter };
 }
 
 interface Rig {
@@ -118,6 +128,7 @@ const historyOf = (options: RigOptions): HistoryConfig => ({
   ...(options.toolLog === false ? { tool_log: { enabled: false } } : {}),
   agent_log: { ...defaultAgentLog(), enabled: options.agentLog !== false, interval_s: 0 },
   ...(options.usage === null ? {} : { usage: { ...defaultUsage(), ...options.usage } }),
+  ...(options.toolCalls === true ? { tool_calls: defaultToolCalls() } : {}),
 });
 
 async function rig(options: RigOptions = {}): Promise<Rig> {
@@ -140,13 +151,16 @@ async function rig(options: RigOptions = {}): Promise<Rig> {
     sleep: options.sleep ?? (async () => undefined),
     stepWaitMs: options.stepWaitMs ?? 0,
   });
-  const store = new FileStore({ root: join(root, ".kodel") });
-  const agentLog = new AgentLogWriter({
-    store,
-    root,
-    rules: options.rules ?? [],
-    env: () => env,
-  });
+  const own = options.agentLogWith?.(() => env);
+  const store = own?.store ?? new FileStore({ root: join(root, ".kodel") });
+  const agentLog =
+    own?.writer ??
+    new AgentLogWriter({
+      store,
+      root,
+      rules: options.rules ?? [],
+      env: () => env,
+    });
   const host = new LocalPipelineHost({
     root,
     heartbeatMs: 0,
@@ -1891,4 +1905,265 @@ describe("usage pass: the copy of the agent's log fails", () => {
     const told = (await journalOf(r)).filter((rec) => rec.event === "agent_log_failed");
     expect(told).toHaveLength(1);
   }, 20_000);
+});
+
+// ── a count behind a pass that does not end (TASK-7BH9) ─────────────────────
+
+const until = async (met: () => boolean | Promise<boolean>, what: string): Promise<void> => {
+  for (let i = 0; i < 1_000; i++) {
+    if (await met()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`never happened: ${what}`);
+};
+
+const STALE_MS = 1_000;
+
+/**
+ * A run whose copy has hand-fired limits and a clock of its own for the lock, and whose reads (of the copy and of
+ * the count, each with a switch) can be held until the test lets them go.
+ */
+async function stallRig() {
+  interface Fake {
+    fn: () => void;
+    ms: number;
+    state: "live" | "fired" | "cleared";
+  }
+  const all: Fake[] = [];
+  const timers: PassTimers = {
+    setTimeout: (fn, ms) => {
+      const handle: Fake = { fn, ms, state: "live" };
+      all.push(handle);
+      return handle;
+    },
+    clearTimeout: (handle) => {
+      const fake = handle as Fake;
+      if (fake.state === "live") fake.state = "cleared";
+    },
+  };
+  const live = (ms: number) => all.filter((t) => t.state === "live" && t.ms === ms);
+  const fire = async (ms: number) => {
+    await until(() => live(ms).length > 0, `a live timer of ${ms} ms`);
+    const timer = live(ms)[0] as Fake;
+    timer.state = "fired";
+    timer.fn();
+  };
+
+  const now = { t: Date.now() };
+  /** A read that can be held: `hold` makes the next one wait for `release`. */
+  const held = () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const spy = { reads: 0, hold: false, release: () => release() };
+    const collector = (configDir: string): AgentHistoryCollector => {
+      const real = claudeCodeCollector({ configDir, cacheScope: true });
+      return {
+        ...real,
+        read: async function* (ref, window, options) {
+          spy.reads += 1;
+          if (spy.hold) {
+            spy.hold = false;
+            await gate;
+          }
+          yield* real.read(ref, window, options);
+        },
+      };
+    };
+    return { spy, collector };
+  };
+  const copy = held();
+  const count = held();
+  const locks: Promise<unknown>[] = [];
+  const env: { of?: () => NodeJS.ProcessEnv } = {};
+  const r = await rig({
+    toolCalls: true,
+    collector: count.collector,
+    agentLogWith: (envOf) => {
+      env.of = envOf;
+      const store = new FileStore({
+        root: join(dir, ".kodel"),
+        clock: () => now.t,
+        sleep: async (ms) => {
+          now.t += ms;
+        },
+        agentLogStaleMs: STALE_MS,
+      });
+      const lock = store.withAgentLogLock.bind(store);
+      store.withAgentLogLock = (runId, waitMs, fn) => {
+        const taken = lock(runId, waitMs, fn);
+        locks.push(taken.catch(() => undefined));
+        return taken;
+      };
+      const writer = new AgentLogWriter({
+        store,
+        root: dir,
+        rules: [],
+        env: envOf,
+        timers,
+        collector: copy.collector,
+      });
+      return { store, writer };
+    },
+  });
+  const tools = new ToolCallsWriter({
+    root: dir,
+    rules: [],
+    env: env.of as () => NodeJS.ProcessEnv,
+  });
+  const eventsOf = async (event: string) =>
+    (await journalOf(r)).filter((rec) => rec.event === event);
+  const reasons = async (event: string) => (await eventsOf(event)).map((rec) => rec["reason"]);
+  return {
+    ...r,
+    now,
+    live,
+    fire,
+    copy: copy.spy,
+    count: count.spy,
+    locks,
+    tools,
+    eventsOf,
+    reasons,
+  };
+}
+
+describe("task_7bh9 the count and a pass that does not end", () => {
+  test("task_7bh9_late_count_after_takeover_records_nothing", async () => {
+    const s = await stallRig();
+    const log = sessionLog(s.runId);
+    log
+      .call(
+        "msg_tool",
+        { id: "toolu_ls", name: "Bash", input: { command: "ls" } },
+        { input: 7, output: 1 },
+      )
+      .result("toolu_ls", "a.txt");
+    const path = await install(log);
+    const run = s.run.agentLogRun();
+    const step = { node: "a", attempt: 1 };
+    // the pass of a step end as the host makes it: the copy, then the count and the tool calls under its lock
+    const stepPass = () =>
+      s.agentLog.capture(run, {
+        why: "step",
+        waitMs: 0,
+        step,
+        also: async (lock) => {
+          await s.writer.capture(run, step, lock);
+          await s.tools.capture(run, step, lock);
+        },
+      });
+    const records = async () => ({
+      usage: (await s.eventsOf("usage_recorded")).length,
+      tools: (await s.eventsOf("tool_calls_recorded")).length,
+    });
+
+    s.count.hold = true;
+    const late = stepPass();
+    await until(() => s.count.reads > 0, "the read of the count");
+    const lateLock = s.locks[s.locks.length - 1] as Promise<unknown>;
+    await s.fire(PASS_LIMIT_MS);
+    expect(await late).toMatchObject({ failures: ["stalled"], errored: true });
+    expect(await records()).toEqual({ usage: 0, tools: 0 });
+
+    // the lock goes stale; a newer step pass takes it over and counts
+    s.now.t += STALE_MS + 1;
+    expect((await stepPass()).errored).toBeUndefined();
+    const counted = await records();
+    expect(counted.usage).toBeGreaterThan(0);
+    expect(counted.tools).toBeGreaterThan(0);
+    const input = tokensOf(runTotals((await stateOf(s)).usage ?? emptyUsage())).input;
+    expect(input).toBe(100 + 200 + 7);
+
+    // the late one wakes under somebody else's lock: it records nothing
+    let free: () => void = () => undefined;
+    const newer = s.store.withAgentLogLock(
+      s.runId,
+      0,
+      () =>
+        new Promise<void>((resolve) => {
+          free = resolve;
+        }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    s.count.release();
+    await lateLock;
+    expect(await records()).toEqual(counted);
+    expect(tokensOf(runTotals((await stateOf(s)).usage ?? emptyUsage())).input).toBe(input);
+    expect(await s.reasons("usage_failed")).toEqual([]);
+    expect(await s.reasons("tool_calls_failed")).toEqual([]);
+    free();
+    await newer;
+
+    // and nothing is stopped for good: the next pass counts what is new, once
+    log.say("msg_2", "more of step a", { input: 10, output: 5 });
+    await writeFile(path, log.text());
+    expect((await stepPass()).errored).toBeUndefined();
+    expect((await records()).usage).toBe(counted.usage + 1);
+    expect(tokensOf(runTotals((await stateOf(s)).usage ?? emptyUsage())).input).toBe(input + 10);
+    expect(await s.reasons("usage_failed")).toEqual([]);
+  });
+
+  test("task_7bh9_counted_then_stalled_tells_busy", async () => {
+    const s = await stallRig();
+    await install(sessionLog(s.runId));
+    // the record of the stall does not answer either, until the test lets it
+    let tell: () => void = () => undefined;
+    const told = new Promise<void>((resolve) => {
+      tell = resolve;
+    });
+    const real = s.run.agentLogRun.bind(s.run);
+    s.run.agentLogRun = () => {
+      const run = real();
+      return {
+        ...run,
+        apply: async (event) => {
+          if (event.type === "agent_log_failed" && event.reason === "stalled") await told;
+          return run.apply(event);
+        },
+      };
+    };
+
+    // a pass of the timer is in flight when the step ends
+    s.copy.hold = true;
+    const tick = s.agentLog.capture(real(), { why: "tick", waitMs: 0 });
+    await until(() => s.copy.reads > 0, "the read of the tick");
+    s.count.hold = true;
+    const seen = { done: false };
+    const step = s.run.completeStep("a", 1).then((decision) => {
+      seen.done = true;
+      return decision;
+    });
+    // first leg: the step waits for the pass in flight, which ends inside the wait
+    await until(
+      () => s.live(STEP_IN_FLIGHT_WAIT_MS).length === 1,
+      "the wait for the pass in flight",
+    );
+    expect(seen.done).toBe(false);
+    s.copy.release();
+    await tick;
+    // second leg: the step's own pass, whose count never answers, up to the limit of a pass
+    await until(() => s.count.reads > 0, "the read of the count");
+    await until(() => s.live(PASS_LIMIT_MS).length === 1, "the limit of the step's pass");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(seen.done).toBe(false);
+    await s.fire(PASS_LIMIT_MS);
+    // third leg: the record of the stall, up to its own wait
+    await until(() => s.live(GIVE_UP_WAIT_MS).length === 1, "the wait for the record");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(seen.done).toBe(false);
+    await s.fire(GIVE_UP_WAIT_MS);
+    expect((await step).ok).toBe(true);
+
+    expect((await stateOf(s)).nodes["a"]?.status).not.toBe("running");
+    // the count had started, and it is still told as not made
+    expect(s.count.reads).toBe(1);
+    expect(await s.reasons("usage_failed")).toEqual(["busy"]);
+    expect(await s.reasons("tool_calls_failed")).toEqual(["busy"]);
+    expect(await s.reasons("agent_log_failed")).toEqual([]);
+    tell();
+    await until(async () => (await s.reasons("agent_log_failed")).length > 0, "the stalled record");
+    expect(await s.reasons("agent_log_failed")).toEqual(["stalled"]);
+  });
 });
