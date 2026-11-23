@@ -94,6 +94,8 @@ export function serverToolSet(input: {
   tasks?: TaskService;
   runLink?: RunTaskLink;
   agentDecisions?: { gate?: boolean; pipelineChange?: boolean };
+  /** The host keeps attachments: only then can their tools be served. */
+  attachments?: boolean;
 }): ResolvedToolSet {
   const taskLink = input.tasks !== undefined && input.runLink !== undefined;
   return resolveToolSet({
@@ -101,7 +103,7 @@ export function serverToolSet(input: {
     ...(input.overrides === undefined ? {} : { overrides: input.overrides }),
     readOnly: input.readOnly === true,
     available: [
-      ...toolsFor({ taskLink }),
+      ...toolsFor({ taskLink, attachments: input.attachments === true }),
       ...(input.agentDecisions?.gate === true
         ? [{ name: "pipeline_decide_gate", readOnly: false }]
         : []),
@@ -163,6 +165,8 @@ export function createServer(
   const dialog = humans !== undefined && options.dialog === true && !readOnly;
   // Without a host that can decide there is nothing for the agent's tools to do, so none is served.
   const agentDecisions = humans === undefined ? {} : (options.agentDecisions ?? {});
+  // The attachment tools, and the rule about them, only on a host whose runs keep attachments.
+  const attachments = host.attachments === true;
   const taskLink = tasks !== undefined && runLink !== undefined;
   const state = newDialogState();
   // A manager works no step: its decisions answer with the run as it is, and nothing is served to it.
@@ -174,6 +178,7 @@ export function createServer(
     [
       ...toolsFor({
         taskLink,
+        attachments,
         ...(role === undefined ? {} : { role }),
         ...(only === undefined ? {} : { served: only }),
       }),
@@ -194,6 +199,7 @@ export function createServer(
     ...(options.waitHint === undefined ? {} : { waitHint: options.waitHint }),
     dialog,
     decisions: agentDecisions,
+    attachments,
     ...(role === undefined ? {} : { role }),
     served,
   });
@@ -220,6 +226,7 @@ export function createServer(
     taskLink,
     ...(role === undefined ? {} : { role }),
     only: served,
+    attachments,
     ...(humans && dialog
       ? {
           afterTool: createElicitor(server.server, humans, service, {

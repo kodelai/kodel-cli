@@ -5,10 +5,11 @@
  * does not stop an agent with full shell access that goes looking for this directory.
  */
 import { createHash } from "node:crypto";
-import { mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { KodelError } from "@kodel-ai/pipeline-core";
+import { realPath } from "./real-path";
 
 /**
  * The names are run ids, or a run id plus `.seal` for the seal file's hash. A hash is first
@@ -51,7 +52,7 @@ async function stableRealpath(path: string): Promise<string> {
   let current = absolute;
   for (;;) {
     try {
-      return join(await realpath(current), ...[...rest].reverse());
+      return join(await realPath(current), ...[...rest].reverse());
     } catch {
       const parent = dirname(current);
       if (parent === current) return absolute;

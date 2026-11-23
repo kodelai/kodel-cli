@@ -8,6 +8,7 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  attachmentRecords,
   CURRENT_RECORD_VERSION,
   cannotHoldError,
   cannotHoldMessage,
@@ -18,11 +19,13 @@ import {
   decodeJournalRecord,
   defaultAgentLog,
   defaultHistory,
+  defaultRegistry,
   encodeJournalRecord,
   encodeRunState,
   type JournalRecord,
   KNOWN_RECORD_VERSIONS,
   KodelError,
+  nextStep,
   type PipelineSpec,
   parsePipeline,
   parseSnapshot,
@@ -33,6 +36,7 @@ import {
   V1_EVENTS,
   V1_STATE_KEYS,
   V2_ONLY_EVENTS,
+  withAttachmentKinds,
 } from "../src";
 
 const FORMATS = new URL("../../../fixtures/formats/", import.meta.url).pathname;
@@ -76,7 +80,15 @@ function refusal(fn: () => unknown): KodelError {
 }
 
 describe("t41 the codecs read and write the golden runs unchanged", () => {
-  for (const format of ["v1", "v1-open", "v2", "v2-worker", "v2-roles", "v2-manager"]) {
+  for (const format of [
+    "v1",
+    "v1-open",
+    "v2",
+    "v2-worker",
+    "v2-roles",
+    "v2-manager",
+    "v2-attachment",
+  ]) {
     test(`t41_${format.replace("-", "_")}_round_trip_on_real_fixtures`, () => {
       const runs = fixtureRuns(format);
       expect(runs.length).toBeGreaterThan(0);
@@ -749,6 +761,59 @@ describe("t41 upgrading a run", () => {
       NOW,
     );
     expect(marked.ok && marked.journal.map((r) => r.event)).toEqual(["run_migrated"]);
+  });
+});
+
+describe("t45 the golden run with attachments", () => {
+  const attachmentRun = () => {
+    const [run] = fixtureRuns("v2-attachment");
+    if (!run) throw new Error("fixtures/formats/v2-attachment holds no run");
+    return run;
+  };
+
+  test("t45_v2_attachment_fixture_round_trips", () => {
+    const run = attachmentRun();
+    const journal = run.journal.map((line) => decodeJournalRecord(JSON.parse(line)));
+    const written = journal.filter((r) => r.event === "attachment_written");
+    expect(written.map((r) => [r.name, r.version, r.type, r.scanned, r.claim])).toEqual([
+      ["plan.md", 1, "text", true, "none"],
+      ["plan.md", 2, "text", true, "none"],
+      ["shot.png", 1, "png", false, "none"],
+    ]);
+    // every record of a version reads back as one, and is written back as it was read
+    expect(attachmentRecords(journal).map((r) => r.seq)).toEqual(written.map((r) => r.seq));
+    for (const record of written) {
+      expect(encodeJournalRecord(record)).toEqual(record);
+      expect("content" in record).toBe(false);
+    }
+    // the state holds nothing of the attachments: no field of it names one, and its `seq` is the
+    // number of the last record, as with every event
+    const state = readRunState(run.state, run.id);
+    expect(JSON.stringify(state)).not.toContain("plan.md");
+    expect(JSON.stringify(state)).not.toContain("attachment");
+    expect(state.seq).toBe(journal.at(-1)?.seq as number);
+    expect(canonical(encodeRunState(state))).toBe(canonical(JSON.parse(run.state)));
+    // format 1 has no place for the event
+    const [first] = written;
+    expect(refusal(() => encodeJournalRecord({ ...(first as JournalRecord), v: 1 })).code).toBe(
+      "UNSUPPORTED_FORMAT_FEATURE",
+    );
+  });
+
+  test("t45_fixture_reads_without_the_event", () => {
+    // An engine of format 2 that does not know the event (an older build of the same format) reads
+    // the run the same: the records are data it skips, the state has nothing to drop on a write-back,
+    // and the report of the run is the same with and without them.
+    const run = attachmentRun();
+    const journal = run.journal.map((line) => decodeJournalRecord(JSON.parse(line)));
+    const without = journal.filter((r) => r.event !== "attachment_written");
+    expect(without.length).toBe(journal.length - 3);
+    const state = readRunState(run.state, run.id);
+    const source = readFileSync(join(run.dir, "specs", `${state.specHash}.yaml`), "utf8");
+    const spec = parsePipeline(source, { registry: withAttachmentKinds(defaultRegistry()) });
+    expect(canonical(summarizeRun(state, without))).toBe(canonical(summarizeRun(state, journal)));
+    // and nothing the engine decides reads them: the next step of the run is the same answer
+    expect(nextStep(spec, state, 0)).toEqual({ done: true, run_status: "completed" });
   });
 });
 

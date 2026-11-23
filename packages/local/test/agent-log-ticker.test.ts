@@ -1,28 +1,47 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { appendFile, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type AgentLogConfig,
   defaultAgentLog,
   defaultHistory,
+  defaultToolCalls,
+  defaultUsage,
   type HistoryConfig,
   type HistoryEvent,
   type RunEvent,
   type RunState,
+  runTotals,
+  tokensOf,
 } from "@kodel-ai/pipeline-core";
 import { ClaudeLogBuilder } from "../../testkit/src";
 import {
+  AGENT_LOG_STALE_MS,
   type AgentLogRun,
   AgentLogTickers,
   AgentLogWriter,
   FileStore,
+  GIVE_UP_WAIT_MS,
   LocalPipelineHost,
   type LocalRun,
   MAX_FAILED_TICKS,
+  PASS_LIMIT_MS,
+  type PassTimers,
+  STEP_IN_FLIGHT_WAIT_MS,
   type TimerHandle,
   type Timers,
+  UsageWriter,
 } from "../src";
 import { claudeCodeCollector } from "../src/history";
 
@@ -381,7 +400,7 @@ describe("t3bk2 the timer: what a tick does", () => {
     // a tick that comes while the first is still reading does not start another
     await tickers.tick(h.run.runId);
     expect(h.spy.reads).toBe(1);
-    // and the end of a step waits for it, since that copy must be made
+    // and the end of a step waits for it, because the pass ends inside the time a step end waits for one
     const stepDone = h.run.completeStep("a", 1);
     h.release();
     await first;
@@ -646,6 +665,39 @@ describe("t3bk2 the timer: giving up", () => {
     expect(fake.live()).toHaveLength(1);
   });
 
+  test("task_7bh9_skips_do_not_reset_the_failure_count", async () => {
+    const errored = { errored: true };
+    const busy = { skipped: "busy" };
+    const after = async (answers: object[]) => {
+      const journal: RunEvent[] = [];
+      const fake = manualTimers();
+      const t = new AgentLogTickers(answering([...answers]), fake.timers);
+      const run = fakeRun(journal);
+      await t.ensure(run);
+      for (let i = 0; i < answers.length; i++) await t.tick(run.runId);
+      return { going: fake.live().length === 1, journal };
+    };
+    // a tick that did not run is not a good one: the failures on either side of it still add up
+    const stopped = await after([
+      errored,
+      busy,
+      busy,
+      busy,
+      busy,
+      busy,
+      errored,
+      { skipped: "in_flight" },
+      errored,
+    ]);
+    expect(stopped.going).toBe(false);
+    expect(stopped.journal).toEqual([{ type: "agent_log_failed", reason: "unreadable" }]);
+    // a good one between them starts the count again
+    expect((await after([errored, busy, {}, errored, errored])).going).toBe(true);
+    // and being kept out is not a failure, however long it lasts
+    const kept = await after(Array.from({ length: 20 }, () => busy));
+    expect(kept).toEqual({ going: true, journal: [] });
+  });
+
   test("t3bk2_tick_cap_once", async () => {
     const journal: RunEvent[] = [];
     const fake = manualTimers();
@@ -752,5 +804,309 @@ describe("session_label the timer journals a rename", () => {
     await tickersOf(r.host).tick(r.runId);
     await tickersOf(r.host).tick(r.runId);
     expect(await names()).toEqual(["first", "second"]);
+  });
+});
+
+const until = async (met: () => boolean | Promise<boolean>, what: string): Promise<void> => {
+  for (let i = 0; i < 1_000; i++) {
+    if (await met()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`never happened: ${what}`);
+};
+
+/** The timers of a writer's limits, which go when the test says so. */
+function passTimers() {
+  interface Fake {
+    fn: () => void;
+    ms: number;
+    state: "live" | "fired" | "cleared";
+  }
+  const all: Fake[] = [];
+  const timers: PassTimers = {
+    setTimeout: (fn, ms) => {
+      const handle: Fake = { fn, ms, state: "live" };
+      all.push(handle);
+      return handle;
+    },
+    clearTimeout: (handle) => {
+      const fake = handle as Fake;
+      if (fake.state === "live") fake.state = "cleared";
+    },
+  };
+  const live = (ms?: number) =>
+    all.filter((t) => t.state === "live" && (ms === undefined || t.ms === ms));
+  const fire = async (ms: number) => {
+    await until(() => live(ms).length > 0, `a live timer of ${ms} ms`);
+    const timer = live(ms)[0] as Fake;
+    timer.state = "fired";
+    timer.fn();
+  };
+  return { timers, live, fire };
+}
+
+/**
+ * A run that counts usage and tool calls, served by a host whose writer has hand-fired limits, a clock of its own
+ * for the lock on copying (the wait for the lock moves it) and reads of the log that can be held.
+ */
+async function boundRig(options: { staleMs?: number; session?: string | null } = {}) {
+  const pass = passTimers();
+  const now = { t: Date.now() };
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  /** `hold`: how many of the next reads wait for `release`. */
+  const spy = { reads: 0, hold: 0 };
+  const env: NodeJS.ProcessEnv = { CLAUDE_CONFIG_DIR: claude };
+  if (options.session !== null) env["CLAUDE_CODE_SESSION_ID"] = options.session ?? SESSION;
+  const store = new FileStore({
+    root: join(dir, ".kodel"),
+    clock: () => now.t,
+    sleep: async (ms) => {
+      now.t += ms;
+    },
+    ...(options.staleMs === undefined ? {} : { agentLogStaleMs: options.staleMs }),
+  });
+  const writer = new AgentLogWriter({
+    store,
+    root: dir,
+    rules: [],
+    env: () => env,
+    timers: pass.timers,
+    collector: (configDir) => {
+      const real = claudeCodeCollector({ configDir });
+      return {
+        ...real,
+        read: async function* (ref, window, options) {
+          spy.reads += 1;
+          if (spy.hold > 0) {
+            spy.hold -= 1;
+            await gate;
+          }
+          yield* real.read(ref, window, options);
+        },
+      };
+    },
+  });
+  const fake = manualTimers();
+  const host = new LocalPipelineHost({
+    root: dir,
+    heartbeatMs: 0,
+    environment: env,
+    history: { ...logConfig(), usage: defaultUsage(), tool_calls: defaultToolCalls() },
+    agentLog: writer,
+    // no wait for the step's own call in the log: these logs have none, and the tests are not about it
+    usage: new UsageWriter({
+      root: dir,
+      rules: [],
+      env: () => env,
+      sleep: async () => undefined,
+      stepWaitMs: 0,
+    }),
+    agentLogTimer: fake.timers,
+  });
+  taskNumber += 1;
+  const started = await host.start({ pipeline: "two", task: `t${taskNumber}`, restart: false });
+  const run = started.run as LocalRun;
+  const log = new ClaudeLogBuilder({ sessionId: SESSION, cwd: dir });
+  log
+    .user("run it")
+    .call(
+      "msg_0",
+      { id: "toolu_start", name: "mcp__kodel__pipeline_start", input: { task: "t" } },
+      { input: 100, output: 10 },
+    )
+    .result("toolu_start", JSON.stringify({ ok: true, run_id: run.runId }))
+    .say("msg_1", "step a", { input: 200, output: 20 });
+  const path = await log.install(claude);
+  await settle();
+  const reasons = async (event: string) =>
+    (await run.journal()).filter((rec) => rec.event === event).map((rec) => rec["reason"]);
+  const lockToken = async (): Promise<string | undefined> =>
+    readFile(join(store.runDir(run.runId), "agent_log.lock"), "utf8")
+      .then((text) => (JSON.parse(text) as { token?: string }).token)
+      .catch(() => undefined);
+  return {
+    host,
+    run,
+    runId: run.runId,
+    store,
+    writer,
+    pass,
+    fake,
+    now,
+    spy,
+    log,
+    path,
+    release: () => release(),
+    reasons,
+    lockToken,
+  };
+}
+
+/** Lets a promise go on by itself and says whether it has settled. */
+const watch = (promise: Promise<unknown>) => {
+  const seen = { done: false };
+  void promise.then(
+    () => {
+      seen.done = true;
+    },
+    () => {
+      seen.done = true;
+    },
+  );
+  return seen;
+};
+
+/** The input tokens counted for the run so far; none when the run does not count. */
+const inputOf = async (run: LocalRun): Promise<number | undefined> => {
+  const usage = (await run.state()).usage;
+  return usage === undefined ? undefined : tokensOf(runTotals(usage)).input;
+};
+
+describe("task_7bh9 the end of a step behind a pass", () => {
+  test("task_7bh9_step_end_does_not_wait_past_its_limit", async () => {
+    const b = await boundRig();
+    b.spy.hold = 1;
+    const tick = tickersOf(b.host).tick(b.runId);
+    await until(() => b.spy.reads > 0, "the read of the tick");
+    const step = b.run.completeStep("a", 1);
+    const seen = watch(step);
+    await until(() => b.pass.live(STEP_IN_FLIGHT_WAIT_MS).length === 1, "the step wait");
+    await settle();
+    // not before its wait is over
+    expect(seen.done).toBe(false);
+    expect((await b.run.state()).nodes["a"]?.status).toBe("running");
+    await b.pass.fire(STEP_IN_FLIGHT_WAIT_MS);
+    await step;
+    // the step is judged without a copy, and what was not counted is said once
+    expect((await b.run.state()).nodes["a"]?.status).not.toBe("running");
+    expect(await b.reasons("usage_failed")).toEqual(["busy"]);
+    expect(await b.reasons("tool_calls_failed")).toEqual(["busy"]);
+    expect(b.spy.reads).toBe(1);
+    b.release();
+    await tick;
+  });
+
+  test("task_7bh9_step_end_behind_a_slow_healthy_pass", async () => {
+    // a pass that ends inside the wait: the step end copies and counts as it always did
+    const quick = await boundRig();
+    quick.spy.hold = 1;
+    const first = tickersOf(quick.host).tick(quick.runId);
+    await until(() => quick.spy.reads > 0, "the read of the tick");
+    const inTime = quick.run.completeStep("a", 1);
+    await until(() => quick.pass.live(STEP_IN_FLIGHT_WAIT_MS).length === 1, "the step wait");
+    quick.release();
+    await first;
+    await inTime;
+    expect(await quick.reasons("usage_failed")).toEqual([]);
+    expect(await quick.reasons("tool_calls_failed")).toEqual([]);
+    expect(await inputOf(quick.run)).toBe(300);
+    expect(quick.pass.live()).toEqual([]);
+    await quick.run.apply({ type: "cancel" }, { trust: true });
+
+    // one that ends after it: nothing is wrong anywhere, and the step still says `busy`
+    const slow = await boundRig();
+    slow.spy.hold = 1;
+    const second = tickersOf(slow.host).tick(slow.runId);
+    await until(() => slow.spy.reads > 0, "the read of the tick");
+    const late = slow.run.completeStep("a", 1);
+    await slow.pass.fire(STEP_IN_FLIGHT_WAIT_MS);
+    await late;
+    expect(await slow.reasons("usage_failed")).toEqual(["busy"]);
+    expect(await slow.reasons("agent_log_failed")).toEqual([]);
+    slow.release();
+    await second;
+    // the cursor did not move: the next step end counts what was skipped
+    slow.log.say("msg_2", "step b", { input: 10, output: 5 });
+    await writeFile(slow.path, slow.log.text());
+    await slow.run.completeStep("b", 1);
+    expect(await slow.reasons("usage_failed")).toEqual(["busy"]);
+    expect(await inputOf(slow.run)).toBe(310);
+  });
+
+  test("task_7bh9_step_end_while_stalled_lock_is_fresh_says_busy", async () => {
+    const b = await boundRig();
+    b.spy.hold = 1;
+    const tick = tickersOf(b.host).tick(b.runId);
+    await until(() => b.spy.reads > 0, "the read of the tick");
+    await b.pass.fire(PASS_LIMIT_MS);
+    await tick;
+    expect(b.writer.busy(b.runId)).toBe(false);
+    const token = await b.lockToken();
+    expect(token).toBeDefined();
+    const from = b.now.t;
+    await b.run.completeStep("a", 1);
+    // it waited for the lock as long as a step end does, and not for the pass that holds it
+    expect(b.now.t - from).toBeGreaterThanOrEqual(5_000);
+    expect(b.now.t - from).toBeLessThan(AGENT_LOG_STALE_MS);
+    expect(b.pass.live(STEP_IN_FLIGHT_WAIT_MS)).toEqual([]);
+    expect(await b.lockToken()).toBe(token as string);
+    expect((await b.run.state()).nodes["a"]?.status).not.toBe("running");
+    expect(await b.reasons("usage_failed")).toEqual(["busy"]);
+    expect(await b.reasons("tool_calls_failed")).toEqual(["busy"]);
+    expect(await b.reasons("agent_log_failed")).toEqual(["stalled"]);
+  });
+});
+
+describe("task_7bh9 the timer and a pass that does not end", () => {
+  test("task_7bh9_ticker_stops_after_three_stalled_passes_and_steps_still_copy", async () => {
+    const stale = 1_000;
+    const b = await boundRig({ staleMs: stale });
+    await b.run.nextStep({ serve: {} });
+    await settle();
+    const tickers = tickersOf(b.host);
+    expect(tickers.has(b.runId)).toBe(true);
+    b.spy.hold = MAX_FAILED_TICKS;
+    const tokens: (string | undefined)[] = [];
+    for (let round = 1; round <= MAX_FAILED_TICKS; round++) {
+      const tick = tickers.tick(b.runId);
+      await until(() => b.spy.reads === round, `the read of round ${round}`);
+      tokens.push(await b.lockToken());
+      await b.pass.fire(PASS_LIMIT_MS);
+      await tick;
+      // a tick kept out by the lock of the pass given up is no failure and no good tick
+      await tickers.tick(b.runId);
+      expect(tickers.has(b.runId)).toBe(round < MAX_FAILED_TICKS);
+      b.now.t += stale + 1;
+    }
+    // each round took the lock of the one before over
+    expect(new Set(tokens).size).toBe(MAX_FAILED_TICKS);
+    expect(tokens).not.toContain(undefined);
+    expect(b.fake.live()).toHaveLength(0);
+    expect(await b.reasons("agent_log_failed")).toEqual(["stalled", "unreadable"]);
+    // the timer is done; the end of a step still copies and counts
+    await b.run.completeStep("a", 1);
+    const saved = (await b.run.journal()).filter((rec) => rec.event === "agent_log_saved");
+    expect(saved.map((rec) => rec["why"])).toEqual(["step"]);
+    expect(await b.reasons("usage_failed")).toEqual([]);
+  });
+
+  test("task_7bh9_ensure_does_not_get_stuck_on_candidates", async () => {
+    const b = await boundRig();
+    const finder = (b.writer as unknown as { finder: { hasCandidates(): Promise<boolean> } })
+      .finder;
+    const real = finder.hasCandidates.bind(finder);
+    // the read of the hook index never answers
+    finder.hasCandidates = () => new Promise<boolean>(() => undefined);
+    const timers = manualTimers();
+    const tickers = new AgentLogTickers(b.writer, timers.timers);
+    const run = b.run.agentLogRun();
+    const ensured = tickers.ensure(run);
+    const seen = watch(ensured);
+    await until(() => b.pass.live(GIVE_UP_WAIT_MS).length === 1, "the wait for the candidates");
+    await settle();
+    expect(seen.done).toBe(false);
+    await b.pass.fire(GIVE_UP_WAIT_MS);
+    await ensured;
+    expect(timers.all).toHaveLength(0);
+    expect(tickers.lastRefusal).toBe("no_candidates");
+    // nothing is left behind that would keep a later call from trying again
+    finder.hasCandidates = real;
+    await tickers.ensure(run);
+    expect(timers.live()).toHaveLength(1);
+    expect(tickers.lastRefusal).toBeUndefined();
+    expect(b.pass.live()).toEqual([]);
   });
 });

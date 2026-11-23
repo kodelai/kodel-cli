@@ -26,6 +26,8 @@ export type AfterTool = (call: ToolCall) => Promise<ToolResult | undefined>;
 
 export interface RegisterOptions {
   taskLink?: boolean;
+  /** The host keeps attachments (T-45): the three attachment tools are registered too. */
+  attachments?: boolean;
   afterTool?: AfterTool;
   /** Tools the host adds to the usual ones (the decisions the config lets the agent make). */
   extraTools?: ToolDescriptor[];
@@ -49,6 +51,7 @@ export function registerPipelineTools(
     [
       ...toolsFor({
         ...(options.taskLink === undefined ? {} : { taskLink: options.taskLink }),
+        ...(options.attachments === undefined ? {} : { attachments: options.attachments }),
         ...(options.role === undefined ? {} : { role: options.role }),
         ...(options.only === undefined ? {} : { served: options.only }),
       }),

@@ -283,6 +283,83 @@ describe("the commands", () => {
   });
 });
 
+describe("task links at the command line (T-45)", () => {
+  test("t45_cli_links_show_and_set", async () => {
+    await config(ENABLED);
+    const first = await add("First");
+    const second = await add("Second");
+    const third = await add("Third", "--depends-on", first, "--depends-on", second);
+    const fourth = await add("Fourth", "--conflicts-with", third);
+
+    const shown = (await cli("task", "show", third)).out;
+    expect(shown).toContain(`  depends on: ${first} (open), ${second} (open)\n`);
+    expect(shown).toContain(`  blocked by: ${first}, ${second}\n`);
+    expect(shown).toContain(`  conflicts with: ${fourth}\n`);
+    expect((await cli("task", "show", first)).out).toContain(`  blocks: ${third}\n`);
+    const json = JSON.parse((await cli("task", "show", third, "--json")).out) as {
+      task: Record<string, unknown>;
+    };
+    expect(json.task.depends_on).toEqual([first, second]);
+    expect(json.task.blocked_by).toEqual([first, second]);
+    expect(json.task.dependencies).toEqual([
+      { key: first, state: "open" },
+      { key: second, state: "open" },
+    ]);
+
+    // The list has a BLOCKED column: the keys that hold the task back, `-` for the others.
+    const lines = (await cli("task", "list")).out.split("\n");
+    const header = lines[0] ?? "";
+    const at = header.indexOf("BLOCKED");
+    const row = (key: string) => lines.find((l) => l.startsWith(key)) ?? "";
+    expect(row(third).slice(at)).toStartWith(`${first},${second}`);
+    expect(row(first).slice(at)).toStartWith("- ");
+    expect(row(fourth).slice(at)).toStartWith("- ");
+
+    // set: add, remove, the whole list, clear; one key per flag.
+    expect((await cli("task", "set", third, "--remove-depends-on", first)).code).toBe(0);
+    expect((await cli("task", "show", third)).out).toContain(`  depends on: ${second} (open)\n`);
+    expect(
+      (await cli("task", "set", third, "--add-depends-on", fourth, "--add-conflicts-with", first))
+        .code,
+    ).toBe(0);
+    expect((await cli("task", "show", third)).out).toContain(
+      `  conflicts with: ${[first, fourth].sort().join(", ")}\n`,
+    );
+    expect((await cli("task", "set", fourth, "--remove-conflicts-with", third)).code).toBe(0);
+    expect((await cli("task", "show", third)).out).toContain(`  conflicts with: ${first}\n`);
+    expect((await cli("task", "set", third, "--depends-on", first)).code).toBe(0);
+    expect((await cli("task", "show", third)).out).toContain(`  depends on: ${first} (open)\n`);
+    expect(
+      (await cli("task", "set", third, "--clear", "depends_on", "--clear", "conflicts_with")).code,
+    ).toBe(0);
+    const cleared = (await cli("task", "show", third)).out;
+    for (const word of ["depends on:", "blocked by:", "conflicts with:"]) {
+      expect(cleared).not.toContain(word);
+    }
+
+    // Refused with the reason, nothing written.
+    const self = await cli("task", "set", first, "--add-depends-on", first);
+    expect(self.code).toBe(1);
+    expect(self.err).toContain("INVALID_TASK");
+    await cli("task", "set", second, "--depends-on", first);
+    const cycle = await cli("task", "set", first, "--depends-on", second);
+    expect(cycle.code).toBe(1);
+    expect(cycle.err).toContain(`${first} -> ${second} -> ${first}`);
+    const unknown = await cli("task", "add", "Fifth", "--depends-on", "KDL-ZZZZ");
+    expect(unknown.code).toBe(1);
+    expect(unknown.err).toContain("TASK_NOT_FOUND");
+    expect((await cli("task", "show", first)).out).not.toContain("depends on:");
+
+    // A closed dependency says what it is; doctor names a link that points nowhere.
+    await cli("task", "set", first, "--status", "declined", "--comment", "not needed");
+    expect((await cli("task", "show", second)).out).toContain(
+      `  depends on: ${first} (declined, waits for approval)\n`,
+    );
+    expect((await cli("task", "doctor")).out).toContain("ok");
+    expect((await cli("task", "schema")).out).toContain("links (depends_on, conflicts_with)");
+  }, 30_000);
+});
+
 describe("the header of the list", () => {
   test("task list starts with a header and aligns the columns", async () => {
     await config(ENABLED);
@@ -291,10 +368,12 @@ describe("the header of the list", () => {
     await cli("task", "set", b, "--comment", "the latest note");
     const lines = (await cli("task", "list")).out.split("\n").filter((l) => !l.startsWith("    "));
     const header = lines[0] ?? "";
-    expect(header).toMatch(/^KEY\s+STATUS\s+PRIORITY\s+APPROVE\s+TITLE\s+SUBTASKS\s+PARENT$/);
+    expect(header).toMatch(
+      /^KEY\s+STATUS\s+PRIORITY\s+APPROVE\s+BLOCKED\s+TITLE\s+SUBTASKS\s+PARENT$/,
+    );
     const rows = lines.filter((l) => l.startsWith("KDL-"));
     expect(rows.length).toBe(2);
-    for (const col of ["STATUS", "PRIORITY", "APPROVE", "TITLE", "SUBTASKS", "PARENT"]) {
+    for (const col of ["STATUS", "PRIORITY", "APPROVE", "BLOCKED", "TITLE", "SUBTASKS", "PARENT"]) {
       const at = header.indexOf(col);
       for (const row of rows) expect(row[at - 1], `${col} in ${row}`).toBe(" ");
     }
@@ -313,7 +392,7 @@ describe("the header of the list", () => {
     const out = (await cli("task", "list")).out.split("\n");
     const at = out.findIndex((l) => l.startsWith(child));
     // Made without a terminal, so it is an agent's task and its row says it waits for approval.
-    expect(out[at]).toMatch(new RegExp(`\\swaits\\s+Child\\s+-\\s+${parent}$`));
+    expect(out[at]).toMatch(new RegExp(`\\swaits\\s+-\\s+Child\\s+-\\s+${parent}$`));
     expect(out[at + 1]).toBe('    "note here"');
     expect(out.find((l) => l.startsWith(parent))).toMatch(/\s0\/1\s/);
   });

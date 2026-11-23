@@ -656,7 +656,7 @@ describe("t42 the consumers of a failure's source, and the pins", () => {
     const { createHash } = await import("node:crypto");
     const { CONTRACT_VERSION, HISTORY_TOOLS, toolsFor } = await import("../src/mcp");
     const { toolsFingerprint } = await import("../src");
-    expect(CONTRACT_VERSION).toBe(6);
+    expect(CONTRACT_VERSION).toBe(7);
     const hash = (taskLink: boolean) =>
       createHash("sha256")
         .update(toolsFingerprint([...toolsFor({ taskLink }), ...HISTORY_TOOLS]))

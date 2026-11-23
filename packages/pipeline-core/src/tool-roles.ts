@@ -46,6 +46,16 @@ export const MANAGER_TOOL_NAMES: readonly string[] = [
   "manager_watch",
 ];
 
+/**
+ * The attachment tools (`mcp/tools.ts`, T-45), served only by a host that keeps attachments. Writing is
+ * part of working a step; the manager reads what the person is shown at a gate and writes nothing.
+ */
+export const ATTACHMENT_TOOL_NAMES: readonly string[] = [
+  "pipeline_attachment_write",
+  "pipeline_attachment_read",
+  "pipeline_attachment_list",
+];
+
 const HISTORY: readonly string[] = [
   "history_runs",
   "history_run_details",
@@ -63,6 +73,7 @@ export const ROLE_TOOLS: Readonly<Record<ServerRole, readonly string[]>> = {
     "pipeline_docs",
     "pipeline_feedback",
     "pipeline_propose_change",
+    ...ATTACHMENT_TOOL_NAMES,
     "task_get",
     "task_list",
     "task_schema",
@@ -75,6 +86,8 @@ export const ROLE_TOOLS: Readonly<Record<ServerRole, readonly string[]>> = {
     "pipeline_resolve",
     "pipeline_docs",
     "pipeline_propose_change",
+    "pipeline_attachment_read",
+    "pipeline_attachment_list",
     ...DECISION_TOOLS,
     ...MANAGER_TOOL_NAMES,
   ],
@@ -202,7 +215,9 @@ export function resolveToolSet(input: {
           name,
           why: DECISION_TOOLS.includes(name)
             ? "added by mcp.roles, but this server serves a decision tool only under decisions.agent"
-            : "added by mcp.roles, but this server cannot serve it (a task tool needs tasks on)",
+            : ATTACHMENT_TOOL_NAMES.includes(name)
+              ? "added by mcp.roles, but this server keeps no attachments"
+              : "added by mcp.roles, but this server cannot serve it (a task tool needs tasks on)",
         });
       }
       continue;

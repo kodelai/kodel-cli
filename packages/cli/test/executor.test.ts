@@ -71,9 +71,9 @@ describe("the real server stamps who calls it", () => {
       record_version: 2,
       meta_version: 2,
       contract_version: CONTRACT_VERSION,
-      instructions_hash: sha256(serverInstructions()),
+      instructions_hash: sha256(serverInstructions({ attachments: true })),
       tools_hash: sha256(
-        toolsFingerprint([...toolsFor(), ...HISTORY_TOOLS, ...MANAGER_TOOLS], {
+        toolsFingerprint([...toolsFor({ attachments: true }), ...HISTORY_TOOLS, ...MANAGER_TOOLS], {
           role: "all",
           readOnly: false,
         }),

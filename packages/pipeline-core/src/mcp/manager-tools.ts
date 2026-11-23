@@ -71,7 +71,7 @@ export const MANAGER_TOOLS: ManagerToolDescriptor[] = [
     name: "manager_gate_changes",
     title: "What a run changed",
     description:
-      "The files a run changed since it started, with the lines changed in each, as the person is shown them at a gate; `gates` names the steps the run waits at now. `kind` is `changes`, `unavailable` (with the reason: say that to the person, never that nothing changed) or `no_repo`. " +
+      "The files a run changed since it started, with the lines changed in each, as the person is shown them at a gate; `gates` names the steps the run waits at now, and `attachments` lists the files the run keeps apart from the project (the latest version of each; `new` marks one written since the run stopped at the gate), with the `attachments_fingerprint` an approval of the gate must send back. `kind` is `changes`, `unavailable` (with the reason: say that to the person, never that nothing changed) or `no_repo`. " +
       DATA,
     shape: { run_id: runId },
     readOnly: true,

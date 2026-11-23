@@ -60,6 +60,14 @@ export interface GateChangesData {
   note?: string;
   /** The gates the run waits at now. */
   gates: { node_slug: string; attempt: number }[];
+  /**
+   * The attachments the run keeps (T-45), the latest version of each name, as a gate answer lists them;
+   * absent on a host that keeps none and for a run with none.
+   */
+  attachments?: Obj[];
+  attachments_omitted?: number;
+  /** What an approval through `pipeline_decide_gate` is held against. */
+  attachments_fingerprint?: string;
 }
 
 /** `off` with a reason where there is nothing to say (no daemon on Windows); else what it is doing. */
@@ -244,6 +252,16 @@ export async function gateChangesAnswer(
     ...(left > 0 ? { files_omitted: left } : {}),
     ...(found.reason === undefined ? {} : { reason: cutText(redact(found.reason)) }),
     ...(found.note === undefined ? {} : { changes_note: cutText(redact(found.note)) }),
+    ...(found.attachments === undefined
+      ? {}
+      : { attachments: historyScrub(found.attachments, redact) }),
+    ...(found.attachments_omitted === undefined
+      ? {}
+      : { attachments_omitted: found.attachments_omitted }),
+    // Sent back as it is to approve: never redacted or cut.
+    ...(found.attachments_fingerprint === undefined
+      ? {}
+      : { attachments_fingerprint: found.attachments_fingerprint }),
     note: MANAGER_NOTE,
   };
 }

@@ -29,6 +29,9 @@ The journal points to them:
 
 A patch that could not be made is recorded and never changes the result of a step or of the run.
 
+A file a step keeps with the run (an attachment, `docs/attachments.md`) is not a change of the project: it
+is in no patch and in no list of changed files, and a gate shows it as a group of its own.
+
 ## What a patch is
 
 Every file starts with `# kodel-patch v1`, or `# kodel-patch v1; cut at <n> KB; more follows` when it was cut

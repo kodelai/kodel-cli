@@ -14,6 +14,7 @@
  * branches have settled. Pauses are per branch (`pauses[]`); the run is `paused` only when nothing
  * can move.
  */
+import { type AttachmentClaim, type AttachmentType, attachmentRecordOf } from "./attachments";
 import { canonicalNode, checkIdOf, type NodeForms, stableJson } from "./canonical";
 import { type ChangesRef, changesField, isTreeId, MAX_CHANGES_ERROR } from "./changes";
 import {
@@ -35,6 +36,7 @@ import type { NodeSpec, PipelineSpec } from "./pipeline";
 import { type AcceptEffect, diffPipelines, standingOf } from "./pipeline-diff";
 import {
   beginsAsSession,
+  checkFeaturesOf,
   defaultRegistry,
   labelsOf,
   RESTART_FAILED,
@@ -123,6 +125,21 @@ export function cleanWorkerModels(models: readonly unknown[]): string[] {
  */
 export function hasModelSteps(spec: PipelineSpec, registry: Registry = defaultRegistry()): boolean {
   return spec.nodes.some((node) => requestedModelOf(registry, node) !== undefined);
+}
+
+/**
+ * What a pipeline's checks need that a stored format cannot hold, in words for the refusal (a check
+ * that reads the run's attachments, in a format with no record of them); `undefined` when it holds all.
+ */
+export function unheldCheckFeature(
+  spec: PipelineSpec,
+  registry: Registry,
+  caps: FormatCapabilities,
+): string | undefined {
+  const lacking = checkFeaturesOf(registry, spec.nodes).find(
+    (feature) => !caps.pipelineFeatures.includes(feature),
+  );
+  return lacking === undefined ? undefined : `a pipeline with a check of kind "${lacking}"`;
 }
 
 /** Whether an active visit is the work of an engine step: by its phase and its node, never by a record. */
@@ -523,6 +540,7 @@ export const AGENT_LOG_FAILURES = [
   "stored_copy_changed",
   "tick_cap",
   "unreadable",
+  "stalled",
 ] as const;
 export type AgentLogFailure = (typeof AGENT_LOG_FAILURES)[number];
 
@@ -681,6 +699,28 @@ export type RunEvent =
       attempt: number;
       completeness: string;
       rows: number;
+    }
+  /**
+   * The host stored a version of an attachment for an open agent step (T-45). Journaled; nothing in the
+   * state changes but its `seq`. The file is the host's: the event carries its hash and place, never the
+   * content. `claimToken` is the hash of the token the write came with; it is only compared with the
+   * live claim on the step, to say whose write it was (`claim` in the record): a write never takes,
+   * renews or releases a claim.
+   */
+  | {
+      type: "attachment_written";
+      node: string;
+      attempt: number;
+      name: string;
+      version: number;
+      ref: string;
+      fileType: AttachmentType;
+      bytes: number;
+      lines?: number;
+      sha256: string;
+      scanned: boolean;
+      redacted?: boolean;
+      claimToken?: string;
     }
   /**
    * A call of the agent was refused (the engine said no). Journaled, up to a limit, so that what was
@@ -1985,6 +2025,7 @@ class Machine {
       });
       return;
     }
+    if (event.type === "attachment_written") return this.attachmentWritten(event);
     if (event.type === "call_refused") {
       // Only the first few are kept: an agent that keeps making refused calls must not be able to
       // grow the journal without end.
@@ -2466,6 +2507,54 @@ class Machine {
     delete run.claim;
   }
 
+  /**
+   * Journal a version of an attachment. Taken only for an open agent step at its current attempt, in a
+   * format that has the event; a refusal reaches the agent, since its file was not kept. The shape is
+   * checked again here (the host made it), so a record that would not read back is never written.
+   */
+  private attachmentWritten(event: Extract<RunEvent, { type: "attachment_written" }>) {
+    if (!this.caps.attachments) throw cannotHoldError(this.s.v, "an attachment", this.s.runId);
+    if (this.ended) throw fail("NODE_NOT_RUNNING", `the run is ${this.s.status}`);
+    this.node(event.node);
+    const visit = this.s.active.find((v) => v.node === event.node);
+    if (!visit) throw fail("NODE_NOT_RUNNING", `node "${event.node}" is not running`);
+    if (visit.attempt !== event.attempt) {
+      throw fail(
+        "ATTEMPT_MISMATCH",
+        `node "${event.node}" is on attempt ${visit.attempt}, not ${event.attempt}`,
+      );
+    }
+    if (visit.phase !== "agent" || visit.suspended === true) {
+      throw fail(
+        "NODE_NOT_RUNNING",
+        `node "${event.node}" is not an open agent step (it is in the ${visit.phase} phase): an attachment is written while the agent works a step`,
+      );
+    }
+    const live = liveClaim(this.run(event.node), this.now);
+    const claim: AttachmentClaim =
+      live === undefined ? "none" : live.token === event.claimToken ? "matched" : "foreign";
+    const data = {
+      node: event.node,
+      attempt: event.attempt,
+      name: event.name,
+      version: event.version,
+      ref: event.ref,
+      type: event.fileType,
+      bytes: event.bytes,
+      ...(event.lines === undefined ? {} : { lines: event.lines }),
+      sha256: event.sha256,
+      scanned: event.scanned,
+      ...(event.redacted === true ? { redacted: true } : {}),
+      claim,
+      ...this.forkFields(visit.fork),
+    };
+    const probe = { v: this.s.v, seq: 0, ts: this.now, event: "attachment_written", ...data };
+    if (attachmentRecordOf(probe) === undefined) {
+      throw fail("INVALID_ARGUMENTS", "the record of the attachment does not hold");
+    }
+    this.log("attachment_written", data);
+  }
+
   private servedWriteFailed(event: Extract<RunEvent, { type: "served_write_failed" }>) {
     if (this.s.served === undefined || this.s.status !== "running") throw new Repeat();
     const so_far = this.s.servedEvents ?? 0;
@@ -2868,6 +2957,8 @@ class Machine {
     if (hasModelSteps(this.spec, this.registry) && !this.caps.pipelineFeatures.includes("model")) {
       throw cannotHoldError(this.s.v, "a pipeline with a step that asks for a model", this.s.runId);
     }
+    const lacking = unheldCheckFeature(this.spec, this.registry, this.caps);
+    if (lacking !== undefined) throw cannotHoldError(this.s.v, lacking, this.s.runId);
     // An unknown outcome waits for a person's resume, which looks the session up first; a change
     // would enter the step again past it.
     const open = this.s.engineSession;

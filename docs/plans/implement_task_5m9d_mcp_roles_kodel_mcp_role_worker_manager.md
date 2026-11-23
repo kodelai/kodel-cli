@@ -494,3 +494,46 @@ Rejected by me in the first round, as before:
     `agent-commands.ts` and `serve-command.ts`), `scripts/take-v2-roles-fixture.mjs` (how the fixture is made),
     `packages/local/test/helpers/run-states.ts` (the project of six run states both "writes nothing" tests use).
     `pipeline_next_step`'s instruction line keeps the words "never takes a step" (a pinned test reads them).
+11. **Merged with `main` (run attachments T-45, task links, the start order of `kodel serve`).** Where the plan
+    and `main` disagreed, `main` was followed:
+    - **Contract version.** `main` took 6 for the attachment tools, so the roles are version 7
+      (`CONTRACT_VERSION`, the tests that pin it, `docs/mcp-roles.md`, `docs/run-formats.md`).
+    - **Rule numbers of the instructions.** `main` took `9d` for the rule of the attachment tools, so the rule
+      this change adds to a server with no role (the manager's read tools) is `9e`. It keeps that number on a
+      host that keeps no attachments (`9c`, then `9e`), so no rule is renumbered by what a host can do.
+    - **The golden texts were written again**, from the sources of `origin/main` at the merge (extracted apart
+      and run as they are), never from the merged output: `instructions-no-role.txt`,
+      `-tasks-ask.txt` and `-decisions-dialog.txt` are now `main`'s texts of a host that keeps attachments (the
+      real local server), and `instructions-no-role-no-attachments.txt` is new, `main`'s text of a host that
+      keeps none (byte for byte the previous `instructions-no-role.txt`). What `main` changed in them: rule
+      `9d`, and the links sentence of task rule 7. The golden test's list of deliberate differences is the
+      same, with `9e` for `9d`.
+    - **Where the three new tools went.** `pipeline_attachment_write` (marked a write, not idempotent, as
+      `main` marks it): the worker only. It is part of working an open step (it takes the step's slug, attempt
+      and claim token), and an `attachment` check cannot pass without it. `pipeline_attachment_read` and
+      `pipeline_attachment_list` (read-only): the worker and the manager. The worker reads what an earlier step
+      kept; the manager reads what the person is shown at a gate. So a `--read-only` server serves the two
+      reads, a server with no role serves all three, and a host that keeps no attachments serves none (an
+      `mcp.roles` `add` of one is reported as not applied, "this server keeps no attachments"). The names are
+      `ATTACHMENT_TOOL_NAMES` in `tool-roles.ts`, in `KNOWN_TOOL_NAMES` through the role tables; the pinned
+      list of writes gained `pipeline_attachment_write`. Test: `5m9d_attachment_tools_follow_the_role`.
+    - **The rule about attachments follows the served set**, like every other rule: a server with all three
+      tools says `main`'s text unchanged; a server with the reads only (manager, `--read-only`) names the reads
+      only.
+    - **Task rule 7** (`main` added what closing a task does to the tasks that depend on it, naming
+      `task_update`): a server without `task_update` (the worker) gets the rule without that clause.
+    - **A gate with attachments, decided through a manager.** `main` holds an agent's approval against the
+      `attachments_fingerprint` of the waiting answer, which a manager never gets. `manager_gate_changes` now
+      lists the run's attachments and that fingerprint (`GateChangesData`, read with the host's
+      `gateAttachments`, redacted like the rest of the answer; the fingerprint is passed as it is), the
+      manager's `pipeline_decide_gate` points there, and its refusal (no fingerprint, or a stale one) no longer
+      calls `pipeline_next_step`: that call could journal a `step_served` for an open sibling step, which a
+      manager must never do (deviation 1). `details` carries the fingerprint and the attachments as before,
+      without `next`. Test: `5m9d_manager_approves_a_gate_with_attachments_from_what_it_was_shown`.
+    - **Stored formats.** Both capabilities are kept (`executorRole`, `attachments`), format 2 has the pipeline
+      feature `attachment`, and the three fixture directories (`v2-roles`, `v2-manager`, `v2-attachment`) are
+      all in the registry test and the round-trip test. Neither side's journal keys overlap.
+    - **`workerToolNames` of `main` is `workerServedTools` here** (the worker's set is its own server's, with
+      the role and `mcp.roles` applied, attachments included). `main`'s test
+      `t45_worker_gets_the_attachment_tools` compares it with a `--role worker` server now, and its
+      `tools_hash` is the fingerprint with the role.

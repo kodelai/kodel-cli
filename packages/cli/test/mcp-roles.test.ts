@@ -169,6 +169,9 @@ const NEVER = ["pipeline_approve", "manager_decide"];
 const EVERY = [...KNOWN_TOOL_NAMES, ...NEVER];
 const sorted = (names: readonly string[]) => [...names].sort();
 const withoutTasks = (names: readonly string[]) => names.filter((n) => !n.startsWith("task_"));
+/** A server outside a project has a host that keeps no attachments. */
+const withoutAttachments = (names: readonly string[]) =>
+  names.filter((n) => !n.startsWith("pipeline_attachment_"));
 const withoutDecisions = (names: readonly string[]) =>
   names.filter((n) => n !== "pipeline_decide_gate" && n !== "pipeline_accept_change");
 
@@ -241,6 +244,8 @@ describe("5m9d a server serves exactly its set", () => {
         "pipeline_docs",
         "pipeline_resolve",
         "pipeline_plan",
+        "pipeline_attachment_read",
+        "pipeline_attachment_list",
         "history_runs",
         "history_run_details",
         "history_agent_log",
@@ -372,7 +377,10 @@ describe("5m9d the start command", () => {
     // Without `--root`: the server looks for a project from where it stands, and finds none.
     const outside = (args: string[]) => connect(nowhere, [], { command: [main, "mcp", ...args] });
     const manager = await outside(["--role", "manager"]);
-    await expectOnly(manager, withoutDecisions(withoutTasks(ROLE_TOOLS.manager)));
+    await expectOnly(
+      manager,
+      withoutAttachments(withoutDecisions(withoutTasks(ROLE_TOOLS.manager))),
+    );
     // Every tool it does serve answers with the reason there is no project.
     expect(await manager.call("manager_inbox")).toMatchObject({ ok: false, code: "NO_PROJECT" });
     expect(await manager.call("pipeline_list")).toMatchObject({ ok: false, code: "NO_PROJECT" });
@@ -383,7 +391,7 @@ describe("5m9d the start command", () => {
     for (const tool of readOnly.tools) expect(tool.annotations?.readOnlyHint).toBe(true);
     await readOnly.close();
     const worker = await outside(["--role", "worker"]);
-    await expectOnly(worker, withoutTasks(ROLE_TOOLS.worker));
+    await expectOnly(worker, withoutAttachments(withoutTasks(ROLE_TOOLS.worker)));
     await worker.close();
   }, 90_000);
 });
@@ -659,6 +667,8 @@ describe("5m9d a server that only reads", () => {
           history_agent_log: { run_id: runId, node: "write", attempt: 1 },
           manager_run_report: { run_id: runId },
           manager_gate_changes: { run_id: runId },
+          pipeline_attachment_list: { run_id: runId },
+          pipeline_attachment_read: { run_id: runId, name: "plan.md" },
         };
         for (const [name, input] of Object.entries(perRun)) {
           if (server.names.includes(name)) await server.call(name, input);
@@ -686,6 +696,8 @@ describe("5m9d a server that only reads", () => {
             "history_agent_log",
             "manager_run_report",
             "manager_gate_changes",
+            "pipeline_attachment_list",
+            "pipeline_attachment_read",
           ]).toContain(name);
       }
       const inbox = await server.call("manager_inbox");
@@ -789,5 +801,67 @@ describe("5m9d a decision through a manager", () => {
     );
     const text = formatReport(summarizeRun(state, journalOf(runId)), plain);
     expect(text).toContain("server role: started by worker; steps served by worker");
+  }, 120_000);
+
+  test("5m9d_manager_approves_a_gate_with_attachments_from_what_it_was_shown", async () => {
+    const dir = makeRepo(OFF + DECISIONS);
+    const home = tempDir("kodel-roles-home-");
+    const servedIn = (runId: string) =>
+      readFileSync(join(dir, ".kodel", "runs", runId, "journal.jsonl"), "utf8")
+        .split("\n")
+        .filter((line) => line.trim())
+        .map((line) => JSON.parse(line) as Loose)
+        .filter((r) => r.event === "step_served").length;
+    const worker = await connect(dir, ["--role", "worker"], { home });
+    const started = await worker.call("pipeline_start", { task: "attached", pipeline: "demo" });
+    const runId = started.run_id as string;
+    const written = await worker.call("pipeline_attachment_write", {
+      run_id: runId,
+      node_slug: "write",
+      attempt: 1,
+      name: "plan.md",
+      content: "a plan\n",
+    });
+    expect(written).toMatchObject({ ok: true, version: 1 });
+    await worker.call("pipeline_complete_step", { run_id: runId, node_slug: "write", attempt: 1 });
+    await worker.close();
+    const servedBefore = servedIn(runId);
+
+    const manager = await connect(dir, ["--role", "manager"], { home });
+    // The manager reads the attachments (T-45) and has no tool that writes one.
+    expect(manager.names).toContain("pipeline_attachment_read");
+    expect(manager.names).toContain("pipeline_attachment_list");
+    expect(manager.names).not.toContain("pipeline_attachment_write");
+    expect(await manager.refuses("pipeline_attachment_write")).toBe(true);
+    const shown = await manager.call("manager_gate_changes", { run_id: runId });
+    expect(shown).toMatchObject({
+      gates: [{ node_slug: "approve", attempt: 1 }],
+      attachments: [{ name: "plan.md", version: 1 }],
+    });
+    expect(typeof shown.attachments_fingerprint).toBe("string");
+    // Without what the person was shown the approval is refused, and nothing is served to the manager.
+    const blind = await manager.call("pipeline_decide_gate", {
+      run_id: runId,
+      node_slug: "approve",
+      attempt: 1,
+      decision: "approved",
+      instruction: "approve it",
+    });
+    expect(blind).toMatchObject({ ok: false, code: "INVALID_ARGUMENTS" });
+    expect(blind.message).toContain("manager_gate_changes");
+    expect(blind.details).toMatchObject({ attachments_fingerprint: shown.attachments_fingerprint });
+    expect(blind.details.next).toBeUndefined();
+    expect(servedIn(runId)).toBe(servedBefore);
+    const decided = await manager.call("pipeline_decide_gate", {
+      run_id: runId,
+      node_slug: "approve",
+      attempt: 1,
+      decision: "approved",
+      instruction: "approve it",
+      attachments_fingerprint: shown.attachments_fingerprint,
+    });
+    expect(decided).toMatchObject({ ok: true, decided_by: "agent", run: { open_step: "ship" } });
+    expect(servedIn(runId)).toBe(servedBefore);
+    await manager.close();
   }, 120_000);
 });

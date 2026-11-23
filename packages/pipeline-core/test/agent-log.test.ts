@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AGENT_LOG_FAILURES,
   decide,
   defaultAgentLog,
   defaultHistory,
@@ -200,6 +201,22 @@ describe("t3bk2 the account of the agent's log in the run machine", () => {
     expect(apply(reloaded, { type: "agent_log_failed", reason: "made up" as never })).toMatchObject(
       { noop: true },
     );
+  });
+
+  test("task_7bh9_stalled_reason_is_known_to_the_machine", () => {
+    expect(AGENT_LOG_FAILURES).toContain("stalled");
+    const first = apply(started(), { type: "agent_log_failed", reason: "stalled" });
+    // a constant and nothing else: no text, no session
+    expect(first.journal).toHaveLength(1);
+    expect(first.journal[0]).toMatchObject({ event: "agent_log_failed", reason: "stalled" });
+    expect(first.journal[0]?.["session"]).toBeUndefined();
+    expect(first.state.agentLog?.failed).toContain("stalled");
+    // every later stall of the run is a repeat
+    const reloaded = JSON.parse(JSON.stringify(first.state)) as RunState;
+    expect(apply(reloaded, { type: "agent_log_failed", reason: "stalled" })).toMatchObject({
+      noop: true,
+      journal: [],
+    });
   });
 
   test("t3bk2_failed_event_names_no_unsafe_session", () => {
@@ -573,6 +590,7 @@ describe("t41 a consumer that has to know every event", () => {
     engine_session_joined: true,
     work_unknown: true,
     engine_start_abandoned: true,
+    attachment_written: true,
   } satisfies Record<RunEvent["type"], true>;
 
   test("t41_the_event_that_names_a_session_is_in_the_table_of_the_consumer", () => {

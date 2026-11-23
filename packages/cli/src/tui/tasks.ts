@@ -1,4 +1,5 @@
 /** The Tasks screen and the Backlog block as lines of text, and the state they keep. Pure: nothing here reads or writes a task. */
+import { dependencyWords } from "@kodel-ai/pipeline-core";
 import { bold, cyan, dim, fit, green, inverse, red, stripAnsi, wrapText, yellow } from "./ansi";
 import type { Session } from "./session";
 import { prose } from "./tabs";
@@ -155,7 +156,7 @@ const STATUS_WIDTH = 11;
 function rowText(row: TaskRow, width: number, child: boolean): string {
   const lead = child ? dim("└ ") : "";
   const titleWidth = Math.max(4, width - 1 - (child ? 2 : 0) - KEY_WIDTH - 1 - PRIORITY_WIDTH - 1);
-  const title = row.waitsForApproval ? `[waits for approval] ${row.title}` : row.title;
+  const title = `${row.waitsForApproval ? "[waits for approval] " : ""}${row.title}`;
   return ` ${lead}${dim(fit(row.key, KEY_WIDTH))} ${fit(title, titleWidth)} ${priorityStyle(row.priority, fit(row.priority ?? "", PRIORITY_WIDTH))}`;
 }
 
@@ -303,14 +304,20 @@ const RUN_WORD: Record<Session["status"], string> = {
 export type CardItem =
   | { kind: "parent"; key: string }
   | { kind: "subtask"; key: string }
+  /** A task the card names in its links: a dependency, a task it blocks, a conflict. */
+  | { kind: "link"; key: string }
   | { kind: "run"; id: string };
 
-/** The parent, the subtasks, then the runs that are in Sessions (a run that is not there cannot be jumped to). */
+/** The parent, the linked tasks, the subtasks, then the runs that are in Sessions (a run that is not there cannot be jumped to). */
 export function cardItems(slot: CardSlot | undefined, sessions: Session[]): CardItem[] {
   if (slot?.status !== "ready") return [];
   const c = slot.card;
   return [
     ...(c.parent === undefined ? [] : [{ kind: "parent" as const, key: c.parent }]),
+    ...[...(c.dependsOn ?? []), ...(c.blocks ?? []), ...(c.conflictsWith ?? [])].map((key) => ({
+      kind: "link" as const,
+      key,
+    })),
     ...c.subtasks.map((k) => ({ kind: "subtask" as const, key: k.key })),
     ...c.runs
       .filter((id) => sessions.some((s) => s.id === id))
@@ -387,6 +394,25 @@ export function taskCardView(a: CardInput): CardView {
     return a.focused ? bold(cyan("› ")) : dim("› ");
   };
   if (card.parent !== undefined) out.push(`${mark()}parent: ${cyan(card.parent)}`);
+  if (card.dependsOn !== undefined) {
+    const refs = new Map((card.dependencies ?? []).map((ref) => [ref.key, ref] as const));
+    const blocking = new Set(card.blockedBy ?? []);
+    out.push(dim("DEPENDS ON"));
+    for (const dependency of card.dependsOn) {
+      const words = dependencyWords(refs.get(dependency));
+      out.push(
+        `${mark()}${cyan(dependency)} ${blocking.has(dependency) ? yellow(`(${words})`) : dim(`(${words})`)}`,
+      );
+    }
+  }
+  if (card.blocks !== undefined) {
+    out.push(dim("BLOCKS"));
+    for (const other of card.blocks) out.push(`${mark()}${cyan(other)}`);
+  }
+  if (card.conflictsWith !== undefined) {
+    out.push(dim("CONFLICTS WITH"));
+    for (const other of card.conflictsWith) out.push(`${mark()}${cyan(other)}`);
+  }
   out.push("");
   if (card.body !== undefined) out.push(...prose(card.body, width), "");
   if (card.subtasks.length > 0) {

@@ -738,8 +738,9 @@ describe("the tool surface", () => {
   test("t40_contract_version_and_surface_snapshot", () => {
     // Bumped from 2 for pipeline_take_step, node_slug/subagents on next_step, claim_token on complete;
     // from 3 for UNSUPPORTED_FORMAT_FEATURE and details.how_to_upgrade (T-41); from 4 for the history tools;
-    // from 5 for the roles of a server (5M9D): the manager tools, and pipeline_next_step marked a write.
-    expect(CONTRACT_VERSION).toBe(6);
+    // from 5 for the attachment tools (T-45); from 6 for the roles of a server (5M9D): the manager tools,
+    // and pipeline_next_step marked a write.
+    expect(CONTRACT_VERSION).toBe(7);
     expect(TOOLS.map((t) => t.name)).toEqual([
       "pipeline_list",
       "pipeline_docs",

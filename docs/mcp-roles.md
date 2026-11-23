@@ -17,8 +17,9 @@ which role it took and how many tools it serves.
 
 **`worker`** works a run: `pipeline_start`, `pipeline_next_step`, `pipeline_take_step`, `pipeline_complete_step`,
 `pipeline_report_result`, `pipeline_list`, `pipeline_resolve`, `pipeline_plan`, `pipeline_docs`,
-`pipeline_feedback`, `pipeline_propose_change`, and with tasks on `task_get`, `task_list`, `task_schema`,
-`task_create`. It has no history tool, cannot change a task (`task_update`) and is never given a tool that decides
+`pipeline_feedback`, `pipeline_propose_change`, the three attachment tools (`pipeline_attachment_write`,
+`pipeline_attachment_read`, `pipeline_attachment_list`, `docs/attachments.md`; only on a host that keeps
+attachments), and with tasks on `task_get`, `task_list`, `task_schema`, `task_create`. It has no history tool, cannot change a task (`task_update`) and is never given a tool that decides
 for the person, whatever `decisions.agent` says. When a run tied to a task ends and the engine does not close the
 task (`tasks.on_run.mode: ask`), the worker is told to tell the person the task is still open; the person closes
 it (`kodel task set`, or through a manager).
@@ -26,14 +27,15 @@ it (`kodel task set`, or through a manager).
 **`manager`** looks after the runs for the person and works none: the history tools (`history_runs`,
 `history_run_details`, `history_agent_log`, `history_stats`), every task tool, `pipeline_list`,
 `pipeline_resolve`, `pipeline_docs`, `pipeline_propose_change` (for the project only: a call with `run_id` is
-refused, not read as a project proposal), the two decision tools when `decisions.agent` allows them, and seven
-read tools of its own:
+refused, not read as a project proposal), `pipeline_attachment_read` and `pipeline_attachment_list` (what a run
+keeps apart from the project; it has no tool that writes an attachment), the two decision tools when
+`decisions.agent` allows them, and seven read tools of its own:
 
 | Tool | What it reads |
 | --- | --- |
 | `manager_inbox` | Everything that waits for the person: a gate (with the step's slug and attempt), a paused run, a change of a run's pipeline (its hash, summary and what differs), a pipeline proposed outside a run, a task that waits for approval, a finished run whose task is still open, a background worker that is gone. Each entry has the command the person runs. A run this kodel cannot read is one entry of kind `unreadable` (a newer format, a state that does not fit its format, a state changed outside kodel); another checkout's runs are not shown. |
 | `manager_run_report` | Where the time of a run went and what was redone. |
-| `manager_gate_changes` | The files a run changed since it started, as the person is shown them at a gate. |
+| `manager_gate_changes` | The files a run changed since it started, as the person is shown them at a gate, and the attachments the run keeps (the latest version of each, `new` on one written since the run stopped at the gate) with their `attachments_fingerprint`. |
 | `manager_serve_status` | What `kodel serve` is doing for this checkout. |
 | `manager_agents` | The background agents of the project (`kodel agent ls`). |
 | `manager_agent_log` | The last lines one of them wrote (`unverified`: the agent wrote them). |
@@ -47,6 +49,11 @@ read without serving anything: no step is handed to the manager, and nothing is 
 is journaled as made by an agent through a manager (`decided_by: agent`, `decided_via: manager`), and `kodel
 serve` resumes the run's worker after it as after a person's decision. (A decision an agent makes where the run
 is worked is followed by that agent itself, so the daemon does not resume a worker for it; that did not change.)
+
+A gate of a run that keeps attachments is approved only with the `attachments_fingerprint` of what the person was
+told about (`docs/attachments.md`). Where the run is worked that is the waiting answer's; a manager takes it from
+`manager_gate_changes`. An approval without it, or with one from before a version was written, is refused with
+the attachments as they are now in `details`, and on a manager that refusal serves no step either.
 
 **No role** is the union of the two after the overrides. `pipeline_next_step` is listed with
 `readOnlyHint: false`: it restarts engine work whose owner is gone and records what the agent was shown.
@@ -160,7 +167,7 @@ A run records the role of the server that started it (`run_started.engine.role` 
 `manager`, or `all` for a server with no role) and of the server behind each served and completed step. `kodel
 report`, `history_run_details` and `manager_run_report` show it (`server_roles`). Runs of format 1 record no
 role (`docs/run-formats.md`). `tools_hash` covers the role, `--read-only`, the read-only mark of each tool and
-the final set with the task tools, so its values changed. The MCP contract version is 6.
+the final set with the task tools, so its values changed. The MCP contract version is 7.
 
 ## Limits
 

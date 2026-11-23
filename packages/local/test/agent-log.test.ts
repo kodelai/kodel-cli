@@ -21,7 +21,9 @@ import {
   type HistoryConfig,
   type HistoryEvent,
   historyEventSchema,
+  parsePipeline,
   type RedactRule,
+  type RunEvent,
   type RunState,
 } from "@kodel-ai/pipeline-core";
 import { ClaudeLogBuilder } from "../../testkit/src";
@@ -29,10 +31,17 @@ import {
   type AgentLogRun,
   AgentLogWriter,
   agentLogRoom,
+  type CaptureResult,
   FileStore,
+  GIVE_UP_WAIT_MS,
+  LocalHost,
   LocalPipelineHost,
   type LocalRun,
+  PASS_LIMIT_MS,
+  type PassTimers,
   readStoredAgentLog,
+  STEP_IN_FLIGHT_WAIT_MS,
+  SYSTEM_PASS_TIMERS,
 } from "../src";
 import { claudeCodeCollector } from "../src/history";
 
@@ -1869,5 +1878,472 @@ describe("session_label the pass: what stops the name", () => {
     await capture(r);
     await capture(r);
     expect(await events(r)).toHaveLength(1);
+  });
+});
+
+const until = async (met: () => boolean | Promise<boolean>, what: string): Promise<void> => {
+  for (let i = 0; i < 1_000; i++) {
+    if (await met()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`never happened: ${what}`);
+};
+
+/** The timers of a writer's limits, which go when the test says so. */
+function passTimers() {
+  interface Fake {
+    fn: () => void;
+    ms: number;
+    state: "live" | "fired" | "cleared";
+  }
+  const all: Fake[] = [];
+  const timers: PassTimers = {
+    setTimeout: (fn, ms) => {
+      const handle: Fake = { fn, ms, state: "live" };
+      all.push(handle);
+      return handle;
+    },
+    clearTimeout: (handle) => {
+      const fake = handle as Fake;
+      if (fake.state === "live") fake.state = "cleared";
+    },
+  };
+  const live = (ms?: number) =>
+    all.filter((t) => t.state === "live" && (ms === undefined || t.ms === ms));
+  /** Waits for a live timer of `ms` and lets it go off. */
+  const fire = async (ms: number) => {
+    await until(() => live(ms).length > 0, `a live timer of ${ms} ms`);
+    const timer = live(ms)[0] as Fake;
+    timer.state = "fired";
+    timer.fn();
+  };
+  return { timers, all, live, fire };
+}
+
+const STALE_MS = 1_000;
+
+interface StallRig extends Rig {
+  fake: ReturnType<typeof passTimers>;
+  /** The clock of the lock on copying: a test makes a lock stale by moving it. */
+  now: { t: number };
+  /** `hold`: the next read waits for `release`. `fail`: the next read throws. */
+  spy: { reads: number; hold: boolean; fail: boolean; release: () => void };
+  /** One per time the lock on copying was asked for; settles when the holder is done and the lock let go. */
+  locks: Promise<unknown>[];
+}
+
+/** A run whose writer has hand-fired limits, a clock of its own for the lock, and reads that can be held. */
+async function stallRig(
+  extra: Partial<ConstructorParameters<typeof AgentLogWriter>[0]> = {},
+): Promise<StallRig> {
+  const fake = passTimers();
+  const now = { t: Date.now() };
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const spy = { reads: 0, hold: false, fail: false, release: () => release() };
+  const locks: Promise<unknown>[] = [];
+  const made: { store?: FileStore } = {};
+  const r = await rig({
+    writer: (_store, env) => {
+      const store = new FileStore({
+        root: join(dir, ".kodel"),
+        clock: () => now.t,
+        sleep: async (ms) => {
+          now.t += ms;
+        },
+        agentLogStaleMs: STALE_MS,
+      });
+      const lock = store.withAgentLogLock.bind(store);
+      store.withAgentLogLock = (runId, waitMs, fn) => {
+        const held = lock(runId, waitMs, fn);
+        locks.push(held.catch(() => undefined));
+        return held;
+      };
+      made.store = store;
+      return new AgentLogWriter({
+        store,
+        root: dir,
+        rules: [],
+        env,
+        timers: fake.timers,
+        collector: (configDir) => {
+          const real = claudeCodeCollector({ configDir, cacheScope: true });
+          return {
+            ...real,
+            read: async function* (ref, window, options) {
+              spy.reads += 1;
+              if (spy.fail) {
+                spy.fail = false;
+                throw new Error("the log could not be read");
+              }
+              if (spy.hold) {
+                spy.hold = false;
+                await gate;
+              }
+              yield* real.read(ref, window, options);
+            },
+          };
+        },
+        ...extra,
+      });
+    },
+  });
+  return { ...r, store: made.store as FileStore, fake, now, spy, locks };
+}
+
+const lockPath = (r: Rig) => join(r.store.runDir(r.runId), "agent_log.lock");
+/** The token of the lock on copying; none when there is no lock, or it is being written this instant. */
+const lockToken = async (r: Rig): Promise<string | undefined> =>
+  readFile(lockPath(r), "utf8")
+    .then((text) => (JSON.parse(text) as { token?: string }).token)
+    .catch(() => undefined);
+const eventsOf = async (r: Rig, event: string) =>
+  (await journalOf(r)).filter((rec) => rec.event === event);
+const failedReasons = async (r: Rig) =>
+  (await eventsOf(r, "agent_log_failed")).map((rec) => rec["reason"]);
+const STALLED: CaptureResult = { saved: 0, streams: [], failures: ["stalled"], errored: true };
+
+/** A pass whose read never settles, given up at the limit. */
+async function stallInRead(s: StallRig) {
+  s.spy.hold = true;
+  const reads = s.spy.reads;
+  const pass = capture(s);
+  await until(() => s.spy.reads > reads, "the read of the pass");
+  const token = await lockToken(s);
+  await s.fake.fire(PASS_LIMIT_MS);
+  expect(await pass).toEqual(STALLED);
+  return token;
+}
+
+describe("task_7bh9 a pass that does not end is given up", () => {
+  test("task_7bh9_stalled_pass_is_given_up_and_keeps_its_lock", async () => {
+    const s = await stallRig();
+    await installed(sessionLog(s.runId));
+    s.spy.hold = true;
+    const pass = capture(s);
+    await until(() => s.spy.reads > 0, "the read of the pass");
+    const token = await lockToken(s);
+    expect(token).toBeDefined();
+    expect(s.writer.busy(s.runId)).toBe(true);
+    let answered = false;
+    void pass.then(() => {
+      answered = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(answered).toBe(false);
+    await s.fake.fire(PASS_LIMIT_MS);
+    expect(await pass).toEqual(STALLED);
+    expect(s.writer.busy(s.runId)).toBe(false);
+    // the lock is the pass's own still: it may be writing, so nobody is let in beside it
+    expect(await lockToken(s)).toBe(token as string);
+    expect(await failedReasons(s)).toEqual(["stalled"]);
+    expect((await eventsOf(s, "agent_log_failed"))[0]?.["session"]).toBeUndefined();
+    expect(s.fake.live()).toEqual([]);
+  });
+
+  test("task_7bh9_copy_resumes_after_the_takeover", async () => {
+    const s = await stallRig();
+    await installed(sessionLog(s.runId));
+    const token = await stallInRead(s);
+    const before = (await journalOf(s)).length;
+    // while the lock is fresh a tick is skipped and says nothing
+    for (let i = 0; i < 3; i++) expect(await capture(s)).toMatchObject({ skipped: "busy" });
+    s.now.t += STALE_MS - 100;
+    expect(await capture(s)).toMatchObject({ skipped: "busy" });
+    expect((await journalOf(s)).length).toBe(before);
+    expect(await lockToken(s)).toBe(token as string);
+    // past the time a lock may be held the next tick takes it over and copies from the journal on
+    s.now.t += 200;
+    expect(await capture(s)).toMatchObject({ saved: 1, streams: [SESSION], failures: [] });
+    const events = await stored(s);
+    expect(events.map((e) => e.seq)).toEqual(events.map((_, i) => i + 1));
+    expect(await lockToken(s)).toBeUndefined();
+  });
+
+  test("task_7bh9_stall_before_the_lock_leaves_no_lock", async () => {
+    const s = await stallRig();
+    await installed(sessionLog(s.runId));
+    const run = s.run.agentLogRun();
+    const hung: AgentLogRun = { ...run, state: () => new Promise<RunState>(() => undefined) };
+    const pass = s.writer.capture(hung, { why: "tick", waitMs: 0 });
+    await s.fake.fire(PASS_LIMIT_MS);
+    expect(await pass).toEqual(STALLED);
+    // it never got as far as the lock, so there is none to wait out
+    expect(s.locks).toHaveLength(0);
+    expect(await lockToken(s)).toBeUndefined();
+    expect(s.writer.busy(s.runId)).toBe(false);
+    expect(await capture(s)).toMatchObject({ saved: 1 });
+    expect(s.spy.reads).toBe(1);
+  });
+
+  test("task_7bh9_stalled_is_journaled_once", async () => {
+    const s = await stallRig();
+    await installed(sessionLog(s.runId));
+    const run = s.run.agentLogRun();
+    const hung: AgentLogRun = { ...run, state: () => new Promise<RunState>(() => undefined) };
+    for (let i = 0; i < 2; i++) {
+      const pass = s.writer.capture(hung, { why: "tick", waitMs: 0 });
+      await s.fake.fire(PASS_LIMIT_MS);
+      expect(await pass).toEqual(STALLED);
+    }
+    // the machine of the run (the real one) takes a reason once
+    expect(await failedReasons(s)).toEqual(["stalled"]);
+    expect((await stateOf(s)).agentLog?.failed).toEqual(["stalled"]);
+  });
+
+  test("task_7bh9_late_pass_with_its_lock_finishes", async () => {
+    const s = await stallRig();
+    await installed(sessionLog(s.runId));
+    await stallInRead(s);
+    expect(await eventsOf(s, "agent_log_saved")).toHaveLength(0);
+    // it was only slow: let go while the lock is its own, it goes on as the pass it is
+    s.spy.release();
+    await Promise.all(s.locks);
+    expect(await lockToken(s)).toBeUndefined();
+    expect(await eventsOf(s, "agent_log_saved")).toHaveLength(1);
+    const file = join(s.store.runDir(s.runId), "agent_log", `${SESSION}.jsonl`);
+    expect((await stateOf(s)).agentLog?.sessions[SESSION]?.length).toBe((await stat(file)).size);
+    expect(await capture(s)).toMatchObject({ saved: 0, failures: [] });
+    expect(await eventsOf(s, "agent_log_saved")).toHaveLength(1);
+    const events = await stored(s);
+    expect(events.map((e) => e.seq)).toEqual(events.map((_, i) => i + 1));
+  });
+
+  /** The run of a rig, with the calls a test names held until it lets them go. */
+  function heldRun(s: StallRig, held: { state?: number; apply?: RunEvent["type"] }) {
+    const run = s.run.agentLogRun();
+    let letGo: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      letGo = resolve;
+    });
+    const at = { states: 0, reached: false };
+    const wrapped: AgentLogRun = {
+      ...run,
+      state: async () => {
+        at.states += 1;
+        if (at.states === held.state) {
+          at.reached = true;
+          await gate;
+        }
+        return run.state();
+      },
+      apply: async (event) => {
+        if (event.type === held.apply && !at.reached) {
+          at.reached = true;
+          await gate;
+        }
+        return run.apply(event);
+      },
+    };
+    return { run: wrapped, at, letGo: () => letGo() };
+  }
+
+  interface HangPoint {
+    name: string;
+    /** Starts the pass that hangs; answers how to tell that it got there and how to let it go. */
+    start(s: StallRig): {
+      pass: Promise<unknown>;
+      reached: () => boolean;
+      letGo: () => void;
+    };
+  }
+
+  const points: HangPoint[] = [
+    {
+      name: "in the read",
+      start: (s) => {
+        s.spy.hold = true;
+        const reads = s.spy.reads;
+        return { pass: capture(s), reached: () => s.spy.reads > reads, letGo: s.spy.release };
+      },
+    },
+    {
+      name: "in run.state() at the top of the copy",
+      start: (s) => {
+        // the fourth look at the state: before the lock, under it, for the name, then for the copy
+        const held = heldRun(s, { state: 4 });
+        const pass = s.writer.capture(held.run, { why: "tick", waitMs: 0 });
+        return { pass, reached: () => held.at.reached, letGo: held.letGo };
+      },
+    },
+    {
+      name: "in appendAgentLog before its tail check",
+      start: (s) => {
+        const append = s.store.appendAgentLog.bind(s.store);
+        let letGo: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => {
+          letGo = resolve;
+        });
+        const at = { reached: false };
+        s.store.appendAgentLog = async (...args) => {
+          if (!at.reached) {
+            at.reached = true;
+            await gate;
+          }
+          return append(...args);
+        };
+        return { pass: capture(s), reached: () => at.reached, letGo: () => letGo() };
+      },
+    },
+    {
+      name: "in the apply of agent_log_saved",
+      start: (s) => {
+        const held = heldRun(s, { apply: "agent_log_saved" });
+        const pass = s.writer.capture(held.run, { why: "tick", waitMs: 0 });
+        return { pass, reached: () => held.at.reached, letGo: held.letGo };
+      },
+    },
+    {
+      name: "in the apply of a failure",
+      start: (s) => {
+        s.spy.fail = true;
+        const held = heldRun(s, { apply: "agent_log_failed" });
+        const pass = s.writer.capture(held.run, { why: "tick", waitMs: 0 });
+        return { pass, reached: () => held.at.reached, letGo: held.letGo };
+      },
+    },
+  ];
+
+  describe("task_7bh9_late_pass_after_takeover_writes_nothing", () => {
+    for (const point of points) {
+      test(`task_7bh9_late_pass_after_takeover_writes_nothing: ${point.name}`, async () => {
+        const s = await stallRig();
+        const log = sessionLog(s.runId);
+        const path = await installed(log);
+        const file = join(s.store.runDir(s.runId), "agent_log", `${SESSION}.jsonl`);
+        // a stream with a part the journal vouches for, then more to copy
+        expect(await capture(s)).toMatchObject({ saved: 1 });
+        log.say("msg_3", "three").say("msg_4", "four");
+        await writeFile(path, log.text());
+
+        const late = point.start(s);
+        await until(late.reached, `the pass hangs ${point.name}`);
+        const lateLock = s.locks[s.locks.length - 1] as Promise<unknown>;
+        expect(await lockToken(s)).toBeDefined();
+        await s.fake.fire(PASS_LIMIT_MS);
+        expect(await late.pass).toEqual(STALLED);
+
+        // the lock goes stale and a newer pass takes it over and copies
+        s.now.t += STALE_MS + 1;
+        expect(await capture(s)).toMatchObject({ saved: 1 });
+        expect(await eventsOf(s, "agent_log_saved")).toHaveLength(2);
+        const bytes = await readFile(file, "utf8");
+        // and the lock is held by somebody newer when the late pass wakes
+        let free: () => void = () => undefined;
+        const newer = s.store.withAgentLogLock(
+          s.runId,
+          0,
+          () =>
+            new Promise<void>((resolve) => {
+              free = resolve;
+            }),
+        );
+        await until(async () => (await lockToken(s)) !== undefined, "the newer lock");
+        const token = await lockToken(s);
+
+        late.letGo();
+        await lateLock;
+        expect(await eventsOf(s, "agent_log_saved")).toHaveLength(2);
+        expect(await readFile(file, "utf8")).toBe(bytes);
+        expect(await lockToken(s)).toBe(token as string);
+        expect(await failedReasons(s)).not.toContain("stored_copy_changed");
+        free();
+        await newer;
+
+        // nothing is stopped for good: a third pass copies what is new, and nothing twice
+        log.say("msg_5", "five").say("msg_6", "six");
+        await writeFile(path, log.text());
+        expect(await capture(s)).toMatchObject({ saved: 1 });
+        expect(await failedReasons(s)).not.toContain("stored_copy_changed");
+        const events = await stored(s);
+        expect(events.map((e) => e.seq)).toEqual(events.map((_, i) => i + 1));
+        const ids = events.map((e) => e.kind === "message" && e.message_id).filter(Boolean);
+        expect(ids).toEqual(expect.arrayContaining(["msg_3", "msg_4", "msg_5"]));
+        expect((await stateOf(s)).agentLog?.sessions[SESSION]?.length).toBe(
+          (await stat(file)).size,
+        );
+      });
+    }
+  });
+
+  test("task_7bh9_healthy_pass_does_not_stall", async () => {
+    const s = await stallRig();
+    await installed(sessionLog(s.runId));
+    expect(await capture(s)).toMatchObject({ saved: 1, failures: [] });
+    // the limit of a pass that ended is cleared, never left to go off
+    expect(s.fake.all.map((t) => [t.ms, t.state])).toEqual([[PASS_LIMIT_MS, "cleared"]]);
+    expect(await failedReasons(s)).toEqual([]);
+
+    // the wait of a step end for a pass in flight is cleared when the pass ends first
+    s.spy.hold = true;
+    const tick = capture(s);
+    await until(() => s.spy.reads > 1, "the read of the second pass");
+    const step = capture(s, "step");
+    await until(() => s.fake.live(STEP_IN_FLIGHT_WAIT_MS).length === 1, "the step wait");
+    s.spy.release();
+    await tick;
+    expect((await step).skipped).toBeUndefined();
+    expect(s.fake.live()).toEqual([]);
+    expect(s.fake.all.some((t) => t.state === "fired")).toBe(false);
+  });
+
+  test("task_7bh9_stop_clears_the_pass_timer", async () => {
+    const s = await stallRig();
+    await installed(sessionLog(s.runId));
+    s.spy.hold = true;
+    const pass = capture(s);
+    await until(() => s.fake.live(PASS_LIMIT_MS).length === 1, "the limit of the pass");
+    s.writer.stop();
+    expect(s.fake.live()).toEqual([]);
+    // and the host that is stopped stops its writer
+    let stops = 0;
+    const stop = s.writer.stop.bind(s.writer);
+    s.writer.stop = () => {
+      stops += 1;
+      stop();
+    };
+    s.host.stop();
+    expect(stops).toBe(1);
+    s.spy.release();
+    expect(await pass).toMatchObject({ saved: 1 });
+  });
+
+  test("task_7bh9_defaults_are_wired", async () => {
+    expect([PASS_LIMIT_MS, STEP_IN_FLIGHT_WAIT_MS, GIVE_UP_WAIT_MS]).toEqual([
+      60_000, 5_000, 2_000,
+    ]);
+    const viaPipelineHost = (
+      new LocalPipelineHost({ root: dir, heartbeatMs: 0 }) as unknown as {
+        agentLog: AgentLogWriter;
+      }
+    ).agentLog;
+    const viaHost = new LocalHost(parsePipeline(PIPELINE), { root: dir, heartbeatMs: 0 }).agentLog;
+    for (const writer of [viaPipelineHost, viaHost]) {
+      expect(writer.passLimitMs).toBe(60_000);
+      expect(writer.stepWaitMs).toBe(5_000);
+      expect(writer.timers).toBe(SYSTEM_PASS_TIMERS);
+    }
+    const store = new FileStore({ root: join(dir, ".kodel") });
+    for (const passLimitMs of [0, -1, Number.NaN]) {
+      const writer = new AgentLogWriter({
+        store,
+        root: dir,
+        rules: [],
+        env: () => ({}),
+        passLimitMs,
+      });
+      expect(writer.passLimitMs).toBe(60_000);
+    }
+
+    // the system timers give a pass up as the hand-fired ones do
+    const spy = { reads: 0, gate: new Promise<void>(() => undefined) };
+    const r = await rig({ writer: spyWriter(spy, { passLimitMs: 30 }) });
+    await installed(sessionLog(r.runId));
+    expect(await capture(r)).toEqual(STALLED);
+    expect(spy.reads).toBe(1);
+    expect(r.writer.busy(r.runId)).toBe(false);
+    expect(await failedReasons(r)).toEqual(["stalled"]);
   });
 });

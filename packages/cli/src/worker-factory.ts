@@ -41,7 +41,9 @@ export async function workerServedTools(dataDir: string): Promise<string[]> {
     role: "worker",
     overrides,
     available: [
-      ...toolsFor({ taskLink: opened?.runLink !== undefined }),
+      // Attachments included, as the local host keeps them: a worker that could not call their tools
+      // could never satisfy an `attachment` check.
+      ...toolsFor({ taskLink: opened?.runLink !== undefined, attachments: true }),
       ...HISTORY_TOOLS,
       ...MANAGER_TOOLS,
       ...(opened === undefined ? [] : buildTaskTools(opened.service.capabilities)),

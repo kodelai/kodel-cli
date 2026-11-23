@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  ATTACHMENT_TOOL_NAMES,
   DECISION_TOOLS,
   HISTORY_TOOL_NAMES,
   KNOWN_TOOL_NAMES,
@@ -83,6 +84,8 @@ interface Setup {
   tasks?: TaskAdapterCapabilities;
   taskLink?: "auto" | "ask";
   overrides?: RoleOverrides;
+  /** The host keeps attachments, as the local one does; `false` for a host that keeps none. */
+  attachments?: boolean;
 }
 
 /** A server's surface, put together the way `createServer` of the CLI does it. */
@@ -90,12 +93,13 @@ function surface(setup: Setup) {
   const flags = setup.decisions === true ? BOTH : {};
   const lookWith = setup.role === "manager" ? "manager_inbox" : "pipeline_next_step";
   const taskLink = setup.tasks !== undefined && setup.taskLink !== undefined;
+  const attachments = setup.attachments !== false;
   const resolved = resolveToolSet({
     ...(setup.role === undefined ? {} : { role: setup.role }),
     ...(setup.overrides === undefined ? {} : { overrides: setup.overrides }),
     readOnly: setup.readOnly === true,
     available: [
-      ...toolsFor({ taskLink }),
+      ...toolsFor({ taskLink, attachments }),
       ...decisionTools(flags, decider),
       ...HISTORY_TOOLS,
       ...MANAGER_TOOLS,
@@ -109,6 +113,7 @@ function surface(setup: Setup) {
       [
         ...toolsFor({
           taskLink,
+          attachments,
           ...(setup.role === undefined ? {} : { role: setup.role }),
           served: only,
         }),
@@ -123,6 +128,7 @@ function surface(setup: Setup) {
   const served = tools.map((tool) => tool.name);
   const base = serverInstructions({
     decisions: flags,
+    attachments,
     ...(setup.role === undefined ? {} : { role: setup.role }),
     served,
   });
@@ -150,6 +156,9 @@ describe("5m9d the role tables", () => {
         "pipeline_docs",
         "pipeline_feedback",
         "pipeline_propose_change",
+        "pipeline_attachment_write",
+        "pipeline_attachment_read",
+        "pipeline_attachment_list",
         "task_get",
         "task_list",
         "task_schema",
@@ -171,6 +180,8 @@ describe("5m9d the role tables", () => {
         "pipeline_resolve",
         "pipeline_docs",
         "pipeline_propose_change",
+        "pipeline_attachment_read",
+        "pipeline_attachment_list",
         "pipeline_decide_gate",
         "pipeline_accept_change",
         "manager_inbox",
@@ -273,7 +284,7 @@ describe("5m9d the role tables", () => {
 
 describe("5m9d the marks", () => {
   const everyTool = (): ToolSpec[] => [
-    ...toolsFor({ taskLink: true }),
+    ...toolsFor({ taskLink: true, attachments: true }),
     ...decisionTools(BOTH, decider),
     ...HISTORY_TOOLS,
     ...MANAGER_TOOLS,
@@ -294,7 +305,11 @@ describe("5m9d the marks", () => {
     // The name lists kept without the SDK are the registries'.
     expect(sorted(MANAGER_TOOL_NAMES)).toEqual(sorted(MANAGER_TOOLS.map((t) => t.name)));
     expect(sorted([...PIPELINE_TOOL_NAMES, ...HISTORY_TOOL_NAMES])).toEqual(
-      sorted([...toolsFor(), ...decisionTools(BOTH, decider), ...HISTORY_TOOLS].map((t) => t.name)),
+      sorted(
+        [...toolsFor({ attachments: true }), ...decisionTools(BOTH, decider), ...HISTORY_TOOLS].map(
+          (t) => t.name,
+        ),
+      ),
     );
     for (const name of RUN_CORE) expect(ROLE_TOOLS.worker).toContain(name);
   });
@@ -320,6 +335,7 @@ describe("5m9d the marks", () => {
         "pipeline_propose_change",
         "pipeline_decide_gate",
         "pipeline_accept_change",
+        "pipeline_attachment_write",
         "task_create",
         "task_update",
       ]),
@@ -347,7 +363,7 @@ describe("5m9d the marks", () => {
   });
 
   test("5m9d_fingerprint_covers_the_role_and_the_final_set", () => {
-    expect(CONTRACT_VERSION).toBe(6);
+    expect(CONTRACT_VERSION).toBe(7);
     const hash = (setup: Setup, header: { role: ServerRole | "all"; readOnly: boolean }) =>
       createHash("sha256")
         .update(toolsFingerprint(surface(setup).tools, header))
@@ -580,7 +596,57 @@ describe("5m9d the texts", () => {
       expect(withAllowance.instructions).toContain(`\n${rule}`);
     }
     expect(withAllowance.instructions).not.toContain("\n9c. ");
-    expect(withAllowance.instructions).not.toContain("\n9d. ");
+    // 9d is the rule of the attachment tools, which the worker has; 9e is the manager's.
+    expect(withAllowance.instructions).toContain("\n9d. pipeline_attachment_write ");
+    expect(withAllowance.instructions).not.toContain("\n9e. ");
+  });
+
+  test("5m9d_attachment_tools_follow_the_role", () => {
+    const names = (list: readonly string[]) =>
+      list.filter((n) => n.startsWith("pipeline_attachment_"));
+    // The worker keeps files with the run; the manager reads what the person is shown and writes none.
+    const worker = surface({ role: "worker" });
+    expect(sorted(names(worker.served))).toEqual(sorted(ATTACHMENT_TOOL_NAMES));
+    const manager = surface({ role: "manager", decisions: true });
+    expect(sorted(names(manager.served))).toEqual([
+      "pipeline_attachment_list",
+      "pipeline_attachment_read",
+    ]);
+    expect(manager.instructions).toContain(
+      "pipeline_attachment_list and pipeline_attachment_read show",
+    );
+    expect(manager.instructions).not.toContain("pipeline_attachment_write");
+    // A decision through a manager is held against what manager_gate_changes showed.
+    const decide = manager.tools.find((t) => t.name === "pipeline_decide_gate");
+    expect(decide?.description).toContain("manager_gate_changes");
+    expect(decide?.description).not.toContain("waiting answer");
+    // `--read-only` keeps the two that read.
+    const readOnly = surface({ readOnly: true });
+    expect(sorted(names(readOnly.served))).toEqual([
+      "pipeline_attachment_list",
+      "pipeline_attachment_read",
+    ]);
+    expect(readOnly.instructions).not.toContain("pipeline_attachment_write");
+    // A host that keeps no attachments serves none, names none, and says so of an `add`.
+    const none = surface({
+      role: "manager",
+      attachments: false,
+      overrides: { manager: { add: ["pipeline_attachment_write"] } },
+    });
+    expect(names(none.served)).toEqual([]);
+    expect(none.instructions).not.toContain("pipeline_attachment");
+    expect(none.unapplied).toEqual([
+      {
+        name: "pipeline_attachment_write",
+        why: expect.stringContaining("keeps no attachments") as unknown as string,
+      },
+    ]);
+    // The person can give the manager the write, as any other tool.
+    const given = surface({
+      role: "manager",
+      overrides: { manager: { add: ["pipeline_attachment_write"] } },
+    });
+    expect(sorted(names(given.served))).toEqual(sorted(ATTACHMENT_TOOL_NAMES));
   });
 
   test("5m9d_manager_decides_from_the_inbox", () => {
@@ -613,9 +679,11 @@ describe("5m9d the texts", () => {
         to: "pipeline_next_step never takes a step.",
       },
     ];
-    const ADDED = [/^9d\. To look after the runs for the person: manager_inbox lists /];
+    const ADDED = [/^9e\. To look after the runs for the person: manager_inbox lists /];
     const cases: [string, string][] = [
       ["instructions-no-role.txt", surface({}).instructions],
+      // A host that keeps no attachments has no rule 9d; the added rule keeps its number.
+      ["instructions-no-role-no-attachments.txt", surface({ attachments: false }).instructions],
       [
         "instructions-no-role-tasks-ask.txt",
         surface({ tasks: FULL, taskLink: "ask" }).instructions,
@@ -626,6 +694,7 @@ describe("5m9d the texts", () => {
           dialog: true,
           waitHint: false,
           decisions: BOTH,
+          attachments: true,
           served: surface({ decisions: true }).served,
         }),
       ],
@@ -648,9 +717,11 @@ describe("5m9d the texts", () => {
         }
       });
       expect(replaced, file).toBe(REPLACED.length);
-      // The added rule stands after 9c and before the dialog rule, so the others keep their numbers.
-      const at = lines.findIndex((line) => line.startsWith("9d. "));
-      expect(lines[at - 1]?.startsWith("9c. "), file).toBe(true);
+      // The added rule stands after 9c, and after 9d (the attachment tools, T-45) where the host keeps
+      // attachments, and before the dialog rule, so the others keep their numbers.
+      const at = lines.findIndex((line) => line.startsWith("9e. "));
+      const last = file.includes("no-attachments") ? "9c. " : "9d. ";
+      expect(lines[at - 1]?.startsWith(last), file).toBe(true);
     }
   });
 });

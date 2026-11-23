@@ -6,7 +6,7 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
+import { lstat, mkdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -290,7 +290,7 @@ export async function ensurePlace(
 ): Promise<void> {
   if (place.mode !== "home" || place.base === undefined || place.tree === undefined) return;
   await mkdir(place.base, { recursive: true, mode: 0o700 });
-  const realBase = await realpath(place.base);
+  const realBase = realpathSync.native(place.base);
   const folders =
     scope === "tree"
       ? [join(place.base, "projects"), place.tree]
@@ -308,7 +308,7 @@ export async function ensurePlace(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-    if (info?.isSymbolicLink() && !isInside(realBase, await realpath(folder))) {
+    if (info?.isSymbolicLink() && !isInside(realBase, realpathSync.native(folder))) {
       throw new StoragePathsError(
         `${folder} is a link that leaves ${realBase}; the history is not placed through it`,
       );

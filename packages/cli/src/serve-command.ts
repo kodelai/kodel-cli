@@ -225,6 +225,14 @@ export async function printServeStatus(input: ServeStatusInput): Promise<void> {
   if (plan.blocked !== undefined) out(`starts:      blocked: ${plain(plan.blocked)}\n`);
   for (const runId of plan.waiting.resumes) out(`${waitLabel} resume of ${plain(runId)}\n`);
   for (const key of plan.waiting.starts) out(`${waitLabel} start of ${plain(key)}\n`);
+  // Both queues in their order with the reason of each place, then what the links hold back (T-45, T-46).
+  plan.queues.workers.forEach((entry, i) => {
+    out(`worker queue: ${i + 1}. ${plain(entry.runId)}: ${plain(entry.reason)}\n`);
+  });
+  plan.queues.starts.forEach((entry, i) => {
+    out(`start queue: ${i + 1}. ${plain(entry.key)}: ${plain(entry.reason)}\n`);
+  });
+  for (const held of plan.blocked_tasks) out(`blocked:     ${plain(held.reason)}\n`);
   for (const runId of plan.orphans) {
     out(
       `no agent:    ${plain(runId)}: open run with a task and no agent; any agent continues it with pipeline_next_step\n`,

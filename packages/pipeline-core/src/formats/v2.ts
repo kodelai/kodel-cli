@@ -18,7 +18,8 @@ export const V2_CAPABILITIES: FormatCapabilities = {
   sessionNames: true,
   workerNotes: true,
   executorRole: true,
-  pipelineFeatures: ["join", "engine", "model"],
+  attachments: true,
+  pipelineFeatures: ["join", "engine", "model", "attachment"],
 };
 
 const isObject = (value: unknown): value is Record<string, unknown> =>

@@ -68,6 +68,11 @@ This repository adds these rules:
   yourself; what waits for a person (`also_waiting` names every gate and pause) is for you to tell them,
   with the command of each (`--node <slug>` when several wait).
 
+A step may keep a file with the run instead of in the project (a plan, a screenshot) with
+`pipeline_attachment_write`; a pipeline can require one with an `attachment` check, and the person sees
+them at a gate beside the changed files (`docs/attachments.md`). An image is stored as given, not scanned
+for secrets: never put a secret in one.
+
 Tasks (`docs/tasks.md`) are off unless `.kodel/config.yaml` has `tasks: { enabled: true }`; when they are on the
 server also offers the `task_*` tools. When the user asks you to "create a task" for something you should not
 fix now, use `task_create` (after one `task_schema`) and tell the user the key; change a status only when
@@ -128,7 +133,7 @@ The engine is meant to be shared with Kodel Server: the server implements the sa
 
 1. **Agent input is untrusted.** The engine, not the agent, decides whether a step is done.
 2. **Fail closed.** Missing or invalid results never close a step.
-3. **Redact at every write path.** Nothing reaches history without going through `redact`.
+3. **Redact at every write path.** Nothing reaches history without going through `redact`. The one exception is an image a step keeps with the run: it cannot be redacted, so it is stored as given and marked `not scanned for secrets` everywhere it is listed (`docs/attachments.md`).
 4. **The engine knows nothing about transport or I/O.** Keep `@kodel-ai/pipeline-core` free of MCP, CLI, `node:fs`, `node:child_process` and clock access; those come in through adapters.
 5. **Side effects behind traits** (clock, filesystem, process execution) so tests can fake them.
 6. **Humans decide trust.** Trust, gate decisions, `ack`, `seal` and accepting a change of a run's pipeline, or a new or changed pipeline outside a run, are never available as agent-callable MCP tools. The agent may propose (`pipeline_propose_change`); only a person's command puts it in place. The one exception is a project that turns it on in its config (`decisions.agent`, off by default, never for `ack`): the server's instructions then say when the agent may decide, and the journal marks it (`docs/decisions.md`).

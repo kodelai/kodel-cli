@@ -21,6 +21,7 @@ export interface AgentDecider {
       instruction: string;
       reason?: string;
       confirm_unverified?: boolean;
+      attachments_fingerprint?: string;
     },
   ): Promise<ToolResult>;
   acceptChange(
@@ -73,7 +74,10 @@ export function decisionTools(
         `${ONLY_WHEN_TOLD} ${otherwise} The decision is recorded in the run's history as made by the agent, with ` +
         "your `instruction`. A rejection needs a reason unless comments were recorded at the step. If the " +
         "engine could not tell what changed since the step was reached, approving needs " +
-        `\`confirm_unverified: true\`, and only if the person said to approve anyway. ${answer}`,
+        `\`confirm_unverified: true\`, and only if the person said to approve anyway. If ${inbox ? "manager_gate_changes lists attachments of the run, tell the person about them first; its answer" : "the waiting answer"} ` +
+        "carries `attachments_fingerprint`, an approval must send it back as it is: when an attachment was " +
+        "written since, the approval is refused with the attachments as they are now (`details`), and you tell the " +
+        `person what is new before they decide again. ${answer}`,
       shape: {
         run_id: runId,
         node_slug: z
@@ -98,6 +102,15 @@ export function decisionTools(
         instruction,
         reason: z.string().max(LIMITS.reason).optional().describe("Why, in the person's words."),
         confirm_unverified: z.boolean().optional(),
+        attachments_fingerprint: z
+          .string()
+          .max(4_096)
+          .optional()
+          .describe(
+            inbox
+              ? "`attachments_fingerprint` of the manager_gate_changes answer the person decided on, when it has one; needed to approve."
+              : "`attachments_fingerprint` of the waiting answer the person decided on, when it has one; needed to approve.",
+          ),
       },
       readOnly: false,
       idempotent: false,

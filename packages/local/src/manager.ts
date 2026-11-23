@@ -8,11 +8,13 @@
 import { randomBytes } from "node:crypto";
 import {
   type AlsoWaiting,
+  attachmentAnswer,
   type GateChangesData,
   type InboxData,
   type InboxItem,
   KodelError,
   MANAGER_LIMITS,
+  MAX_ATTACHMENTS_SHOWN,
   type ManagerHost,
   type NextStep,
   type PipelineChange,
@@ -464,11 +466,30 @@ export function createManagerReads(options: ManagerReadsOptions): ManagerHost {
         .filter((v) => v.phase === "human")
         .map((v) => ({ node_slug: v.node, attempt: v.attempt }));
       const found = await run.changesSinceStart();
+      // The attachments are their own group, whatever could be told about the files (as at a gate).
+      const attached = await run.gateAttachments(gates[0]?.node_slug ?? "");
+      const fresh = new Set(gates.length === 0 ? [] : attached.newSince);
+      const kept =
+        attached.list.length === 0
+          ? {}
+          : {
+              attachments: attached.list.slice(0, MAX_ATTACHMENTS_SHOWN).map((info) => ({
+                ...attachmentAnswer(info),
+                ...(fresh.has(info.name) ? { new: true } : {}),
+              })),
+              ...(attached.list.length > MAX_ATTACHMENTS_SHOWN
+                ? { attachments_omitted: attached.list.length - MAX_ATTACHMENTS_SHOWN }
+                : {}),
+              ...(attached.fingerprint === undefined
+                ? {}
+                : { attachments_fingerprint: attached.fingerprint }),
+            };
       if (found.kind !== "changes") {
         return {
           run_id: runId,
           kind: found.kind,
           gates,
+          ...kept,
           ...(found.kind === "unavailable" ? { reason: found.reason } : {}),
         };
       }
@@ -480,6 +501,7 @@ export function createManagerReads(options: ManagerReadsOptions): ManagerHost {
         ...(omitted > 0 ? { omitted } : {}),
         ...(found.note === undefined ? {} : { note: found.note }),
         gates,
+        ...kept,
       };
     },
 
