@@ -446,6 +446,8 @@ export interface TurnOptions {
   rootFromCwd?: boolean;
   /** More environment for the agent and the commands it runs (`KODEL_TEST_WAIT_TIMEOUT`, say). */
   env?: Record<string, string>;
+  /** Flags after `kodel mcp` (`--role manager`, `--read-only`): no flag serves every tool. */
+  mcpArgs?: string[];
 }
 
 /** One `claude -p` call: the agent works until it ends its turn. */
@@ -455,7 +457,10 @@ export async function runAgentTurn(options: TurnOptions): Promise<AgentTurn> {
     mcpServers: {
       kodel: {
         command: "bun",
-        args: options.rootFromCwd ? [MAIN_TS, "mcp"] : [MAIN_TS, "--root", sandbox.dir, "mcp"],
+        args: [
+          ...(options.rootFromCwd ? [MAIN_TS, "mcp"] : [MAIN_TS, "--root", sandbox.dir, "mcp"]),
+          ...(options.mcpArgs ?? []),
+        ],
         env: { KODEL_STATE_DIR: sandbox.stateDir },
       },
     },
