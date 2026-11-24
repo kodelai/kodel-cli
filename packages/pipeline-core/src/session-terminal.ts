@@ -165,8 +165,8 @@ export interface ModeTracker {
 }
 
 // Patterns are built from strings: the escape character in a regular expression literal reads as a mistake.
-const CSI = new RegExp("\\u001b\\[([?<>=]?)([0-9;:]*)([ -/]*)([@-~])", "y");
-const CSI_PARTIAL = new RegExp("^\\u001b(?:\\[[?<>=]?[0-9;:]*[ -/]*)?$");
+const CSI = /\u001b\[([?<>=]?)([0-9;:]*)([ -/]*)([@-~])/y;
+const CSI_PARTIAL = /^\u001b(?:\[[?<>=]?[0-9;:]*[ -/]*)?$/;
 /** A switch is short; anything longer that is still not whole is not one. */
 const MAX_CARRY = 64;
 const MAX_KITTY_DEPTH = 16;
@@ -332,8 +332,8 @@ const ANY_QUERY = `\\u001b(?:\\[(?:${after(QUERY_LEADS[0])})|\\](?:${after(QUERY
 const QUERIES = new RegExp(ANY_QUERY, "g");
 const FIRST_QUERY = new RegExp(ANY_QUERY);
 /** An escape sequence that has begun and has no end yet (CSI, OSC, DCS or APC), at the end of the text. */
-const OPEN_ESCAPE = new RegExp("\\u001b(?:\\[[0-?]*[ -/]*|[\\]P_][^\\u0007\\u001b]*\\u001b?)?$");
-const EVERY_ESCAPE = new RegExp("\\u001b", "g");
+const OPEN_ESCAPE = /\u001b(?:\[[0-?]*[ -/]*|[\]P_][^\u0007\u001b]*\u001b?)?$/;
+const EVERY_ESCAPE = /\u001b/g;
 /** Passes over a text before it is taken for hostile; output that nests no query needs two. */
 export const QUERY_STRIP_PASSES = 16;
 
@@ -423,7 +423,7 @@ const STRIP = [
   "\\u001b\\[[0-?]*[ -/]*[@-~]", // CSI
   "\\u001b[ -/]*[0-~]", // the short escapes
 ].map((source) => new RegExp(source, "g"));
-const CONTROLS = new RegExp("[\\u0000-\\u0008\\u000b-\\u001f\\u007f]", "g");
+const CONTROLS = /[\u0000-\u0008\u000b-\u001f\u007f]/g;
 
 /** Terminal output as plain text: no escape sequences, no control characters but the newline and the tab. */
 export const stripTerminal = (text: string): string => {

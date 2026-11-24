@@ -53,6 +53,10 @@ export const WORKER_DENIED_COMMANDS: readonly string[] = [
   "pipeline proposals apply*",
   "pipeline proposals discard*",
   "task approve*",
+  "web pair*",
+  "web revoke*",
+  "web token add*",
+  "web token revoke*",
   ...AGENT_HUMAN_COMMANDS.map((command) => `${command}*`),
 ];
 
