@@ -165,8 +165,8 @@ that reaches one stream in pieces with the other stream writing in between can e
 ## Terminal sessions (`mode: pty`)
 
 `kodel agent start [prompt]` (for a person) runs the coding agent of the `claude` profile in a terminal of its
-own, in the project root, and attaches unless `--bg`; it prints the argv and what a start nobody watches may
-meet. With `--pipeline <name>` the prompt is the task of a new run and the session is that run's worker
+own, in the project root, and attaches unless `--bg`; it prints the argv, what a start nobody watches may
+meet, and that a kodel server the agent starts for itself is a worker inside the session (`docs/mcp-roles.md`). With `--pipeline <name>` the prompt is the task of a new run and the session is that run's worker
 (`kw-<run>`), started by the same launcher as `s` in the TUI (`docs/serve.md`). `kodel agent exec --pty --attach
 -- <command>` starts any command and attaches at once.
 

@@ -232,8 +232,8 @@ Principles (AGENTS.md):
    its session, as above; a worker's shell can edit `.kodel/config.yaml`, which is why `engines` is read
    from `HEAD`, though an agent that can commit to the checkout's branch still changes it; the attach socket
    is no boundary; a person can switch a worker's permission mode in the agent's own UI; a plain `agent
-   start` session uses the project's own kodel server, which may decide when `decisions.agent` is on (said
-   by the command). Offline tests show lists and argv as strings only: that the real program honours them
+   start` session is a kodel session, so the kodel server its agent starts for itself is a worker and decides
+   nothing (said by the command; see "After the second merge" in the implementation notes). Offline tests show lists and argv as strings only: that the real program honours them
    is shown by the spike (criterion 11), the real-agent scenario and your hand check.
 7. **Kinds are adapters.** Untouched.
 8. **Formats are versioned.** Below.
@@ -398,7 +398,8 @@ The record, the commands, the config:
 | `agent start <prompt>`: the claude profile's command, the chosen id, the prompt; no kodel MCP config and no permission flag; `KODEL_ENGINE` set; prints the argv and the unattended hint; attaches unless `--bg` | `t47_agent_start_plain_prints_argv_and_attaches` |
 | The flags of `agent start`, one row each: `--pipeline` with `worker: terminal` attaches, with `--bg` does not; `--pipeline` with `worker: print` starts today's `-p` worker, attaches nothing and says so; `--pipeline` without a prompt, `--pipeline --name`, `--resume` with a prompt, with `--pipeline` or with `--name`: refused by name, nothing started; a plain start with `decisions.dialog` on is not refused and prints the line about dialogs; `--pipeline` with it on is refused | `t47_agent_start_flag_table` |
 | With `KODEL_STATE_DIR` set it prints the warning about the agent's own server | `t47_agent_start_plain_warns_about_the_state_dir` |
-| With `decisions.agent` on, a plain start says that this agent's kodel server may decide | `t47_agent_start_plain_says_what_its_server_may_decide` |
+| A plain start says that a kodel server this agent starts for itself is a worker in the session and decides nothing, `decisions.agent` named when it is on | `t47_agent_start_plain_says_what_its_server_may_decide` |
+| The environment a plain session gives its child makes `kodel mcp` with no role a worker (real server from source), and `--role manager` does not start there | `t47_agent_start_plain_session_makes_the_projects_server_a_worker` |
 | `exec --pty --attach` prints `started`, then attaches; the exit code is the attach's; a command that ended before the attach gives `[ended: …]` and code 0; without `--pty` refused | `tA_exec_attach_starts_then_attaches`, `tA_exec_attach_of_a_command_that_already_ended` (`cli/test/agent.test.ts`), `tA_exec_attach_real_terminal` (`tests/pty/pty-session.test.ts`) |
 | `terminal.command` is `[<program>, then pairs of an allowed flag and its value]` (`--flag value` or `--flag=value`): element 0 is the program (a wrapper there is the person's committed choice, and the group rule above covers it); a bare word after it, a value that begins with `-`, any other flag, also in a short form, are refused by name; before the start the built argv is read back by the profile and every element must be the program, one of kodel's own fixed elements, or an allowed pair | `t47_engines_terminal_override`, `t47_engines_terminal_allows_only_listed_flags`, `t47_final_argv_is_checked` |
 | Only the `engines` block is compared with `HEAD` of the checkout: equal: used; a `serve` edit beside it: still used; a working-copy edit, a staged-only edit, a block in `HEAD` that the working copy removed: a daemon or TUI start is refused with "engines is used only as committed: commit .kodel/config.yaml or put the block back as it was", and `agent start` shows the difference and asks; a config that `HEAD` does not hold and git does not track, or no git: `worker:` is honoured and one line says so, `terminal.command` refuses a daemon or TUI start and is asked at `agent start`; a project root that is a subfolder of the git top level is found by its path from the top; `HEAD` is read once per start, inside the start lock; a commit a worker made on its run's branch changes nothing, one on the checkout's own branch does (the stated limit); git itself fails (not found, `safe.directory`, a locked index): a daemon or TUI start is refused with git's reason, `agent start` asks | `t47_engines_block_is_read_from_head` (a table), `t47_engines_head_reader_failure_refuses` |
@@ -1263,6 +1264,30 @@ Steps 12 and 13 (the docs, the follow-up):
   of T-44 in `docs/serve.md` is this run's revised one with `main`'s clause about links on its approval line.
 - **The pipeline's `test` step** takes `main`'s numbers (`timeout: 1800`, `expected_duration: 1100`), not the
   1500 accepted during this run: the person agreed.
+
+### After the second merge (main's MCP roles, 5M9D)
+
+- **A plain `agent start` no longer has a server that may decide.** The plan said such a session "uses the
+  project's own kodel server, which may decide when `decisions.agent` is on". Main's 5M9D decided otherwise for
+  every kodel session: a child of a session carries `KODEL_ENGINE=1` (forced by `sessionEnv`, by the holder and
+  by `ptyChildEnv`, since KDJS and HN8N, for `agent exec` and `agent exec --pty` as well), and under it `kodel
+  mcp` with no `--role` is a worker, `--role manager` and a bare `--read-only` do not start
+  (`cli.ts`, `docs/mcp-roles.md`, "Under `KODEL_ENGINE`"; the task of 5M9D says it verbatim and names an agent a
+  person started with `agent exec`). A plain `agent start` is the same case, so the command, `agent doctor`,
+  `docs/decisions.md`, `docs/mcp-roles.md` and `docs/session-formats.md` now say what is true: the agent's
+  own kodel server is a worker there, with no history and no manager tools, and decides nothing.
+- **Why the mark was not taken off a person's own session instead.** It is read by more than the role
+  default and the first guard of a person's command: `kodel serve` refuses by it alone, `task add|set` count as
+  a person's only without it (a task made in a session would otherwise be started by the daemon with no `task
+  approve`; in a terminal session a command can have a terminal), and the path of a stored image is withheld
+  by it. The session guard of step 6a covers only the registry of person's commands, not these. Taking the
+  mark off would also need a new field of the session's start (the spec refuses `KODEL_ENGINE` in `env`) and
+  would undo a rule of 5M9D inside this task. A person who wants an agent that decides or manages starts it
+  outside kodel, as `docs/mcp-roles.md` says. Whether a person's own session should get the server "as
+  configured" is a decision for the person (it changes 5M9D), not a fix of this merge.
+- Tests: `t47_agent_start_plain_says_what_its_server_may_decide` (the new words, with and without
+  `decisions.agent`), `t47_agent_start_plain_session_makes_the_projects_server_a_worker` (new),
+  `t47_doctor_decisions_dialog_and_agent` (the doctor line).
 
 ## Follow-up tasks (for the person to file; none is in the tracker)
 

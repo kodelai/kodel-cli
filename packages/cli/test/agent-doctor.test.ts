@@ -292,6 +292,8 @@ describe("t47 kodel agent doctor: the seven checks", () => {
     expect(on.answer("decisions.dialog off")).toContain("no (a background agent cannot answer");
     expect(on.answer("decisions.agent off")).toContain("no (gate, pipeline_change: ");
     expect(on.answer("decisions.agent off")).toContain("a worker's own server never decides");
+    expect(on.answer("decisions.agent off")).toContain("the project's server is a worker too");
+    expect(on.answer("decisions.agent off")).not.toContain("which may");
     expect(on.fix("decisions.dialog off")).toContain("set decisions.dialog: false");
     expect(on.fix("decisions.agent off")).toContain("nothing stops a worker");
     // The launcher is asked with what the config says.

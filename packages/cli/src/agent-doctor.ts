@@ -213,9 +213,9 @@ export async function runAgentDoctor(input: AgentDoctorInput): Promise<boolean> 
       ...(decides.length === 0
         ? {}
         : {
-            value: `${decides.join(", ")}: a worker's own server never decides; an agent of kodel agent start uses the project's server, which may`,
+            value: `${decides.join(", ")}: a worker's own server never decides, and inside a session of kodel agent start the project's server is a worker too`,
           }),
-      fix: `nothing stops a worker; to let no agent decide, take decisions.agent out of ${CONFIG}`,
+      fix: `nothing stops a worker; the block lets an agent started outside kodel decide: to let no agent decide, take decisions.agent out of ${CONFIG}`,
     });
   } else {
     say({ check: "decisions.dialog off", answer: "unknown", value: config.reason, fix: fixConfig });

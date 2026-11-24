@@ -5,7 +5,7 @@
  * probes and the launcher given by the test; the run of `--pipeline` is made by the real host.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,7 +15,13 @@ import {
   sessionEnv,
   type UnattendedEngines,
 } from "@kodel-ai/local";
-import { type AttachStream, SessionError, type SessionListEntry } from "@kodel-ai/pipeline-core";
+import {
+  type AttachStream,
+  ROLE_TOOLS,
+  SessionError,
+  type SessionListEntry,
+} from "@kodel-ai/pipeline-core";
+import { ptyChildEnv } from "../../local/src/session-pty";
 import { ScriptedSessionAdapter } from "../../testkit/src/engine-fakes";
 import { resumeHints, resumeProblem } from "../src/agent-commands";
 import type { AttachClientOptions, AttachResult, AttachTerminal } from "../src/attach-client";
@@ -26,6 +32,7 @@ import { createSessionWorkerLauncher } from "../src/worker-launcher-session";
 import { FakeLauncher } from "./fake-launcher";
 import { FakeSessions } from "./fake-sessions";
 
+const MAIN = join(import.meta.dir, "../src/main.ts");
 const UUID = "7f3b2a9c-1d4e-4f6a-9b8c-0d1e2f3a4b5c";
 const OLD_UUID = "11111111-2222-4333-8444-555555555555";
 const OLD = "a_0mw000000_old0";
@@ -328,12 +335,51 @@ describe("t47 kodel agent start, a person's own agent", () => {
     project("decisions:\n  agent:\n    gate: true\n");
     const on = await start({}, "--bg", "hello");
     expect(on.code, on.err).toBe(0);
-    expect(on.out).toContain("decisions.agent is on (gate)");
-    expect(on.out).toContain("the project's own kodel server, which may decide");
+    // 5M9D: inside a session the project's server is a worker, so the block gives this agent nothing.
+    expect(on.out).toContain("is a worker inside a kodel session");
+    expect(on.out).toContain("decides nothing, whatever decisions.agent (gate) says");
+    expect(on.out).toContain("--role manager or --read-only does not start there");
+    expect(on.out).not.toContain("may decide");
+    expect(on.out.indexOf("is a worker inside")).toBeLessThan(on.out.indexOf("started a_"));
     project();
     const off = await start({}, "--bg", "hello");
+    expect(off.out).toContain("is a worker inside a kodel session");
+    expect(off.out).toContain("decides nothing; one set to");
     expect(off.out).not.toContain("decisions.agent");
   });
+
+  test("t47_agent_start_plain_session_makes_the_projects_server_a_worker", async () => {
+    project("decisions:\n  agent:\n    gate: true\n");
+    const sessions = new FakeSessions();
+    const r = await start({ sessions }, "--bg", "hello");
+    expect(r.code, r.err).toBe(0);
+    const [spec] = sessions.specs;
+    // The environment the child of this session gets: what the adapter and the PTY holder make of the spec.
+    const child = ptyChildEnv(sessionEnv(spec?.env, spec?.inheritEnv ?? true, {}));
+    expect(child.KODEL_ENGINE).toBe("1");
+    const home = mkdtempSync(join(tmpdir(), "kodel-agent-start-home-"));
+    made.push(home);
+    // The project's own server as `.mcp.json` starts it (`kodel mcp`, no role), in that environment.
+    const serve = (...args: string[]) =>
+      spawnSync(process.execPath, [MAIN, "--root", dir, "mcp", ...args], {
+        cwd: dir,
+        env: { ...child, PATH: process.env.PATH ?? "", HOME: home },
+        input: "",
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+    const plainServer = serve();
+    expect(plainServer.stderr).toContain(`serving ${ROLE_TOOLS.worker.length} tools (role worker)`);
+    expect(plainServer.stderr).not.toContain("every tool");
+    for (const name of ["pipeline_decide_gate", "pipeline_accept_change", "history_runs"]) {
+      expect(ROLE_TOOLS.worker.includes(name), name).toBe(false);
+    }
+    // A project whose server is a manager gets none in this session, with the reason.
+    const manager = serve("--role", "manager");
+    expect(manager.status).toBe(1);
+    expect(manager.stderr).toContain("KODEL_ENGINE is set");
+    expect(manager.stdout).toBe("");
+  }, 120_000);
 });
 
 /** The scripted adapter with a terminal to attach to. */

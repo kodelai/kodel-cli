@@ -117,7 +117,8 @@ or a bare `--read-only`.
 ## Under `KODEL_ENGINE`
 
 Every child of a kodel session carries `KODEL_ENGINE=1`: the background workers of `kodel serve` and of the TUI,
-a command or a check the engine runs, an agent a person started with `kodel agent exec`. There a server with no
+a command or a check the engine runs, an agent a person started with `kodel agent exec` or `kodel agent start`
+(their own agent in a terminal session; the command says it before the agent starts). There a server with no
 `--role` is a worker, and a manager does not start. Such an agent has no history tools and none of the
 `decisions.agent` allowance; connect a manager from an agent started outside kodel. A pipeline step whose
 command starts `kodel mcp` gets the worker for the same reason. The mark is a guard against mistakes, not a

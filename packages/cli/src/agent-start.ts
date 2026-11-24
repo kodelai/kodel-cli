@@ -196,11 +196,14 @@ async function startOwn(input: AgentStartInput, flags: StartFlags, prompt: strin
   if (config?.dialog === true) {
     ctx.out("decisions.dialog is on: this agent's dialogs show in its own terminal\n");
   }
-  if (config !== undefined && config.agentDecides.length > 0) {
-    ctx.out(
-      `decisions.agent is on (${config.agentDecides.join(", ")}): this agent uses the project's own kodel server, which may decide when you tell it to\n`,
-    );
-  }
+  // 5M9D: every child of a session carries the engine's mark, and under it `kodel mcp` with no role is a
+  // worker. The person is told before the agent starts, not left to find the tools missing.
+  const decides = config?.agentDecides ?? [];
+  ctx.out(
+    `a kodel server this agent starts for itself is a worker inside a kodel session: it works runs, has no history and no manager tools, and decides nothing${
+      decides.length > 0 ? `, whatever decisions.agent (${decides.join(", ")}) says` : ""
+    }; one set to --role manager or --read-only does not start there\n`,
+  );
   const stateDir = environment.KODEL_STATE_DIR;
   if (stateDir !== undefined && stateDir !== "") {
     ctx.out(

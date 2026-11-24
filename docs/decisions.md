@@ -75,7 +75,7 @@ that judge its own work; prefer to leave `pipeline_change` off.
 
 The two tools are served by a server with no role and by a manager (`kodel mcp --role manager`), never by a worker:
 a server started with `--role worker`, and any server under `KODEL_ENGINE` (a background worker, an agent started
-with `kodel agent exec`), decides nothing for the person whatever this block says, and its texts have no word of the
+with `kodel agent exec` or `kodel agent start`), decides nothing for the person whatever this block says, and its texts have no word of the
 tools. On a manager the tools point to `manager_inbox`, their answer is a short state of the run and no step, and the
 journal marks the decision `decided_via: manager`; `kodel serve` then resumes the run's worker as after a person's
 decision. The `mcp.roles` block cannot give the worker a decision tool, and it can give a manager the tools that work
@@ -113,7 +113,7 @@ decide. Kodel never types into a session.*
 What keeps such an agent from deciding:
 
 - **Its kodel server serves no decision tool.** The server of a background agent is `kodel mcp
-  --no-decisions`, whatever `decisions.agent` says, and it is the only MCP server of the session
+  --role worker --no-decisions`, whatever `decisions.agent` says, and it is the only MCP server of the session
   (`--strict-mcp-config`). It shows no dialog; with `decisions.dialog` on, every background agent is refused
   at its start.
 - **Its lists.** An allow list without the decision tools, and a deny list with them, with every command that
@@ -161,9 +161,11 @@ What stays open, stated and not closed:
   session.
 - A person can switch a worker's permission mode in the agent's own interface; the lists then hold as that
   mode says.
-- A plain `kodel agent start` (no `--pipeline`) is your own agent, not a worker: it uses the project's own
-  kodel server, which may decide when `decisions.agent` is on, and shows its dialogs in its own terminal. The
-  command says both.
+- A plain `kodel agent start` (no `--pipeline`) is your own agent, not the worker of a run: it gets no server,
+  no lists and no permission mode from kodel. It is still a kodel session, so the kodel server it starts for
+  itself (the project's `.mcp.json`) is a worker (`KODEL_ENGINE`, `docs/mcp-roles.md`): it decides nothing
+  whatever `decisions.agent` says, and a server set to `--role manager` does not start there. The command says
+  so before it starts the agent. To let an agent decide, or to look after the runs, start it outside kodel.
 
 Test plan: the `t47_*` tests, the `tA_*` tests of the sessions and the real-terminal rows of
 `tests/pty/worker-terminal.test.ts`. What they cannot show is in `tests/README.md`. The decision is refuted
