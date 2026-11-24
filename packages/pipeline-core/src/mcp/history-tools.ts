@@ -14,7 +14,7 @@ import {
 } from "../history-view";
 import { RUN_ID_PATTERN } from "../run-id";
 import type { PipelineService, ToolResult } from "../service";
-import type { ToolDescriptor } from "./tools";
+import { keepOnly, type ToolDescriptor } from "./tools";
 
 const NAME_MAX = 200;
 const CURSOR_MAX = 2_000;
@@ -201,9 +201,14 @@ export async function invokeHistoryTool(
   return tool.run(service, parsed.data);
 }
 
-/** Put the history tools on an MCP server. */
-export function registerHistoryTools(server: McpServer, service: PipelineService): void {
-  for (const tool of HISTORY_TOOLS) {
+/** Put the history tools on an MCP server: those in `only` (all without it). Returns what it registered. */
+export function registerHistoryTools(
+  server: McpServer,
+  service: PipelineService,
+  options: { only?: readonly string[] } = {},
+): ToolDescriptor[] {
+  const tools = keepOnly(HISTORY_TOOLS, options.only);
+  for (const tool of tools) {
     server.registerTool(
       tool.name,
       {
@@ -214,7 +219,7 @@ export function registerHistoryTools(server: McpServer, service: PipelineService
         annotations: { readOnlyHint: tool.readOnly, idempotentHint: tool.idempotent },
       } as never,
       (async (args: Record<string, unknown>) => {
-        const result = await invokeHistoryTool(service, tool.name, args);
+        const result = await invokeHistoryTool(service, tool.name, args, tools);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
           isError: !result.ok,
@@ -222,4 +227,5 @@ export function registerHistoryTools(server: McpServer, service: PipelineService
       }) as never,
     );
   }
+  return tools;
 }

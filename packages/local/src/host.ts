@@ -8,7 +8,7 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { mkdir, readFile, realpath } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import {
@@ -166,6 +166,7 @@ import {
 import { defaultIntegrityDir, FileIntegrity, type IntegrityStore } from "./integrity";
 import { patchBetween } from "./patch";
 import { MAX_PATCH_KB, PATCH_READ_MARGIN } from "./patch-text";
+import { realPath } from "./real-path";
 import { fitServed, promptHashOf, type ServedNode, servedKeyOf } from "./served";
 import { RunStartCache } from "./session-finder";
 import { type StoragePlace, scrubHome } from "./storage-paths";
@@ -228,6 +229,12 @@ export interface HostOptions {
    * when it is here, so they never name one the server does not offer.
    */
   agentDecisions?: { gate?: boolean; pipelineChange?: boolean };
+  /**
+   * The names of the tools the server serves (5M9D), so that an answer never names one it does not:
+   * the note about a task the engine does not close says `task_update` only where it is served.
+   * Absent: every tool.
+   */
+  servedTools?: readonly string[];
   /**
    * The hints the waiting answers carry, over the `agent_hints` block of the config: a server that
    * serves an agent whose turn must end at a wait (`kodel mcp --no-wait-hint`) passes `wait: false`
@@ -932,6 +939,8 @@ export class LocalHost {
                 : { indexPath: this.options.storage.sessionsPath }),
               dirs: [...(workdir ? [workdir.path] : []), this.options.root],
               rules: this.rules,
+              // A new run starts in the current format.
+              withRole: capabilitiesOf(CURRENT_RECORD_VERSION).executorRole,
               ...(this.options.environment === undefined ? {} : { env: this.options.environment }),
             })
           : undefined;
@@ -1294,7 +1303,7 @@ export class LocalRun {
     };
     if (!inside(base, path)) return undefined;
     try {
-      if (!inside(await realpath(base), await realpath(path))) return undefined;
+      if (!inside(await realPath(base), await realPath(path))) return undefined;
     } catch {
       return undefined;
     }
@@ -3215,7 +3224,11 @@ export class LocalRun {
           : doneHint(this.host.options.root, where.path, where.branch);
       }
       if (state.taskKey !== undefined && (await this.host.taskLink())?.mode === "ask") {
-        const ask = `The run was started for task ${state.taskKey} and the engine does not close it by itself (tasks.on_run.mode is ask): ask the person whether to close it, and if they agree call task_update with the done status from task_schema.`;
+        const served = this.host.options.servedTools;
+        const closes = served === undefined || served.includes("task_update");
+        const ask = closes
+          ? `The run was started for task ${state.taskKey} and the engine does not close it by itself (tasks.on_run.mode is ask): ask the person whether to close it, and if they agree call task_update with the done status from task_schema.`
+          : `The run was started for task ${state.taskKey} and the engine does not close it by itself (tasks.on_run.mode is ask): tell the person the task is still open; they close it (\`kodel task set\`, or through a manager).`;
         step.tell_the_person = step.tell_the_person ? `${step.tell_the_person}\n\n${ask}` : ask;
       }
     }
@@ -3663,7 +3676,9 @@ export class LocalRun {
         },
       })
       .catch(() => undefined);
-    if (!counted) {
+    // A pass given up may have started the count; what it read is not known to have been recorded.
+    const stalled = copied?.failures.includes("stalled") === true;
+    if (!counted || stalled) {
       // Said once: what the pass would have read is read by the next one, the cursor did not move. A step the copy
       // had nothing to do with (the run is over, or it is not at an agent step) has nothing to say either.
       // The lock was busy or lost before the count could run: nothing was read, so it is `busy`. A copy that throws no longer stops the count (it runs after the copy under the same lock, and the copy tells its own failure).
@@ -3779,6 +3794,7 @@ export class LocalRun {
       ],
       rules: this.host.rules,
       ...(options.environment === undefined ? {} : { env: options.environment }),
+      withRole: capabilitiesOf(state.v).executorRole,
     };
   }
 

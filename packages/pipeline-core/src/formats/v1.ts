@@ -28,6 +28,7 @@ export const V1_CAPABILITIES: FormatCapabilities = {
   firstDuplicateEdgeWins: true,
   sessionNames: false,
   workerNotes: false,
+  executorRole: false,
   attachments: false,
   pipelineFeatures: [],
 };
@@ -433,6 +434,12 @@ function encodeV1Record(record: JournalRecord): unknown {
   if (!V1_EVENTS.includes(record.event)) throw cannotHold(`the event "${record.event}"`);
   for (const field of FORK_RECORD_FIELDS) {
     if (record[field] !== undefined) throw cannotHold(`a fork attribution ("${field}")`);
+  }
+  for (const field of ["engine", "executor"]) {
+    const nested = record[field];
+    if (isObject(nested) && nested.role !== undefined) {
+      throw cannotHold(`the role of a server ("${field}.role")`);
+    }
   }
   if (record.event !== "pipeline_accepted") return record;
   const { effects, ...rest } = record;

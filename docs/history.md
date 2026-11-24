@@ -280,8 +280,8 @@ is `{ value, source }`, and a part that cannot be observed is left out, never gu
 
 | where | what |
 | --- | --- |
-| `run_started.engine` | `version`, `commit`, `record_version`, `meta_version`, `contract_version`, `instructions_hash`, `tools_hash` |
-| `run_started.executor`, `agent_completed.executor`, `step_served.executor` | `client` (name and version), `session`, `model`, `session_name` |
+| `run_started.engine` | `version`, `commit`, `record_version`, `meta_version`, `contract_version`, `instructions_hash`, `tools_hash`, `role` |
+| `run_started.executor`, `agent_completed.executor`, `step_served.executor` | `client` (name and version), `session`, `model`, `session_name`, `role` |
 | `agent_completed.engine_version` | only when the engine that completed the step is not the one that started the run |
 
 | source | meaning |
@@ -295,6 +295,12 @@ Strings from outside are stripped of control characters and cut at 200 character
 everything else it writes. `contract_version`, `instructions_hash` and `tools_hash` are there when the host knows what
 the agent was served; they change when the instructions or a tool (its name,
 description or arguments) change. With `history.executor: false` none of these fields is written.
+
+`role` is the role of the server the call came through (`docs/mcp-roles.md`): `worker`, `manager`, or `all` for a
+server started with no role. It is the server's own, never an argument of a tool. It is written for runs of format 2
+only, and `kodel report`, `history_run_details` and `manager_run_report` show it as `server_roles` (the role that
+started the run, and the roles that served or completed its steps). `tools_hash` covers the role, `--read-only`, the
+read-only mark of each tool and the final set of tools, the task tools included.
 
 ### The name of the session (`session_name`)
 
@@ -435,11 +441,32 @@ restart the first copy reads the log from the start, for up to 30 seconds a pass
 several copies. A pass that fails after it has read leaves nothing to resume from: the next one starts from the journal, so
 what the failed pass read is stored by it.
 
+**A copy that does not end.** One pass may take 60 seconds; past that it is given up and the run journals
+`agent_log_failed` with `stalled`, like every reason once per run (a later stall leaves no record of its own; `stalled`
+means "a pass was given up", also when the copy itself was saved and the count after it stalled). The pass given up keeps
+its lock, because it may still be writing: until that lock is 300 seconds old the timer's copies are skipped and nothing
+is copied, then the next copy takes the lock over and goes on from the journal. A pass that stalled before it had the
+lock leaves none, and the next copy starts at once. The end of a step waits at most 5 seconds for a copy that is going
+on and for the lock, then the step is completed without a copy, and `usage_failed` and `tool_calls_failed` say `busy`.
+That also happens behind a healthy copy that is merely slow (the first after a restart may read for 30 seconds); the
+next copy reads what was skipped, but at the last step of a run nothing comes after, so `busy` there means that step's
+usage, tool calls and the end of its log are missing. `busy` is also said when the count had started and its pass was
+given up; if that count ends later the journal has both `busy` and the record, and no usage is lost. The timer stops
+with `unreadable` after three copies that failed or stalled with no good one between; a copy skipped because another is going on or the
+lock is held, by this process or another, neither counts nor resets, and the ends of steps go on copying after the
+timer has stopped. Only the copy is bounded this way: kodel resolves real paths with the synchronous call, because the
+asynchronous one can be lost by the runtime, and another file call that is lost outside the copy is not caught. The
+synchronous call blocks the process for as long as it takes, so on a mount that hangs (the project, a worktree, the
+agent's store or the home folder) the process sends no heartbeat meanwhile; if an engine step is in flight and a second
+kodel process works the same run, that process may judge the step abandoned after 30 seconds and start its command
+again while the first still runs. A server that was started before an update keeps its old behaviour until it is
+restarted.
+
 **What is written.** `agent_log/<session>.jsonl` holds the events, one JSON line each, in the event format above (`v: 1`).
 The journal has one `agent_log_saved` per copy: `why` (`tick` or `step`), `session`, `parent?`, `node`, `attempt`,
 `first_seq`, `last_seq`, `stream_from`, `stream_to`, `tail_hash`, `last_key`, `entries` and `cut?`; and `agent_log_failed`
 with a reason, once per reason: `session_unknown`, `log_missing`, `refused`, `log_changed`, `stored_copy_changed`,
-`tick_cap`, `unreadable`. The journal is what the files are measured against: a stream is vouched for up to `stream_to`
+`tick_cap`, `unreadable`, `stalled`. The journal is what the files are measured against: a stream is vouched for up to `stream_to`
 bytes. Bytes after it are a copy that never reached the journal; they are not read and the next copy cuts them off (this
 drops only bytes nothing vouched for, so no history is rewritten). A stream that is shorter than the journal says, or whose
 end is not the end the journal vouches for, is not extended: the report says `stored_copy_changed`. A log that is shorter
@@ -738,7 +765,9 @@ the pass stops, and the next one starts again from the cursor.
 
 ## History tools (`history_runs`, `history_run_details`, `history_agent_log`, `history_stats`)
 
-Four read-only tools of the MCP server let the agent read what past runs of the project did. They read the run's state and
+Four read-only tools of the MCP server let the agent read what past runs of the project did. A server started with
+`--role worker` (a background worker's, and any server under `KODEL_ENGINE`) does not serve them; a manager and a server
+with no role do (`docs/mcp-roles.md`). They read the run's state and
 journal and the stored agent log; they write nothing, take no lock and never open a run for work. They are served by every
 host; a host that keeps no history it can read answers `HISTORY_UNAVAILABLE`. Runs of another checkout of the project
 (`storage: home` shares one history between clones) are never listed, and the other tools answer `UNKNOWN_RUN` for them.

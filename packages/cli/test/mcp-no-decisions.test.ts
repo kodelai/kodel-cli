@@ -333,7 +333,14 @@ describe("t47 kodel mcp --wait-command", () => {
       mcpServers: { kodel: { command: string; args: string[]; env: Record<string, string> } };
     };
     const { command, args, env } = config.mcpServers.kodel;
-    expect(args.slice(-4)).toEqual(["mcp", "--no-decisions", "--wait-command", template]);
+    expect(args.slice(-6)).toEqual([
+      "mcp",
+      "--role",
+      "worker",
+      "--no-decisions",
+      "--wait-command",
+      template,
+    ]);
     expect(args).not.toContain("--no-wait-hint");
     const c = await connect(dir, [], { ...env, HOME: home }, { exec: command, args });
     try {

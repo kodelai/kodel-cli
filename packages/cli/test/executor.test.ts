@@ -9,6 +9,7 @@ import { toolsFingerprint } from "@kodel-ai/pipeline-core";
 import {
   CONTRACT_VERSION,
   HISTORY_TOOLS,
+  MANAGER_TOOLS,
   serverInstructions,
   toolsFor,
 } from "@kodel-ai/pipeline-core/mcp";
@@ -59,7 +60,9 @@ describe("the real server stamps who calls it", () => {
       engine: unknown;
     };
 
+    // 5M9D: a server started with no role says so on its records.
     expect(started.executor).toEqual({
+      role: "all",
       client: { value: { name: "claude-code", version: "2.1.0" }, source: "observed" },
     });
     expect(started.engine).toEqual({
@@ -69,7 +72,13 @@ describe("the real server stamps who calls it", () => {
       meta_version: 2,
       contract_version: CONTRACT_VERSION,
       instructions_hash: sha256(serverInstructions({ attachments: true })),
-      tools_hash: sha256(toolsFingerprint([...toolsFor({ attachments: true }), ...HISTORY_TOOLS])),
+      tools_hash: sha256(
+        toolsFingerprint([...toolsFor({ attachments: true }), ...HISTORY_TOOLS, ...MANAGER_TOOLS], {
+          role: "all",
+          readOnly: false,
+        }),
+      ),
+      role: "all",
     });
     await Promise.all([client.close(), server.close()]);
   });

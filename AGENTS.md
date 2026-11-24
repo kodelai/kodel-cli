@@ -27,8 +27,9 @@ This repository adds these rules:
 - Do not edit `.mcp.json` or `.claude/settings*.json` (the person decides how the server starts and what
   the agent may do). The same goes for the `decisions` block of the project config: it says what the
   agent may decide for the person (`docs/decisions.md`), so only the person changes it. So do the `storage`
-  and `project_id` keys, which say where the history is kept (`docs/history.md`), and the `serve` block, which
-  says what `kodel serve` starts on its own (`docs/serve.md`), and the `engines` block, which says which
+  and `project_id` keys, which say where the history is kept (`docs/history.md`), the `serve` block, which
+  says what `kodel serve` starts on its own (`docs/serve.md`), the `mcp` block, which says which tools each
+  role of the server serves (`docs/mcp-roles.md`), and the `engines` block, which says which
   programs kodel starts as agents and how (`docs/engines.md`; a start nobody watches uses it only as committed).
 - Do not edit the files in `.kodel/pipelines/` while a run is going. To change the pipeline of a run, ask
   the person whether to change it now, and then use `pipeline_propose_change`; the run stops at the end of
@@ -88,6 +89,14 @@ Tasks (`docs/tasks.md`) are off unless `.kodel/config.yaml` has `tasks: { enable
 server also offers the `task_*` tools. When the user asks you to "create a task" for something you should not
 fix now, use `task_create` (after one `task_schema`) and tell the user the key; change a status only when
 asked. Do not edit the files in `.kodel/tasks/` by hand: the tools keep their format and their keys.
+
+The server has roles (`docs/mcp-roles.md`): `kodel mcp --role worker` serves the tools a run is worked with,
+`--role manager` the tools for looking after the runs (the history, the tasks, `manager_inbox` and the other
+`manager_*` reads, and the decision tools when the config allows them), `--read-only` only the tools that write
+nothing, and no flag every tool. Under `KODEL_ENGINE` a server with no role is a worker. A worker has no history
+tool and no `task_update`: it does not change a task's status, and when a run ends for a task the engine does
+not close, it tells the person the task is still open. An agent is told only of the tools its server serves; do
+not look for the others.
 
 Humans: `bun packages/cli/src/main.ts status` lists runs, `report` shows where the time went, `wait <run>` stays
 until a run stops waiting for a person (see above); the same

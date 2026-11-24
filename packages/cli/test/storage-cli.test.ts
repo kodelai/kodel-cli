@@ -493,6 +493,8 @@ describe("kodel mcp with a place that cannot be used", () => {
     await writeFile(join(dir, ".kodel", "config.yaml"), config);
     const environment = { ...(process.env as Record<string, string>) };
     delete environment["KODEL_STATE_DIR"];
+    // Under the engine's mark the server would be a worker (5M9D); this one is the person's.
+    delete environment["KODEL_ENGINE"];
     if (stateDir !== undefined) environment["KODEL_STATE_DIR"] = stateDir;
     const client = new Client({ name: "agent", version: "0.0.0" });
     await client.connect(

@@ -59,7 +59,7 @@ export async function checkForkRun(
 ) {
   const dir = mkdtempSync(join(tmpdir(), "kodel-artifact-fork-"));
   // The trusted hashes of the run go into the scratch folder too, not into the home of whoever runs this.
-  const env = { ...process.env, KODEL_STATE_DIR: join(dir, "state") };
+  const env = { ...outsideEngine(), KODEL_STATE_DIR: join(dir, "state") };
   const transport = new StdioClientTransport({
     command: runtime,
     args: [artifact, "--root", dir, "mcp"],
@@ -191,4 +191,11 @@ export async function checkForkRun(
     await client.close().catch(() => {});
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+// A run of this repository's own pipeline has KODEL_ENGINE=1 in its environment, and under it `kodel mcp`
+// is a worker (5M9D); the server checked here is the person's, with every tool.
+function outsideEngine() {
+  const { KODEL_ENGINE: _mark, ...rest } = process.env;
+  return rest;
 }

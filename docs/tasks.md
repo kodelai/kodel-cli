@@ -305,8 +305,9 @@ is cut from `HEAD` at that moment, whether or not the dependency's branch has be
   moves to another task. It starts the task's run (the task text is the title, a blank line and the body; the task goes
   to `progress`) and a detached session named `kw-<run id>`, in the run's working directory: `claude` in a
   terminal of its own (`engines.claude.worker: terminal`, the default) or `claude -p` (`worker: print`); see the
-  next two points and `docs/serve.md`. Either drives the run through its own `kodel mcp --no-decisions`: a
-  server that serves no decision tool and shows no dialog, whatever the project config allows an agent. A
+  next two points and `docs/serve.md`. Either drives the run through its own `kodel mcp --role worker
+  --no-decisions`: a server that serves the worker's tools only (`docs/mcp-roles.md`: no history tool and no
+  `task_update`), no decision tool and no dialog, whatever the project config allows an agent. A
   terminal agent's server offers the wait command of this build at every wait (`--wait-command`); a print
   agent's never offers `kodel wait` (`--no-wait-hint`). The
   agent runs with `--permission-mode dontAsk`, an allowlist (the kodel tools its server serves, `Read`, `Write`,

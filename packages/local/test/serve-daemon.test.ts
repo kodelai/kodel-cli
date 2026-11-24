@@ -855,6 +855,60 @@ describe("kodel serve on the local host (T-44)", () => {
     }
   });
 
+  test("t44_5m9d_serve_idles_and_counts_no_resume_attempt_on_a_config_refusal", async () => {
+    const serve = ["serve:", "  enabled: true", "  start:", "    - pipeline: gated"];
+    await project({ serve });
+    const w = await world();
+    const a = await w.make("Task A", { priority: "high" });
+    await w.daemon.cycle();
+    const runA = await w.runOf(a);
+    await w.approve(runA);
+    const config = join(storeRoot(), "config.yaml");
+    const good = await readFile(config, "utf8");
+
+    // An `mcp` block that cannot be used. A daemon that runs ends when the config changes; the one
+    // started on the new config reads it whole every cycle, so it is idle with the reason, and neither
+    // starts nor resumes anything.
+    await writeFile(config, `${good}\nmcp:\n  roles:\n    worker:\n      add: [pipeline_strat]\n`);
+    tick(61_000);
+    expect((await w.daemon.cycle()).kind).toBe("restart");
+    const onBadConfig = w.newDaemon();
+    for (let i = 0; i < 4; i++) {
+      tick(61_000);
+      expect((await onBadConfig.cycle()).kind).toBe("idle");
+    }
+    expect(w.lines.filter((l) => l.startsWith("idle:"))).toHaveLength(1);
+    expect(w.lines.find((l) => l.startsWith("idle:"))).toContain("pipeline_strat");
+    expect(resumes(w.launcher)).toHaveLength(0);
+
+    // A refusal that still reaches a resume (the file changed between the daemon's read and the
+    // launcher's own check): nothing was spawned, and it is not one of the run's three attempts.
+    await writeFile(config, good);
+    const daemon = w.newDaemon();
+    const refusing = spyOn(w.launcher, "resume").mockImplementation(async () => {
+      throw new KodelError("CONFIG_INVALID", 'mcp.roles.worker names "pipeline_strat"');
+    });
+    try {
+      for (let i = 0; i < 5; i++) {
+        tick(61_000);
+        await daemon.cycle();
+      }
+      expect(refusing).toHaveBeenCalledTimes(5);
+    } finally {
+      refusing.mockRestore();
+    }
+    const refused = w.lines.filter((l) => l.startsWith(`not resumed: run ${runA}`));
+    expect(refused).toHaveLength(5);
+    expect(refused.every((l) => l.includes("no attempt is counted"))).toBe(true);
+    expect(w.lines.some((l) => l.includes("(attempt"))).toBe(false);
+    expect(w.lines.some((l) => l.startsWith("resume_failed"))).toBe(false);
+    // Fixed: the very next cycle resumes the worker.
+    tick(61_000);
+    await daemon.cycle();
+    expect(resumes(w.launcher)).toHaveLength(1);
+    expect(w.lines.some((l) => l.startsWith(`resumed: run ${runA}`))).toBe(true);
+  });
+
   test("t44_rm_rearms_or_releases_a_run", async () => {
     await project();
     const w = await world();

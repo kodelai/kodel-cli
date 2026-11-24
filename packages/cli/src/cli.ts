@@ -8,6 +8,7 @@
 import { stat } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import {
+  createManagerReads,
   enginesAgainstHead,
   findProjectRoot,
   hashSource,
@@ -15,6 +16,7 @@ import {
   LocalPipelineHost,
   loadAgentHints,
   loadConfig,
+  loadMcpRoles,
   openTaskService,
   type ProjectRoot,
   readServeStatus,
@@ -23,6 +25,7 @@ import {
   SERVE_EXIT_REFUSED,
   type StoragePlace,
   servePlace,
+  serveTasksOf,
   type UnattendedEngines,
 } from "@kodel-ai/local";
 import { MAX_PAYLOAD_BYTES, runHook } from "@kodel-ai/local/hooks";
@@ -37,6 +40,7 @@ import {
   type RunTaskLink,
   redactText,
   runSlug,
+  type ServerRole,
   type SubtaskRef,
   type Task,
   type TaskFilter,
@@ -73,7 +77,9 @@ import { type Choice, InitError, runInit } from "./init";
 import {
   dialogTimeoutFrom,
   noProjectHost,
+  noProjectManager,
   serveNoTools,
+  serverToolSet,
   serveStdio,
   stopAndWait,
 } from "./mcp-server";
@@ -137,6 +143,15 @@ export interface CliEnv {
     launcher?: AgentProject["launcher"];
     engines?: AgentProject["engines"];
   };
+}
+
+/** The flags of `kodel mcp`. */
+interface McpFlags {
+  decisions: boolean;
+  waitHint: boolean;
+  waitCommand?: string;
+  role?: string;
+  readOnly?: boolean;
 }
 
 /** A problem to report to the user without a stack trace. */
@@ -510,11 +525,55 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       "--wait-command <text>",
       "the command the answers offer in place of `kodel wait <run>`, with {run} for the run id (the server of a background agent that stays alive at a wait)",
     )
-    .action(async (opts: { decisions: boolean; waitHint: boolean; waitCommand?: string }) => {
+    .option(
+      "--role <role>",
+      "serve the tools of one role: worker (works a run) or manager (looks after the runs for the person); without it, every tool",
+    )
+    .option(
+      "--read-only",
+      "serve only the tools that write nothing, on top of the role and the mcp.roles block of the config",
+    )
+    .action(async (opts: McpFlags) => {
       // Before anything is served: a command without the run in it would watch nothing.
       if (opts.waitCommand !== undefined && !opts.waitCommand.includes("{run}")) {
         throw new UserError("--wait-command needs {run} where the run id goes");
       }
+      // 5M9D: the start command is judged before anything is served, so a wrong one never leaves an
+      // agent with a server that serves more, or other, tools than the person asked for.
+      const underEngine = (env.environment ?? process.env).KODEL_ENGINE !== undefined;
+      if (opts.role !== undefined && opts.role !== "worker" && opts.role !== "manager") {
+        throw new UserError(`--role is worker or manager, not "${plain(opts.role)}"`);
+      }
+      const readOnly = opts.readOnly === true;
+      if (underEngine && opts.role === "manager") {
+        throw new UserError(
+          "--role manager does not start from a command the engine runs (KODEL_ENGINE is set): connect a manager from an agent started outside kodel",
+        );
+      }
+      // Every child of a session carries the engine's mark: there a server with no role is a worker.
+      const role: ServerRole | undefined = opts.role ?? (underEngine ? "worker" : undefined);
+      if (role === "worker" && readOnly) {
+        throw new UserError(
+          underEngine && opts.role === undefined
+            ? "--read-only does not start from a command the engine runs (KODEL_ENGINE is set): the server is a worker there, and a run is worked with tools that write"
+            : "--role worker cannot be --read-only: a run is worked with tools that write",
+        );
+      }
+      const toolSet = (input: Parameters<typeof serverToolSet>[0]): string[] => {
+        const resolved = serverToolSet({
+          ...input,
+          ...(role === undefined ? {} : { role }),
+          readOnly,
+        });
+        if (resolved.refused !== undefined) throw new UserError(resolved.refused);
+        for (const { name, why } of resolved.unapplied) {
+          env.err(`kodel: mcp.roles: ${plain(name)} is not served here: ${plain(why)}\n`);
+        }
+        env.err(
+          `kodel: serving ${resolved.names.length} tools (${role === undefined ? "no role: every tool" : `role ${role}`}${readOnly ? ", read-only" : ""})\n`,
+        );
+        return resolved.names;
+      };
       // T-42: inside the process group of a live host session's child (an engine step), this server
       // would be a second Kodel client of the person, so it serves nothing. A group that cannot be
       // read fails open.
@@ -535,11 +594,20 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         // which is better than a server that is "not connected" and says nothing.
         if (error instanceof KodelError && error.code === "NO_PROJECT") {
           env.err(`kodel: ${plain(error.message)}\n`);
-          await serveStdio(noProjectHost(error), pkg.version);
+          // The role and `--read-only` hold here too: there is no config, so nothing else narrows.
+          await serveStdio(noProjectHost(error), pkg.version, undefined, undefined, {
+            ...(role === undefined ? {} : { role }),
+            readOnly,
+            only: toolSet({}),
+            manager: noProjectManager(error),
+          });
           return;
         }
         throw error;
       }
+      // Not caught: an `mcp` block that cannot be used stops the server (non-zero exit, the reason on
+      // stderr) instead of serving more than the person wrote. A problem in another block is not read here.
+      const overrides = await loadMcpRoles(resolved.dataDir);
       let tasks: TaskService | undefined;
       let runLink: RunTaskLink | undefined;
       try {
@@ -573,7 +641,15 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       // server decides nothing and asks nobody; the one line says so where the person can read it.
       const settings = noDecisions
         ? { waitHint, dialog: false, agentDecisions: { gate: false, pipelineChange: false } }
-        : { waitHint, ...fromConfig };
+        : role === "worker" || readOnly
+          ? // The worker decides nothing for the person, whatever the project lets an agent decide;
+            // a read-only server neither decides nor asks (an answer in a dialog is a write).
+            {
+              waitHint,
+              dialog: readOnly ? false : fromConfig.dialog,
+              agentDecisions: { gate: false, pipelineChange: false },
+            }
+          : { waitHint, ...fromConfig };
       if (noDecisions) {
         env.err(
           "kodel: --no-decisions: this server serves no decision tool and shows no dialog; a decisions.agent allowance of the project does not apply to it\n",
@@ -598,28 +674,65 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
               );
         env.err(`kodel: ${plain(storageError.message)}\n`);
       }
+      const only = toolSet({
+        overrides,
+        // The local host keeps attachments with its runs.
+        attachments: true,
+        ...(tasks === undefined ? {} : { tasks }),
+        ...(runLink === undefined ? {} : { runLink }),
+        agentDecisions: settings.agentDecisions,
+      });
       const local = new LocalPipelineHost({
         root: resolved.root,
         storeRoot: resolved.dataDir,
         ...(storage === undefined ? {} : { storage, watchStorage: () => resolvePlace(true) }),
         ...(storageError === undefined ? {} : { storageError }),
         agentDecisions: settings.agentDecisions,
+        servedTools: only,
         ...(opts.waitHint === false ? { agentHints: { wait: false } } : {}),
         build: BUILD,
-        // This process serves the agent: it copies the agent's log into the runs while they go.
-        agentLogTimer: true,
-        ...engineHostOptions("mcp", {
-          root: resolved.root,
-          ...(env.environment === undefined ? {} : { environment: env.environment }),
-          ...(env.sessionLauncher ? { launcher: env.sessionLauncher } : {}),
-        }),
+        // A read-only server writes nothing: no timer that copies the agent's log, and no engine
+        // step is started from it.
+        ...(readOnly
+          ? {}
+          : {
+              // This process serves the agent: it copies the agent's log into the runs while they go.
+              agentLogTimer: true,
+              ...engineHostOptions("mcp", {
+                root: resolved.root,
+                ...(env.environment === undefined ? {} : { environment: env.environment }),
+                ...(env.sessionLauncher ? { launcher: env.sessionLauncher } : {}),
+              }),
+            }),
         // The same tie the tools were built for; without one the host asks the config itself.
         ...(runLink === undefined ? {} : { runTaskLink: runLink }),
       });
+      const { managerPorts } = await import("./manager-ports");
+      const environment = env.environment ?? process.env;
+      const manager = {
+        ...createManagerReads({
+          host: local,
+          ...(tasks === undefined ? {} : { tasks: serveTasksOf(tasks) }),
+        }),
+        ...managerPorts({
+          root: resolved.root,
+          environment,
+          launcher: env.sessionLauncher ?? {
+            exec: process.execPath,
+            args: [process.argv[1] ?? "kodel"],
+          },
+          platform: env.platform ?? process.platform,
+        }),
+      };
       await serveStdio(local, pkg.version, tasks, runLink, {
+        ...(role === undefined ? {} : { role }),
+        readOnly,
+        only,
+        manager,
         waitHint: settings.waitHint,
         ...(opts.waitCommand === undefined ? {} : { waitCommand: opts.waitCommand }),
-        humans: local,
+        // A read-only server is given no host that decides: no dialog and no decision tool can reach one.
+        ...(readOnly ? {} : { humans: local }),
         dialog: settings.dialog,
         agentDecisions: settings.agentDecisions,
         ...(dialogTimeoutMs === undefined ? {} : { dialogTimeoutMs }),

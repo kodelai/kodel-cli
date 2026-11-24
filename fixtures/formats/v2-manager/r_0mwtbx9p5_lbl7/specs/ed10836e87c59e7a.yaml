@@ -1,0 +1,10 @@
+name: gated
+description: a step, a gate for the person, and a last step
+nodes:
+  - { slug: write, kind: agent, prompt: write it }
+  - { slug: approve, kind: human, prompt: Looks fine? }
+  - { slug: ship, kind: agent, prompt: ship it }
+edges:
+  - { from: write, to: approve }
+  - { from: approve, to: ship }
+  - { from: approve, to: write, when: rejected }

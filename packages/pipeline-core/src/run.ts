@@ -540,6 +540,7 @@ export const AGENT_LOG_FAILURES = [
   "stored_copy_changed",
   "tick_cap",
   "unreadable",
+  "stalled",
 ] as const;
 export type AgentLogFailure = (typeof AGENT_LOG_FAILURES)[number];
 
@@ -559,11 +560,22 @@ const markOf = (tokenHash: string) => `w-${tokenHash.slice(0, 8)}`;
  */
 export interface AgentDecision {
   instruction: string;
+  /**
+   * The agent decided through a manager's server (5M9D): it works no step of the run, so the run's own
+   * worker still has to be resumed. Kept only where the format holds the role of a server.
+   */
+  viaManager?: boolean;
 }
 
 /** The journal fields that mark a decision as the agent's; a person's decision has none. */
-const decidedBy = (by: AgentDecision | undefined): Record<string, unknown> =>
-  by === undefined ? {} : { decided_by: "agent", instruction: by.instruction };
+const decidedBy = (by: AgentDecision | undefined, role: boolean): Record<string, unknown> =>
+  by === undefined
+    ? {}
+    : {
+        decided_by: "agent",
+        instruction: by.instruction,
+        ...(role && by.viaManager === true ? { decided_via: "manager" } : {}),
+      };
 
 /** A file in the run folder that holds what a command printed; `bytes` counts what is stored. */
 export interface OutputRef {
@@ -2293,7 +2305,7 @@ class Machine {
           node: event.node,
           decision: event.decision,
           reason: event.reason ?? null,
-          ...decidedBy(event.byAgent),
+          ...decidedBy(event.byAgent, this.caps.executorRole),
         });
         this.finish(
           visit,
@@ -2993,7 +3005,7 @@ class Machine {
       nodes: diff.nodes,
       effects: diff.effects,
       ...(event.reason === undefined ? {} : { reason: event.reason }),
-      ...decidedBy(event.byAgent),
+      ...decidedBy(event.byAgent, this.caps.executorRole),
     });
 
     // Each effect names its own node, and no node is standing in two places at once (a branch is

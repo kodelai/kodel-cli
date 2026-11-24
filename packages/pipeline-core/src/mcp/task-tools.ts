@@ -19,6 +19,7 @@ import {
   type TaskAdapterCapabilities,
   type TaskPatch,
 } from "../tasks";
+import { keepOnly, type ToolSpec } from "./tools";
 
 /** Bump when a task tool is renamed or its arguments change for some profile; snapshots pin it. */
 export const TASK_TOOLS_VERSION = 2;
@@ -45,26 +46,60 @@ const TASK_STATUS_RULE =
  * The instructions for a server whose runs can be tied to tasks (`task_key` of pipeline_start). The
  * rule about statuses changes with it: the engine moves a task that is tied to a run.
  */
-export function taskInstructions(mode: TaskOnRunMode, linkable: boolean): string {
-  if (!linkable || mode === "disabled") return TASK_INSTRUCTIONS;
-  const rule =
-    mode === "auto"
-      ? "4. Change a task's status only when the person asks, except for a task tied to a pipeline run: the engine moves it to progress when the run starts and to done when the run completes, so do not do that yourself. When you decline or finish a task on their word, write the reason in `comment`."
-      : "4. Change a task's status only when the person asks, except for a task tied to a pipeline run: the engine moves it to progress when the run starts. When the run is done the engine does not close the task: ask the person, and if they agree, close it with task_update. When you decline or finish a task on their word, write the reason in `comment`.";
-  return [
-    ...TASK_INSTRUCTIONS.split("\n").map((line) => (line === TASK_STATUS_RULE ? rule : line)),
-    "8. When the person gives the key of a task to work on through a pipeline, pass it as `task_key` to pipeline_start: the run is then tied to the task. If pipeline_start answers TASK_ALREADY_DONE, tell the person and ask; set `restart_task` only if they say to start the task again, never on your own.",
-  ].join("\n");
+const CLOSING_RELEASES =
+  "a task you close with task_update releases the tasks that depend on it only after the person approves it, but ";
+
+export function taskInstructions(
+  mode: TaskOnRunMode,
+  linkable: boolean,
+  /** The names the server serves (5M9D): a rule about a tool is there only when the tool is. Absent: all. */
+  served?: readonly string[],
+): string {
+  const names = served === undefined ? undefined : new Set(served);
+  const has = (name: string) => names === undefined || names.has(name);
+  const tied = linkable && mode !== "disabled";
+  const base = TASK_INSTRUCTIONS.split("\n");
+  const lines = base.flatMap((line) => {
+    if (line.startsWith("1. ")) {
+      if (!has("task_schema")) return [];
+      // The server that changes nothing is not told what to do before a change.
+      return has("task_create") || has("task_update")
+        ? [line]
+        : ["1. task_schema shows what the tracker offers: its statuses, priorities and fields."];
+    }
+    if (line.startsWith("2. ")) return has("task_create") ? [line] : [];
+    if (line.startsWith("3. ")) return has("task_list") ? [line] : [];
+    if (line.startsWith("7. ")) {
+      if (has("task_update")) return [line];
+      // A server that closes no task is not told what closing one does to the tasks that wait for it.
+      return has("task_create") ? [line.replace(CLOSING_RELEASES, "")] : [];
+    }
+    if (line !== TASK_STATUS_RULE) return [line];
+    if (!has("task_update")) {
+      const closes =
+        tied && mode === "ask"
+          ? " When a run started for a task is done the engine does not close the task: tell the person it is still open."
+          : "";
+      return [
+        `4. You cannot change a task here (its status, its text): the person does (\`kodel task set\`), or an agent connected as a manager.${closes}`,
+      ];
+    }
+    if (!tied) return [line];
+    return [
+      mode === "auto"
+        ? "4. Change a task's status only when the person asks, except for a task tied to a pipeline run: the engine moves it to progress when the run starts and to done when the run completes, so do not do that yourself. When you decline or finish a task on their word, write the reason in `comment`."
+        : "4. Change a task's status only when the person asks, except for a task tied to a pipeline run: the engine moves it to progress when the run starts. When the run is done the engine does not close the task: ask the person, and if they agree, close it with task_update. When you decline or finish a task on their word, write the reason in `comment`.",
+    ];
+  });
+  if (tied && has("pipeline_start")) {
+    lines.push(
+      "8. When the person gives the key of a task to work on through a pipeline, pass it as `task_key` to pipeline_start: the run is then tied to the task. If pipeline_start answers TASK_ALREADY_DONE, tell the person and ask; set `restart_task` only if they say to start the task again, never on your own.",
+    );
+  }
+  return lines.join("\n");
 }
 
-export interface TaskToolDescriptor {
-  name: string;
-  title: string;
-  /** Written for the agent: when to call it, what the answer means, what to do next. */
-  description: string;
-  shape: z.ZodRawShape;
-  readOnly: boolean;
-  idempotent: boolean;
+export interface TaskToolDescriptor extends ToolSpec {
   run(service: TaskService, input: Record<string, unknown>): Promise<ToolResult>;
 }
 
@@ -88,10 +123,18 @@ const linkKeys = (what: string) => z.array(keyArg).min(1).max(TASK_LIMITS.links)
 const WRITE_FIELDS =
   "Tracker-specific fields as name → value (task_schema lists them; at most 20). Values of select and user fields are the strings task_schema lists. If you do not know a required value, ask the person.";
 
-/** The tools for an adapter with these capabilities, in a fixed order. */
-export function buildTaskTools(caps: TaskAdapterCapabilities): TaskToolDescriptor[] {
+/**
+ * The tools for an adapter with these capabilities, in a fixed order. `served` (the names the server
+ * serves) keeps a text from naming a tool that is not there; without it every tool is taken as served.
+ */
+export function buildTaskTools(
+  caps: TaskAdapterCapabilities,
+  served?: readonly string[],
+): TaskToolDescriptor[] {
   const comments = caps.comment !== "none";
   const runs = caps.runs !== "none";
+  const starts = served === undefined || served.includes("pipeline_start");
+  const lists = served === undefined || served.includes("task_list");
   const links = caps.links === true;
 
   return [
@@ -122,10 +165,10 @@ export function buildTaskTools(caps: TaskAdapterCapabilities): TaskToolDescripto
       description:
         "Record a task for something that should be done later and is not part of the current work (a bug elsewhere, a missing test, a follow-up). " +
         "Do not use it for steps of the pipeline run you are in. " +
-        (runs ? "Pass `run` when you are in a pipeline run. " : "") +
+        (runs && starts ? "Pass `run` when you are in a pipeline run. " : "") +
         "Tell the person the key and the title in your answer. " +
         "A task you create is not started by `kodel serve` until the person approves it with `kodel task approve <key>` (unless a rule of their `serve` block takes tasks without approval): tell them so; never run that command yourself. " +
-        "This call is not retried automatically: if it fails with a timeout, call task_list before trying again, because the task may have been created.",
+        `This call is not retried automatically: if it fails with a timeout, ${lists ? "call task_list" : "ask the person to look"} before trying again, because the task may have been created.`,
       shape: {
         title: z.string().min(1).max(TASK_LIMITS.title).describe("One line: what is to be done."),
         body: z
@@ -160,7 +203,9 @@ export function buildTaskTools(caps: TaskAdapterCapabilities): TaskToolDescripto
         ...(runs
           ? {
               run: runArg(
-                "The id of the pipeline run you are in (from pipeline_start).",
+                starts
+                  ? "The id of the pipeline run you are in (from pipeline_start)."
+                  : "The id of the pipeline run the task comes from.",
               ).optional(),
             }
           : {}),
@@ -358,9 +403,16 @@ export async function invokeTaskTool(
   return tool.run(service, parsed.data);
 }
 
-/** Put the task tools on an MCP server. Call it only when tasks are enabled. */
-export function registerTaskTools(server: McpServer, service: TaskService): void {
-  const tools = buildTaskTools(service.capabilities);
+/**
+ * Put the task tools on an MCP server: those in `only` (all without it). Call it only when tasks are
+ * enabled. Returns what it registered.
+ */
+export function registerTaskTools(
+  server: McpServer,
+  service: TaskService,
+  options: { only?: readonly string[] } = {},
+): TaskToolDescriptor[] {
+  const tools = keepOnly(buildTaskTools(service.capabilities, options.only), options.only);
   for (const tool of tools) {
     server.registerTool(
       tool.name,
@@ -381,4 +433,5 @@ export function registerTaskTools(server: McpServer, service: TaskService): void
       }) as never,
     );
   }
+  return tools;
 }

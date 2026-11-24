@@ -281,6 +281,7 @@ describe("t9jrs check-prices network mode (saved pages)", () => {
 });
 
 describe("t9jrs check-prices network mode (loopback server)", () => {
+  // Each test waits for a child that is killed after 20 s; bun's 5 s default fails them under load.
   let server: Server;
   let base: string;
   let mode: "ok" | "error" | "hang" = "ok";
@@ -323,14 +324,14 @@ describe("t9jrs check-prices network mode (loopback server)", () => {
   test("t9jrs_check_prices_exit_codes: a server that answers with the page is exit 0", async () => {
     mode = "ok";
     expect((await runAsync(["--table", tableFile()])).code).toBe(0);
-  });
+  }, 30_000);
 
   test("t9jrs_check_prices_exit_codes: a server that answers 500 is exit 2", async () => {
     mode = "error";
     const { code, out } = await runAsync(["--table", tableFile()]);
     expect(code).toBe(2);
     expect(out).toContain("HTTP 500");
-  });
+  }, 30_000);
 
   test("t9jrs_check_prices_exit_codes: a server that never answers is exit 2 within the timeout", async () => {
     mode = "hang";
@@ -338,7 +339,7 @@ describe("t9jrs check-prices network mode (loopback server)", () => {
     const { code } = await runAsync(["--table", tableFile(), "--timeout-ms", "300"]);
     expect(code).toBe(2);
     expect(Date.now() - started).toBeLessThan(10_000);
-  });
+  }, 30_000);
 });
 
 describe("t9jrs check-prices --local", () => {

@@ -29,7 +29,7 @@ const sdkUrl = (file: string) =>
   pathToFileURL(sdk.resolve(`@modelcontextprotocol/sdk/${file}`)).href;
 
 /** A client that starts `kodel mcp`, lists its tools and prints how many. */
-function writeClient(dir: string): string {
+function writeClient(dir: string, flags: string[] = []): string {
   const path = join(dir, "client.mjs");
   writeFileSync(
     path,
@@ -38,7 +38,7 @@ function writeClient(dir: string): string {
       `const { StdioClientTransport } = await import(${JSON.stringify(sdkUrl("client/stdio.js"))});`,
       "const transport = new StdioClientTransport({",
       `  command: ${JSON.stringify(process.execPath)},`,
-      `  args: [${JSON.stringify(main)}, "mcp"],`,
+      `  args: ${JSON.stringify([main, "mcp", ...flags])},`,
       "  cwd: process.argv[2],",
       "  env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },",
       "  stderr: 'ignore',",
@@ -119,6 +119,37 @@ describe("t42 kodel mcp in an engine step's session", () => {
         inheritEnv: false,
         timeoutMs: 30_000,
         name: "ke-guard-1-1",
+        origin: "host",
+      });
+      const done = await adapter.wait(id, { timeoutMs: 35_000 });
+      expect(done.state).toBe("exited");
+      const out = (await adapter.tail(id, 64 * 1024, "stdout")).text;
+      expect(JSON.parse(out)).toEqual({ offered: false, tools: 0 });
+    },
+    40_000,
+  );
+
+  real(
+    "5m9d_role_does_not_lift_the_engine_step_guard",
+    async () => {
+      // Inside an engine step's session the server serves nothing, whatever role it is started with: the
+      // step's work is reported by the engine, not through a second client.
+      const dir = mkdtempSync(join(tmpdir(), "kodel-guard-cli-"));
+      made.push(dir);
+      const client = writeClient(dir, ["--role", "worker"]);
+      const adapter = new PipesSessionAdapter({
+        base: join(dir, ".kodel"),
+        root: dir,
+        holder: { exec: process.execPath, args: [entry, "holder"] },
+        intermediate: { exec: process.execPath, args: [entry] },
+      });
+      const { id } = await adapter.start({
+        argv: [process.execPath, client, dir],
+        cwd: dir,
+        env: { PATH: process.env.PATH ?? "", HOME: dir },
+        inheritEnv: false,
+        timeoutMs: 30_000,
+        name: "ke-guard-2-1",
         origin: "host",
       });
       const done = await adapter.wait(id, { timeoutMs: 35_000 });

@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { defaultHistory, parsePipeline } from "@kodel-ai/pipeline-core";
-import { LocalHost, type LocalRun } from "../src";
+import { LocalHost, type LocalRun, localRegistry } from "../src";
 import type { CommandResult } from "../src/command";
 
 // git is slow to start on some systems, and these tests start it many times
@@ -52,26 +52,27 @@ test("t36tw_real_dev_yaml_scripted_run_leaves_patches", async () => {
     "utf8",
   );
   const task = "add the thing";
-  const host = new LocalHost(parsePipeline(source), {
+  const host = new LocalHost(parsePipeline(source, { registry: localRegistry() }), {
     root: dir,
     heartbeatMs: 0,
     runCommand: passing,
   });
   const started = await host.start(task, { history: defaultHistory() });
   const live: LocalRun = started.run;
-  // The pipeline asks for `docs/plans/{{task.slug}}.md`, and that slug is written with underscores.
-  const plan = "docs/plans/add_the_thing.md";
   const done = async (node: string, attempt = 1) => {
     const decision = await live.completeStep(node, attempt);
     expect(decision.ok ? "ok" : `${decision.error.code}: ${decision.error.message}`).toBe("ok");
     await live.settle();
   };
+  // The plan is kept with the run as the attachment `plan.md`, so it is in no patch of the project.
+  const plan = (node: string, content: string) =>
+    live.writeAttachment({ node, attempt: 1, name: "plan.md", content });
 
-  await write(plan, lines(12, "plan"));
+  await plan("plan", lines(12, "plan"));
   await done("plan");
   await live.reportResult("plan-critique", 1, { rows: [], completeness: "complete" });
   await done("plan-critique");
-  await write(plan, lines(12, "plan") + lines(12, "revised"));
+  await plan("plan-revise", lines(12, "plan") + lines(12, "revised"));
   await done("plan-revise");
   await live.decideHuman("plan-approval", "approved");
   await live.settle();
@@ -98,13 +99,15 @@ test("t36tw_real_dev_yaml_scripted_run_leaves_patches", async () => {
     "review-1.patch",
     "run.patch",
   ]);
-  expect(await readFile(join(folder, "plan-1.patch"), "utf8")).toContain(plan);
   expect(await readFile(join(folder, "impl-1.patch"), "utf8")).toContain(
     "packages/thing/src/index.ts",
   );
   const whole = await readFile(join(folder, "run.patch"), "utf8");
-  expect(whole).toContain(plan);
   expect(whole).toContain("packages/thing/src/index.ts");
-  // The patch of a step that changed nothing is a header and nothing else.
-  expect(await readFile(join(folder, "review-1.patch"), "utf8")).toBe("# kodel-patch v1\n");
+  expect(whole).not.toContain("docs/plans/");
+  // The patch of a step that changed nothing is a header and nothing else: the plan steps keep
+  // their plan with the run, not in the project.
+  for (const quiet of ["plan-1.patch", "plan-revise-1.patch", "review-1.patch"]) {
+    expect(await readFile(join(folder, quiet), "utf8")).toBe("# kodel-patch v1\n");
+  }
 });

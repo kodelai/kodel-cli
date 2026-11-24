@@ -19,6 +19,10 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+// A run of this repository's own pipeline has KODEL_ENGINE=1, and under it `kodel mcp` is a worker (5M9D):
+// the servers these tests start are the person's, with every tool.
+const { KODEL_ENGINE: _engineMark, ...OUTSIDE_ENGINE } = process.env as Record<string, string>;
+
 const config = (text: string) => writeFile(join(dir, ".kodel", "config.yaml"), text);
 const ENABLED = "tasks:\n  enabled: true\n  adapters:\n    local:\n      prefix: KDL\n";
 
@@ -470,7 +474,7 @@ describe("tasks over MCP", () => {
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: [join(import.meta.dir, "../src/main.ts"), "--root", dir, "mcp"],
-      env: { ...(process.env as Record<string, string>) },
+      env: { ...OUTSIDE_ENGINE },
       stderr: "pipe",
     });
     const client = new Client({ name: "agent", version: "0.0.0" });

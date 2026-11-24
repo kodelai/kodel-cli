@@ -10,11 +10,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalPipelineHost } from "@kodel-ai/local";
 import { KodelError, toolsFingerprint } from "@kodel-ai/pipeline-core";
-import { HISTORY_TOOLS, serverInstructions, toolsFor } from "@kodel-ai/pipeline-core/mcp";
+import {
+  HISTORY_TOOLS,
+  MANAGER_TOOLS,
+  serverInstructions,
+  toolsFor,
+} from "@kodel-ai/pipeline-core/mcp";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createServer, noProjectHost, type StoppableHost } from "../src/mcp-server";
-import { workerToolNames } from "../src/worker-factory";
+import { createServer, noProjectHost, type StoppableHost, serverToolSet } from "../src/mcp-server";
+import { workerServedTools } from "../src/worker-factory";
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 const ATTACHMENT_NAMES = [
@@ -43,8 +48,16 @@ afterEach(async () => {
   await rm(`${dir}-integrity`, { recursive: true, force: true });
 });
 
-async function connect(host: StoppableHost) {
-  const server = createServer(host, "1.2.3");
+async function connect(host: StoppableHost, role?: "worker" | "manager") {
+  const options =
+    role === undefined
+      ? {}
+      : (() => {
+          const set = serverToolSet({ role, attachments: host.attachments === true });
+          if (set.refused !== undefined) throw new Error(set.refused);
+          return { role, only: set.names };
+        })();
+  const server = createServer(host, "1.2.3", undefined, undefined, options);
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "claude-code", version: "2.1.0" });
   await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
@@ -68,16 +81,33 @@ describe("t45 the tools on the server", () => {
     for (const name of ATTACHMENT_NAMES) expect(served).toContain(name);
     expect(client.getInstructions()).toContain("pipeline_attachment_write");
 
-    // a background worker may call exactly what the server registers
-    const worker = await workerToolNames(join(dir, ".kodel"));
-    expect([...worker].sort()).toEqual([...served].sort());
+    // a background worker may call exactly what its own server (`--role worker`, 5M9D) registers
+    const worker = await workerServedTools(join(dir, ".kodel"));
+    const own = await connect(host, "worker");
+    const ownServed = (await own.client.listTools()).tools.map((t) => t.name);
+    for (const name of ATTACHMENT_NAMES) expect(ownServed).toContain(name);
+    expect([...worker].sort()).toEqual([...ownServed].sort());
+    await own.close();
+    // a manager reads the attachments and keeps none
+    const manager = await connect(host, "manager");
+    const managerServed = (await manager.client.listTools()).tools.map((t) => t.name);
+    expect(managerServed.filter((n) => n.startsWith("pipeline_attachment_")).sort()).toEqual([
+      "pipeline_attachment_list",
+      "pipeline_attachment_read",
+    ]);
+    await manager.close();
 
     // and the run records the surface it was served: the hash of the same lists
     const started = await call("pipeline_start", { task: "attach", pipeline: "one" });
     const journal = (await (await host.open(started.run_id))?.journal()) ?? [];
     const engine = journal.find((r) => r.event === "run_started")?.engine as Record<string, string>;
     expect(engine.tools_hash).toBe(
-      sha256(toolsFingerprint([...toolsFor({ attachments: true }), ...HISTORY_TOOLS])),
+      sha256(
+        toolsFingerprint([...toolsFor({ attachments: true }), ...HISTORY_TOOLS, ...MANAGER_TOOLS], {
+          role: "all",
+          readOnly: false,
+        }),
+      ),
     );
     expect(engine.instructions_hash).toBe(sha256(serverInstructions({ attachments: true })));
 

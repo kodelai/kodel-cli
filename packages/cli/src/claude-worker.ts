@@ -1,8 +1,8 @@
 /**
  * Claude-specific: how a worker is a `claude -p` process (TASK-9PNS). The argv and its flags
  * (`--session-id` for the first session, `--resume` for the one after a decision), the shape of the
- * `--mcp-config` that points it at its own `kodel mcp --no-decisions --no-wait-hint` (or, for a worker
- * that stays alive at a wait, `--wait-command <the command it watches its run with>`), the two tool
+ * `--mcp-config` that points it at its own `kodel mcp --role worker --no-decisions --no-wait-hint` (or,
+ * for a worker that stays alive at a wait, `--wait-command <the command it watches its run with>`), the two tool
  * lists Claude Code enforces, the auth probe, the two prompts and the environment markers. In a terminal
  * of its own (T-47) the same program runs without `-p`, its prompt last. All of it is reached through
  * `claudeProfile`, the `claude` entry of `agent-profiles.ts`; another agent is another entry there, and
@@ -154,8 +154,8 @@ export interface McpConfigInput {
 }
 
 /**
- * The `--mcp-config` JSON: one server, this binary, `--no-decisions` and either `--no-wait-hint` or the
- * worker's own wait command. No task text.
+ * The `--mcp-config` JSON: one server, this binary, `--role worker --no-decisions` and either
+ * `--no-wait-hint` or the worker's own wait command. No task text.
  */
 export function workerMcpConfig(input: McpConfigInput): string {
   const wait =
@@ -164,7 +164,16 @@ export function workerMcpConfig(input: McpConfigInput): string {
     mcpServers: {
       kodel: {
         command: input.exec,
-        args: [...input.args, "--root", input.root, "mcp", "--no-decisions", ...wait],
+        args: [
+          ...input.args,
+          "--root",
+          input.root,
+          "mcp",
+          "--role",
+          "worker",
+          "--no-decisions",
+          ...wait,
+        ],
         ...(input.stateDir === undefined ? {} : { env: { KODEL_STATE_DIR: input.stateDir } }),
       },
     },
@@ -402,6 +411,9 @@ export function workerArgvProblem(
   const missing = REQUIRED.find((flag) => !seen.has(flag));
   return missing === undefined ? undefined : `${missing} is missing`;
 }
+/** A worker whose server did not start has Bash and Edit and no kodel tool: it must not go on without them. */
+const NO_TOOLS =
+  "If you have no pipeline_next_step tool (the kodel tools are missing), stop at once: change nothing and say so.";
 
 /** The first prompt: the run, the title and where to work. The run holds the task text, so the body is never argv. */
 export function workerPrompt(runId: string, title: string, workdir: string): string {
@@ -409,7 +421,7 @@ export function workerPrompt(runId: string, title: string, workdir: string): str
   return (
     `Kodel run ${runId} exists for the task "${name}" and is yours to drive. ` +
     `Call pipeline_next_step with run_id ${runId} and do what each answer says; ` +
-    `never call pipeline_start (it would make a second run). Work in ${workdir}.`
+    `never call pipeline_start (it would make a second run). Work in ${workdir}. ${NO_TOOLS}`
   );
 }
 
@@ -444,7 +456,7 @@ export function resumePrompt(
     `The person decided: ${KIND_WORDS[decision.kind]} "${node}" ${decision.outcome}` +
     `${reason === "" ? "" : ` — ${reason}`}. ` +
     `Continue Kodel run ${runId}: call pipeline_next_step with run_id ${runId} and go on from its answer; ` +
-    "never call pipeline_start."
+    `never call pipeline_start. The kodel tools you have may have changed since this session began: use the ones you have now. ${NO_TOOLS}`
   );
 }
 

@@ -1,17 +1,26 @@
 import { KILL_GRACE_MS } from "@kodel-ai/local";
 import {
   type KodelError,
+  type ManagerHost,
   type PipelineHost,
   PipelineService,
+  type ResolvedToolSet,
+  type RoleOverrides,
   type RunTaskLink,
+  resolveToolSet,
+  type ServerRole,
   type TaskService,
   toolsFingerprint,
 } from "@kodel-ai/pipeline-core";
 import {
+  buildTaskTools,
   CONTRACT_VERSION,
   decisionTools,
   HISTORY_TOOLS,
+  keepOnly,
+  MANAGER_TOOLS,
   registerHistoryTools,
+  registerManagerTools,
   registerPipelineTools,
   registerTaskTools,
   serverInstructions,
@@ -57,7 +66,69 @@ export function dialogTimeoutFrom(
   return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : undefined;
 }
 
+/** A manager host for a server started outside a project: every read answers with the same error. */
+export function noProjectManager(error: KodelError): ManagerHost {
+  const refuse = (): never => {
+    throw error;
+  };
+  return {
+    inbox: refuse,
+    runReport: refuse,
+    gateChanges: refuse,
+    serveStatus: refuse,
+    agents: refuse,
+    agentLog: refuse,
+    watch: refuse,
+  };
+}
+
+/**
+ * The tools a server serves (5M9D): what it can serve at all (the task tools only with a tracker, a
+ * decision tool only when the config lets the agent decide), narrowed by the role, the `mcp.roles`
+ * block and `--read-only`. Worked out before the server is built, from flags and config, never from a call.
+ */
+export function serverToolSet(input: {
+  role?: ServerRole;
+  overrides?: RoleOverrides;
+  readOnly?: boolean;
+  tasks?: TaskService;
+  runLink?: RunTaskLink;
+  agentDecisions?: { gate?: boolean; pipelineChange?: boolean };
+  /** The host keeps attachments: only then can their tools be served. */
+  attachments?: boolean;
+}): ResolvedToolSet {
+  const taskLink = input.tasks !== undefined && input.runLink !== undefined;
+  return resolveToolSet({
+    ...(input.role === undefined ? {} : { role: input.role }),
+    ...(input.overrides === undefined ? {} : { overrides: input.overrides }),
+    readOnly: input.readOnly === true,
+    available: [
+      ...toolsFor({ taskLink, attachments: input.attachments === true }),
+      ...(input.agentDecisions?.gate === true
+        ? [{ name: "pipeline_decide_gate", readOnly: false }]
+        : []),
+      ...(input.agentDecisions?.pipelineChange === true
+        ? [{ name: "pipeline_accept_change", readOnly: false }]
+        : []),
+      ...HISTORY_TOOLS,
+      ...MANAGER_TOOLS,
+      ...(input.tasks === undefined ? [] : buildTaskTools(input.tasks.capabilities)),
+    ],
+  });
+}
+
 export interface ServerOptions {
+  /** The role the server was started with (`--role`); absent for a server with none. */
+  role?: ServerRole;
+  /** `--read-only`: only tools marked read-only are served, and nothing is asked in a dialog. */
+  readOnly?: boolean;
+  /**
+   * The names the server serves, from `serverToolSet`. A tool outside it is not registered and not in
+   * the list its dispatcher searches. Absent: every tool the server can serve.
+   */
+  only?: readonly string[];
+  /** The reads behind the `manager_*` tools; without it they answer `HISTORY_UNAVAILABLE`. */
+  manager?: ManagerHost;
   /** Whether the answers offer the agent `kodel wait` (the project config can turn it off). */
   waitHint?: boolean;
   /**
@@ -94,25 +165,56 @@ export function createServer(
   runLink?: RunTaskLink,
   options: ServerOptions = {},
 ): McpServer {
-  const { humans } = options;
-  const dialog = humans !== undefined && options.dialog === true;
+  const { humans, role, only } = options;
+  const readOnly = options.readOnly === true;
+  // An answer in a dialog is a decision, so a read-only server never asks there.
+  const dialog = humans !== undefined && options.dialog === true && !readOnly;
   // Without a host that can decide there is nothing for the agent's tools to do, so none is served.
   const agentDecisions = humans === undefined ? {} : (options.agentDecisions ?? {});
   // The attachment tools, and the rule about them, only on a host whose runs keep attachments.
   const attachments = host.attachments === true;
+  const taskLink = tasks !== undefined && runLink !== undefined;
+  const state = newDialogState();
+  // A manager works no step: its decisions answer with the run as it is, and nothing is served to it.
+  const lookWith = role === "manager" ? "manager_inbox" : "pipeline_next_step";
+  const decisions = humans
+    ? decisionTools(agentDecisions, createAgentDecider(humans, state, { lookWith }), { lookWith })
+    : [];
+  const pipelineTools = keepOnly(
+    [
+      ...toolsFor({
+        taskLink,
+        attachments,
+        ...(role === undefined ? {} : { role }),
+        ...(only === undefined ? {} : { served: only }),
+      }),
+      ...decisions,
+    ],
+    only,
+  );
+  const taskTools = tasks ? keepOnly(buildTaskTools(tasks.capabilities, only), only) : [];
+  const all = [
+    ...pipelineTools,
+    ...keepOnly(HISTORY_TOOLS, only),
+    ...keepOnly(MANAGER_TOOLS, only),
+    ...taskTools,
+  ];
+  // The final set: the texts, the fingerprint and every registration below follow it.
+  const served = all.map((tool) => tool.name);
   const base = serverInstructions({
-    ...options,
+    ...(options.waitHint === undefined ? {} : { waitHint: options.waitHint }),
+    ...(options.waitCommand === undefined ? {} : { waitCommand: options.waitCommand }),
     dialog,
     decisions: agentDecisions,
     attachments,
+    ...(role === undefined ? {} : { role }),
+    served,
   });
-  const instructions = tasks
-    ? `${base}\n\n${taskInstructions(runLink?.mode ?? "disabled", runLink !== undefined)}`
-    : base;
+  const instructions =
+    taskTools.length > 0
+      ? `${base}\n\n${taskInstructions(runLink?.mode ?? "disabled", runLink !== undefined, served)}`
+      : base;
   const server = new McpServer({ name: "kodel", version }, { instructions });
-  const taskLink = tasks !== undefined && runLink !== undefined;
-  const state = newDialogState();
-  const decisions = humans ? decisionTools(agentDecisions, createAgentDecider(humans, state)) : [];
   const service = new PipelineService(host, {
     engineVersion: version,
     // Asked at each call: the client's name comes with the handshake, after the server is built.
@@ -122,17 +224,16 @@ export function createServer(
     },
     surface: {
       instructions,
-      tools: toolsFingerprint([
-        ...toolsFor({ taskLink, attachments }),
-        ...decisions,
-        ...HISTORY_TOOLS,
-      ]),
+      tools: toolsFingerprint(all, { role: role ?? "all", readOnly }),
       contract_version: CONTRACT_VERSION,
+      role: role ?? "all",
     },
     ...(options.waitCommand === undefined ? {} : { waitCommand: options.waitCommand }),
   });
   registerPipelineTools(server, service, {
     taskLink,
+    ...(role === undefined ? {} : { role }),
+    only: served,
     attachments,
     ...(humans && dialog
       ? {
@@ -146,8 +247,9 @@ export function createServer(
       : {}),
     extraTools: decisions,
   });
-  registerHistoryTools(server, service);
-  if (tasks) registerTaskTools(server, tasks);
+  registerHistoryTools(server, service, { only: served });
+  registerManagerTools(server, options.manager ?? {}, { only: served });
+  if (tasks) registerTaskTools(server, tasks, { only: served });
   return server;
 }
 

@@ -17,6 +17,7 @@ export const V2_CAPABILITIES: FormatCapabilities = {
   firstDuplicateEdgeWins: false,
   sessionNames: true,
   workerNotes: true,
+  executorRole: true,
   attachments: true,
   pipelineFeatures: ["join", "engine", "model", "attachment"],
 };

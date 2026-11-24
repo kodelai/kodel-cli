@@ -13,6 +13,10 @@ let main: string;
 let linked: string;
 let outside: string;
 
+// A run of this repository's own pipeline has KODEL_ENGINE=1, and under it `kodel mcp` is a worker (5M9D):
+// the servers these tests start are the person's, with every tool.
+const { KODEL_ENGINE: _engineMark, ...OUTSIDE_ENGINE } = process.env as Record<string, string>;
+
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "ignore" });
 
 beforeEach(async () => {
@@ -148,7 +152,7 @@ describe("tXJPC_mcp_project_root", () => {
       command: process.execPath,
       args: [join(import.meta.dir, "../src/main.ts"), "mcp"],
       cwd,
-      env: { ...(process.env as Record<string, string>), ...env },
+      env: { ...OUTSIDE_ENGINE, ...env },
       stderr: "pipe",
     });
     const client = new Client({ name: "agent", version: "0.0.0" });

@@ -1362,3 +1362,32 @@ After the person tried it by hand (the final gate, five comments):
   to the redraw no `ESC[?1049l` and no line of the client), the new
   `t47_real_tui_keeps_its_screen_when_the_agent_switches_screens`, and
   `tA_attach_client_keep_screen_leaves_the_terminal_clean` (`tests/pty/attach-client.test.ts`).
+
+### The second merge of `main` (the MCP roles, 5M9D)
+
+`main` gained the roles of the server (`kodel mcp --role worker|manager`, `--read-only`, the `mcp` block of the
+config) and run attachments kept with a dev run. Where the plan and `main` disagree, `main` is followed:
+
+- **The worker's server is `kodel mcp --role worker --no-decisions`** and then `--no-wait-hint` (print) or
+  `--wait-command <command>` (terminal). The plan spelled it without the role. So the print spec is no longer
+  byte for byte the one from before T-47: it is the one of `main`, with `--role worker` in the `--mcp-config`
+  (`t47_worker_print_spec_is_todays`, `t47_wait_command_carries_the_state_dir` and
+  `t47_waiting_answers_spell_the_wait_command` expect the role).
+- **The allow list is worked out at every start and every resume**, not once when the launcher is made:
+  `servedTools` may be a function (`workerServedTools`), asked at the preflight and first thing in `start` and
+  `resume`, before the `engines` block and the records are read, so a worker set that does not resolve
+  (`CONFIG_INVALID`) is the refusal the caller sees and nothing is spawned in either mechanism.
+- **Both prompts end with `main`'s sentence about missing kodel tools**, and the resume prompt says the tools
+  may have changed; a terminal worker gets the same text (with the newline of step 4).
+- **The server's instructions** are `main`'s text built from the served set, with this change's two additions
+  kept: the wait command of the connection (`waitCommand`, which `mcp-server.ts` passes on again, since `main`
+  no longer spreads the options) and the sentence that the `engines` block is the person's (now on both
+  variants of rule 5). Rule 9a ends with `main`'s "pipeline_next_step never takes a step." The golden texts of
+  `5m9d_no_role_instructions_match_the_golden_text` are not regenerated: the `engines` sentence is one more
+  entry of that test's list of replaced lines.
+- **AGENTS.md** names both blocks that are the person's (`mcp` and `engines`); `docs/tasks.md`,
+  `docs/engines.md` and `docs/mcp-roles.md` spell the worker's server with the role and both wait flags.
+- `main` does not use `T-47` or `t47_` for anything else.
+- **`5m9d_worker_without_its_server_ends_as_a_dead_worker`** (`main`'s row on a real holder) names the print
+  mechanism, as the other rows with a `claude -p` stand-in do: without an `engines` block the default is a
+  terminal, which Bun cannot start.

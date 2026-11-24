@@ -5,8 +5,9 @@
  * interface and the contract suite are not shaped after one agent, and that version profiles work: the two
  * profiles read the same facts from two different shapes.
  */
-import { readdir, readFile, realpath, stat } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
+import { realPath } from "@kodel-ai/local";
 import {
   type AgentHistoryCollector,
   type DraftEvent,
@@ -150,8 +151,8 @@ export function fakeAgentCollector(): AgentHistoryCollector {
         "the project root is not a Kodel project",
       );
     }
-    const real = await realpath(ref.path).catch(() => resolve(ref.path));
-    const root = await realpath(ref.project_root).catch(() => resolve(ref.project_root));
+    const real = await realPath(ref.path).catch(() => resolve(ref.path));
+    const root = await realPath(ref.project_root).catch(() => resolve(ref.project_root));
     const rel = relative(root, real);
     if (rel.startsWith("..") || resolve(root, rel) !== real) {
       throw new KodelError("HISTORY_PATH_OUTSIDE_PROJECT", "the session is outside the project");

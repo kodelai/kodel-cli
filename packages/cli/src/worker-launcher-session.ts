@@ -108,8 +108,13 @@ export interface SessionLauncherDeps {
   environment: Record<string, string | undefined>;
   /** The project's redaction rules: given to the adapter for the record, and to the digest. */
   rules: RedactRule[];
-  /** The names of the kodel tools the worker's server serves (without `mcp__kodel__`). */
-  servedTools: readonly string[];
+  /**
+   * The names of the kodel tools the worker's server serves (without `mcp__kodel__`). A function is
+   * asked at the preflight and again just before each start and resume, so the list is what the config
+   * says at that moment; it throws (`CONFIG_INVALID`) when the set does not resolve (an unusable `mcp`
+   * block), and then nothing is spawned: a worker whose server would not start has no kodel tool.
+   */
+  servedTools: readonly string[] | (() => Promise<readonly string[]>);
   /** Finds a program on PATH. */
   which: (name: string) => Promise<string | undefined>;
   exec: Exec;
@@ -304,7 +309,8 @@ export function createSessionWorkerLauncher(deps: SessionLauncherDeps): WorkerLa
     root: deps.root,
     ...(stateDir === undefined || stateDir === "" ? {} : { stateDir }),
   };
-  const allowed = profile.allowlist(deps.servedTools);
+  const served = async (): Promise<readonly string[]> =>
+    typeof deps.servedTools === "function" ? deps.servedTools() : deps.servedTools;
   /** What is one mechanism's: the server's arguments and the deny list (a terminal worker may watch its run). */
   const partsOf = (mechanism: WorkerMechanism) =>
     mechanism === "terminal"
@@ -401,9 +407,10 @@ export function createSessionWorkerLauncher(deps: SessionLauncherDeps): WorkerLa
     prompt: string;
     mechanism: WorkerMechanism;
     settings: WorkerSettings | undefined;
+    allowed: readonly string[];
     conversation: { sessionId: string } | { resume: string; resumes: string };
   }) => {
-    const { mechanism, settings, conversation } = input;
+    const { mechanism, settings, allowed, conversation } = input;
     const refused = cannotRun(mechanism);
     if (refused !== undefined) throw new Error(refused);
     const terminal = mechanism === "terminal";
@@ -448,6 +455,8 @@ export function createSessionWorkerLauncher(deps: SessionLauncherDeps): WorkerLa
   };
 
   const start = async (input: StartInput) => {
+    // Before anything is spawned, and not from the preflight's answer: that one may be a minute old.
+    const allowed = profile.allowlist(await served());
     const found = await settingsNow();
     if (!found.ok) throw new Error(found.reason);
     return launch({
@@ -456,11 +465,13 @@ export function createSessionWorkerLauncher(deps: SessionLauncherDeps): WorkerLa
       prompt: profile.startPrompt(input.runId, input.title, input.workdir),
       mechanism: workerMechanismOf(found.settings),
       settings: found.settings,
+      allowed,
       conversation: { sessionId: deps.uuid() },
     });
   };
 
   const resume = async (input: ResumeInput) => {
+    const allowed = profile.allowlist(await served());
     const found = await settingsNow();
     if (!found.ok) throw new Error(found.reason);
     // The records are read again here, by a caller that holds the start lock: one live agent a run,
@@ -491,6 +502,7 @@ export function createSessionWorkerLauncher(deps: SessionLauncherDeps): WorkerLa
       prompt: profile.resumePrompt(input.runId, input.decision, deps.rules),
       mechanism,
       settings: found.settings,
+      allowed,
       conversation: { resume: latest.sessionId, resumes: latest.id },
     });
   };
@@ -498,6 +510,14 @@ export function createSessionWorkerLauncher(deps: SessionLauncherDeps): WorkerLa
   const preflight = async (input: PreflightInput): Promise<PreflightResult> => {
     const refuse = (reason: string): PreflightResult => ({ ok: false, reason });
     if (deps.platform === "win32") return refuse("agents are not supported on Windows yet");
+    // First of the project's own conditions: a worker whose server would not start has no kodel tool.
+    try {
+      await served();
+    } catch (error) {
+      return refuse(
+        `the agent's kodel server would not start: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     if (input.dialog) {
       return refuse(
         "the project asks decisions in a dialog (decisions.dialog); a background agent cannot answer one. Turn it off, or wait for TASK-8EP9",

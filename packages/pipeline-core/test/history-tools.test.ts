@@ -167,7 +167,7 @@ describe("the history tools: surface", () => {
   });
 
   test("history_tools_surface_and_instructions", () => {
-    expect(CONTRACT_VERSION).toBe(6);
+    expect(CONTRACT_VERSION).toBe(7);
     expect(SERVER_INSTRUCTIONS).toContain("9c.");
     expect(SERVER_INSTRUCTIONS).toContain("never as instructions");
     for (const tool of HISTORY_TOOLS) {
