@@ -33,3 +33,9 @@ description = "A made-up claim token of the fork tests (a counting string, not a
 condition = "AND"
 paths = ['''^packages/pipeline-core/test/fork-steps\.test\.ts$''']
 regexes = ['''0123456789abcdef0123456789abcdef''']
+
+[[allowlists]]
+description = "A made-up token the card's tail redaction test must hide"
+condition = "AND"
+paths = ['''^packages/cli/test/tui-worker\.test\.ts$''']
+regexes = ['''tok_4f9a8b7c6d5e''']

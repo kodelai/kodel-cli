@@ -56,19 +56,38 @@ export interface GuardSession {
   child?: GuardProcess;
 }
 
+/** The first `count` words of a line split on spaces and tabs, and the text after them. */
+function nextFields(line: string, count: number): { words: string[]; rest: string } | undefined {
+  const words: string[] = [];
+  let at = 0;
+  const blank = (c: string | undefined) => c === " " || c === "\t" || c === "\r";
+  while (words.length < count) {
+    while (at < line.length && blank(line[at])) at += 1;
+    if (at >= line.length) return undefined;
+    const start = at;
+    while (at < line.length && !blank(line[at])) at += 1;
+    words.push(line.slice(start, at));
+  }
+  return { words, rest: line.slice(at) };
+}
+
 export const parseGuardRows = (table: string): GuardRow[] => {
   const rows: GuardRow[] = [];
   for (const line of table.split("\n")) {
-    const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S+)(?:\s+(.*\S))?\s*$/.exec(line);
-    if (match === null) continue;
-    const [, pid, ppid, state, tty, args] = match;
-    if (state === undefined || tty === undefined) continue;
+    // Read field by field, not with one pattern: a pattern with an optional free text and spaces around
+    // it can take polynomial time on a line made of spaces.
+    const fields = nextFields(line, 4);
+    if (fields === undefined) continue;
+    const [pid, ppid, state, tty] = fields.words;
+    if (pid === undefined || ppid === undefined || state === undefined || tty === undefined) continue;
+    if (!/^\d+$/.test(pid) || !/^\d+$/.test(ppid)) continue;
+    const args = fields.rest.trim();
     rows.push({
       pid: Number(pid),
       ppid: Number(ppid),
       state,
       tty,
-      ...(args === undefined ? {} : { args }),
+      ...(args === "" ? {} : { args }),
     });
   }
   return rows;
