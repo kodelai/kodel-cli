@@ -75,7 +75,10 @@ const real = test.skipIf(
 );
 const posix = test.skipIf(process.platform === "win32");
 
-const TASKS = "tasks:\n  enabled: true\n  adapters:\n    local:\n      prefix: KDL\n";
+// The workers of these tests are today's `claude -p` (a script stands for it): the project says so,
+// in the committed config and in every rewrite of it (the block is used only as committed).
+const TASKS =
+  "tasks:\n  enabled: true\n  adapters:\n    local:\n      prefix: KDL\nengines:\n  claude:\n    worker: print\n";
 const SERVE_ON = "serve:\n  enabled: true\n  start:\n    - pipeline: one\n";
 
 let dir: string;
@@ -380,7 +383,7 @@ describe("t44 kodel serve --status", () => {
       });
       expect(out).toContain(`kodel serve: active (pid ${process.pid}, since`);
       expect(out).toContain(`state base:  ${stateDir}`);
-      expect(out).toContain("limits:      workers 0 of 1, runs with a worker 0 of 1");
+      expect(out).toContain("limits:      working 0 of 1, alive 0, runs with a worker 0 of 1");
       expect(out).toContain("rule 1:      pipeline one, approval required");
       // What the next cycle would do is not shown here (TASK-H9QP).
       expect(out).not.toContain("next cycle");
@@ -750,6 +753,7 @@ async function realWorld(hang = false) {
     platform: process.platform,
     clock: Date.now,
     uuid: () => "7f3b2a9c-1d4e-4f6a-9b8c-0d1e2f3a4b5c",
+    engines: async () => ({ ok: true, engines: { claude: { worker: "print" } } }),
   });
   const opened = await openTaskService({ storeRoot: storeRoot() });
   if (!opened) throw new Error("tasks are off");
@@ -839,14 +843,28 @@ describe("t44 the real session adapter", () => {
         // The cycle reads the records through `kodel agent ls --json`, as a person's daemon does.
         expect(await daemon.cycle()).toEqual({ kind: "active" });
         const run = (await h.open(runId)) as LocalRun;
+        // T-44 as revised by T-47: while the process the holder started still runs, the worker is
+        // alive for every rule. No note yet; one line with the command that stops it.
+        expect(await adapter.status(id)).toMatchObject({ state: "lost", childAlive: true });
+        expect((await run.journal()).filter((r) => r.event === "worker_note")).toEqual([]);
+        expect(lines).toContain(
+          `child_alive: run ${runId}: kw-${runId}: its process still runs without a holder; stop it: kodel agent stop ${id}`,
+        );
+        // The process is gone at last: a holder that is gone is noted, within one cycle.
+        process.kill(-child, "SIGKILL");
+        for (let i = 0; i < 100; i++) {
+          if ((await adapter.status(id)).childAlive !== true) break;
+          await wait(50);
+        }
+        expect(await daemon.cycle()).toEqual({ kind: "active" });
         const notes = (await run.journal()).filter((r) => r.event === "worker_note");
         expect(notes, lines.join("\n")).toHaveLength(1);
         expect(notes[0]).toMatchObject({ worker: `kw-${runId}`, id, reason: "lost" });
         expect(lines.some((l) => l.startsWith(`noted: run ${runId}`))).toBe(true);
       } finally {
-        // The holder's child leads its own process group; it outlives the holder and is stopped here.
+        // The holder's child outlives the holder and is stopped here, by its pid: its group may have no leader.
         try {
-          process.kill(-child, "SIGKILL");
+          process.kill(child, "SIGKILL");
         } catch {
           // already gone
         }
@@ -854,4 +872,127 @@ describe("t44 the real session adapter", () => {
     },
     120_000,
   );
+});
+
+describe("t44 kodel serve --status with workers that stay alive at a wait (T-47)", () => {
+  const LIMITS =
+    "serve:\n  enabled: true\n  max_workers: 1\n  max_runs: 3\n  start:\n    - pipeline: one\n";
+
+  /** Two runs with a worker in a terminal each: the first waits at its gate, the second has a step open. */
+  async function twoRuns() {
+    writeFileSync(join(storeRoot(), "config.yaml"), `worktree:\n  mode: auto\n${TASKS}${LIMITS}`);
+    const h = host();
+    const launcher = new FakeLauncher();
+    const started: string[] = [];
+    for (const title of ["Waits at its gate", "Has a step open"]) {
+      const key = await seedTask(title);
+      const made = await h.start({
+        pipeline: "one",
+        task: title,
+        restart: true,
+        task_key: key,
+        caller: { name: "kodel-tui", version: "0.0.0-test" },
+      });
+      await launcher.start({ runId: made.run.runId, workdir: dir, title });
+      const status = launcher.statusMap.get(made.run.runId);
+      if (status === undefined) throw new Error("no worker");
+      launcher.statusMap.set(made.run.runId, { ...status, terminal: true });
+      started.push(made.run.runId);
+    }
+    const [waiting, working] = started as [string, string];
+    const run = (await h.open(waiting)) as LocalRun;
+    await run.completeStep("write", 1);
+    await run.waitForRest(10_000);
+    return { h, launcher, waiting, working };
+  }
+
+  const status = async (
+    h: LocalPipelineHost,
+    launcher: FakeLauncher,
+    now: number,
+  ): Promise<string> => {
+    let out = "";
+    await printServeStatus({
+      root: dir,
+      dataDir: storeRoot(),
+      host: h,
+      launcher,
+      place: servePlace({ base: stateDir, root: dir }),
+      version: "0.0.0-test",
+      now,
+      out: (t) => {
+        out += t;
+      },
+    });
+    return out;
+  };
+
+  test("t44_status_names_working_and_alive", async () => {
+    const { h, launcher } = await twoRuns();
+    const before = [...snapshot(dir), ...snapshot(stateDir)];
+    // The worker at its gate is alive and holds no worker place; both runs hold a run place.
+    const out = await status(h, launcher, launcher.started + 60_000);
+    expect(out).toContain("limits:      working 1 of 1, alive 2, runs with a worker 2 of 3");
+    expect(out).not.toContain("stalled:");
+    // It reads and writes nothing, and acts on nothing.
+    expect([...snapshot(dir), ...snapshot(stateDir)]).toEqual(before);
+    expect(launcher.finished).toEqual([]);
+    expect(launcher.resumes).toEqual([]);
+    // The record a daemon writes names both, and `workers` stays what stands beside `max_workers`.
+    const place = servePlace({ base: stateDir, root: dir });
+    const record = await acquireServeRecord(place, { now: Date.now(), build: "test" });
+    try {
+      await record.writeCycle({
+        state: "active",
+        cycle_at: Date.now(),
+        counts: { workers: 1, alive: 2, max_workers: 1, runs: 2, max_runs: 3 },
+      });
+      const stored = JSON.parse(readFileSync(place.file, "utf8")) as { counts: unknown };
+      expect(stored.counts).toEqual({ workers: 1, alive: 2, max_workers: 1, runs: 2, max_runs: 3 });
+    } finally {
+      await record.release();
+    }
+  });
+
+  test("t44_status_lists_stalled_workers", async () => {
+    const { h, launcher, waiting, working } = await twoRuns();
+    // Hours later neither printed anything nor called the engine. No daemon runs: the quiet time is
+    // the worker's own. The one with a step open is stalled, and the line says what it holds; the
+    // one that waits with the person is not.
+    const later = launcher.started + 2 * 3_600_000;
+    const out = await status(h, launcher, later);
+    expect(out).toContain(
+      `stalled:     kw-${working} (run ${working}): quiet for 7200 s; it holds a worker place and a run place; nothing stops it but you: kodel agent attach kw-${working}, or kodel agent stop kw-${working}`,
+    );
+    expect(out).not.toContain(`stalled:     kw-${waiting}`);
+    expect(out).toContain("limits:      working 1 of 1, alive 2, runs with a worker 2 of 3");
+    // A daemon that started a moment ago has not watched it for that long: nothing is listed yet.
+    const place = servePlace({ base: stateDir, root: dir });
+    const record = await acquireServeRecord(place, { now: later - 5_000, build: "test" });
+    try {
+      await record.writeCycle({ state: "active", cycle_at: later });
+      expect(await status(h, launcher, later)).not.toContain("stalled:");
+    } finally {
+      await record.release();
+    }
+    // Output puts it off.
+    const printing = launcher.statusMap.get(working);
+    if (printing === undefined) throw new Error("no worker");
+    launcher.statusMap.set(working, { ...printing, lastOutputAt: later - 60_000 });
+    expect(await status(h, launcher, later)).not.toContain("stalled:");
+  });
+
+  test("t44_status_offers_a_stalled_print_worker_its_log_not_attach", async () => {
+    const { h, launcher, working } = await twoRuns();
+    // A print worker has no terminal: `kodel agent attach` would refuse it, so the line names its log.
+    const print = launcher.statusMap.get(working);
+    if (print === undefined) throw new Error("no worker");
+    const { terminal: _none, ...plainWorker } = print;
+    launcher.statusMap.set(working, plainWorker);
+    const out = await status(h, launcher, launcher.started + 2 * 3_600_000);
+    expect(out).toContain(
+      `stalled:     kw-${working} (run ${working}): quiet for 7200 s; it holds a worker place and a run place; nothing stops it but you: kodel agent logs kw-${working}, or kodel agent stop kw-${working}`,
+    );
+    expect(out).not.toContain("kodel agent attach");
+  });
 });

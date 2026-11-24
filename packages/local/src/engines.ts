@@ -56,10 +56,85 @@ const envName = z
     if (why !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: why });
   });
 
+/** How a background worker of a run is started: in a terminal of its own, or as a print process that ends at a wait. */
+export const WORKER_MECHANISMS = ["terminal", "print"] as const;
+export type WorkerMechanism = (typeof WORKER_MECHANISMS)[number];
+
+/**
+ * The engines that can be a worker (T-47), and the flags the person's `terminal.command` may add for each.
+ * Everything else on that command is refused: it is an argv kodel starts unattended, with its own flags
+ * (the permission mode, the tool lists, the one MCP server) beside it.
+ */
+export const WORKER_ENGINES: Readonly<Record<string, { terminalFlags: readonly string[] }>> = {
+  claude: { terminalFlags: ["--model", "--effort", "--fallback-model"] },
+};
+
+/** What a profile says about a worker: the two keys only a worker engine may carry. */
+export interface WorkerSettings {
+  worker?: WorkerMechanism;
+  terminal?: { command?: readonly string[] };
+}
+
+export interface TerminalCommand {
+  program: string;
+  pairs: { flag: string; value: string }[];
+}
+
+/**
+ * Reads a `terminal.command`: the program, then pairs of an allowed flag and its value (`--flag value`
+ * or `--flag=value`). A bare word, a value that begins with `-`, and any other flag (a short form too)
+ * are refused by name.
+ */
+export function parseTerminalCommand(
+  command: readonly string[],
+  allowed: readonly string[],
+): { ok: true; command: TerminalCommand } | { ok: false; problem: string } {
+  const refuse = (problem: string) => ({ ok: false as const, problem });
+  const program = command[0];
+  if (program === undefined || program === "") return refuse("the program is missing");
+  if (program.startsWith("-")) {
+    return refuse(`the first element is the program, and "${program}" is a flag`);
+  }
+  const may = `it may add ${allowed.length === 0 ? "no flag" : allowed.join(", ")}`;
+  const pairs: TerminalCommand["pairs"] = [];
+  for (let i = 1; i < command.length; i += 1) {
+    const element = command[i] ?? "";
+    if (!element.startsWith("-")) {
+      return refuse(`"${element}" is a bare word: only a flag and its value follow the program`);
+    }
+    const eq = element.startsWith("--") ? element.indexOf("=") : -1;
+    const flag = eq < 0 ? element : element.slice(0, eq);
+    if (!allowed.includes(flag)) return refuse(`the flag "${flag}" is not allowed (${may})`);
+    let value: string | undefined;
+    if (eq < 0) {
+      i += 1;
+      value = command[i];
+    } else {
+      value = element.slice(eq + 1);
+    }
+    if (value === undefined || value === "") return refuse(`the flag "${flag}" has no value`);
+    if (value.startsWith("-")) {
+      return refuse(`the value of "${flag}" ("${value}") begins with -`);
+    }
+    pairs.push({ flag, value });
+  }
+  return { ok: true, command: { program, pairs } };
+}
+
 export const engineProfileSchema = z
   .object({
-    /** The program and its fixed arguments; the prompt comes last, as one argument after `--`. */
-    command: z.array(z.string().min(1)).min(1),
+    /**
+     * The program of an engine step and its fixed arguments; the prompt comes last, as one argument
+     * after `--`. Absent on a profile that only says how a worker is started: such a profile runs no step.
+     */
+    command: z.array(z.string().min(1)).min(1).optional(),
+    /** How a background worker of a run is started (T-47). Only on a profile that can be a worker. */
+    worker: z.enum(WORKER_MECHANISMS).optional(),
+    /** The program of a terminal worker and the flags the person adds to it (`parseTerminalCommand`). */
+    terminal: z
+      .object({ command: z.array(z.string().min(1)).min(1).optional() })
+      .strict()
+      .optional(),
     /** How the program is told the node's `model`, for example `--model`. */
     model_flag: z.string().min(1).optional(),
     /** Literal values for the step's environment; long ones are redacted from what is kept. */
@@ -73,10 +148,39 @@ export const engineProfileSchema = z
 
 export type EngineProfile = z.infer<typeof engineProfileSchema>;
 
-export const enginesSchema = z.record(
-  z.string().regex(ENGINE_PROFILE_NAME, "a profile name is lowercase letters, digits, - and _"),
-  engineProfileSchema,
-);
+/** Why only some profile names may carry `worker:` or `terminal:` (decision 2 of TASK-EKAV). */
+export const ONLY_CLAUDE_IS_A_WORKER =
+  "only claude can be a worker in this version; codex and opencode are a follow-up task";
+
+export const enginesSchema = z
+  .record(
+    z.string().regex(ENGINE_PROFILE_NAME, "a profile name is lowercase letters, digits, - and _"),
+    engineProfileSchema,
+  )
+  .superRefine((profiles, ctx) => {
+    for (const [name, profile] of Object.entries(profiles)) {
+      if (profile.worker === undefined && profile.terminal === undefined) continue;
+      const engine = Object.hasOwn(WORKER_ENGINES, name) ? WORKER_ENGINES[name] : undefined;
+      if (engine === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [name],
+          message: `engines.${name}: ${ONLY_CLAUDE_IS_A_WORKER}`,
+        });
+        continue;
+      }
+      const command = profile.terminal?.command;
+      if (command === undefined) continue;
+      const parsed = parseTerminalCommand(command, engine.terminalFlags);
+      if (!parsed.ok) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [name, "terminal", "command"],
+          message: `engines.${name}.terminal.command: ${parsed.problem}`,
+        });
+      }
+    }
+  });
 
 const PATH_START = /^(\/|~\/|\.{1,2}\/|[A-Za-z]:[\\/])/;
 const PATH_SEGMENT = /^[A-Za-z0-9._ -]*$/;
@@ -185,6 +289,13 @@ export function configEngineResolver(
           };
         }
       }
+      const command = profile.command;
+      if (command === undefined) {
+        return {
+          ok: false,
+          reason: `the engine profile "${request.profile}" has no command: it says how a worker is started and runs no step`,
+        };
+      }
       if (request.model !== undefined && profile.model_flag === undefined) {
         return {
           ok: false,
@@ -218,7 +329,7 @@ export function configEngineResolver(
         literal.push(value);
       }
       const argv = [
-        ...profile.command,
+        ...command,
         ...(request.model !== undefined && profile.model_flag !== undefined
           ? [profile.model_flag, request.model]
           : []),

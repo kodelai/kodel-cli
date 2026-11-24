@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import {
+  type AgentRecord,
   decodeRecord,
   encodeRecord,
   type NameMarker,
@@ -17,16 +18,27 @@ import {
   SESSION_FORMAT_VERSION,
   type SessionRecord,
   type SessionSnapshot,
+  STOP_BY,
   type StatusRecord,
+  type StopAsker,
+  type StopRecord,
+  stopAskerOf,
 } from "@kodel-ai/pipeline-core";
 import { sameProcess } from "./process-table";
 
-export type { NameMarker, SessionRecord, StatusRecord, StopRecord } from "@kodel-ai/pipeline-core";
+export type {
+  AgentRecord,
+  NameMarker,
+  SessionRecord,
+  StatusRecord,
+  StopRecord,
+} from "@kodel-ai/pipeline-core";
 
 export const SESSION_FILE = "session.json";
 export const STATUS_FILE = "status.json";
 export const STOP_FILE = "stop.json";
 export const TAIL_FILE = "tail.txt";
+export const AGENT_FILE = "agent.json";
 
 const readJson = (path: string): unknown | "missing" | "unreadable" => {
   if (!existsSync(path)) return "missing";
@@ -56,11 +68,39 @@ export const readSession = (dir: string): Read<SessionRecord> =>
 export const readStatus = (dir: string): Read<StatusRecord> =>
   readRecord("status", join(dir, STATUS_FILE));
 
-export const readStop = (dir: string): "missing" | "unreadable" | "newer" | "present" => {
+/** Who asked for the stop, when the record is there and can be read. */
+export const readStop = (dir: string): "missing" | "unreadable" | "newer" | StopAsker => {
   const value = readRecord("stop", join(dir, STOP_FILE));
-  if (value === "missing") return "missing";
-  return typeof value === "string" ? value : "present";
+  return typeof value === "string" ? value : stopAskerOf(value.by);
 };
+
+/**
+ * Leaves the stop record of who asks, before anything is signalled. A person's record is never replaced; a
+ * person's stop replaces any other, so what a `finish` left of a session does not hide that a person stopped
+ * the rest.
+ */
+export const writeStop = (
+  dir: string,
+  by: StopAsker,
+  at: number,
+  identity?: StopRecord["identity"],
+): void => {
+  const there = readStop(dir);
+  if (there === "person" || (there !== "missing" && by !== "person")) return;
+  replaceRecord(
+    join(dir, STOP_FILE),
+    encodeRecord("stop", {
+      v: SESSION_FORMAT_VERSION,
+      by: STOP_BY[by],
+      at,
+      ...(identity === undefined ? {} : { identity }),
+    }),
+  );
+};
+
+/** `missing` for a session from before the record existed, or one that runs no agent. */
+export const readAgent = (dir: string): Read<AgentRecord> =>
+  readRecord("agent", join(dir, AGENT_FILE));
 
 export const readMarker = (path: string): Read<NameMarker> => readRecord("name", path);
 
@@ -88,17 +128,30 @@ export const replaceRecord = (path: string, text: string): void => {
   renameSync(tmp, path);
 };
 
-/** `session.json` appears with the directory or not at all: written in a temporary directory, then renamed in. */
-export const publishSession = (dir: string, record: SessionRecord): void => {
+/**
+ * `session.json` appears with the directory or not at all: written in a temporary directory, then renamed in.
+ * The `agent` record is written once, here, before `session.json` (the file that makes the folder a session), so
+ * no session exists without the id of its agent's conversation.
+ */
+export const publishSession = (dir: string, record: SessionRecord, agent?: AgentRecord): void => {
   const tmp = `${dir}.tmp-${process.pid}`;
   mkdirSync(tmp, { mode: 0o700 });
+  if (agent !== undefined) {
+    writeFileSync(join(tmp, AGENT_FILE), encodeRecord("agent", agent), { mode: 0o600 });
+  }
   writeFileSync(join(tmp, SESSION_FILE), encodeRecord("session", record), { mode: 0o600 });
   renameSync(tmp, dir);
 };
 
 export const removeDir = (path: string): void => rmSync(path, { recursive: true, force: true });
 
-export const snapshotOf = (dir: string): SessionSnapshot => {
+/**
+ * Asked only for a record whose holder is gone and never recorded its child's end, when the recorded child is
+ * gone too: does a process of the child's group still run? (`since` is when the session began.)
+ */
+export type OrphanCheck = (child: NonNullable<StatusRecord["child"]>, since: number) => boolean;
+
+export const snapshotOf = (dir: string, orphans?: OrphanCheck): SessionSnapshot => {
   if (!existsSync(dir)) {
     return {
       exists: false,
@@ -112,10 +165,27 @@ export const snapshotOf = (dir: string): SessionSnapshot => {
   const session = readSession(dir);
   const status = readStatus(dir);
   const stop = readStop(dir);
+  const agent = readAgent(dir);
   const live =
     status !== "missing" && status !== "unreadable" && status !== "newer" ? status : undefined;
   // A newer format anywhere in the folder is "upgrade kodel", whichever file it is in.
-  const newer = session === "newer" || status === "newer" || stop === "newer";
+  const newer = session === "newer" || status === "newer" || stop === "newer" || agent === "newer";
+  const holderAlive =
+    live?.holder !== undefined && sameProcess(live.holder.pid, live.holder.identity);
+  let childAlive = live?.child !== undefined && sameProcess(live.child.pid, live.child.identity);
+  // A holder that recorded the end (an exit, a stop, its own timeout) answers for its child: what it left behind
+  // (a `kodel wait`, say) is not looked at. Only a holder that went away without a word may have left the agent
+  // behind a wrapper that died.
+  if (
+    !childAlive &&
+    !holderAlive &&
+    orphans !== undefined &&
+    live?.child !== undefined &&
+    (live.state === "running" || live.state === "starting") &&
+    typeof session !== "string"
+  ) {
+    childAlive = orphans(live.child, session.started);
+  }
   return {
     exists: true,
     session: newer
@@ -134,8 +204,8 @@ export const snapshotOf = (dir: string): SessionSnapshot => {
             ...(status.signal !== undefined ? { signal: status.signal } : {}),
             ...(status.reason !== undefined ? { reason: status.reason } : {}),
           },
-    holderAlive: live?.holder !== undefined && sameProcess(live.holder.pid, live.holder.identity),
-    childAlive: live?.child !== undefined && sameProcess(live.child.pid, live.child.identity),
+    holderAlive,
+    childAlive,
     stop: stop === "newer" ? "unreadable" : stop,
   };
 };

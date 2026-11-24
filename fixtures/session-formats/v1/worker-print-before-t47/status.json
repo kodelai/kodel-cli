@@ -1,0 +1,22 @@
+{
+  "v": 1,
+  "state": "exited",
+  "by": "holder",
+  "holder": {
+    "pid": 4242,
+    "identity": {
+      "method": "ps-lstart",
+      "value": "MASKED"
+    }
+  },
+  "child": {
+    "pid": 4242,
+    "identity": {
+      "method": "ps-lstart",
+      "value": "MASKED"
+    }
+  },
+  "exitCode": 0,
+  "lastOutputAt": 1700000000000,
+  "since": 1700000000000
+}

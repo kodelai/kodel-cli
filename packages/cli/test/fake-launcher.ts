@@ -118,7 +118,43 @@ export class FakeLauncher implements WorkerLauncher {
   async stop(runId: string): Promise<void> {
     this.stopped.push(runId);
     const status = this.statusMap.get(runId);
-    if (status) this.statusMap.set(runId, { ...status, state: "killed", label: "stopped" });
+    // As the real launcher: a stop through it is the person's, and the record reads so.
+    if (status) {
+      this.statusMap.set(runId, {
+        ...status,
+        state: "killed",
+        label: "stopped",
+        stopped: true,
+        endedBy: "stopped",
+      });
+    }
+  }
+
+  readonly finished: string[] = [];
+
+  async finish(runId: string): Promise<void> {
+    this.calls.push(`finish ${runId}`);
+    this.finished.push(runId);
+    const status = this.statusMap.get(runId);
+    if (status && (status.state === "running" || status.state === "starting")) {
+      // Stopped, but not by the person: no `stopped` mark.
+      this.statusMap.set(runId, {
+        ...status,
+        state: "killed",
+        label: "stopped",
+        endedBy: "stopped",
+      });
+    }
+  }
+
+  async attachable(
+    runId: string,
+  ): Promise<{ ok: true; id: string } | { ok: false; reason: string }> {
+    const status = this.statusMap.get(runId);
+    if (status === undefined) return { ok: false, reason: `run ${runId} has no agent of kodel` };
+    return status.terminal === true && status.state === "running"
+      ? { ok: true, id: status.id }
+      : { ok: false, reason: `${status.name} cannot be opened` };
   }
 
   /** The worker of a run exited: at `since`, with this code. */

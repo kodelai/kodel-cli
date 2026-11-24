@@ -2,8 +2,14 @@
  * `kodel serve` on a real host and tracker, with a fake clock and a launcher without processes
  * (TASK-G8KM, T-44). Process liveness is injected where a test needs a holder alive or gone; the tests
  * that use real processes are POSIX only.
+ *
+ * The clock is fake and nothing here sleeps or polls: the time of a test is the real host's `git`. A
+ * run that is started and driven to its gate costs about 60 `git` processes (its worktree, a snapshot
+ * of each step, the baseline of its diff), a second or so on a free machine and several times that when
+ * other test files spawn processes beside this one. Hence the bound below, as in the other files that
+ * work a real repository; it is a bound on the machine, not on a wait.
  */
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -32,6 +38,8 @@ import {
   type ServeTasksPort,
   serveTasksOf,
 } from "../src";
+
+setDefaultTimeout(60_000);
 
 const GATED = [
   "name: gated",
@@ -2038,6 +2046,416 @@ describe("the start lock (T-44)", () => {
     setTimeout(release, 100);
     const [, started] = await Promise.all([holding, starting]);
     expect(started.status).toBe("started");
+  });
+});
+
+/** A host port that counts what the daemon reads of each run, and can fail a read. */
+function countingHost(host: LocalPipelineHost) {
+  const counts = { inspect: 0, journal: 0 };
+  const state: {
+    failInspect: boolean;
+    locked: number;
+    readsInLock: number;
+    /** Runs once, right before the next taking of the start lock: between a plan and its action. */
+    beforeLock?: () => Promise<void>;
+  } = { failInspect: false, locked: 0, readsInLock: 0 };
+  const port: ServeHostPort = {
+    open: async (runId) => {
+      const run = await host.open(runId);
+      if (run === undefined) return undefined;
+      return {
+        runId: run.runId,
+        journal: () => {
+          counts.journal += 1;
+          if (state.locked > 0) state.readsInLock += 1;
+          return run.journal();
+        },
+        inspect: () => {
+          counts.inspect += 1;
+          if (state.failInspect) throw new Error("the state cannot be read now");
+          return run.inspect();
+        },
+        integrityStatus: () => run.integrityStatus(),
+        location: () => run.location(),
+        inProject: (worktree) => run.inProject(worktree),
+        noteWorker: (input) => run.noteWorker(input),
+      };
+    },
+    runSummaries: (options) => host.runSummaries(options),
+    list: () => host.list(),
+    taskLink: () => host.taskLink(),
+    start: (input) => host.start(input),
+    withWorkerStartLock: async (fn) => {
+      const before = state.beforeLock;
+      state.beforeLock = undefined;
+      await before?.();
+      state.locked += 1;
+      try {
+        return await host.withWorkerStartLock(fn);
+      } finally {
+        state.locked -= 1;
+      }
+    },
+    foreignRootOf: (meta) => host.foreignRootOf(meta),
+  };
+  return { port, counts, state };
+}
+
+const finishes = (launcher: ScriptedLauncher) => launcher.calls.filter((c) => c.kind === "finish");
+
+describe("kodel serve with workers that stay alive at a wait (T-47)", () => {
+  test("t44_daemon_reads_live_runs_sparingly", async () => {
+    await project({
+      serve: ["serve:", "  enabled: true", "  max_runs: 3", "  start:", "    - pipeline: gated"],
+    });
+    const host = newHost();
+    const counted = countingHost(host);
+    // A print worker that is alive: its run's answer is not asked.
+    const print = new ScriptedLauncher({ host, now: () => t, behaviour: "silent" });
+    const w = await world({ host, launcher: print, deps: { host: counted.port } });
+    await w.make("Task A");
+    await w.daemon.cycle();
+    for (let i = 0; i < 4; i++) {
+      tick();
+      await w.daemon.cycle();
+    }
+    expect(counted.counts).toEqual({ inspect: 0, journal: 0 });
+    // A worker in a terminal that waits at its gate, alive: the answer every cycle, the journal at
+    // most once a minute.
+    const terminal = new ScriptedLauncher({ host, now: () => t, terminal: true });
+    const lines: string[] = [];
+    const daemon = createServeDaemon({
+      root: dir,
+      storeRoot: storeRoot(),
+      host: counted.port,
+      launcher: terminal,
+      tasks: serveTasksOf(w.service),
+      log: (line) => lines.push(line),
+      version: "0.0.0-test",
+      now: () => t,
+    });
+    const key = await w.make("Task B");
+    print.records.length = 0;
+    tick();
+    await daemon.cycle();
+    const runId = await w.runOf(key);
+    expect(terminal.of(runId).map((r) => r.state)).toEqual(["running"]);
+    expect(await atGate(w, runId)).toBe(true);
+    counted.counts.inspect = 0;
+    counted.counts.journal = 0;
+    for (let i = 0; i < 6; i++) {
+      tick();
+      await daemon.cycle();
+    }
+    // Six cycles in 30 s: six answers, one read of the journal.
+    expect(counted.counts).toEqual({ inspect: 6, journal: 1 });
+    tick(60_000);
+    await daemon.cycle();
+    expect(counted.counts).toEqual({ inspect: 7, journal: 2 });
+    // It waits with the person: alive, no worker place, its run place held.
+    const plan = await daemon.plan();
+    if (plan.config !== "ok") throw new Error("no plan");
+    expect(plan.plan.counts).toMatchObject({ workers: 0, alive: 1 });
+    expect(plan.plan.counts.runs).toContain(runId);
+    // A read that fails keeps both places, and the run is said to be unreadable.
+    counted.state.failInspect = true;
+    tick();
+    await daemon.cycle();
+    const broken = await daemon.plan();
+    if (broken.config !== "ok") throw new Error("no plan");
+    expect(broken.plan.counts).toMatchObject({ workers: 1, alive: 1 });
+    expect(broken.plan.counts.runs).toContain(runId);
+    expect(lines.some((l) => l.startsWith(`unreadable: run ${runId}:`))).toBe(true);
+    expect(finishes(terminal)).toEqual([]);
+    // And is read again when it reads again.
+    counted.state.failInspect = false;
+    tick();
+    await daemon.cycle();
+    const again = await daemon.plan();
+    if (again.config !== "ok") throw new Error("no plan");
+    expect(again.plan.counts).toMatchObject({ workers: 0, alive: 1 });
+  });
+
+  test("t44_daemon_finishes_through_the_launcher", async () => {
+    await project();
+    const host = newHost();
+    const launcher = new ScriptedLauncher({ host, now: () => t, terminal: true });
+    const w = await world({ host, launcher });
+    const key = await w.make("Task A");
+    await w.daemon.cycle();
+    const runId = await w.runOf(key);
+    // At its gate the worker is alive and nothing is done about it.
+    tick();
+    await w.daemon.cycle();
+    expect(launcher.of(runId).map((r) => r.state)).toEqual(["running"]);
+    expect(resumes(launcher)).toEqual([]);
+    expect(notesOf(await w.journal(runId))).toEqual([]);
+    // The person decides; the agent goes on by itself (its `kodel wait` reported) and the run ends.
+    await w.approve(runId);
+    await launcher.wake(runId);
+    expect((await w.state(runId)).status).toBe("completed");
+    expect(launcher.of(runId).map((r) => r.state)).toEqual(["running"]);
+    // The next cycle ends the session: one stop, through the launcher. A failure is logged and tried again.
+    launcher.failFinish = new Error("the holder did not answer");
+    tick();
+    await w.daemon.cycle();
+    expect(finishes(launcher)).toHaveLength(1);
+    expect(w.lines).toContain(`failed: finish run ${runId}: the holder did not answer`);
+    expect(launcher.of(runId).map((r) => r.state)).toEqual(["running"]);
+    launcher.failFinish = undefined;
+    tick();
+    await w.daemon.cycle();
+    expect(finishes(launcher)).toHaveLength(2);
+    expect(w.lines).toContain(
+      `finished: run ${runId}: agent kw-${runId} stopped (the run is over)`,
+    );
+    expect(launcher.of(runId)[0]).toMatchObject({ state: "killed", endedBy: "stopped" });
+    // Kodel's own stop of a finished run is not the person's.
+    expect(launcher.of(runId)[0]?.stopped).toBeUndefined();
+    // Once: a session that is stopped is not finished again, and it was never resumed or noted.
+    for (let i = 0; i < 3; i++) {
+      tick();
+      await w.daemon.cycle();
+    }
+    expect(finishes(launcher)).toHaveLength(2);
+    expect(resumes(launcher)).toEqual([]);
+    expect(notesOf(await w.journal(runId))).toEqual([]);
+    expect(w.daemon.memory().dead_in_a_row).toBe(0);
+    // The record names the agents that work and those that are alive.
+    const plan = await w.daemon.plan();
+    if (plan.config !== "ok") throw new Error("no plan");
+    expect(plan.plan.counts).toMatchObject({ workers: 0, alive: 0 });
+  });
+
+  test("t44_finish_reads_again_under_the_lock", async () => {
+    await project();
+    const host = newHost();
+    const launcher = new HookedLauncher({ host, now: () => t, terminal: true });
+    const w = await world({ host, launcher });
+    const key = await w.make("Task A");
+    await w.daemon.cycle();
+    const runId = await w.runOf(key);
+    await w.approve(runId);
+    await launcher.wake(runId);
+    // The session ends by itself between the plan and the finish: nothing is stopped.
+    launcher.hook = async () => {
+      const record = launcher.of(runId)[0];
+      if (record === undefined) throw new Error("no record");
+      record.state = "exited";
+      record.since = t;
+      record.exitCode = 0;
+    };
+    tick();
+    await w.daemon.cycle();
+    expect(finishes(launcher)).toEqual([]);
+    expect(w.lines.some((l) => l.startsWith("finished:") || l.startsWith("failed:"))).toBe(false);
+    // A print worker of a run that is over is left to exit.
+    const printHost = newHost();
+    const print = new ScriptedLauncher({ host: printHost, now: () => t, behaviour: "silent" });
+    const other = await world({ host: printHost, launcher: print });
+    const second = await other.make("Task B");
+    await other.daemon.cycle();
+    const run = await printHost.open(await other.runOf(second));
+    await run?.cancel();
+    tick();
+    await other.daemon.cycle();
+    expect(finishes(print)).toEqual([]);
+  });
+
+  // The serve files carry a serve decision's id (`t44_`) in every test name; this row is T-47's (the resume
+  // under the start lock).
+  test("t47_no_resume_for_a_worker_that_went_on (t44_resume_reads_again_under_the_lock)", async () => {
+    await project();
+    const host = newHost();
+    const counted = countingHost(host);
+    const launcher = new ScriptedLauncher({ host, now: () => t, terminal: true });
+    const w = await world({ host, launcher, deps: { host: counted.port } });
+    const key = await w.make("Task A");
+    await w.daemon.cycle();
+    const runId = await w.runOf(key);
+    // The holder went away while the agent waited at its gate; the person decides.
+    launcher.lose(runId);
+    tick();
+    await w.daemon.cycle();
+    expect(notesOf(await w.journal(runId))).toEqual([]);
+    await w.approve(runId);
+    // Between the plan and the resume the TUI resumes it, and that agent goes on.
+    counted.state.beforeLock = async () => {
+      const marks = (await w.journal(runId)).findLast((r) => r.event === "gate_decided");
+      if (marks === undefined) throw new Error("no decision");
+      await launcher.resume({
+        runId,
+        workdir: dir,
+        sessionId: `session-${runId}`,
+        decision: {
+          seq: marks.seq,
+          ts: marks.ts,
+          kind: "gate",
+          node: "review",
+          outcome: "approved",
+        },
+      });
+    };
+    counted.state.readsInLock = 0;
+    tick();
+    await w.daemon.cycle();
+    // The daemon's own resume read the journal and the records again inside the lock and started nothing.
+    expect(counted.state.readsInLock).toBeGreaterThan(0);
+    expect(resumes(launcher)).toHaveLength(1);
+    expect(launcher.of(runId).map((r) => r.name)).toHaveLength(2);
+    expect(w.lines.some((l) => l.startsWith(`resumed: run ${runId} as`))).toBe(false);
+    expect(w.lines.some((l) => l.startsWith("failed:"))).toBe(false);
+    expect(w.daemon.memory().dead_in_a_row).toBe(0);
+    for (let i = 0; i < 3; i++) {
+      tick();
+      await w.daemon.cycle();
+    }
+    expect(resumes(launcher)).toHaveLength(1);
+  });
+
+  test("t44_worker_lost_at_a_gate_is_resumed_once_after_the_decision", async () => {
+    await project();
+    const host = newHost();
+    const launcher = new ScriptedLauncher({ host, now: () => t, terminal: true });
+    const w = await world({ host, launcher });
+    const key = await w.make("Task A");
+    await w.daemon.cycle();
+    const runId = await w.runOf(key);
+    // A reboot: the holder and the agent are gone while the run waits for the person.
+    launcher.lose(runId);
+    for (let i = 0; i < 3; i++) {
+      tick();
+      await w.daemon.cycle();
+    }
+    // No note, no death, its place kept; nothing is resumed before the decision.
+    expect(notesOf(await w.journal(runId))).toEqual([]);
+    expect(w.daemon.memory().dead_in_a_row).toBe(0);
+    expect(resumes(launcher)).toEqual([]);
+    await w.approve(runId);
+    tick();
+    await w.daemon.cycle();
+    expect(resumes(launcher)).toHaveLength(1);
+    expect(launcher.of(runId).at(-1)).toMatchObject({ state: "running", terminal: true });
+    tick();
+    await w.daemon.cycle();
+    expect(resumes(launcher)).toHaveLength(1);
+    // A worker the person stopped at a gate is left to the person.
+    const other = await w.make("Task B");
+    tick();
+    await w.daemon.cycle();
+    tick();
+    await w.daemon.cycle();
+    const second = await w.runOf(other);
+    launcher.stop(second);
+    await w.approve(second);
+    for (let i = 0; i < 3; i++) {
+      tick();
+      await w.daemon.cycle();
+    }
+    expect(resumes(launcher).filter((c) => c.runId === second)).toEqual([]);
+    expect(notesOf(await w.journal(second))).toEqual([]);
+  });
+
+  test("t44_child_alive_is_logged_once_by_the_daemon", async () => {
+    await project();
+    const host = newHost();
+    const launcher = new ScriptedLauncher({ host, now: () => t, terminal: true });
+    const w = await world({ host, launcher });
+    const key = await w.make("Task A");
+    await w.daemon.cycle();
+    const runId = await w.runOf(key);
+    const record = launcher.of(runId)[0];
+    if (record === undefined) throw new Error("no record");
+    // The holder was killed and the agent lives on.
+    launcher.lose(runId);
+    record.childAlive = true;
+    await w.approve(runId);
+    for (let i = 0; i < 4; i++) {
+      tick();
+      await w.daemon.cycle();
+    }
+    const line = `child_alive: run ${runId}: kw-${runId}: its process still runs without a holder; stop it: kodel agent stop ${record.id}`;
+    expect(w.lines.filter((l) => l === line)).toHaveLength(1);
+    // No second agent, no finish, no note; both places held.
+    expect(resumes(launcher)).toEqual([]);
+    expect(finishes(launcher)).toEqual([]);
+    expect(notesOf(await w.journal(runId))).toEqual([]);
+    const plan = await w.daemon.plan();
+    if (plan.config !== "ok") throw new Error("no plan");
+    expect(plan.plan.counts).toMatchObject({ workers: 1, alive: 1, runs: [runId] });
+    // The agent ends at last (it was at its gate, decided since): resumed once.
+    record.childAlive = false;
+    tick();
+    await w.daemon.cycle();
+    expect(resumes(launcher)).toHaveLength(1);
+  });
+
+  test("t44_unreadable_process_table_is_logged_once", async () => {
+    await project();
+    const host = newHost();
+    const launcher = new ScriptedLauncher({ host, now: () => t, terminal: true });
+    const w = await world({ host, launcher });
+    const key = await w.make("Task A");
+    await w.daemon.cycle();
+    const runId = await w.runOf(key);
+    const record = launcher.of(runId)[0];
+    if (record === undefined) throw new Error("no record");
+    // The holder is gone and the process table cannot be read (a sandbox): the group is not looked
+    // at, the recorded process alone answers, and the daemon says so once.
+    launcher.lose(runId);
+    record.groupUnread = true;
+    for (let i = 0; i < 4; i++) {
+      tick();
+      await w.daemon.cycle();
+    }
+    const said = w.lines.filter((l) => l.includes("cannot read the process table"));
+    expect(said).toEqual([
+      "environment: cannot read the process table: an agent left behind a dead wrapper would not be seen",
+    ]);
+    // Nothing is held for good: the worker is one that ended at its wait, and is resumed after the decision.
+    await w.approve(runId);
+    tick();
+    await w.daemon.cycle();
+    expect(resumes(launcher)).toHaveLength(1);
+    // The condition gone and back: said again.
+    record.groupUnread = false;
+    tick();
+    await w.daemon.cycle();
+    launcher.lose(runId);
+    const latest = launcher.of(runId).at(-1);
+    if (latest === undefined) throw new Error("no record");
+    latest.groupUnread = true;
+    tick();
+    await w.daemon.cycle();
+    expect(w.lines.filter((l) => l.includes("cannot read the process table"))).toHaveLength(2);
+  });
+
+  test("t44_not_moving_is_said_by_the_daemon", async () => {
+    await project();
+    const host = newHost();
+    const launcher = new ScriptedLauncher({ host, now: () => t, terminal: true });
+    const w = await world({ host, launcher });
+    const key = await w.make("Task A");
+    await w.daemon.cycle();
+    const runId = await w.runOf(key);
+    await w.approve(runId);
+    // The agent does not go on (its `kodel wait` was lost): after two minutes, one line, and nothing else.
+    for (let i = 0; i < 30; i++) {
+      tick();
+      await w.daemon.cycle();
+    }
+    const said = w.lines.filter((l) => l.startsWith(`not_moving: run ${runId}:`));
+    expect(said).toHaveLength(1);
+    expect(said[0]).toContain("nothing is typed for you");
+    expect(resumes(launcher)).toEqual([]);
+    expect(finishes(launcher)).toEqual([]);
+    // Besides its looks at the records the daemon did one thing in all: the start.
+    expect(
+      launcher.calls.map((c) => c.kind).filter((k) => k !== "statuses" && k !== "preflight"),
+    ).toEqual(["start"]);
+    // It goes on at last.
+    await launcher.wake(runId);
+    expect((await w.state(runId)).status).toBe("completed");
   });
 });
 

@@ -1,31 +1,46 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
+  type EnginesAgainstHead,
   forgetName,
   PipesSessionAdapter,
   readMarker,
   resolveBase,
+  type StartOptions,
   sessionDirOf,
+  type UnattendedEngines,
 } from "@kodel-ai/local";
 import {
+  type Caller,
   foldSessionName,
+  isLocalSessionId,
   isSessionName,
+  isTerminalState,
+  leftoverInstruction,
   type RedactRule,
+  type RunState,
   type SessionAdapter,
   SessionError,
   type SessionListEntry,
+  type SessionSpec,
+  type StartResult,
+  stoppedByPerson,
   type TerminalSize,
 } from "@kodel-ai/pipeline-core";
-import type { Command } from "commander";
+import { type Command, Option } from "commander";
 import {
+  type AttachResult,
   type AttachTerminal,
+  attachLine,
   processTerminal,
   runAttachClient,
   terminalSizeOf,
 } from "./attach-client";
+import type { Exec } from "./claude-worker";
 import { plain } from "./plain";
 import { type PtyProbe, probePty } from "./pty-loader";
 import { formatTable } from "./table";
+import type { WorkerLauncher } from "./worker-launcher";
 
 /** Commands that refuse under `KODEL_ENGINE` (and need a terminal): the set a test walks. */
 export const AGENT_HUMAN_COMMANDS = [
@@ -34,9 +49,59 @@ export const AGENT_HUMAN_COMMANDS = [
   "agent exec",
   "agent forget-name",
   "agent attach",
+  "agent start",
+  "agent prune",
 ] as const;
 /** Commands an agent may run: they only read. */
-export const AGENT_READ_COMMANDS = ["agent ls", "agent logs"] as const;
+export const AGENT_READ_COMMANDS = ["agent ls", "agent logs", "agent doctor"] as const;
+
+/** The local adapter as the commands use it: a start may take the place of a finished session. */
+export type AgentSessions = SessionAdapter & {
+  start(spec: SessionSpec, options?: StartOptions): Promise<StartResult>;
+};
+
+/** What `agent start`, `prune` and `doctor` read of the project config. */
+export interface AgentProjectConfig {
+  /** `decisions.dialog`. */
+  dialog: boolean;
+  /** The keys of `decisions.agent` that are on. */
+  agentDecides: string[];
+  /** The folder the worktrees of the runs are made in. */
+  worktreesDir: string;
+}
+
+/** The part of the pipeline host those commands use; `LocalPipelineHost` fits it. */
+export interface AgentHost {
+  list(): Promise<{ pipelines: { name: string }[] }>;
+  start(input: {
+    pipeline: string;
+    task: string;
+    restart: boolean;
+    task_key?: string;
+    caller: Caller;
+  }): Promise<{
+    status: "started" | "reused" | "terminal";
+    run: { runId: string };
+    workdir?: { path: string };
+  }>;
+  runSummaries(): Promise<
+    { meta: { runId: string }; state: RunState | undefined; unreadable?: unknown }[]
+  >;
+  withWorkerStartLock?<T>(fn: () => Promise<T>): Promise<T>;
+}
+
+/** The project as `agent start`, `prune` and `doctor` need it; the CLI builds it, a test may. */
+export interface AgentProject {
+  root: string;
+  version: string;
+  /** Throws, with the reason, when the config cannot be read. */
+  config(): Promise<AgentProjectConfig>;
+  /** The `engines` block of the working copy against the committed one. */
+  engines(): Promise<EnginesAgainstHead>;
+  /** The one launcher of workers; `engines` replaces the committed block with one a person accepted. */
+  launcher(engines?: () => Promise<UnattendedEngines>): Promise<WorkerLauncher>;
+  host(): Promise<AgentHost>;
+}
 
 export interface AgentContext {
   cwd: string;
@@ -57,6 +122,22 @@ export interface AgentContext {
   terminalSize?: () => TerminalSize | undefined;
   /** `process.platform` unless a test says another. */
   platform?: string;
+  /** The project behind `agent start`, `prune` and `doctor`. */
+  project?: () => Promise<AgentProject>;
+  /** The session adapter, in place of the local one (tests). */
+  sessions?: () => Promise<AgentSessions>;
+  /** Runs the attach client; the real one by default. */
+  attach?: typeof runAttachClient;
+  /** For the probes of `start` and `doctor`: a child process, a program on PATH, a file, an id, the time. */
+  exec?: Exec;
+  which?: (name: string) => Promise<string | undefined>;
+  readText?: (path: string) => Promise<string | undefined>;
+  uuid?: () => string;
+  now?: () => number;
+  /** Whether `out` is a terminal: `doctor` colours its marks only there (and not under `NO_COLOR`). */
+  outIsTerminal?: boolean;
+  /** Whether this process runs under Bun (`doctor` says so); the real answer by default. */
+  bun?: boolean;
 }
 
 /** How a reason the adapter records reads to a person; a reason this build does not know is shown as it is, spaced. */
@@ -72,7 +153,8 @@ const reasonWords = (reason: string): string => REASON_WORDS[reason] ?? reason.r
 
 /**
  * What a person reads as the state, with the detail in brackets: how it ended, or why it is not known. A session
- * that `stop` ended is "stopped", not "killed". A process that is still alive after the session is over is said so
+ * that `stop` ended is "stopped", not "killed"; so is one a person stopped after its holder had recorded another
+ * end (the person ended what was left of it), with that end after it: `stopped (after timeout)`. A process that is still alive after the session is over is said so
  * in whatever state it is, because the person (or a step) must not take that session for finished.
  */
 export const stateLabel = (entry: SessionListEntry): string => {
@@ -82,6 +164,10 @@ export const stateLabel = (entry: SessionListEntry): string => {
   const s = entry.status;
   const detail: string[] = [];
   let word: string = s.state;
+  const stoppedAfter =
+    s.stoppedBy === "person" &&
+    s.reason !== "stopped" &&
+    (s.state === "killed" || s.state === "lost");
   switch (s.state) {
     case "exited":
       if (s.exitCode !== undefined) detail.push(String(s.exitCode));
@@ -89,6 +175,11 @@ export const stateLabel = (entry: SessionListEntry): string => {
     case "killed":
       if (s.reason === "stopped") {
         word = "stopped";
+      } else if (stoppedAfter) {
+        word = "stopped";
+        if (s.reason !== undefined || s.signal !== undefined) {
+          detail.push(`after ${reasonWords(s.reason ?? (s.signal as string))}`);
+        }
       } else if (
         s.reason === "holder_error" ||
         s.reason === "rules_unknown" ||
@@ -101,7 +192,10 @@ export const stateLabel = (entry: SessionListEntry): string => {
       }
       break;
     case "lost":
-      if (s.reason !== undefined) detail.push(reasonWords(s.reason));
+      if (stoppedAfter) word = "stopped";
+      if (s.reason !== undefined) {
+        detail.push(`${stoppedAfter ? "after " : ""}${reasonWords(s.reason)}`);
+      }
       break;
     default:
       break;
@@ -111,12 +205,159 @@ export const stateLabel = (entry: SessionListEntry): string => {
   return detail.length > 0 ? `${word} (${detail.join(", ")})` : word;
 };
 
-/** A command cut to a width for the table; the full text is in `--json`. */
-const shorten = (text: string, width = 48): string => {
-  const flat = text.replace(/\s+/g, " ").trim();
-  const chars = [...flat];
-  return chars.length > width ? `${chars.slice(0, width - 1).join("")}…` : flat;
+/** The `AGENT` column: the engine, as the `agent` record names it. */
+export const agentLabel = (entry: SessionListEntry): string => entry.agent?.engine ?? "-";
+
+const CONVERSATION_WIDTH = 36;
+
+/**
+ * The `CONVERSATION` column: the id of the agent's own conversation. An id of the usual form (a UUID)
+ * is whole; a longer one is cut, and `--json` has all of it.
+ */
+export const conversationLabel = (entry: SessionListEntry): string => {
+  const id = entry.agent?.session;
+  if (id === undefined || id === "") return "-";
+  const chars = [...id];
+  return chars.length > CONVERSATION_WIDTH
+    ? `${chars.slice(0, CONVERSATION_WIDTH - 1).join("")}…`
+    : id;
 };
+
+/**
+ * Why a `stop` signalled nothing of a process group it could not call the session's, or nothing to say. A group
+ * without its leader is never signalled: the note names its processes and says what the person does.
+ */
+export const groupNote = (
+  group: SessionListEntry["status"]["group"],
+  id = "<agent>",
+  leftover: NonNullable<SessionListEntry["status"]["leftover"]> = [],
+): string | undefined =>
+  group === "unread"
+    ? "the process table could not be read: a process this agent left behind a wrapper that died would not be seen, and none was signalled"
+    : group === "stranger"
+      ? "the number of its process group belongs to another process now: nothing of this agent is left, and nothing was signalled"
+      : group === "leaderless"
+        ? `nothing was signalled: ${leftoverInstruction(id, leftover)}`
+        : undefined;
+
+/**
+ * The word `agent stop` prints. A session whose holder had recorded another end, and whose leftover the stop
+ * ended, is stopped too; one whose group has no leader was not signalled, whatever its stop record makes of it.
+ */
+export const stopLabel = (status: SessionListEntry["status"]): string =>
+  status.group === "leaderless" && status.childAlive === true
+    ? "not stopped (its process is gone, others are in its group)"
+    : (status.state === "killed" && status.reason === "stopped") ||
+        (status.stoppedBy === "person" &&
+          (status.state === "killed" || status.state === "lost") &&
+          status.childAlive !== true)
+      ? "stopped"
+      : `${status.state}${status.reason ? ` (${status.reason})` : ""}`;
+
+/** The flags of `kodel agent start`. */
+export interface StartFlags {
+  pipeline?: string;
+  name?: string;
+  resume?: string;
+  bg?: boolean;
+}
+
+const WORKER_NAME = /^kw-r_[0-9a-z]+_[0-9a-z]+(?:-d[1-9][0-9]*)?$/;
+const ENGINE_STEP_NAME = /^ke-/;
+
+/** The engines whose conversation `kodel agent start --resume` can continue. */
+export const RESUMABLE_ENGINES: readonly string[] = ["claude"];
+
+/** The ends of a terminal session at which the agent never worked or cannot have waited: nothing resumes it. */
+const NEVER_AT_A_WAIT: readonly string[] = ["start_late", "rules_unknown"];
+
+/**
+ * Who goes on with the agent of a run (`kw-<run>`), by the rule of `resumeVerdict`: one that still runs
+ * needs nobody; one the person stopped is never resumed by the daemon, and by `s` in the TUI only when the
+ * stop found it at a wait; one kodel ended because its run was over is resumed by nobody; one that ended in
+ * another way where it may have waited is resumed by the daemon too; any other end is a death, and nothing
+ * resumes it. Whether it did end at a wait, and whether the run still goes, is the run's to say and is not
+ * read here, so the text says "if".
+ */
+function runAgentProblem(entry: SessionListEntry, ref: string): string {
+  const head = `${ref} is the agent of a run`;
+  const { state, reason, childAlive, stoppedBy } = entry.status;
+  const terminal = entry.mode === "pty";
+  if (state === "starting" || state === "running") {
+    return terminal
+      ? `${head} and still runs: kodel agent attach ${ref}`
+      : `${head} and still runs: kodel agent logs ${ref}`;
+  }
+  if (childAlive === true) {
+    return `${head}, and its process still runs without a holder; stop it: kodel agent stop ${entry.id}`;
+  }
+  // Kodel ended it itself, and only ever when its run was over.
+  if (stoppedBy === "finish") {
+    return `${head} that kodel ended when the run was over: nothing resumes it`;
+  }
+  const mayHaveWaited = terminal
+    ? !(state === "killed" && reason !== undefined && NEVER_AT_A_WAIT.includes(reason))
+    : state === "exited";
+  // A print worker never waits alive: a stop of one found it at work, like any other kill.
+  if (mayHaveWaited && terminal && stoppedByPerson(entry.status)) {
+    return `${head} that you stopped: kodel serve leaves it to you; if it was at a wait and the run still goes, s in kodel tui resumes it after your decision`;
+  }
+  return mayHaveWaited
+    ? `${head}: if it ended at a wait and the run still goes, kodel serve or s in kodel tui resumes it after your decision`
+    : `${head} that did not end at a wait: nothing resumes it; any agent continues the run if it still goes`;
+}
+
+/**
+ * Why `kodel agent start --resume` does not continue the conversation of this session, or nothing. One
+ * rule for the command and for the hint of `agent ls`.
+ */
+export function resumeProblem(entry: SessionListEntry): string | undefined {
+  const ref = entry.name ?? entry.id;
+  if (entry.problem !== undefined) return `the records of agent ${ref} cannot be read`;
+  if (entry.name !== undefined && WORKER_NAME.test(entry.name)) {
+    return runAgentProblem(entry, ref);
+  }
+  if (entry.name !== undefined && ENGINE_STEP_NAME.test(entry.name)) {
+    return `${ref} is the session of an engine step: the engine starts those`;
+  }
+  const { state, childAlive } = entry.status;
+  if (state === "starting" || state === "running") {
+    return `agent ${ref} still runs: kodel agent attach ${ref}`;
+  }
+  if (childAlive === true) {
+    return `${ref}: its process still runs without a holder; stop it: kodel agent stop ${entry.id}`;
+  }
+  if (entry.mode !== "pty") {
+    return `agent ${ref} ran without a terminal: it has no conversation to continue in one`;
+  }
+  if (entry.agent === undefined || entry.agent.session === undefined) {
+    return `the id of the conversation of agent ${ref} is not known`;
+  }
+  if (!RESUMABLE_ENGINES.includes(entry.agent.engine)) {
+    return `agent ${ref} is ${entry.agent.engine}: only ${RESUMABLE_ENGINES.join(", ")} can be resumed in this version`;
+  }
+  return undefined;
+}
+
+/**
+ * The lines under the table of `agent ls`: for each finished agent whose conversation can be continued,
+ * the command that does it. The newest record of a name only, and never one that was resumed already.
+ */
+export function resumeHints(rows: readonly SessionListEntry[]): string[] {
+  const resumed = new Set(rows.map((row) => row.agent?.resumes).filter((id) => id !== undefined));
+  const newest = new Map<string, SessionListEntry>();
+  for (const row of rows) {
+    const key = row.name ?? row.id;
+    const best = newest.get(key);
+    if (best === undefined || row.id > best.id) newest.set(key, row);
+  }
+  return [...newest.values()]
+    .filter((row) => !resumed.has(row.id) && resumeProblem(row) === undefined)
+    .map((row) => {
+      const ref = row.name ?? row.id;
+      return `${ref} can be continued: kodel agent start --resume ${ref}`;
+    });
+}
 
 /**
  * The local session adapter as the CLI builds it: the holder is this program (`session-holder`), and the
@@ -186,6 +427,48 @@ export async function resolveSession(
   return { id: found.id, ...(found.name !== undefined ? { name: found.name } : {}) };
 }
 
+/**
+ * The session `stop`, `rm` and `logs` act on: a name or an id, as `attach` takes them. An id that is
+ * listed is taken as it is, also when its records cannot be judged: the adapter answers for those itself.
+ */
+export async function resolveTarget(
+  adapter: SessionAdapter,
+  ref: string,
+): Promise<{ id: string; name?: string }> {
+  const exact = (await adapter.list()).find((row) => row.id === ref);
+  if (exact !== undefined) {
+    return { id: exact.id, ...(exact.name !== undefined ? { name: exact.name } : {}) };
+  }
+  return resolveSession(adapter, ref);
+}
+
+/** How a question or an answer names the session found: its name with its id, or the id alone. */
+export const targetLabel = (target: { id: string; name?: string }): string =>
+  target.name === undefined ? target.id : `${target.name} (${target.id})`;
+
+/**
+ * Connects a terminal to the session a person named and stays until they detach or it ends. The one way a
+ * command attaches: `agent attach`, `agent exec --pty --attach` and `agent start` all come through here.
+ */
+export async function attachSession(
+  ctx: Pick<AgentContext, "attach" | "attachTerminal">,
+  sessions: SessionAdapter,
+  ref: string,
+  options: { keepScreen?: boolean } = {},
+): Promise<AttachResult> {
+  const found = await resolveSession(sessions, ref);
+  if (sessions.attach === undefined) {
+    throw new SessionError("NOT_ATTACHABLE", "this build cannot connect a terminal to an agent");
+  }
+  const stream = await sessions.attach(found.id);
+  return (ctx.attach ?? runAttachClient)({
+    stream,
+    terminal: (ctx.attachTerminal ?? processTerminal)(),
+    name: found.name ?? found.id,
+    ...(options.keepScreen ? { keepScreen: true } : {}),
+  });
+}
+
 export function registerAgentCommands(
   program: Command,
   withPlural: (c: Command) => Command,
@@ -199,6 +482,12 @@ export function registerAgentCommands(
       launcher,
       ...(ctx.ptyProbe ? { ptyProbe: ctx.ptyProbe } : {}),
     });
+
+  const sessions = async (): Promise<AgentSessions> => (ctx.sessions ? ctx.sessions() : adapter());
+  const project = async (): Promise<AgentProject> => {
+    if (ctx.project === undefined) ctx.fail("this command needs a project");
+    return ctx.project();
+  };
 
   // Before anything else, also before the check for a person: the answer on Windows is the same for everyone.
   const platform = (): void => {
@@ -215,6 +504,33 @@ export function registerAgentCommands(
     }
   };
 
+  /**
+   * Connects to a session this command has just started. One that ended before the terminal could be
+   * connected is no failure: the line a person would have read at its end is printed.
+   */
+  const attachStarted = async (all: SessionAdapter, started: StartResult): Promise<void> => {
+    let result: AttachResult;
+    try {
+      result = await attachSession(ctx, all, started.id);
+    } catch (error) {
+      if (!(error instanceof SessionError) || error.code !== "NOT_ATTACHABLE") throw error;
+      const status = await all.status(started.id).catch(() => undefined);
+      if (status === undefined || !isTerminalState(status.state)) {
+        ctx.fail(`${error.code}: ${plain(error.message)}`);
+      }
+      const end =
+        status.state === "exited"
+          ? {
+              how: "ended" as const,
+              ...(status.exitCode === undefined ? {} : { exitCode: status.exitCode }),
+            }
+          : { how: "killed" as const };
+      ctx.out(`${attachLine(started.name ?? started.id, end)}\n`);
+      return;
+    }
+    if (result.problem !== undefined) ctx.fail(result.problem);
+  };
+
   const agent = withPlural(program.command("agent")).description(
     "Agents the project runs in the background (long-running processes)",
   );
@@ -226,7 +542,7 @@ export function registerAgentCommands(
     .option("--no-headers", "do not print the header row")
     .action(async (opts: { json?: boolean; headers?: boolean }) => {
       platform();
-      const rows = await guard(async () => (await adapter()).list());
+      const rows = await guard(async () => (await sessions()).list());
       if (opts.json) {
         ctx.out(`${JSON.stringify(rows, null, 2)}\n`);
         return;
@@ -239,46 +555,58 @@ export function registerAgentCommands(
         plain(r.id),
         plain(r.name ?? "-"),
         plain(stateLabel(r)),
-        plain(shorten(r.command ?? "")),
+        plain(r.mode ?? "-"),
+        plain(agentLabel(r)),
+        plain(conversationLabel(r)),
       ]);
+      // The command a session runs is in `--json`: in the table it was cut short and said little.
       for (const line of formatTable(
-        ["ID", "NAME", "STATE", "COMMAND"],
+        ["ID", "NAME", "STATE", "MODE", "AGENT", "CONVERSATION"],
         table,
         opts.headers !== false,
       )) {
         ctx.out(`${line}\n`);
       }
+      for (const line of resumeHints(rows)) ctx.out(`${plain(line)}\n`);
     });
 
   agent
-    .command("stop <id>")
-    .description("Stop an agent and the processes it started")
-    .action(async (id: string) => {
+    .command("stop <agent>")
+    .description("Stop an agent and the processes it started, by name or id")
+    .action(async (ref: string) => {
       platform();
       ctx.requireHuman();
-      await ctx.mustConfirm(`Stop agent ${plain(id)}?`);
-      const status = await guard(async () => (await adapter()).stop(id));
-      const label =
-        status.state === "killed" && status.reason === "stopped"
-          ? "stopped"
-          : `${status.state}${status.reason ? ` (${status.reason})` : ""}`;
+      const all = await sessions();
+      // Before the question: an unknown name fails at once, and the question names the session found.
+      const target = await guard(() => resolveTarget(all, ref));
+      const id = target.id;
+      await ctx.mustConfirm(`Stop agent ${plain(targetLabel(target))}?`);
+      const status = await guard(() => all.stop(id));
+      // A session whose holder had recorded another end, and whose leftover this stop ended, is stopped too.
+      const label = stopLabel(status);
       ctx.out(`${plain(id)}: ${label}\n`);
+      const note = groupNote(status.group, id, status.leftover);
+      // a command line is another program's text: it must not move the cursor in the person's terminal
+      if (note !== undefined) ctx.out(`${plain(id)}: ${plain(note)}\n`);
     });
 
   agent
-    .command("logs <id>")
-    .description("Print the end of what an agent wrote (secrets are redacted)")
+    .command("logs <agent>")
+    .description("Print the end of what an agent wrote, by name or id (secrets are redacted)")
     .option("--stdout", "only standard output")
     .option("--stderr", "only standard error")
     .option("--bytes <n>", "how many bytes at most (default 65536)", (v) => Number.parseInt(v, 10))
-    .action(async (id: string, opts: { stdout?: boolean; stderr?: boolean; bytes?: number }) => {
+    .action(async (ref: string, opts: { stdout?: boolean; stderr?: boolean; bytes?: number }) => {
       platform();
       if (opts.stdout && opts.stderr) ctx.fail("give --stdout or --stderr, not both");
       if (opts.bytes !== undefined && !(Number.isInteger(opts.bytes) && opts.bytes > 0)) {
         ctx.fail("--bytes is a positive whole number");
       }
       const stream = opts.stdout ? "stdout" : opts.stderr ? "stderr" : "both";
-      const tail = await guard(async () => (await adapter()).tail(id, opts.bytes, stream));
+      const all = await sessions();
+      const tail = await guard(async () =>
+        all.tail((await resolveTarget(all, ref)).id, opts.bytes, stream),
+      );
       // line by line: what an agent printed must not move the cursor or fake a line in the person's terminal
       ctx.out(
         `${tail.text.replace(/\r/g, "").split("\n").map(plain).join("\n")}${tail.text.endsWith("\n") ? "" : "\n"}`,
@@ -287,13 +615,25 @@ export function registerAgentCommands(
     });
 
   agent
-    .command("rm <id>")
-    .description("Remove a finished agent")
-    .action(async (id: string) => {
+    .command("rm <agent>")
+    .description("Remove a finished agent, by name or id")
+    .action(async (ref: string) => {
       platform();
       ctx.requireHuman();
-      await ctx.mustConfirm(`Remove agent ${plain(id)}?`);
-      await guard(async () => (await adapter()).remove(id));
+      const all = await sessions();
+      const target = await guard(async () => {
+        try {
+          return await resolveTarget(all, ref);
+        } catch (error) {
+          // A folder with no record is not listed; its id still removes it, as before.
+          if (error instanceof SessionError && error.code === "NOT_FOUND" && isLocalSessionId(ref))
+            return { id: ref };
+          throw error;
+        }
+      });
+      const id = target.id;
+      await ctx.mustConfirm(`Remove agent ${plain(targetLabel(target))}?`);
+      await guard(() => all.remove(id));
       ctx.out(`${plain(id)}: removed\n`);
     });
 
@@ -302,16 +642,30 @@ export function registerAgentCommands(
     .description("Run a command as an agent (for trying the sessions by hand)")
     .option("--name <name>", "a name to find it again by")
     .option("--pty", "run it in a terminal of its own (kodel agent attach connects to it)")
+    .option(
+      "--attach",
+      "with --pty: connect this terminal to it at once (Ctrl+\\ detaches); -a before the command is the same",
+    )
     .allowUnknownOption()
-    .action(async (command: string[], opts: { name?: string; pty?: boolean }) => {
+    .action(async (words: string[], opts: { name?: string; pty?: boolean; attach?: boolean }) => {
       platform();
       ctx.requireHuman();
       if (opts.name !== undefined && !isSessionName(opts.name)) ctx.fail("the name is not valid");
+      // `-a` is `--attach` only before the command; after its first word it is the command's own (`ls -a`).
+      const short = words[0] === "-a";
+      // The parser leaves the `--` that followed a word it does not know.
+      const command = short ? words.slice(words[1] === "--" ? 2 : 1) : words;
+      if (short) opts.attach = true;
+      if (opts.attach && !opts.pty) {
+        ctx.fail("--attach needs --pty: only an agent in a terminal of its own can be attached to");
+      }
+      if (command.length === 0) ctx.fail("exec needs a command");
       const size = opts.pty
         ? (ctx.terminalSize ?? (() => terminalSizeOf(process.stdout)))()
         : undefined;
-      const started = await guard(async () =>
-        (await adapter()).start({
+      const all = await sessions();
+      const started = await guard(() =>
+        all.start({
           argv: command,
           cwd: ctx.cwd,
           origin: "cli" as const,
@@ -320,7 +674,9 @@ export function registerAgentCommands(
         }),
       );
       ctx.out(`started ${plain(started.id)}${started.name ? ` (${plain(started.name)})` : ""}\n`);
-      if (opts.pty) {
+      if (opts.attach) {
+        await attachStarted(all, started);
+      } else if (opts.pty) {
         ctx.out(`attach with: kodel agent attach ${plain(started.name ?? started.id)}\n`);
       }
     });
@@ -330,18 +686,66 @@ export function registerAgentCommands(
     .description(
       "Connect this terminal to an agent that runs in a terminal of its own, by name or id (Ctrl+\\ detaches)",
     )
-    .action(async (ref: string) => {
+    // The TUI's `o` starts this command on its own alternate screen and takes the screen back after it.
+    .addOption(new Option("--keep-screen").hideHelp())
+    .action(async (ref: string, opts: { keepScreen?: boolean }) => {
       platform();
       ctx.requireHuman();
-      const sessions = await adapter();
-      const found = await guard(() => resolveSession(sessions, ref));
-      const stream = await guard(() => sessions.attach(found.id));
-      const result = await runAttachClient({
-        stream,
-        terminal: (ctx.attachTerminal ?? processTerminal)(),
-        name: found.name ?? found.id,
-      });
+      const all = await sessions();
+      const result = await guard(() =>
+        attachSession(ctx, all, ref, opts.keepScreen ? { keepScreen: true } : {}),
+      );
       if (result.problem !== undefined) ctx.fail(result.problem);
+    });
+
+  agent
+    .command("start [prompt...]")
+    .description(
+      "Start the coding agent in a terminal of its own and connect to it (Ctrl+\\ detaches); with --pipeline, as the agent of a new run",
+    )
+    .option("--pipeline <name>", "make a run of this pipeline with the prompt as its task")
+    .option("--name <name>", "a name to find the agent again by")
+    .option("--resume <agent>", "continue the conversation of a finished agent, under its name")
+    .option("--bg", "do not connect this terminal to it")
+    .action(async (words: string[], opts: StartFlags) => {
+      platform();
+      ctx.requireHuman();
+      const { runAgentStart } = await import("./agent-start");
+      await guard(async () =>
+        runAgentStart(
+          {
+            ctx,
+            sessions: await sessions(),
+            project: await project(),
+            attachStarted,
+          },
+          opts,
+          words,
+        ),
+      );
+    });
+
+  agent
+    .command("prune")
+    .description("Remove the finished agents (never one that runs, nor the agent of an open run)")
+    .option("--older-than <days>", "only those that ended at least this many days ago")
+    .option("--dry-run", "say what would be removed and remove nothing")
+    .action(async (opts: { olderThan?: string; dryRun?: boolean }) => {
+      platform();
+      ctx.requireHuman();
+      const { runAgentPrune } = await import("./agent-prune");
+      await guard(async () =>
+        runAgentPrune({ ctx, sessions: await sessions(), project: await project() }, opts),
+      );
+    });
+
+  agent
+    .command("doctor")
+    .description("Say whether a background agent can start here, and why not (it only reads)")
+    .action(async () => {
+      const { runAgentDoctor } = await import("./agent-doctor");
+      const ok = await runAgentDoctor({ ctx, project: await project() });
+      if (!ok) ctx.fail("a worker cannot start here (see above)");
     });
 
   agent

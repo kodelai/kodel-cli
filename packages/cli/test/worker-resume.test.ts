@@ -273,11 +273,15 @@ describe("task_9pns the resume offer", () => {
       "agent exited (1), not at a gate",
     );
     // A run that is over, in every end state.
-    for (const status of ["done", "failed", "canceled", "unreadable"] as const) {
+    for (const status of ["done", "failed", "canceled"] as const) {
       const over = resumeOffer(session(info, status), worker(), false);
       expect(over.offer).toBeUndefined();
       expect(whyOf(over)).toBe("the run is over");
     }
+    // A run that cannot be read is kept apart from one that failed (T-47): nothing is known of it.
+    const unread = resumeOffer(session(info, "unreadable"), worker(), false);
+    expect(unread.offer).toBeUndefined();
+    expect(whyOf(unread)).toBe("the run cannot be read");
     // A run waiting again (a worker resumed after gate A reached gate B and exited): waiting for you.
     const again = decisionOf([
       ...GATE,
@@ -429,5 +433,149 @@ describe("t44 the TUI and kodel serve share one rule", () => {
       }
     }
     expect(offers).toBeGreaterThan(0);
+  });
+});
+
+describe("t47 the card of a worker in a terminal", () => {
+  /** The gate journal with an agent's line after the decision (seq 5, ts 6000). */
+  const MOVED = [...GATE, ...build([{ event: "step_served" }]).map((r) => ({ ...r, seq: 5 }))];
+
+  test("t47_tui_offers_no_resume_while_the_child_lives", () => {
+    // The record says the session is over, but its process still runs without a holder: a resume
+    // would put a second agent on the run. No offer, whatever else holds; the card names the command.
+    for (const state of ["lost", "killed"] as const) {
+      for (const terminal of [true, false]) {
+        const w = worker({
+          state,
+          label: `${state} (holder gone, child still runs)`,
+          since: 4_500,
+          childAlive: true,
+          ...(terminal ? { terminal: true as const, endedBy: "holder_gone" } : {}),
+        });
+        for (const journal of [GATE, MOVED]) {
+          const offer = resumeOffer(session(decisionOf(journal)), w, false);
+          expect(offer.offer).toBeUndefined();
+          expect(offer.line).toBe(`agent ${state} (holder gone, child still runs)`);
+          expect(whyOf(offer)).toBe(
+            `kw-${RUN}: its process still runs without a holder; stop it: kodel agent stop a_000000001_0000`,
+          );
+        }
+      }
+    }
+    // Once the person stopped it (the process is gone) the offer is there: the TUI resumes a worker
+    // a person stopped, which the daemon does not.
+    const stopped = worker({
+      state: "killed",
+      label: "stopped",
+      since: 4_500,
+      stopped: true,
+      terminal: true,
+      endedBy: "stopped",
+    });
+    const offered = resumeOffer(session(decisionOf(GATE)), stopped, false);
+    expect(offered.offer).toMatchObject({ seq: 4 });
+    expect(offered.line).toBe("agent stopped at your decision · s resumes");
+    expect(
+      resumeVerdict(
+        { runId: RUN, status: "running", waitsForPerson: false, marks: decisionOf(GATE) },
+        stopped,
+        { refuseMoved: true },
+      ),
+    ).toEqual({ kind: "no", why: "stopped" });
+    // A worker in a terminal that ended by itself at the wait is offered in its own words.
+    const lost = worker({
+      state: "lost",
+      label: "lost (holder gone)",
+      since: 4_500,
+      terminal: true,
+      endedBy: "holder_gone",
+    });
+    expect(resumeOffer(session(decisionOf(GATE)), lost, false).line).toBe(
+      "agent lost (holder gone) at your decision · s resumes",
+    );
+    // A print worker that is lost is dead, as before.
+    const dead = resumeOffer(
+      session(decisionOf(GATE)),
+      worker({ state: "lost", label: "lost" }),
+      false,
+    );
+    expect(dead.offer).toBeUndefined();
+    expect(dead.line).toBe("agent lost");
+  });
+
+  test("t47_card_says_died_after_your_decision", () => {
+    // It waited, the person decided, an agent's line follows the decision, and then the worker ended.
+    const ends: Partial<WorkerStatus>[] = [
+      { state: "exited", label: "exited (1)", exitCode: 1 },
+      { state: "lost", label: "lost (holder gone)", endedBy: "holder_gone" },
+      { state: "killed", label: "killed (timeout)", endedBy: "timeout" },
+    ];
+    for (const end of ends) {
+      const w = worker({ terminal: true, since: 7_000, lastOutputAt: 6_500, ...end });
+      const offer = resumeOffer(session(decisionOf(MOVED)), w, false);
+      expect(offer.offer).toBeUndefined();
+      expect(offer.line).toBe("agent died after your decision");
+      expect(whyOf(offer)).toContain(`pipeline_next_step ${RUN}`);
+      // The same worker when no agent's line follows the decision never went on: it is offered.
+      expect(resumeOffer(session(decisionOf(GATE)), w, false).offer).toMatchObject({ seq: 4 });
+      // And one that ended before the decision, with an agent's line after it: the old words.
+      const before = worker({ terminal: true, since: 4_500, lastOutputAt: 4_400, ...end });
+      const moved = resumeOffer(session(decisionOf(MOVED)), before, false);
+      expect(moved.offer).toMatchObject({ seq: 4, moved: true });
+      expect(moved.line).toContain("an agent was served a step since");
+    }
+    // A print worker never reads so: it exits at its wait.
+    const print = resumeOffer(
+      session(decisionOf(MOVED)),
+      worker({ since: 3_000, exitCode: 1, label: "exited (1)" }),
+      false,
+    );
+    expect(print.line).toBe("agent exited (1), not at a gate");
+  });
+
+  test("t47_a_worker_that_did_not_exit_is_never_said_to_have_exited", () => {
+    const info = decisionOf(GATE);
+    // A second wait after the decision, not decided.
+    const again = decisionOf([
+      ...GATE,
+      ...build([{ event: "gate_waiting", node: "final-approval", attempt: 1 }]).map((r) => ({
+        ...r,
+        seq: 5,
+        ts: 6_000,
+      })),
+    ]);
+    const ends: Partial<WorkerStatus>[] = [
+      { state: "killed", label: "killed (SIGTERM)", endedBy: "signal" },
+      { state: "killed", label: "killed (timeout)", endedBy: "timeout" },
+      { state: "lost", label: "lost (holder gone)", endedBy: "holder_gone" },
+      { state: "killed", label: "stopped", endedBy: "stopped", stopped: true },
+      { state: "killed", label: "stopped (after timeout)", endedBy: "timeout", stopped: true },
+    ];
+    for (const end of ends) {
+      const w = (over: Partial<WorkerStatus> = {}) =>
+        worker({ terminal: true, exitCode: undefined, since: 4_500, ...end, ...over });
+      const word = `agent ${end.label}`;
+      const label = String(end.label);
+      // The run is over.
+      const over = resumeOffer(session(info, "done"), w(), false);
+      expect(over, label).toEqual({ line: word, why: "the run is over" });
+      // A wait nothing was decided since (the person's stop keeps the wait a wait).
+      const undecided = resumeOffer(session(again), w({ since: 6_500 }), false);
+      expect(undecided.line, label).toBe(`${word} at a wait; nothing decided since`);
+      expect(undecided.offer, label).toBeUndefined();
+      if (end.stopped === true) continue;
+      // It ended at work, before the wait.
+      const atWork = resumeOffer(session(info), w({ since: 3_000 }), false);
+      expect(atWork.line, label).toBe(`${word}, not at a gate`);
+      expect(whyOf(atWork), label).toStartWith(`the agent ended (${end.label}), not at a gate;`);
+      // The wait is dated before it started.
+      const clock = resumeOffer(session(info), w({ started: 4_001 }), false);
+      expect(clock.line, label).toBe(`${word}, not at a gate`);
+    }
+    // One that did exit keeps its words, with its code.
+    const exited = resumeOffer(session(info), worker({ since: 3_000, exitCode: 1 }), false);
+    expect(exited.line).toBe("agent exited (1), not at a gate");
+    expect(whyOf(exited)).toStartWith("the agent exited, not at a gate;");
+    expect(resumeOffer(session(info, "done"), worker(), false).line).toBe("agent exited (0)");
   });
 });

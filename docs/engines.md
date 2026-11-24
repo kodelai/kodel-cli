@@ -42,6 +42,76 @@ engines:
 
 A profile name is lowercase letters, digits, `-` and `_`. A variable name may not start with `KODEL_`.
 
+## The profile of a background agent (`worker`, `terminal`)
+
+This part of the block is **on** in this build, whatever the flag of engine steps says. The profile named
+`claude` also says how kodel starts Claude Code as the background agent of a run (`s` in `kodel tui`,
+`kodel serve`, `kodel agent start --pipeline`). Decision T-47 (`docs/decisions.md`).
+
+```yaml
+engines:
+  claude:
+    worker: terminal            # or print; terminal when the key is absent
+    terminal:
+      command: [claude, --model, opus]
+```
+
+- `worker: terminal`: the agent runs as an interactive program in a terminal session of its own
+  (`kw-<run>`, `MODE` `pty` in `kodel agent ls`), which a person can open and leave and which stays alive at a
+  gate. `worker: print`: `claude -p`, which exits at every wait. `docs/serve.md` says what each means for the
+  daemon. Nothing switches between the two by itself: where a terminal cannot run (kodel from source under
+  Bun, the optional package `@lydell/node-pty` or its binary missing) a start is refused, and the refusal
+  spells the line to commit to keep print workers: `engines: { claude: { worker: print } }`.
+- `terminal.command`: the program of a terminal agent, then pairs of a flag and its value (`--flag value` or
+  `--flag=value`). Element 0 is the program (a wrapper there is your committed choice). Only `--model`,
+  `--effort` and `--fallback-model` may follow; a bare word, a value that begins with `-`, and any other
+  flag, also in a short form, are refused by name when the config is read. Before a start the whole argv is
+  read back: every element must be the program, one of kodel's own fixed elements, or an allowed pair.
+- A profile's step `command` (above) is not the program of a background agent and is ignored for one: that is
+  the profile's own `claude`, or `terminal.command[0]`. A profile with no `command` runs no engine step.
+
+**Only `claude` can be a background agent in this version.** `worker:` or `terminal:` on a profile of any
+other name is refused when the config is read (`engines.<name>: only claude can be a worker in this version;
+codex and opencode are a follow-up task`). A step profile of another name with neither key loads as before.
+Which engine a run's agent uses cannot be chosen yet (`serve.start[].engine` is an unknown key and `kodel agent
+start --engine` an unknown flag); what is stored already names the engine (`agent.json`,
+`docs/session-formats.md`).
+
+**The block is used only as committed.** A worker's shell can write `.kodel/config.yaml`, and it must not
+choose the program of the next start nobody watches. So for a start by the daemon or the TUI, the `engines`
+block of the working copy is compared, parsed, with the one in `HEAD` of the checkout (only this block: an
+edit of `serve` beside it changes nothing):
+
+- equal: used;
+- different (an edit in the working copy, a staged edit, a block the working copy removed): refused with
+  `engines is used only as committed: commit .kodel/config.yaml or put the block back as it was`;
+- a config git does not track at all (or no git): `worker:` is honoured and one line says so; a
+  `terminal.command` is refused (`commit .kodel/config.yaml to use terminal.command`);
+- git itself fails (not found, `safe.directory`, a locked index): refused with git's reason.
+
+`kodel agent start`, at your terminal, shows what differs and asks instead of refusing. The stated limit: an
+agent that can commit to the checkout's own branch still changes the block; a commit on a run's branch does
+not.
+
+**How the agent is started.** In a terminal: `claude <flags> -- "<prompt>\n"`, with `--session-id <uuid>` (the
+launcher chooses the id of the conversation and stores it; nothing the agent prints is read as an id),
+`--mcp-config <json> --strict-mcp-config` (the run's kodel server, `kodel mcp --role worker --no-decisions
+--wait-command <command>`, is the only MCP server of the session), `--permission-mode dontAsk`, an allow list without the decision tools and a deny list
+with them and with every command that is a person's. The prompt always ends with a newline and comes after
+`--`: a one-word prompt that names a subcommand of `claude` (`doctor`, `mcp`) would otherwise run that
+subcommand. A resume is `--resume <id>`. The server is given the wait command of this very build and state
+base, and every waiting answer spells it (`… wait <run> --timeout 604800`, prefixed with `env
+KODEL_STATE_DIR=…` when the starter has one), whatever `agent_hints.wait` says: that setting is for your own
+agents. The profile is written against claude 2.1.330; `kodel agent doctor` prints the version it finds. It
+runs a program that `terminal.command` names only when the `engines` block is the committed one, and says so
+otherwise: a person's check must not run what an agent wrote into the config.
+
+An older kodel refuses a config with these keys (`unknown key: …`), see `docs/run-formats.md`.
+
+**Not built: codex and opencode as background agents.** Their profiles, their spikes and safety criteria, an
+id that cannot be chosen (`source: "observed"` in `agent.json`), waiting in the foreground and the choice of
+the engine are one follow-up task; the plan of TASK-EKAV (`docs/plans/`, step 13) lists what it gets.
+
 ## The node
 
 ```yaml

@@ -12,7 +12,9 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { workerMcpConfig } from "../src/claude-worker";
+import { agentProfile } from "../src/agent-profiles";
+import { WORKER_DENIED, workerMcpConfig, workerWaitCommand } from "../src/claude-worker";
+import { runCli } from "../src/cli";
 
 const main = join(import.meta.dir, "../src/main.ts");
 
@@ -287,4 +289,169 @@ describe("task_9pns kodel mcp --no-decisions --no-wait-hint", () => {
       await c.close();
     }
   }, 40_000);
+});
+
+describe("t47 kodel mcp --wait-command", () => {
+  /** A person's decision at the gate, as the command makes it, in the environment the server has. */
+  async function decide(dir: string, env: Record<string, string>, ...args: string[]) {
+    let err = "";
+    // The record of what this machine vouches for is found through the process's own environment.
+    const before = { HOME: process.env.HOME, KODEL_STATE_DIR: process.env.KODEL_STATE_DIR };
+    Object.assign(process.env, env);
+    try {
+      const code = await runCli(["--root", dir, "gate", ...args], {
+        cwd: dir,
+        out: () => {},
+        err: (t) => {
+          err += t;
+        },
+        interactive: true,
+        confirm: async () => true,
+        select: async () => [],
+        environment: { PATH: process.env.PATH ?? "", ...env },
+      });
+      if (code !== 0) throw new Error(`gate ${args.join(" ")}: ${err}`);
+    } finally {
+      for (const [key, value] of Object.entries(before)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }
+
+  test("t47_waiting_answers_spell_the_wait_command", async () => {
+    // The launcher's exact `--mcp-config` for a worker that stays alive at a wait, in a project that
+    // turned the offer off for its own agents: the worker is offered its command all the same.
+    const dir = makeRepo();
+    writeFileSync(join(dir, ".kodel", "config.yaml"), `${CONFIG}agent_hints:\n  wait: false\n`);
+    const home = mkdtempSync(join(tmpdir(), "kodel-waitcmd-home-"));
+    made.push(home);
+    const stateDir = join(dir, "state");
+    const self = { exec: process.execPath, args: [main], root: dir, stateDir };
+    const template = workerWaitCommand(self);
+    const config = JSON.parse(workerMcpConfig({ ...self, waitCommand: template })) as {
+      mcpServers: { kodel: { command: string; args: string[]; env: Record<string, string> } };
+    };
+    const { command, args, env } = config.mcpServers.kodel;
+    expect(args.slice(-6)).toEqual([
+      "mcp",
+      "--role",
+      "worker",
+      "--no-decisions",
+      "--wait-command",
+      template,
+    ]);
+    expect(args).not.toContain("--no-wait-hint");
+    const c = await connect(dir, [], { ...env, HOME: home }, { exec: command, args });
+    try {
+      const instructions = c.client.getInstructions() ?? "";
+      expect(instructions).toContain(`\`${template.replace("{run}", "<run_id>")}\``);
+      expect(instructions).not.toContain("kodel wait");
+      const runId = await atGate(dir, c.client);
+      const spelled = template.replace("{run}", runId);
+      const offer = `start \`${spelled}\` that way and end your turn`;
+      const first = await call(c.client, "pipeline_next_step", { run_id: runId });
+      const tell = (answer: Record<string, unknown>) =>
+        String((answer.waiting as { tell_the_person?: string } | undefined)?.tell_the_person);
+      expect(tell(first)).toContain(offer);
+      expect(tell(first)).toContain("run_in_background");
+      expect(JSON.stringify(first)).not.toContain("kodel wait");
+      expect(JSON.stringify(first)).not.toContain("{kodel-wait-command}");
+      // The person sends the step back; at the second gate the answer spells the command again.
+      await decide(dir, { ...env, HOME: home }, "reject", runId, "--reason", "once more");
+      await call(c.client, "pipeline_next_step", { run_id: runId });
+      writeFileSync(join(dir, "out.txt"), "hello again\n");
+      const done = await call(c.client, "pipeline_complete_step", {
+        run_id: runId,
+        node_slug: "write",
+        attempt: 2,
+      });
+      expect(tell(done.next as Record<string, unknown>)).toContain(offer);
+      const second = await call(c.client, "pipeline_next_step", { run_id: runId });
+      expect(second.waiting).toMatchObject({ reason: "gate", attempt: 2 });
+      expect(tell(second)).toContain(offer);
+      // It decides nothing: this is still a background agent's server.
+      expect(c.asked).toEqual([]);
+      expect(journalEvents(dir, runId).filter((e) => e === "gate_decided")).toHaveLength(1);
+    } finally {
+      await c.close();
+    }
+  }, 60_000);
+
+  test("t47_wait_command_flag_needs_the_run", async () => {
+    const dir = makeRepo();
+    let err = "";
+    const code = await runCli(["--root", dir, "mcp", "--wait-command", "kodel wait"], {
+      cwd: dir,
+      out: () => {},
+      err: (t) => {
+        err += t;
+      },
+      interactive: false,
+      confirm: async () => false,
+      select: async () => [],
+      environment: { PATH: process.env.PATH ?? "" },
+    });
+    expect(code).toBe(1);
+    expect(err).toContain("--wait-command needs {run}");
+  });
+});
+
+describe("t47 the server of a worker", () => {
+  test("t47_worker_server_serves_no_decision_tool", async () => {
+    // The claude profile's exact server arguments, for a terminal worker (with its wait command) and for
+    // a print worker, in a project whose config lets an agent decide: the server refuses both tools.
+    const profile = agentProfile("claude");
+    if (!profile) throw new Error("no claude profile");
+    for (const terminal of [true, false]) {
+      const dir = makeRepo();
+      const self = {
+        exec: process.execPath,
+        args: [main],
+        root: dir,
+        stateDir: join(dir, "state"),
+      };
+      const config = JSON.parse(
+        profile.mcpConfig(terminal ? { ...self, waitCommand: profile.waitCommand(self) } : self),
+      ) as {
+        mcpServers: Record<
+          string,
+          { command: string; args: string[]; env: Record<string, string> }
+        >;
+      };
+      // One server, ours, with the flag that takes the decisions away.
+      expect(Object.keys(config.mcpServers)).toEqual(["kodel"]);
+      const server = config.mcpServers.kodel;
+      if (!server) throw new Error("no kodel server in the config");
+      expect(server.args).toContain("--no-decisions");
+      const c = await connect(dir, [], server.env, { exec: server.command, args: server.args });
+      try {
+        const tools = (await c.client.listTools()).tools.map((t) => t.name);
+        const decisions = WORKER_DENIED.map((tool) => tool.replace("mcp__kodel__", ""));
+        expect(decisions.sort()).toEqual(["pipeline_accept_change", "pipeline_decide_gate"]);
+        for (const tool of decisions) expect(tools, tool).not.toContain(tool);
+        const runId = await atGate(dir, c.client);
+        // Called all the same (a client that ignores the list): refused, and the gate stays undecided.
+        for (const tool of decisions) {
+          const answer = await c.client
+            .callTool({
+              name: tool,
+              arguments: { run_id: runId, decision: "approved", node_slug: "approve" },
+            })
+            .then(
+              (result) => ({ isError: result.isError === true, text: text(result) }),
+              (error: unknown) => ({ isError: true, text: String(error) }),
+            );
+          expect(answer.isError, `${tool}: ${answer.text}`).toBe(true);
+        }
+        expect(journalEvents(dir, runId)).not.toContain("gate_decided");
+        const waiting = await call(c.client, "pipeline_next_step", { run_id: runId });
+        expect(waiting.waiting).toBeDefined();
+        expect(JSON.stringify(waiting)).not.toContain("pipeline_decide_gate");
+        expect(c.asked).toEqual([]);
+      } finally {
+        await c.close();
+      }
+    }
+  }, 90_000);
 });

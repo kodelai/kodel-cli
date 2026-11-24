@@ -6,9 +6,10 @@
  */
 
 import { stat } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import {
   createManagerReads,
+  enginesAgainstHead,
   findProjectRoot,
   hashSource,
   insideHostSession,
@@ -25,6 +26,7 @@ import {
   type StoragePlace,
   servePlace,
   serveTasksOf,
+  type UnattendedEngines,
 } from "@kodel-ai/local";
 import { MAX_PAYLOAD_BYTES, runHook } from "@kodel-ai/local/hooks";
 import {
@@ -49,7 +51,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { Command, CommanderError, Option } from "commander";
 import pkg from "../package.json" with { type: "json" };
-import { registerAgentCommands } from "./agent-commands";
+import { type AgentContext, type AgentProject, registerAgentCommands } from "./agent-commands";
 import { BUILD } from "./build-info";
 import { attachmentLine, describePendingChange } from "./decide-text";
 import { engineHostOptions } from "./engine-steps";
@@ -70,6 +72,7 @@ import {
   prepareResume,
   WORK_WAIT_MS,
 } from "./gate-decision";
+import { INSIDE_SESSION_REFUSAL } from "./human-only";
 import { type Choice, InitError, runInit } from "./init";
 import {
   dialogTimeoutFrom,
@@ -116,18 +119,37 @@ export interface CliEnv {
   sessionLauncher?: { exec: string; args: string[] };
   /** The platform (`process.platform` if none): `serve` refuses on `win32`, and `agent` uses it when a test stands on another one. */
   platform?: string;
+  /**
+   * Whether this command runs inside a kodel agent session (`insideSessionOf`): the person's commands
+   * refuse on `inside`. The program's entry gives the real probe; without one the guard says nothing.
+   */
+  insideSession?(): "inside" | "outside" | "unknown";
   /** For `serve`: ends the daemon when aborted, in place of the signals of the process (tests). */
   serveSignal?: AbortSignal;
   /** For `agent`: whether a terminal session can be started (a test answers for a machine it is not on). */
   ptyProbe?: () => { ok: true } | { ok: false; reason: string };
+  /** Whether `out` is a terminal (stdout is a TTY): `agent doctor` colours its marks only there. */
+  outIsTerminal?: boolean;
   /** For `agent`: the size a terminal session starts with (a test has no terminal to ask). */
   terminalSize?: () => { cols: number; rows: number } | undefined;
+  /**
+   * For `agent start`, `prune` and `doctor`: what a test gives in place of the machine's own (the session
+   * adapter, the attach client, the probes, the launcher of workers and the committed `engines` block).
+   */
+  agent?: Pick<
+    AgentContext,
+    "sessions" | "attach" | "attachTerminal" | "exec" | "which" | "readText" | "uuid" | "now"
+  > & {
+    launcher?: AgentProject["launcher"];
+    engines?: AgentProject["engines"];
+  };
 }
 
 /** The flags of `kodel mcp`. */
 interface McpFlags {
   decisions: boolean;
   waitHint: boolean;
+  waitCommand?: string;
   role?: string;
   readOnly?: boolean;
 }
@@ -354,7 +376,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
   const storeRoot = async () => (await project()).dataDir;
 
   /** The one launcher of background workers, for `tui` and `serve` alike (`worker-factory.ts`). */
-  const openWorkerLauncher = async () => {
+  const openWorkerLauncher = async (engines?: () => Promise<UnattendedEngines>) => {
     const { root, dataDir } = await project();
     const { openWorkerLauncher: open } = await import("./worker-factory");
     return open({
@@ -363,7 +385,30 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       environment: env.environment ?? process.env,
       self: env.sessionLauncher ?? { exec: process.execPath, args: [process.argv[1] ?? "kodel"] },
       ...(env.platform === undefined ? {} : { platform: env.platform }),
+      ...(engines === undefined ? {} : { engines }),
     });
+  };
+
+  /** The project as `agent start`, `prune` and `doctor` read it (`agent-commands.ts`). */
+  const agentProject = async (): Promise<AgentProject> => {
+    const { root, dataDir } = await project();
+    return {
+      root,
+      version: pkg.version,
+      async config() {
+        const config = await loadConfig(dataDir);
+        return {
+          dialog: config.decisions.dialog,
+          agentDecides: Object.entries(config.decisions.agent)
+            .filter(([, on]) => on === true)
+            .map(([key]) => key),
+          worktreesDir: resolve(root, config.worktree.dir),
+        };
+      },
+      engines: env.agent?.engines ?? (() => enginesAgainstHead({ root, storeRoot: dataDir })),
+      launcher: env.agent?.launcher ?? ((engines) => openWorkerLauncher(engines)),
+      host,
+    };
   };
 
   async function openRun(host_: LocalPipelineHost, runId: string) {
@@ -392,12 +437,22 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
   }
 
   /**
-   * The decisions are a person's: no terminal, no decision. A command the engine runs (a test that
-   * the agent wrote, say) is told so in its environment and is refused whatever its terminal is.
-   * This is a guard against mistakes, not a security boundary: it checks that `KODEL_ENGINE` is unset and
-   * that there is a terminal, and a program run by the same user can arrange both. Every descendant of a
-   * terminal session (`agent exec --pty`) has a terminal, so there the mark alone refuses; a program that
-   * unsets it, or an agent that gets itself a pseudo-terminal outside a session, passes.
+   * The decisions are a person's. Three guards, each against a mistake and none a security boundary (a
+   * program run by the same user can arrange what each one looks at):
+   *
+   * 1. The mark: a command the engine runs (a test an agent wrote, say), and every process of an agent
+   *    session, has `KODEL_ENGINE` in its environment and is refused whatever its terminal is. A program
+   *    that unsets it passes this one.
+   * 2. The session: a command whose parent processes include the holder of a live kodel agent session,
+   *    or that runs on the terminal of one, is refused whatever its environment says (a holder is known
+   *    by its own command line, so also when its record is under another `KODEL_STATE_DIR`). An agent in a
+   *    terminal of its own has a terminal, so without this guard only the mark would stand between it
+   *    and `kodel gate`. Where the process table cannot be read it says nothing and the other two decide.
+   * 3. The terminal: no terminal on stdin and stdout, no decision. A script, and a command an agent runs
+   *    without a terminal, stop here.
+   *
+   * What passes all three is what passed before: a process that left its session and got itself a
+   * pseudo-terminal of its own (`docs/decisions.md`).
    */
   function requireHuman(): void {
     if (env.environment?.KODEL_ENGINE !== undefined) {
@@ -405,6 +460,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         "this command is for a person; it will not run from a command the engine runs",
       );
     }
+    if (env.insideSession?.() === "inside") throw new UserError(INSIDE_SESSION_REFUSAL);
     if (!env.interactive) {
       throw new UserError(
         "this command is for a person at a terminal; it will not run from a script or an agent",
@@ -466,6 +522,10 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       "never offer the agent `kodel wait`: its turn ends at a wait (a background agent's server)",
     )
     .option(
+      "--wait-command <text>",
+      "the command the answers offer in place of `kodel wait <run>`, with {run} for the run id (the server of a background agent that stays alive at a wait)",
+    )
+    .option(
       "--role <role>",
       "serve the tools of one role: worker (works a run) or manager (looks after the runs for the person); without it, every tool",
     )
@@ -474,6 +534,10 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       "serve only the tools that write nothing, on top of the role and the mcp.roles block of the config",
     )
     .action(async (opts: McpFlags) => {
+      // Before anything is served: a command without the run in it would watch nothing.
+      if (opts.waitCommand !== undefined && !opts.waitCommand.includes("{run}")) {
+        throw new UserError("--wait-command needs {run} where the run id goes");
+      }
       // 5M9D: the start command is judged before anything is served, so a wrong one never leaves an
       // agent with a server that serves more, or other, tools than the person asked for.
       const underEngine = (env.environment ?? process.env).KODEL_ENGINE !== undefined;
@@ -666,6 +730,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         only,
         manager,
         waitHint: settings.waitHint,
+        ...(opts.waitCommand === undefined ? {} : { waitCommand: opts.waitCommand }),
         // A read-only server is given no host that decides: no dialog and no decision tool can reach one.
         ...(readOnly ? {} : { humans: local }),
         dialog: settings.dialog,
@@ -972,6 +1037,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const { createDecisionTools, decisionOptions } = await import("./tui/decide");
       const { openTasksForTui, tuiTaskOptions } = await import("./tui/tasks-open");
       const { createWorkerOptions } = await import("./tui/worker-start");
+      const { createOpenWorker } = await import("./tui/worker-open");
       const h = await host();
       const { root, dataDir } = await project();
       const tasks = await openTasksForTui(dataDir);
@@ -980,9 +1046,9 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       // The background agents (`s`): the records live where `kodel agent` keeps them, and the worker's
       // own server is this very build.
       const launcher = await openWorkerLauncher();
-      const dialog = await loadConfig(dataDir)
-        .then((config) => config.decisions.dialog)
-        .catch(() => false);
+      const config = await loadConfig(dataDir).catch(() => undefined);
+      const dialog = config?.decisions.dialog ?? false;
+      const worktreesDir = config === undefined ? undefined : resolve(root, config.worktree.dir);
       const place = servePlace({ base: resolveBase(env.environment ?? process.env), root });
       await runTui(process.stdin, process.stdout, () => loadSessions(h, Date.now()), "project", {
         mouse: opts.mouse === true,
@@ -994,8 +1060,28 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           removeComment(h, runId, node, attempt, index),
         loadStats: (pipeline) => loadStats(pipeline),
         ...tuiTaskOptions(tasks),
-        ...createWorkerOptions({ host: h, tasks, launcher, dialog, root, version: pkg.version }),
+        ...createWorkerOptions({
+          host: h,
+          tasks,
+          launcher,
+          dialog,
+          root,
+          version: pkg.version,
+          ...(worktreesDir === undefined ? {} : { worktreesDir }),
+        }),
         serve: () => readServeStatus(place, Date.now()),
+        // `o`: the terminal of a run's agent, through `kodel agent attach` of this very build.
+        openWorker: createOpenWorker({
+          launcher,
+          platform: env.platform ?? process.platform,
+          bun: process.versions.bun !== undefined,
+          self: env.sessionLauncher ?? {
+            exec: process.execPath,
+            args: [process.argv[1] ?? "kodel"],
+          },
+          root,
+          environment: env.environment ?? process.env,
+        }),
       });
     });
 
@@ -1802,6 +1888,11 @@ Examples:
     ...(env.ptyProbe ? { ptyProbe: env.ptyProbe } : {}),
     ...(env.terminalSize ? { terminalSize: env.terminalSize } : {}),
     ...(env.platform ? { platform: env.platform } : {}),
+    ...(env.outIsTerminal ? { outIsTerminal: true } : {}),
+    project: agentProject,
+    ...(env.agent === undefined
+      ? {}
+      : (({ launcher: _launcher, engines: _engines, ...seams }) => seams)(env.agent)),
   });
 
   const task = withPlural(program.command("task")).description(

@@ -55,6 +55,8 @@ class FakeHost implements PipelineHost {
   readonly waited: number[] = [];
   /** Whose work each of those waits was for: the node and the scope the service named. */
   readonly waitedFor: { node?: string; scope?: WaitScope }[] = [];
+  /** Every request for an answer, as the service made it. */
+  readonly requests: NextStepRequest[] = [];
   /** What the service asked `start` for. */
   readonly starts: { pipeline: string; task: string; restart: boolean; cwd?: string }[] = [];
   /** Where this host says its runs work, when it has an opinion. */
@@ -169,7 +171,9 @@ class FakeRun implements RunHandle {
   }
 
   async nextStep(options: NextStepRequest = {}): Promise<NextStep> {
+    this.host.requests.push(options);
     return projectNextStep(this.spec, this.state_ as RunState, 0, undefined, {
+      ...(options.waitCommand === undefined ? {} : { waitCommand: options.waitCommand }),
       ...(options.nodeSlug === undefined ? {} : { nodeSlug: options.nodeSlug }),
       ...(options.completionOf === undefined ? {} : { completionOf: options.completionOf }),
       ...(options.worker === true ? { worker: true } : {}),
@@ -182,14 +186,19 @@ class FakeRun implements RunHandle {
   /** The fake's hash of a token: no crypto needed to tell two tokens apart. */
   private tokens = 0;
 
-  async takeStep(input: { node?: string; token?: string }): Promise<TakeOutcome> {
+  async takeStep(input: {
+    node?: string;
+    token?: string;
+    waitCommand?: string;
+  }): Promise<TakeOutcome> {
+    const wait = input.waitCommand === undefined ? {} : { waitCommand: input.waitCommand };
     const state = this.state_ as RunState;
     const slug =
       input.node ??
       state.active.find(
         (v) => v.phase === "agent" && liveClaim(state.nodes[v.node], 0) === undefined,
       )?.node;
-    if (slug === undefined) return { status: "none", next: await this.nextStep() };
+    if (slug === undefined) return { status: "none", next: await this.nextStep(wait) };
     const token = input.token ?? `tok-${++this.tokens}`;
     const hash = `hash:${token}`;
     const renewed = liveClaim(state.nodes[slug], 0)?.token === hash;
@@ -213,7 +222,7 @@ class FakeRun implements RunHandle {
         taken_by: claim?.by ?? "?",
       };
     }
-    const answer = await this.nextStep({ nodeSlug: slug });
+    const answer = await this.nextStep({ nodeSlug: slug, ...wait });
     if (!("node" in answer)) return { status: "none", next: answer };
     return { status: renewed ? "renewed" : "claimed", step: answer.node, claim_token: token };
   }
@@ -1150,5 +1159,72 @@ describe("t40 steps through the tools", () => {
     ]) {
       expect(SERVER_INSTRUCTIONS, part).toContain(part);
     }
+  });
+});
+
+describe("t47 the wait command of a connection", () => {
+  // No `kodel wait` in it, so a bare one left in an answer is seen.
+  const TEMPLATE =
+    "env KODEL_STATE_DIR=/s /usr/bin/node '/opt/k dist/kodel.js' --root /proj wait {run} --timeout 604800";
+  const MARK = "{kodel-wait-command}";
+  /** Every string of an answer, as one text (not JSON: a quote in the command stays a quote). */
+  const strings = (value: unknown): string =>
+    typeof value === "string"
+      ? value
+      : typeof value === "object" && value !== null
+        ? Object.values(value).map(strings).join("\n")
+        : "";
+
+  test("t47_service_puts_the_wait_command_in", async () => {
+    const host = new FakeHost([feature]);
+    const svc = new PipelineService(host, { waitBudgetMs: 0, waitCommand: TEMPLATE });
+    const started = asOk(await svc.start({ task: "t" }));
+    const runId = started.run_id as string;
+    const command = TEMPLATE.replace("{run}", runId);
+    const done = asOk(await svc.completeStep({ run_id: runId, node_slug: "plan", attempt: 1 }));
+    const asked = asOk(await svc.nextStep({ run_id: runId }));
+    for (const answer of [done.next, asked]) {
+      const waiting = (answer as { waiting: { tell_the_person: string } }).waiting;
+      expect(waiting.tell_the_person).toContain(`start \`${command}\` that way`);
+      expect(strings(answer)).not.toContain(MARK);
+      expect(strings(answer)).not.toContain("kodel wait");
+    }
+    // The host was never given the command: it builds, and keeps, the answer with the mark.
+    expect(host.requests.length).toBeGreaterThanOrEqual(3);
+    for (const request of host.requests) expect(request.waitCommand).toBe(MARK);
+    expect(JSON.stringify(host.requests)).not.toContain("/opt/k dist");
+
+    // A fork: the steps' instruction and a worker's own answers name the same command.
+    const forkHost = new FakeHost([forkSpec]);
+    const fork = new PipelineService(forkHost, { waitBudgetMs: 0, waitCommand: TEMPLATE });
+    const forkRun = asOk(await fork.start({ task: "split" })).run_id as string;
+    const forkCommand = TEMPLATE.replace("{run}", forkRun);
+    asOk(await fork.completeStep({ run_id: forkRun, node_slug: "plan", attempt: 1 }));
+    const open = asOk(await fork.nextStep({ run_id: forkRun, subagents: { can: true } }));
+    expect(strings(open)).toContain(`never starts \`${forkCommand}\``);
+    const took = asOk(await fork.takeStep({ run_id: forkRun, node_slug: "a" }));
+    const handed = asOk(
+      await fork.completeStep({
+        run_id: forkRun,
+        node_slug: "a",
+        attempt: 1,
+        claim_token: took.claim_token as string,
+      }),
+    );
+    expect(strings(handed.next)).toContain(`do not start \`${forkCommand}\``);
+    for (const answer of [open, took, handed]) {
+      expect(strings(answer)).not.toContain(MARK);
+      expect(strings(answer)).not.toContain("kodel wait");
+    }
+    for (const request of forkHost.requests) expect(request.waitCommand).toBe(MARK);
+  });
+
+  test("t47_service_without_a_wait_command_is_as_it_was", async () => {
+    const { host, svc } = service();
+    const runId = asOk(await svc.start({ task: "t" })).run_id as string;
+    const done = asOk(await svc.completeStep({ run_id: runId, node_slug: "plan", attempt: 1 }));
+    expect(strings(done.next)).toContain(`\`kodel wait ${runId}\``);
+    expect(host.requests.length).toBeGreaterThanOrEqual(2);
+    for (const request of host.requests) expect("waitCommand" in request).toBe(false);
   });
 });

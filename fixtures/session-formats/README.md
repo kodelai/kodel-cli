@@ -5,6 +5,10 @@ with ids, pids, paths, times and identity values masked. `status-lost.json` is t
 tombstone a reader writes when no holder ever answered. Tests open every file, write it back as it was read and
 check that a newer `v` is refused. Records are machine-local state, not history; see AGENTS.md.
 
+`agent-chosen.json` and `agent-resumed.json` are `agent.json` of two sessions the script starts with an `agent` in
+their spec (a fixed conversation id; the second continues the first). The process table must be readable where
+the script runs: without it a holder records no process identity and the other goldens would differ.
+
 The `*-pty.json` files are the records of a terminal session (`mode: pty`). Bun cannot host a PTY, so their holder is
 the built artifact on Node: run `bun run build` first, outside a sandbox that has no terminal devices (the script
 skips this part with a printed reason where it cannot open one). `status-running-pty.json` is the one record with
@@ -19,3 +23,7 @@ byte for byte as they were (a test pins their hashes); run `bunx biome format --
 after a golden was written. `bun scripts/take-session-fixtures.mjs --check` writes nothing: it takes the records
 again and fails when one differs from its golden. The CI `pty` job runs it; where no terminal exists a stale
 `*-pty.json` is not detected.
+
+`worker-print-before-t47/` is not written by the script: it is `session.json` and `status.json` of a print worker
+(`claude -p`, no `agent.json`) taken once from the launcher and the holder of the build before T-47 (commit
+d055fd6), with a shell script for `claude`, and masked the same way. It is never taken again.

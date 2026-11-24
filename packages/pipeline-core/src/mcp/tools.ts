@@ -11,7 +11,7 @@ import {
   ATTACHMENT_TEXT_EXTENSIONS,
   NOT_SCANNED,
 } from "../attachments";
-import { MAX_WAIT_S } from "../next-step";
+import { DEFAULT_WAIT_COMMAND, MAX_WAIT_S, spellWaitCommand } from "../next-step";
 import { RUN_ID_PATTERN } from "../run-id";
 import type { PipelineService, ToolResult } from "../service";
 import { MANAGER_TOOL_NAMES, type ServerRole } from "../tool-roles";
@@ -33,8 +33,25 @@ export const CONTRACT_VERSION = 7;
  * off in its config) leaves out the offer of `kodel wait`; `dialog: true` (the host can ask the person
  * through the client) adds the rule for the dialog.
  */
-const WAIT_OFFER =
-  " `tell_the_person` may offer you `kodel wait <run_id>`, a command that only watches and prints one line when the person has decided: start it in the background as it says, end your turn, and call pipeline_next_step when it reports. Never poll pipeline_next_step in a loop to wait for a person.";
+const waitOffer = (command: string) =>
+  ` \`tell_the_person\` may offer you \`${command}\`, a command that only watches and prints one line when the person has decided: start it in the background as it says, end your turn, and call pipeline_next_step when it reports. Never poll pipeline_next_step in a loop to wait for a person.`;
+
+/**
+ * How the instructions name the command that watches a run: the given one (a template in which `{run}`
+ * is the run id) with `<run_id>` in the id's place, offered whatever `waitHint` says; else `kodel wait`,
+ * unless the project turned the offer off.
+ */
+function waitNames(options: {
+  waitHint?: boolean;
+  waitCommand?: string;
+}): { offer: string; name: string } | undefined {
+  if (options.waitCommand !== undefined) {
+    const command = spellWaitCommand(options.waitCommand, "<run_id>");
+    return { offer: command, name: command };
+  }
+  if (options.waitHint === false) return undefined;
+  return { offer: spellWaitCommand(DEFAULT_WAIT_COMMAND, "<run_id>"), name: "kodel wait" };
+}
 
 const DIALOG_RULE =
   "10. Some clients show the person a dialog when a call would answer `waiting` for them (or when the state of a run was changed outside kodel): the call then stays open until they answer, and it returns the state after their decision with a `dialog` entry saying what they did. If `dialog.answer` is anything but `decided`, they did not decide there: do what `tell_the_person` says, the command in `how_to_decide` still works. You cannot answer the dialog, and nothing you send is read as an answer.";
@@ -67,6 +84,8 @@ function agentDecisionsRule(
 
 export interface InstructionOptions {
   waitHint?: boolean;
+  /** The wait command of this connection's agent (`ServiceOptions.waitCommand`). */
+  waitCommand?: string;
   dialog?: boolean;
   decisions?: AgentDecisionFlags;
   /** The role the server was started with; absent for a server with none. */
@@ -193,7 +212,8 @@ export function serverInstructions(options: InstructionOptions = {}): string {
   if (options.role === "manager" || !has("pipeline_start")) {
     return lookerInstructions(options, has, decisions);
   }
-  const wait = options.waitHint === false ? "" : WAIT_OFFER;
+  const names = waitNames(options);
+  const wait = names === undefined ? "" : waitOffer(names.offer);
   const decides = decisions.gate === true || decisions.pipelineChange === true;
   // The dialog rule is number 10 when it is there; this one follows whatever comes last.
   const decidesRule = options.dialog === true ? 11 : 10;
@@ -211,8 +231,8 @@ export function serverInstructions(options: InstructionOptions = {}): string {
         : "You cannot approve, reject or resume anything yourself, and you must not try: those commands are for the person and refuse to run for an agent.") +
       wait,
     propose
-      ? "5. Do not read or edit the run files of the project (by default in .kodel/runs), and do not edit the pipeline files while a run is going: the only way for you to change the pipeline of a run is pipeline_propose_change, and a person accepts it."
-      : "5. Do not read or edit the run files of the project (by default in .kodel/runs), and do not edit the pipeline files while a run is going: you cannot change the pipeline of a run, a person does.",
+      ? "5. Do not read or edit the run files of the project (by default in .kodel/runs), and do not edit the pipeline files while a run is going: the only way for you to change the pipeline of a run is pipeline_propose_change, and a person accepts it. The `engines` block of the project config (.kodel/config.yaml) is the person's as well: it says which programs kodel starts as agents, so never add to it or change it."
+      : "5. Do not read or edit the run files of the project (by default in .kodel/runs), and do not edit the pipeline files while a run is going: you cannot change the pipeline of a run, a person does. The `engines` block of the project config (.kodel/config.yaml) is the person's as well: it says which programs kodel starts as agents, so never add to it or change it.",
     ...(has("pipeline_feedback")
       ? [
           "6. If a step's description or a check looks wrong or unclear, say so with pipeline_feedback; it never blocks the run. If you think the pipeline of a run should change for this run, first ask the person: change it now (the run stops at the end of the current step until they accept it), or only note it with pipeline_feedback and decide another way. Propose it only if they say now. When a check failed and you think it fired for nothing, or the person says so, offer to record it with pipeline_feedback (category wrong_check, `check` the check_id the retry text names), and record it only after they agree.",
@@ -227,7 +247,7 @@ export function serverInstructions(options: InstructionOptions = {}): string {
     propose
       ? "9. If an answer tells you that the pipeline of the run was changed and a person has to accept it (a `waiting` answer about the change, or a note about it on a `node` answer), do what `tell_the_person` says. If the change was made by editing the pipeline file and not through pipeline_propose_change, put the file back as it was and propose it instead."
       : "9. If an answer tells you that the pipeline of the run was changed and a person has to accept it (a `waiting` answer about the change, or a note about it on a `node` answer), do what `tell_the_person` says.",
-    stepsRule(options.waitHint !== false),
+    stepsRule(names?.name),
     FORMAT_RULE,
     ...historyRule(has, "9c"),
     ...(options.attachments === true ? attachmentsRule(has, "9d") : []),
@@ -241,9 +261,9 @@ export function serverInstructions(options: InstructionOptions = {}): string {
  * Several steps open at once (a fork of the pipeline). Numbered after rule 9, so the dialog rule and
  * the agent-decision rule keep the numbers the other texts refer to.
  */
-const stepsRule = (waitHint: boolean) =>
+const stepsRule = (waitName: string | undefined) =>
   "9a. A `node` answer may list several open steps (`steps`): `execution.mode` says how this project works them, and `execution.instruction` says exactly what to do. In `parallel` mode you start one worker per free step; each worker takes its step with pipeline_take_step (node_slug), keeps the `claim_token`, does the step, completes it with pipeline_complete_step and that token, and reports the answer back to you; a worker never writes to the person" +
-  (waitHint ? " and never starts `kodel wait`" : "") +
+  (waitName === undefined ? "" : ` and never starts \`${waitName}\``) +
   ". In `sequential` mode you do them one by one, unless its instruction says the project lets you work them in parallel: then, if you can start subagents, call pipeline_next_step again with subagents: {can: true} to have the open steps worked in parallel; if you cannot, carry on one step at a time. A `running` answer with `open_steps` means every open step is in a worker's hands: wait for them (wait_s) or for their reports. `also_waiting` on an answer names decisions a person has to make meanwhile: tell them. pipeline_next_step never takes a step.";
 
 /**

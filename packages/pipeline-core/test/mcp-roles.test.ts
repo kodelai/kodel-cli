@@ -678,6 +678,11 @@ describe("5m9d the texts", () => {
         from: "pipeline_next_step only reads; it never takes a step.",
         to: "pipeline_next_step never takes a step.",
       },
+      {
+        // T-47: the `engines` block is the person's, said after rule 5.
+        from: "is pipeline_propose_change, and a person accepts it.",
+        to: "is pipeline_propose_change, and a person accepts it. The `engines` block of the project config (.kodel/config.yaml) is the person's as well: it says which programs kodel starts as agents, so never add to it or change it.",
+      },
     ];
     const ADDED = [/^9e\. To look after the runs for the person: manager_inbox lists /];
     const cases: [string, string][] = [

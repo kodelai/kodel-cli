@@ -1227,6 +1227,7 @@ export class LocalRun {
       ...(request.completionOf === undefined ? {} : { completionOf: request.completionOf }),
       ...(request.worker === true ? { worker: true } : {}),
       ...(request.atCompletion === true ? { atCompletion: true } : {}),
+      ...(request.waitCommand === undefined ? {} : { waitCommand: request.waitCommand }),
     };
   }
 
@@ -3288,10 +3289,16 @@ export class LocalRun {
    * hash reaches the state and the journal; the machine decides under the run's lock whether the
    * step is free, so two workers taking at once get one claim between them.
    */
-  async takeStep(input: { node?: string; token?: string; caller?: Caller }): Promise<TakeOutcome> {
+  async takeStep(input: {
+    node?: string;
+    token?: string;
+    caller?: Caller;
+    waitCommand?: string;
+  }): Promise<TakeOutcome> {
     await this.assertOurs();
     const hints = await this.hints();
     const serve = { ...(input.caller === undefined ? {} : { caller: input.caller }) };
+    const wait = input.waitCommand === undefined ? {} : { waitCommand: input.waitCommand };
     const token = input.token ?? randomBytes(16).toString("hex");
     const hash = hashSource(token);
     // Which step is free is decided by the machine under the lock, with the claim itself.
@@ -3307,7 +3314,7 @@ export class LocalRun {
     // advice to call pipeline_next_step.
     const none = async (): Promise<TakeOutcome> => ({
       status: "none",
-      next: await this.nextStep({ serve, worker: true }),
+      next: await this.nextStep({ serve, worker: true, ...wait }),
     });
     if (!decision.ok) {
       await this.recordRefusal("take_step", input.node, undefined, decision.error);
@@ -3346,7 +3353,7 @@ export class LocalRun {
     }
     // Only the step taken is recorded as served to this caller, not the siblings the answer lists.
     const answer = await this.nextStep(
-      { nodeSlug: claimed.node, serve, worker: true },
+      { nodeSlug: claimed.node, serve, worker: true, ...wait },
       claimed.node,
     );
     if (!("node" in answer)) {

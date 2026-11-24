@@ -7,8 +7,9 @@ The state base is `KODEL_STATE_DIR` or `~/.kodel`. A session folder holds:
 | File | Written by | When |
 |------|------------|------|
 | `session.json` | the starter | once, in a temporary folder that is renamed into place |
+| `agent.json` | the starter | once, before `session.json` in the same temporary folder; only for a session that runs a coding agent (see "The agent record" below) |
 | `status.json` | the holder (or once, as a `lost` tombstone, by the first reader that finds no holder) | at start, when the child runs, at the end |
-| `stop.json` | `agent stop` | before the child is signalled |
+| `stop.json` | whoever asks for the stop: `agent stop` (a person, `by: "stop"`), or kodel ending the session of a run that is over (`by: "finish"`) | before the child is signalled; a person's record is never replaced, and it replaces a `finish` |
 | `tail.txt`, `stdout.txt`, `stderr.txt` | the holder | redacted output tails (interleaved, and each stream alone), replaced while output arrives; `kodel agent logs <id> [--stdout\|--stderr]` prints them. A terminal session (`mode: pty`) has `tail.txt` only: a terminal has one stream, and `--stdout` and `--stderr` answer `UNSUPPORTED` |
 | `boot.txt` | the holder | the boot report: `ready` or `HOLDER_BOOT_FAILED:<why>` |
 | `in.fifo` | the holder | only for a session started with `input` |
@@ -33,6 +34,154 @@ different thing and is not touched here.
 
 Golden fixtures: `fixtures/session-formats/v1/` (`scripts/take-session-fixtures.mjs`).
 
+## The agent record (`agent.json`)
+
+A session that runs a coding agent says which one in a record of its own:
+`{ v, engine, session?, source?, resumes? }`.
+
+- `engine` is the name of the engine's profile (`claude`).
+- `session` is the id of the agent's own conversation, and `source` says who named it: `chosen` (the starter chose
+  it and gave it to the program) or `observed` (read from the engine's own files after the start; no build writes
+  that yet, the schema holds it so that such an engine needs no change of the format).
+- `resumes` is the id of the session whose conversation this one continues.
+
+The starter writes it once, before `session.json`, and both appear with the folder in one rename, so no session
+exists without the id of its conversation. Nothing rewrites it. It holds validated shapes only: never a prompt,
+never an argv, and nothing the agent printed. The id says which conversation to continue, never whether anything
+is done. `SessionSpec.agent` (`{ engine, session?, resumes? }`) is how a starter gives it; the stored `spec` of
+`session.json` does not repeat it.
+
+It is a file of its own, and not a field of `session.json`, because `session.json` is written once and an
+engine's id may be known only later. `kodel agent ls` shows it in two columns beside `MODE` (`pipes` or `pty`):
+`AGENT` is the engine (`claude`) and `CONVERSATION` the id of its conversation (`-` when there is none; an id
+longer than a UUID is cut). The table is `ID NAME STATE MODE AGENT CONVERSATION`; the command a session runs is
+not a column, `--json` has it whole, with `mode` and `agent`.
+
+`kodel agent stop`, `rm` and `logs` take a name or an id, as `attach` does: of the sessions that used a name
+the one that runs is meant, then the newest. `stop` and `rm` find the session before they ask, so an unknown
+name fails at once (`NOT_FOUND: no agent "<name>"`) and the question names the session found (`Stop agent
+<name> (<id>)?`).
+
+**Builds of different age.** A build from before this record never reads the file: it derives the same status,
+lists the session without an agent and removes the folder whole. A session with no `agent.json` is an older one
+(or runs no agent) and is listed with `AGENT` empty. A record with a newer `v` makes the session `NEWER_FORMAT`
+like any other file of the folder; one that cannot be read changes no status, and the session is listed without
+an agent. No change of `v`.
+
+**A worker of a run** (`kw-<run>`, `kw-<run>-d<seq>` for a resume after a decision) has the record whether it
+runs in a terminal or as a print process. The launcher takes the id of the conversation to continue from it,
+never from the screen or the tail. For a worker's record from before this file the id is read from the argv
+the record keeps (the last `--session-id`, else the last `--resume`), which the launcher wrote; nothing is
+written for such a record (fixture `worker-print-before-t47/`). A terminal record's argv is never read for an
+id: its prompt comes last, and a prompt is a person's text.
+
+### Continuing a finished agent: `kodel agent start --resume`
+
+`kodel agent start --resume <name|id>` starts a new terminal session that continues the stored conversation
+(`agent.json` of the new record has the same `session` and `resumes: <the old id>`) and **keeps the name**.
+`kodel agent ls` prints, under the table, `<name> can be continued: kodel agent start --resume <name>` for a
+session this holds for. It is refused, with the reason, for a session that runs, one whose process still runs
+without a holder, one whose id is not known or whose record does not name `claude`, a `kw-` or `ke-`
+session, a session a host started, and a session on pipes. The old record stays listed until `rm` or `prune`.
+
+**The name marker moves.** A marker is written once by `start`; a resume is the one case where it changes
+hands, and only from a finished session a person started (`origin: "cli"`) of the same name:
+
+1. a claim `<name>.json.take` is made exclusively: of two resumes of one name, one gets it;
+2. the new record is published (its folder renamed into place);
+3. the claim is renamed over the marker: the name now points at the new record, in one rename;
+4. if the start then fails, the old marker is written back by a rename.
+
+A crash before step 3 leaves the name with the old record; a claim whose session never began within 15 s, or
+is over, was left by a process that died and is taken away by the next resume. While a claim is in progress
+`rm` and `prune` refuse the old record (`STILL_RUNNING`, "is being resumed"), so a failed resume has a session
+to give the name back to; a plain `agent start --name` of that name answers `NAME_TAKEN` at every point. A
+host session's marker is never moved, and the marker of a session whose process still runs is not either.
+`rm` of the old record afterwards keeps the name with the new one.
+
+### `kodel agent prune`
+
+Removes finished records, after one question that names the count (`--dry-run` removes nothing,
+`--older-than <days>` keeps younger ones). It never removes a record that runs or whose process still runs,
+one that cannot be read, is of another machine or of a newer format, or a `kw-` or `ke-` record whose run is
+open or cannot be read. Each record is read again, by its id, right before its removal, and `remove` itself
+refuses a live one. A person's name is freed with its record; a host session's marker stays. When a record
+that goes holds a conversation `kodel agent start --resume` could still continue, a line before the question
+names it and the question counts it: the conversation cannot be continued through kodel once its record is
+removed.
+
+## A holder that went away: "child still runs"
+
+A session whose holder is gone is `lost` (or `killed`, when a stop record is there), and `childAlive` ("child
+still runs" in `kodel agent ls`) says that its process is not: a consumer must not take it for finished, and
+`agent rm` refuses it (`STILL_RUNNING`). "Still runs" is the process the holder started, told by its recorded
+identity, **or a process left in that child's process group**: an agent behind a wrapper that died is seen.
+
+The group is looked at only for a record whose holder went away without recording its child's end. A holder that
+recorded the end (an exit, a stop, its own timeout) answers for its child, and what the child left behind is not
+looked at. A member of the group counts only when all of this holds:
+
+- the process table was read (`ps -A -o pid=,pgid=,stat=,lstart=`, once for a listing, and only when the listing
+  holds such a record);
+- the machine was not restarted after the session began (Linux `/proc/stat` `btime`, macOS `sysctl
+  kern.boottime`): after a restart every number is given out anew;
+- no live process that is not the recorded child has the group's number as its pid: the kernel gives a group's
+  number to a new process only once the group is empty, so with such a process nothing of the session is left.
+
+Where the table or the boot time cannot be read (a sandbox), or the process that has the group's number as
+its pid cannot be told from the recorded child (its start time cannot be read now), the group is not looked at and the recorded child
+alone decides, as before this rule: nothing is held for good, and the stated limit is that an agent behind a dead
+wrapper is not seen there. The status then carries `group: "unread"`; `group: "stranger"` says that the number
+changed hands.
+
+A member that counts is **not known to be the session's**. The group has no leader any more, so once it was
+empty its number may have gone to another program's process that made a group of it (`setsid`), started its own
+processes there and went away: nothing in the process table tells those from an agent left behind a wrapper. So
+the members count only for "something may still run" (fail closed: the session is not taken for finished, the
+daemon holds its places and resumes nothing, `rm` and `prune` refuse), the status says `group: "leaderless"` and
+names them in `leftover` (`pid`, and `command` in the answer of a stop), and **kodel never signals a process
+group without its live leader**.
+
+`kodel agent stop <id>` therefore signals nothing of such a group. It writes the stop record (you did ask: a
+session a person stopped is never resumed by the daemon), prints `not stopped`, each process of the group with
+its pid and command line, and what to do: look at each (`ps -o pid,lstart,command -p <pid>`), end the ones that
+are this agent's yourself (`kill <pid>`), and run `kodel agent stop <id>` again. With no member left that
+command settles the record: the session is `stopped`, and `agent rm` removes it. `agent rm` refuses with the
+same instruction until then. The stated limit: while a process of the group lives, another program's too, the
+record stays and its run is held.
+
+A session whose recorded child lives is stopped as ever: the child's identity is checked, its group gets
+`SIGTERM`, and what ignores it gets `SIGKILL` after the grace. That last signal goes to the group only while the
+recorded child still lives; once it is gone, the members that were listed while it lived are signalled one by
+one, each only while its pid, group and start time are still those of the listing.
+
+## Who asked for a stop
+
+`stop.json` says who asked, in `by`: `stop` is a person (`kodel agent stop`), `finish` is kodel itself, which
+ends the terminal session of a run that is over (`kodel serve`, or an open TUI). Any other value, and a record
+from before the two were told apart (every one said `stop`), reads as a person's: nobody else is ever taken
+for the person. A person's record is never replaced, and a person's stop replaces a `finish` record, so the
+file keeps the person's word whichever came first.
+
+A status carries it as `stoppedBy` (`person` or `finish`; in `agent ls --json` too) for every session that is
+over, **whatever the status record says of the end**. The reason `stopped` in `status.json` only says that a
+stop record was there when the holder wrote its last record. A holder that had already recorded another end (its
+timeout, a `holder_error`, a signal) and left its program running is still stopped by the person who then runs
+`kodel agent stop`: the record keeps `killed (timeout)`, the status says `stoppedBy: person`, and `agent ls`
+reads `stopped (after timeout)`. "A person stopped it" is `stoppedBy: person` (or the reason `stopped` from an
+adapter that keeps no stop record); `kodel serve` leaves such an agent of a run to the person
+(`docs/serve.md`), and never one with `stoppedBy: finish`. A stop record that cannot be read makes the
+session `CANNOT_READ` once it is over: it is never read as "nobody asked". A live session names no stop.
+
+**Builds of different age.** `by` was always a string, so the format does not change: an older build reads a
+`finish` record as a stop (`stopped`, as it read every stop record), and this build reads an older record as a
+person's.
+
+**Limits.** A zombie is not a process that runs. A process that left the group (its own `setsid`, as the shell
+commands of Claude Code do) is not a member: it is neither seen nor ended this way; `stop` of a session whose
+recorded child lives reaches the child's descendants as before. On macOS the boot time moves with the wall
+clock, so a clock set forward by more than the time between the boot and the session's start reads as a restart.
+
 **Refutation.** The record format is wrong if a reader of the same `v` must change to read a record a later compatible build
 writes, if a run in flight is refused, orphaned or changed by an update of kodel, or if `stop` ever signals a process
 that is not the one the record names.
@@ -52,12 +201,24 @@ that reaches one stream in pieces with the other stream writing in between can e
 
 ## Terminal sessions (`mode: pty`)
 
+`kodel agent start [prompt]` (for a person) runs the coding agent of the `claude` profile in a terminal of its
+own, in the project root, and attaches unless `--bg`; it prints the argv, what a start nobody watches may
+meet, and that a kodel server the agent starts for itself is a worker inside the session (`docs/mcp-roles.md`). With `--pipeline <name>` the prompt is the task of a new run and the session is that run's worker
+(`kw-<run>`), started by the same launcher as `s` in the TUI (`docs/serve.md`). `kodel agent exec --pty --attach
+-- <command>` starts any command and attaches at once.
+
 `kodel agent exec --pty -- <command>` (hidden, for a person) runs the command in a terminal of its own, and
 `kodel agent attach <name|id>` (for a person; it asks for no confirmation) connects the person's terminal to it:
 first the terminal modes the program has on, then the earlier output (up to 1 MiB, with terminal queries cut
 out), then the live terminal. `Ctrl+\` detaches and leaves the agent running; on every way out the client resets
 the terminal and prints `[detached: <name>]`, `[ended: <name>, exit <code>]` or `[killed: <name>]`. Several clients
 may be attached (8 at most); the size of the one that resized last wins.
+
+`kodel agent attach <name|id> --keep-screen` (not in the help: it is what `o` in `kodel tui` runs) is the same
+client on a terminal that is on its starter's alternate screen and stays there: it clears the screen once,
+for the session's first output, takes the switches of the screen (modes 1049, 1047, 47) out of the session's
+output (a switch on becomes "save the cursor, clear", a switch off "clear, restore the cursor"), resets the
+other modes on every way out, never leaves the screen and prints no line, because the starter draws over it.
 
 The terminal is made by `@lydell/node-pty`, an optional dependency of the CLI that only the holder loads. Where it
 cannot be used, `exec --pty` answers `UNSUPPORTED` with the reason before anything is written: the package was not
@@ -73,7 +234,11 @@ It is optional and added without a change of `v`: a reader that ignores it deriv
   writes `sock` with the `running` record and reports `ready`: an attach right after the start finds the socket.
 - The final record has no `sock`, and the holder removes the socket file on every way out it can take.
 - A holder that is told to end (`SIGTERM`, `SIGHUP`) stops the program as `stop` does and ends the same way: the
-  clients are told, the socket is removed, the final record says `killed` with the reason `stopped`.
+  clients are told, the socket is removed, and the final record says `killed` with that `signal`. Only a stop
+  somebody asked for (it leaves `stop.json`, which says who: see "Who asked for a stop") is recorded with the
+  reason `stopped`, on every way out of the holder, an unexpected error included: a
+  shutdown of the machine sends the same signals, and the agent of a run it ended is resumed like any that ended
+  at a wait (`docs/serve.md`).
 - A holder that was killed (`SIGKILL`) leaves the record with `sock` and the file. So `sock` never means "somebody
   listens": `attach` asks the status first, and anything but a live `running` session, a missing file or a refused
   connect is `NOT_ATTACHABLE` with the reason. `agent rm`, `agent stop` (when it finds the holder gone) and a failed
@@ -111,7 +276,34 @@ remove no socket and it cannot attach; nothing else differs.
   every client that connects. Only `tail.txt` is on disk: stripped of escape sequences, then redacted.
 - **The tail of a full-screen program is repaint fragments** (cursor moves between the pieces of a word), so a
   secret such a program draws may never be one string in `tail.txt`, and redaction finds less there than in the
-  output of a program that writes lines.
+  output of a program that writes lines. A secret printed as a line is caught
+  (`tA_terminal_tail_redacts_a_printed_secret`); one painted in pieces stays in the bounded tail until newer
+  output replaces it or `agent rm` or `prune` removes the record
+  (`tA_terminal_tail_painted_secret_is_the_known_limit` pins the limit, so a change of it is seen). Since a
+  background agent of a run is a terminal session by default (`docs/serve.md`), this limit holds for every
+  such worker; there is no retention rule beyond the tail's size. What the TUI's card shows of a tail is
+  stripped and redacted again.
+- **A session's own timeout signals its child's process group, and only while its leader lives.** The holder
+  sends `SIGTERM` to the group the child leads and, 2 seconds later, `SIGKILL` for what ignored it. The child
+  is looked at again right before that second signal: while it still leads the group, the group gets it; once
+  it has ended, no group is signalled, and the process table is read once instead: each process in a group of
+  that number that had started before the `SIGTERM` is killed by its pid, its start time read again right
+  before (the number was this group's at the `SIGTERM`, so a process that old in it is a member; one that
+  started in the same clock tick as the `SIGTERM`, or with `ps` the same second, is not known to be and is
+  left, and so is everything where the table or the clock cannot be read). A pipeline command that is timed
+  out or stopped is ended the same way. That reading happens only if the process that sent the `SIGTERM` is
+  still up 2 seconds later: the MCP server waits for it when it shuts down, a holder that has recorded its
+  session's end does not. A terminal session's holder signals the group only when
+  the identity it read of the child at the start is read again and is the same; when it was not read then
+  or cannot be read now, the child alone is signalled, and only before its exit was reported.
+  **A member that ignored `SIGTERM`, outlives the leader and is not reached by that reading is left, and kodel
+  does not see it:** the
+  holder records the end (`killed`, `timeout`), and the group of a session whose end is recorded is not
+  looked at, so no status names it (`leftover` is only for a session whose holder went away without
+  recording the end). A worker's terminal session lives 7 days at most; when the holder ends it
+  by that timeout, a process the agent left in another process group (a background `kodel wait`, say) lives
+  on to its own end (the wait command is given the same 7 days). `agent stop`, and the stop at the end of a
+  run, reach the child's descendants as well.
 - **After more than 1 MiB of output** the replay starts in the middle. The client is first given the modes the
   program had switched on by then (mouse, focus events, bracketed paste, the kitty keyboard, application keys, the
   alternate screen, the hidden cursor), not colours, the cursor's place, the scroll region or the screen's content:

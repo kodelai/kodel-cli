@@ -5,7 +5,8 @@
  */
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
-import { SessionError } from "@kodel-ai/pipeline-core";
+import { SessionError, type SessionListEntry } from "@kodel-ai/pipeline-core";
+import { ScriptedSessionAdapter } from "../../testkit/src/engine-fakes";
 import { DIGEST_LINES, digest } from "../src/claude-stream";
 import { bold, dim, RESET, stripAnsi, visibleLength } from "../src/tui/ansi";
 import type { WorkHandle } from "../src/tui/decide";
@@ -40,8 +41,19 @@ import {
   withTasks,
   withWorkers,
 } from "../src/tui/view";
-import type { DecisionMark, WaitMark } from "../src/tui/worker-resume";
+import {
+  type DecisionMark,
+  finishOf,
+  NOT_GONE_ON_LINE,
+  NOT_MOVING_MS,
+  STALLED_LINE,
+  STALLED_MS,
+  WAITS_WITH_YOU_LINE,
+  type WaitMark,
+} from "../src/tui/worker-resume";
+import { createWorkerOptions, type StartHost } from "../src/tui/worker-start";
 import type { WorkerStatus } from "../src/worker-launcher";
+import { createSessionWorkerLauncher } from "../src/worker-launcher-session";
 import { FakeLauncher } from "./fake-launcher";
 
 const NOW = Date.UTC(2026, 10, 6, 15, 0, 0);
@@ -2674,6 +2686,44 @@ describe("t44 the TUI with kodel serve", () => {
     expect(screen(m, WIDER)).not.toContain("kodel serve resumes it");
   });
 
+  test("t47_tui_keeps_the_offer_of_a_stopped_worker_when_serve_is_on", () => {
+    // The daemon never resumes an agent the person stopped: the screen keeps its own offer.
+    const serve = { kind: "active" as const, pid: 4242, since: NOW - 3_600_000 };
+    const stopped = worker("r_1", {
+      state: "killed",
+      label: "stopped",
+      stopped: true,
+      terminal: true,
+      endedBy: "stopped",
+      since: NOW - 20_000,
+    });
+    const m = withWorkers(model([decidedSession()]), statuses(["r_1", stopped]), false, serve);
+    expect(m.offers.r_1?.offer?.seq).toBe(DECIDED.seq);
+    expect(screen(m, WIDER)).toContain("agent stopped at your decision · s resumes");
+    expect(screen(m, WIDER)).not.toContain("kodel serve resumes it");
+    expect(footer(m)).toContain("s resume");
+    // One that a signal ended at the wait (a shutdown) was not stopped by the person: the daemon resumes
+    // it, and the line says how it ended, not "exited".
+    const signalled = worker("r_1", {
+      state: "killed",
+      label: "killed (SIGTERM)",
+      terminal: true,
+      endedBy: "signal",
+      since: NOW - 20_000,
+    });
+    const left = withWorkers(model([decidedSession()]), statuses(["r_1", signalled]), false, serve);
+    expect(left.offers.r_1?.offer).toBeUndefined();
+    expect(screen(left, WIDER)).toContain(
+      "agent killed (SIGTERM) at your decision · kodel serve resumes it",
+    );
+    expect(footer(left)).not.toContain("s resume");
+    // While the TUI runs a step of its own the line names the same end.
+    const busy = withWorkers(model([decidedSession()]), statuses(["r_1", signalled]), true);
+    expect(screen(busy, WIDER)).toContain(
+      "agent killed (SIGTERM) at your decision; the TUI is running the step",
+    );
+  });
+
   test("t44_tui_keeps_the_offer_of_another_checkouts_run", async () => {
     // The daemon serves its own checkout only: a run another checkout made keeps the offer here.
     const foreign = { ...decidedSession(), foreignRoot: "/elsewhere" };
@@ -2784,5 +2834,500 @@ describe("t44 the TUI with kodel serve", () => {
       false,
     );
     expect(screen(newer, WIDER)).not.toContain("lost at");
+  });
+});
+
+describe("t47 the o key, the words of a terminal worker and the TUI's own finish", () => {
+  const terminal = (runId: string, over: Partial<WorkerStatus> = {}) =>
+    worker(runId, { terminal: true, ...over });
+  const attachOf = (m: Model) => effects(m).filter((e) => e.type === "attach_worker");
+
+  test("t47_tui_o_opens_the_latest_attachable_record", () => {
+    // The run's latest record is the resumed one: that is the one opened, once, from the list and the card.
+    const latest = terminal("r_1", {
+      id: "a_000000002_fake",
+      name: "kw-r_1-d12",
+      resumed: [12],
+      resumes: 1,
+      decisionSeq: 12,
+    });
+    const base = withWorkers(model([session("r_1", "waiting")]), statuses(["r_1", latest]), false);
+    for (const focus of ["list", "card"] as const) {
+      const pressed = update({ ...base, focus }, "o", WIDE);
+      expect(attachOf(pressed), focus).toEqual([
+        { type: "attach_worker", runId: "r_1", id: "a_000000002_fake" },
+      ]);
+      expect(effects(pressed).length, focus).toBe(1);
+      expect(pressed.notice, focus).toBe("");
+      // Nothing of the place moves with the key.
+      expect({ ...clean(pressed), notice: base.notice }, focus).toEqual({ ...base, focus });
+      expect(footer({ ...base, focus }, WIDER), focus).toContain("o agent");
+    }
+    // Else a notice and no effect: no agent, a print worker, one that ended, one without a holder.
+    const refusals: [string, WorkerStatus | undefined, string][] = [
+      ["no agent", undefined, "Nothing to open: no agent of kodel on this run."],
+      [
+        "print",
+        worker("r_1"),
+        "Nothing to open: kw-r_1 runs without a terminal (worker: print): kodel agent logs kw-r_1",
+      ],
+      [
+        "ended",
+        terminal("r_1", { state: "exited", label: "exited (0)", exitCode: 0 }),
+        "Nothing to open: agent exited (0).",
+      ],
+      [
+        "no holder",
+        terminal("r_1", {
+          state: "lost",
+          label: "lost (holder gone, child still runs)",
+          childAlive: true,
+        }),
+        "Nothing to open: kw-r_1 has no holder to connect to, though its process still runs; stop it: kodel agent stop a_000000001_fake",
+      ],
+    ];
+    for (const [name, status, notice] of refusals) {
+      const m = withWorkers(
+        model([session("r_1", "waiting")]),
+        status === undefined ? statuses() : statuses(["r_1", status]),
+        false,
+      );
+      const pressed = update(m, "o", WIDE);
+      expect(effects(pressed), name).toEqual([]);
+      expect(pressed.notice, name).toBe(notice);
+      expect(footer(m, WIDER), name).not.toContain("o agent");
+    }
+    // Sample data, a task of the Backlog and the other screens: no effect.
+    const demo = initialModel({ sessions: [session("r_1", "waiting")], proposals: 0 }, "demo", NOW);
+    const onDemo = update(withWorkers(demo, statuses(["r_1", latest]), false), "o", WIDE);
+    expect(effects(onDemo)).toEqual([]);
+    expect(onDemo.notice).toBe("opening an agent is not available in --demo");
+    const onTask = press(
+      withWorkers(
+        model([session("r_1", "running")], ready([row("T-A1")])),
+        statuses(["r_1", latest]),
+        false,
+      ),
+      "down",
+    );
+    expect(onTask.pick.kind).toBe("task");
+    expect(attachOf(update(clean(onTask), "o", WIDE))).toEqual([]);
+    for (const section of [1, 2, 3]) {
+      expect(attachOf(update({ ...base, section }, "o", WIDE)), String(section)).toEqual([]);
+    }
+  });
+
+  test("t47_tui_row_and_card_words_of_a_terminal_worker", () => {
+    // At a gate a terminal worker stays: the card and the row say that it waits with the person.
+    const waits = withWorkers(
+      model([session("r_1", "waiting", { lastWait: WAIT })]),
+      statuses(["r_1", terminal("r_1")]),
+      false,
+    );
+    expect(waits.offers.r_1?.line).toBe(WAITS_WITH_YOU_LINE);
+    expect(screen(waits)).toContain("agent waits with you");
+    expect(screen(waits)).toContain("◆ with you");
+    // A print worker that is alive at a wait keeps today's words.
+    const print = withWorkers(
+      model([session("r_1", "waiting", { lastWait: WAIT })]),
+      statuses(["r_1", worker("r_1")]),
+      false,
+    );
+    expect(print.offers.r_1?.line).toBe("agent running");
+
+    // Decided, the agent alive, no agent's line since: after two minutes the card says so.
+    const decided = (ago: number, extra: Partial<Session> = {}) =>
+      withWorkers(
+        model([
+          session("r_1", "running", {
+            lastWait: WAIT,
+            decision: { ...DECIDED, ts: NOW - ago },
+            moved: false,
+            ...extra,
+          }),
+        ]),
+        statuses(["r_1", terminal("r_1")]),
+        false,
+      );
+    expect(decided(NOT_MOVING_MS - 1).offers.r_1?.line).toBe("agent running");
+    const stuck = decided(NOT_MOVING_MS);
+    expect(stuck.offers.r_1?.line).toBe(NOT_GONE_ON_LINE);
+    expect(screen(stuck, WIDER)).toContain(
+      "the agent has not gone on since your decision · o opens it",
+    );
+    expect(screen(stuck, WIDER)).toContain("◆ not moving");
+    // It went on, or an agent decided: no such line.
+    expect(decided(NOT_MOVING_MS, { moved: true }).offers.r_1?.line).toBe("agent running");
+    expect(
+      decided(NOT_MOVING_MS, { decision: { ...DECIDED, ts: NOW - NOT_MOVING_MS, byAgent: true } })
+        .offers.r_1?.line,
+    ).toBe("agent running");
+
+    // A step open, nothing printed and nothing called for long: stalled. Output alone puts it off.
+    const quiet = (lastOutputAt: number, quietMs: number | undefined, idleWrites = false) =>
+      withWorkers(
+        model([
+          session("r_1", "running", {
+            ...(quietMs === undefined ? {} : { activity: "quiet" as const, quietMs }),
+          }),
+        ]),
+        statuses([
+          "r_1",
+          terminal("r_1", { lastOutputAt, ...(idleWrites ? { idleWrites: true as const } : {}) }),
+        ]),
+        false,
+      );
+    const stalled = quiet(NOW - STALLED_MS, STALLED_MS);
+    expect(stalled.offers.r_1?.line).toBe(STALLED_LINE);
+    expect(screen(stalled)).toContain("agent stalled · o opens it");
+    expect(screen(stalled)).toContain("◆ stalled");
+    expect(quiet(NOW - 1_000, STALLED_MS).offers.r_1?.line).toBe("agent running");
+    expect(quiet(NOW - STALLED_MS, STALLED_MS - 1).offers.r_1?.line).toBe("agent running");
+    expect(quiet(NOW - STALLED_MS, undefined).offers.r_1?.line).toBe("agent running");
+    // An agent whose idle session keeps writing: the engine's quiet alone tells.
+    expect(quiet(NOW - 1_000, STALLED_MS, true).offers.r_1?.line).toBe(STALLED_LINE);
+
+    // A process without a holder: the card names the command that ends it.
+    const orphan = withWorkers(
+      model([session("r_1", "running")]),
+      statuses([
+        "r_1",
+        terminal("r_1", {
+          state: "lost",
+          label: "lost (holder gone, child still runs)",
+          childAlive: true,
+        }),
+      ]),
+      false,
+    );
+    expect(screen(orphan, WIDER)).toContain(
+      "its process still runs without a holder; stop it: kodel agent stop a_000000001_fake",
+    );
+    // A run that cannot be read is not a run that is over: nothing is said to be over or resumed.
+    const unread = withWorkers(
+      model([session("r_1", "unreadable")]),
+      statuses(["r_1", terminal("r_1")]),
+      false,
+    );
+    expect(unread.offers.r_1).toEqual({ line: "agent running", why: "the run cannot be read" });
+  });
+
+  test("t47_tui_shows_the_preflight_note_and_a_refused_start_on_the_row", () => {
+    const base = press(
+      model([session("r_1", "running")], ready([row("T-A1"), row("T-A2")])),
+      "down",
+    );
+    const pressed = update(clean(base), "s", WIDE);
+    const effect = effects(pressed).find((e) => e.type === "prepare_start");
+    if (effect?.type !== "prepare_start") throw new Error("no prepare_start");
+    // What a person's start is told once: in the question, under it, before the answer is given.
+    const note =
+      "whether /proj/.kodel/worktrees asks to trust the folder is not known; if it does, the agent waits at that question";
+    const asking = withStartReady(clean(pressed), effect.seq, effect.key, ["dev"], undefined, note);
+    const text = lines(asking, WIDER)
+      .join(" ")
+      .replace(/[│┃\s]+/g, " ");
+    expect(text).toContain("Start T-A1 in a background agent (pipeline dev)?");
+    expect(text).toContain("asks to trust the folder is not known");
+    // A note cannot draw on the screen.
+    const unsafe = withStartReady(
+      clean(pressed),
+      effect.seq,
+      effect.key,
+      ["dev"],
+      undefined,
+      `a${ESC}[2Jb`,
+    );
+    for (const line of lines(unsafe, WIDER)) expect(UNSAFE.test(line)).toBe(false);
+    // Without a note the window is as before.
+    const plainAsk = withStartReady(clean(pressed), effect.seq, effect.key, ["dev"]);
+    expect(plainAsk.start?.note).toBeUndefined();
+
+    // A refusal of the preflight: the notice, and the row of the task says why until a start is let through.
+    const refused = withStartRefused(
+      clean(pressed),
+      effect.seq,
+      effect.key,
+      "Could not start T-A1: a terminal session cannot run under Bun.",
+      "a terminal session cannot run under Bun",
+    );
+    expect(refused.start).toBeNull();
+    expect(refused.notice).toBe("Could not start T-A1: a terminal session cannot run under Bun.");
+    const rowOfTask = (m: Model, key: string) =>
+      lines(m, WIDER).find((l) => l.replace(/^[\s›]+/, "").startsWith(key)) ?? "";
+    expect(rowOfTask(refused, "T-A1")).toContain("[cannot start: a terminal session");
+    expect(rowOfTask(refused, "T-A2")).not.toContain("cannot start");
+    const again = update(clean(refused), "s", WIDE);
+    const second = effects(again).find((e) => e.type === "prepare_start");
+    if (second?.type !== "prepare_start") throw new Error("no second prepare_start");
+    const letThrough = withStartReady(clean(again), second.seq, second.key, ["dev"]);
+    expect(letThrough.startRefused).toEqual({});
+    // A refusal with no reason of the preflight (nothing to start with) leaves the row alone.
+    const bare = withStartRefused(clean(pressed), effect.seq, effect.key, "Could not start T-A1.");
+    expect(bare.startRefused).toEqual({});
+  });
+
+  test("t44_tui_leaves_finish_to_an_active_daemon", async () => {
+    const ended = () => {
+      const launcher = new FakeLauncher();
+      launcher.statusMap.set("r_1", terminal("r_1"));
+      return launcher;
+    };
+    const finishWorker = (launcher: FakeLauncher) => (runId: string) => launcher.finish(runId);
+    // An active daemon finishes the worker of an ended run itself: the screen does nothing.
+    const withDaemon = ended();
+    const active = loop([session("r_1", "done")], withDaemon, {
+      finishWorker: finishWorker(withDaemon),
+      serve: async () => ({ kind: "active", record: SERVE_RECORD }),
+    });
+    await wait(200);
+    expect(withDaemon.finished).toEqual([]);
+    await active.quit();
+    // Without one the screen does, once: the record then reads stopped and is not asked again.
+    const alone = ended();
+    const off = loop([session("r_1", "done")], alone, { finishWorker: finishWorker(alone) });
+    await wait(200);
+    expect(alone.finished).toEqual(["r_1"]);
+    expect(alone.stopped).toEqual([]);
+    await off.quit();
+    // A daemon that fell silent gives the work back, as it does the resumes.
+    const silentOne = ended();
+    const silent = loop([session("r_1", "done")], silentOne, {
+      finishWorker: finishWorker(silentOne),
+      serve: async () => ({
+        kind: "silent",
+        record: { ...SERVE_RECORD, cycle_at: NOW - 200_000 },
+      }),
+    });
+    await wait(200);
+    expect(silentOne.finished).toEqual(["r_1"]);
+    await silent.quit();
+    // One finish at a time: three ended runs take three reads, never two stops at once.
+    const three = new FakeLauncher();
+    for (const id of ["r_1", "r_2", "r_3"]) three.statusMap.set(id, terminal(id));
+    let out = 0;
+    let most = 0;
+    const many = loop(
+      ["r_1", "r_2", "r_3"].map((id) => session(id, "done")),
+      three,
+      {
+        finishWorker: async (runId) => {
+          out += 1;
+          most = Math.max(most, out);
+          await wait(40);
+          await three.finish(runId);
+          out -= 1;
+        },
+      },
+    );
+    await wait(500);
+    expect([...three.finished].sort()).toEqual(["r_1", "r_2", "r_3"]);
+    expect(most).toBe(1);
+    await many.quit();
+    // A stop that fails is told once and not tried again from this screen.
+    const failing = ended();
+    let tries = 0;
+    const bad = loop([session("r_1", "done")], failing, {
+      finishWorker: async () => {
+        tries += 1;
+        throw new Error("the holder does not answer");
+      },
+    });
+    await wait(250);
+    expect(tries).toBe(1);
+    expect(bad.t.last()).toContain(
+      "Could not stop the agent of r_1 (the run is over): the holder does not answer",
+    );
+    await bad.quit();
+    // A finish that ends nothing and fails with nothing (the lock was held) does not hold up the others:
+    // every other ended run has its turn before that one is asked again.
+    const stuck = new FakeLauncher();
+    for (const id of ["r_1", "r_2", "r_3"]) stuck.statusMap.set(id, terminal(id));
+    const asked: string[] = [];
+    const held = loop(
+      ["r_1", "r_2", "r_3"].map((id) => session(id, "done")),
+      stuck,
+      {
+        finishWorker: async (runId) => {
+          asked.push(runId);
+          if (runId !== "r_1") await stuck.finish(runId);
+        },
+      },
+    );
+    await wait(500);
+    expect([...stuck.finished].sort()).toEqual(["r_2", "r_3"]);
+    expect(asked.slice(0, 3)).toEqual(["r_1", "r_2", "r_3"]);
+    // it is asked again later, and nothing is said of it
+    expect(asked.filter((id) => id === "r_1").length).toBeGreaterThan(1);
+    expect(held.t.last()).not.toContain("Could not stop the agent");
+    await held.quit();
+  });
+
+  test("t47_tui_never_finishes_an_unreadable_or_foreign_run", async () => {
+    const live = { r_1: terminal("r_1") };
+    const off = { kind: "off" } as const;
+    // The pure rule: only a run of this checkout read as ended, with a live agent in a terminal.
+    for (const status of ["done", "failed", "canceled"] as const) {
+      expect(finishOf([session("r_1", status)], live, off), status).toBe("r_1");
+    }
+    for (const status of ["unreadable", "running", "waiting"] as const) {
+      expect(finishOf([session("r_1", status)], live, off), status).toBeUndefined();
+    }
+    expect(
+      finishOf([session("r_1", "done", { foreignRoot: "/elsewhere" })], live, off),
+    ).toBeUndefined();
+    expect(finishOf([session("r_1", "done")], live, { kind: "active" })).toBeUndefined();
+    expect(finishOf([session("r_1", "done")], live, { kind: "silent" })).toBe("r_1");
+    // A print worker is left to print its last line; a record that is over, or unknown, is not stopped.
+    expect(finishOf([session("r_1", "done")], { r_1: worker("r_1") }, off)).toBeUndefined();
+    for (const state of ["exited", "killed", "lost", "unknown"] as const) {
+      expect(
+        finishOf([session("r_1", "done")], { r_1: terminal("r_1", { state }) }, off),
+        state,
+      ).toBeUndefined();
+    }
+    expect(finishOf([session("r_1", "done")], {}, off)).toBeUndefined();
+
+    // The loop: an unreadable run and another checkout's run are never handed to the stop.
+    const launcher = new FakeLauncher();
+    for (const id of ["r_1", "r_2", "r_3"]) launcher.statusMap.set(id, terminal(id));
+    const asked: string[] = [];
+    const { quit } = loop(
+      [
+        session("r_1", "unreadable"),
+        session("r_2", "done", { foreignRoot: "/elsewhere" }),
+        session("r_3", "running"),
+      ],
+      launcher,
+      {
+        finishWorker: async (runId) => {
+          asked.push(runId);
+        },
+      },
+    );
+    await wait(200);
+    expect(asked).toEqual([]);
+    await quit();
+
+    // The act itself reads again under the lock: what the screen saw is not what decides.
+    const summaries: Awaited<ReturnType<StartHost["runSummaries"]>> = [];
+    let locked = 0;
+    const finisher = new FakeLauncher();
+    const host: StartHost = {
+      list: async () => ({ pipelines: [] }),
+      taskLink: async () => undefined,
+      start: async () => {
+        throw new Error("not used");
+      },
+      open: async () => undefined,
+      runSummaries: async () => summaries,
+      foreignRootOf: (meta) => (meta.root === "/elsewhere" ? meta.root : undefined),
+      withWorkerStartLock: async (fn) => {
+        locked += 1;
+        return fn();
+      },
+    };
+    const { finishWorker } = createWorkerOptions({
+      host,
+      tasks: undefined as never,
+      launcher: finisher,
+      dialog: false,
+      root: "/proj",
+      version: "0.0.0",
+    });
+    if (finishWorker === undefined) throw new Error("no finishWorker");
+    const state = (status: string) => ({ status }) as never;
+    // The run is gone, cannot be read, goes on (it was reopened in between), or is another checkout's.
+    await finishWorker("r_1");
+    summaries.push({ meta: { runId: "r_1" }, state: undefined });
+    await finishWorker("r_1");
+    summaries.splice(0, 1, { meta: { runId: "r_1" }, state: state("running") });
+    await finishWorker("r_1");
+    summaries.splice(0, 1, { meta: { runId: "r_1" }, state: state("paused") });
+    await finishWorker("r_1");
+    summaries.splice(0, 1, {
+      meta: { runId: "r_1", root: "/elsewhere" },
+      state: state("completed"),
+    });
+    await finishWorker("r_1");
+    expect(finisher.finished).toEqual([]);
+    expect(locked).toBe(5);
+    for (const status of ["completed", "failed", "canceled"]) {
+      summaries.splice(0, 1, { meta: { runId: "r_1" }, state: state(status) });
+      await finishWorker("r_1");
+    }
+    expect(finisher.finished).toEqual(["r_1", "r_1", "r_1"]);
+    // Nothing is typed, nothing is decided: the only call is the stop of the session.
+    expect(finisher.calls).toEqual(["finish r_1", "finish r_1", "finish r_1"]);
+  });
+
+  test("t47_card_tail_lines_are_redacted", async () => {
+    // A terminal has no event stream: the card shows the last lines of its tail, which the launcher
+    // redacts by the project's rules and strips of everything that could draw.
+    const RUN = "r_0mw53d7fj_o2lc";
+    const SECRET = "tok_4f9a8b7c6d5e";
+    const adapter = new ScriptedSessionAdapter();
+    const started = await adapter.start({
+      argv: ["claude"],
+      cwd: "/proj",
+      origin: "cli",
+      name: `kw-${RUN}`,
+      mode: "pty",
+      agent: { engine: "claude", session: UUID },
+    });
+    adapter.finish(
+      started.id,
+      { state: "running" },
+      `reading the config\nthe token is ${SECRET} here\n${ESC}[2J${ESC}[31mpainted${ESC}[0m line\n‮drowssap\n`,
+    );
+    const launcher = createSessionWorkerLauncher({
+      adapter,
+      self: { exec: "/usr/local/bin/node", args: ["/opt/kodel/dist/kodel.js"] },
+      root: "/proj",
+      stateBase: "/home/u/.kodel",
+      environment: {},
+      rules: [{ name: "token", pattern: /tok_[0-9a-f]+/g }],
+      servedTools: [],
+      which: async () => undefined,
+      exec: async (_file, args) => {
+        if (args.includes("ls")) {
+          const rows: SessionListEntry[] = [...adapter.sessions.values()].map((x) => ({
+            id: x.id,
+            ...(x.name === undefined ? {} : { name: x.name }),
+            command: "claude",
+            status: { ...x.status },
+            mode: "pty",
+            agent: { engine: "claude", session: UUID, source: "chosen" as const },
+          }));
+          return { stdout: JSON.stringify(rows), stderr: "", code: 0 };
+        }
+        return { stdout: "", stderr: "not used", code: 2 };
+      },
+      platform: "darwin",
+      clock: () => NOW,
+      uuid: () => UUID,
+    });
+    const status = (await launcher.statuses([RUN])).get(RUN);
+    if (status === undefined) throw new Error("no status");
+    expect(status.terminal).toBe(true);
+    const progress = await launcher.progress(RUN);
+    expect(progress.lines.join("\n")).not.toContain(SECRET);
+    expect(progress.lines.join("\n")).toContain("the token is");
+    const m = withProgress(
+      withWorkers(model([session(RUN, "running")]), statuses([RUN, status]), false),
+      RUN,
+      progress,
+    );
+    const drawn = lines(m, WIDER);
+    const text = drawn.join("\n");
+    expect(text).toContain("reading the config");
+    expect(text).toContain("the token is");
+    expect(text).toContain("painted");
+    expect(text).not.toContain(SECRET);
+    for (const line of drawn) expect(UNSAFE.test(line)).toBe(false);
+    // The raw frame holds no escape but the screen's own styles and no secret either.
+    const raw = render(m, WIDER).join("\n");
+    expect(raw).not.toContain(SECRET);
+    expect(raw.replace(OWN_STYLE, "")).not.toContain(ESC);
   });
 });

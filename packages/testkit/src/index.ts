@@ -10,6 +10,7 @@ export * from "./dsl";
 export * from "./engine-fakes";
 export * from "./engine-step-sketch";
 export * from "./fake-agent-history";
+export * from "./fake-terminal-agent";
 export * from "./history-fixtures";
 export * from "./latch-runner";
 export * from "./load";

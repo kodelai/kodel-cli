@@ -5,14 +5,18 @@
  */
 import { randomUUID } from "node:crypto";
 import {
+  enginesAgainstHead,
   loadMcpRoles,
   openTaskService,
   resolveBase,
   type ServeLauncherPort,
+  type UnattendedEngines,
+  unattendedEngines,
 } from "@kodel-ai/local";
 import { KodelError, resolveToolSet } from "@kodel-ai/pipeline-core";
 import type { ServeWorkerView } from "@kodel-ai/pipeline-core/serve";
 import { pipesAdapter } from "./agent-commands";
+import { terminalSizeOf } from "./attach-client";
 import type { WorkerLauncher, WorkerStatus } from "./worker-launcher";
 
 export interface WorkerLauncherInput {
@@ -23,6 +27,11 @@ export interface WorkerLauncherInput {
   /** This process, so the children and the worker's server are this very build. */
   self: { exec: string; args: string[] };
   platform?: string;
+  /**
+   * The `engines` block for the starts of this launcher, in place of the committed one: `kodel agent
+   * start` gives the block a person was shown and accepted at their terminal.
+   */
+  engines?: () => Promise<UnattendedEngines>;
 }
 
 /**
@@ -73,6 +82,11 @@ export async function openWorkerLauncher(input: WorkerLauncherInput): Promise<Wo
     platform: input.platform ?? process.platform,
     clock: Date.now,
     uuid: () => randomUUID(),
+    // Nobody watches these starts: the block is used only as `HEAD` of the checkout holds it.
+    engines:
+      input.engines ??
+      (async () => unattendedEngines(await enginesAgainstHead({ root, storeRoot: input.dataDir }))),
+    terminalSize: () => terminalSizeOf(process.stdout),
   });
 }
 
@@ -92,15 +106,24 @@ export function serveWorkerOf(status: WorkerStatus): ServeWorkerView {
     ...(status.decisionSeq === undefined ? {} : { decisionSeq: status.decisionSeq }),
     ...(status.lastOutputAt === undefined ? {} : { lastOutputAt: status.lastOutputAt }),
     ...(status.stopped === true ? { stopped: true } : {}),
+    ...(status.childAlive === true ? { childAlive: true } : {}),
+    ...(status.terminal === true ? { terminal: true } : {}),
+    ...(status.endedBy === undefined ? {} : { endedBy: status.endedBy }),
+    ...(status.idleWrites === true ? { idleWrites: true } : {}),
+    ...(status.groupUnread === true ? { groupUnread: true } : {}),
   };
 }
 
-/** The daemon's port over the CLI's launcher: the same calls, and nothing that reads logs or stops a worker. */
+/**
+ * The daemon's port over the CLI's launcher: the same calls, and nothing that reads logs, types into a
+ * session or stops the worker of a run that goes on (`finish` ends the session of a run that is over).
+ */
 export function serveLauncherOf(launcher: WorkerLauncher): ServeLauncherPort {
   return {
     preflight: (input) => launcher.preflight(input),
     start: (input) => launcher.start(input),
     resume: (input) => launcher.resume(input),
+    finish: (runId) => launcher.finish(runId),
     async statuses(runIds) {
       const out = new Map<string, ServeWorkerView>();
       for (const [runId, status] of await launcher.statuses(runIds)) {

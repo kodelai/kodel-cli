@@ -28,8 +28,9 @@ This repository adds these rules:
   the agent may do). The same goes for the `decisions` block of the project config: it says what the
   agent may decide for the person (`docs/decisions.md`), so only the person changes it. So do the `storage`
   and `project_id` keys, which say where the history is kept (`docs/history.md`), the `serve` block, which
-  says what `kodel serve` starts on its own (`docs/serve.md`), and the `mcp` block, which says which tools each
-  role of the server serves (`docs/mcp-roles.md`).
+  says what `kodel serve` starts on its own (`docs/serve.md`), the `mcp` block, which says which tools each
+  role of the server serves (`docs/mcp-roles.md`), and the `engines` block, which says which
+  programs kodel starts as agents and how (`docs/engines.md`; a start nobody watches uses it only as committed).
 - Do not edit the files in `.kodel/pipelines/` while a run is going. To change the pipeline of a run, ask
   the person whether to change it now, and then use `pipeline_propose_change`; the run stops at the end of
   its current step until the person accepts the change. A pipeline file edited by hand is noticed all the
@@ -38,10 +39,13 @@ This repository adds these rules:
   write into `.kodel/pipelines/` yourself. The proposal waits in `.kodel/proposals/` (with `storage: home`, in the
   project's folder under `~/.kodel`; do not edit it) until the person accepts it.
 - Do not run `gate`, `ack`, `seal`, `resume`, `migrate`, `pipeline changes apply|discard|restore`,
-  `pipeline proposals apply|discard`, `task approve` or `agent stop|rm|exec|forget-name|attach`: they refuse to run
-  without a terminal, and all but two ask for a confirmation (`agent exec`, which starts a command as an agent, and
-  `agent attach`, which connects a person's terminal to an agent that runs in one of its own, ask for none), so
-  trying them only fails. `agent ls` and `agent logs` only read and are yours.
+  `pipeline proposals apply|discard`, `task approve` or `agent stop|rm|exec|forget-name|attach|start|prune`: they
+  refuse to run without a terminal, and all but three ask for a confirmation before they change anything (`agent
+  exec`, which starts a command as an agent, and `agent attach`, which connects a person's terminal to an agent that
+  runs in one of its own, ask for none; `agent start`, which starts the coding agent in a terminal of its own, asks
+  only when the `engines` block is not the committed one; `agent prune` asks nothing when it removes nothing: with
+  `--dry-run`, or with no finished agent to remove), so trying them only fails.
+  `agent ls`, `agent logs` and `agent doctor` (whether a background agent can start here) only read and are yours.
 - Do not run `kodel serve` (it refuses under `KODEL_ENGINE`, but not in your own shell): the person starts it. A
   task you create or change with the `task_*` tools is not started by it until the person runs
   `kodel task approve <key>`: tell them so.
@@ -54,19 +58,27 @@ This repository adds these rules:
   `agent_hints: { wait: false }` in the project config; then no answer mentions `kodel wait`, and you just
   end your turn and wait to be told.
 - A pipeline may fork: a `node` answer then lists every open step in `steps`, and `execution.mode` says how
-  this project works them. In `parallel` mode start one subagent (a worker) per step that has no `taken_by`
+  this project works them. In `parallel` mode start one subagent (a fork worker) per step that has no `taken_by`
   and give it these rules: call `pipeline_take_step` with the run id and its step's slug and keep the
   `claim_token`; if the answer is `taken` (another worker holds it), `queued` (the project's
   `agents.max_parallel` steps are already being worked) or `none` (no free step), stop and report that
   answer back without doing anything; do the step where its `workdir` says; call
   `pipeline_complete_step` with `node_slug`, `attempt` and that `claim_token`; report the answer back to the
   agent that started you as it is (one of `node`, `waiting`, `running` or `done`, with the `also_waiting` list
-  it may carry), never write to the person, and never start `kodel wait` as a worker. In `sequential` mode
+  it may carry), never write to the person, and never start `kodel wait` as a fork worker. In `sequential` mode
   do the steps one by one, without taking them, unless its instruction says the project lets you work
   them in parallel (`agents.subagents: auto`): then, if you can start subagents, call `pipeline_next_step`
   again with `subagents: {can: true}` to have them handed out to workers. When the workers are back, call `pipeline_next_step`
   yourself; what waits for a person (`also_waiting` names every gate and pause) is for you to tell them,
   with the command of each (`--node <slug>` when several wait).
+- Two things are called a worker; keep them apart. A **fork worker** is the subagent of a fork (the rules
+  above): it lives inside your session, reports to you and never starts `kodel wait`. A **background agent**
+  is the agent of a whole run that kodel itself started (`s` in `kodel tui`, `kodel serve`, `kodel agent start
+  --pipeline`), the session `kw-<run>` of `kodel agent ls`. If you are one, you are the driver of your run:
+  at a `waiting` answer you tell what waits, start the wait command exactly as the answer spells it (in the
+  background) and end your turn, whatever `agent_hints.wait` says for other agents, and you go on when it
+  reports. You cannot decide: your server serves no decision tool, and the person's commands refuse inside
+  your session (`docs/decisions.md`).
 
 A step may keep a file with the run instead of in the project (a plan, a screenshot) with
 `pipeline_attachment_write`; a pipeline can require one with an `attachment` check, and the person sees
@@ -91,8 +103,10 @@ until a run stops waiting for a person (see above); the same
 binary has `gate`, `resume`, `ack`, `seal`, `migrate` (takes a run to the newest stored format, one way), and `pipeline changes` (`show`, `apply`, `discard`, `history`,
 `restore`) for a change of the pipeline of a run that is going, and `pipeline proposals` (`show`, `apply`,
 `discard`) for a pipeline the agent proposed outside a run, and `serve`, a daemon that starts matching tasks in
-background workers and resumes them after a decision, by the `serve` block of the project config
-(`docs/serve.md`; off by default). With `decisions: { dialog: true }` in the project
+background agents and resumes them after a decision, by the `serve` block of the project config
+(`docs/serve.md`; off by default). A background agent runs in a terminal of its own by default (`kodel agent attach kw-<run>`, or `o` in `kodel tui`, opens it and `Ctrl+\` leaves it running; the committed
+line `engines: { claude: { worker: print } }` keeps `claude -p`), and `agent start`, `agent prune` and `agent doctor` start one by hand, remove
+the finished ones and say whether one can start here. With `decisions: { dialog: true }` in the project
 config (off by default), a client that can show a form (MCP elicitation) is also asked there at a gate, a
 pause, a change of the pipeline of a run and a state changed outside kodel, and the person's answer in that
 dialog is the same decision as the command; the commands stay the way to decide when the dialog is off, the
@@ -121,7 +135,7 @@ Bun workspace (TypeScript, ESM). Runtime target: Node >= 22.19; Bun is the devel
 
 - `packages/pipeline-core` (`@kodel-ai/pipeline-core`): pure engine (pipeline spec, result checks, run state machine, routing, redaction, error codes, format versions), the `PipelineService` and the adapter interfaces. It also holds the task adapter contract (`tasks.ts`) and the `TaskService`; the `task_*` tools (`mcp/task-tools.ts`) exist only when the config turns tasks on. No file system, process, network or clock access. The subpath `@kodel-ai/pipeline-core/mcp` holds the MCP tool definitions bound to the service (it depends on the MCP SDK; the main entry does not import it). Transport-free: the CLI adds stdio, the server adds HTTP and auth.
 - `packages/local` (`@kodel-ai/local`): local adapters (file state store, process executor, git snapshots, system clock, the `local` task adapter that keeps one YAML file per task in `.kodel/tasks/`).
-- `packages/cli` (`kodel`): the CLI, built to a single JS file (`dist/kodel.js`), including human-only commands (`gate`, `resume`, `ack`, `seal`, `migrate`, `pipeline changes apply|discard|restore`, `pipeline proposals apply|discard`, `task approve`, `agent stop|rm|exec|forget-name|attach`). It also holds the client of `agent attach` and the loader of the one native module (`@lydell/node-pty`, an optional dependency, loaded only by the holder of a terminal session).
+- `packages/cli` (`kodel`): the CLI, built to a single JS file (`dist/kodel.js`), including human-only commands (`gate`, `resume`, `ack`, `seal`, `migrate`, `pipeline changes apply|discard|restore`, `pipeline proposals apply|discard`, `task approve`, `agent stop|rm|exec|forget-name|attach|start|prune`). It also holds the client of `agent attach` and the loader of the one native module (`@lydell/node-pty`, an optional dependency, loaded only by the holder of a terminal session).
 - `packages/testkit` (`@kodel-ai/testkit`, private): scripted and adversarial fake agents, fixture helpers.
 - `adapters/`: per-agent pieces (MCP config writers, deny rules, driver prompts). `skills/`: agent-facing skills.
 - `tests/e2e`, `tests/agents`: end-to-end and real-agent scenarios. `tests/pty`: terminal sessions against the built artifact on a real PTY; they skip, with a printed reason, where none can be opened (`KODEL_REQUIRE_PTY=1` makes a skip a failure). `fixtures/formats/`: golden fixtures per format version.

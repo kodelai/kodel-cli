@@ -988,7 +988,7 @@ Fixed:
    the holder's, says the boot line when `ready` was not said yet, and the `finally` tells the clients and
    removes the socket. `SIGTERM` and `SIGHUP` to the holder (`HOLDER_SIGNALS`) stop the child as `stop` does
    (`SIGTERM`, then `SIGKILL` after the grace) and the session ends on the normal path with `killed`, reason
-   `stopped`. The last record write is inside a `try`. `tA_pty_holder_signal_ends_as_stop` (fake, and real for
+   `stopped`. The last record write is inside a `try`. `tA_pty_holder_signal_stops_the_child_and_names_the_signal` (fake, and real for
    both signals), `tA_pty_holder_real_signal_listeners_are_removed`,
    `tA_pty_socket_unlinked_on_unexpected_throw`, `tA_pty_final_record_write_failure_is_not_a_crash`. Not covered:
    a throw inside a timer or a listener (an uncaught exception of the process, not of this function), and

@@ -110,3 +110,20 @@ it (an attempt entered before the field) is judged against the run's current ver
 `kodel report` reads `changes/run.patch` by its name, not through the journal; it refuses a link in place of the
 folder or the file and a file over 8 MB. The journal's `changes_recorded` says whether the file was meant to be
 there.
+
+## Migration: background agents run in a terminal by default (T-47)
+
+Since T-47 a background agent of a run (`s` in `kodel tui`, `kodel serve`) is started in a terminal session of
+its own when the project config does not say otherwise; before, it was always `claude -p`. A terminal session
+needs the built kodel on Node with its optional package `@lydell/node-pty`. Where none can run (kodel from
+source under Bun, the package or its binary missing), a start is now **refused** with the reason; nothing
+falls back to a print process. To keep the agents as they were, commit this line in `.kodel/config.yaml`:
+
+```yaml
+engines: { claude: { worker: print } }
+```
+
+The refusal spells the same line. It must be committed: the daemon and the TUI use the `engines` block only
+as it is in `HEAD` (`docs/engines.md`). A worker that was already running or waiting at a gate when kodel was
+updated is listed and resumed as before (`docs/run-formats.md`). `kodel agent doctor` says whether an agent
+can start here.

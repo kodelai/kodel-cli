@@ -350,14 +350,14 @@ export async function runHolder(deps: HolderDeps): Promise<number> {
   if (input.timeoutMs !== undefined) {
     timer = setTimeout(() => {
       timedOut = true;
-      killTree(child.pid);
+      killTree(child);
     }, input.timeoutMs);
   }
   let lastWritten = now();
   const watcher = setInterval(() => {
     flush();
     if (!existsSync(input.dir)) {
-      killTree(child.pid); // the directory was removed under a live child
+      killTree(child); // the directory was removed under a live child
       return;
     }
     if (lastOutputAt !== undefined && now() - lastWritten >= STATUS_MIN_INTERVAL_MS) {

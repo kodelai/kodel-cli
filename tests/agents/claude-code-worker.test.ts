@@ -144,6 +144,8 @@ async function setup(prompt?: string) {
     platform: process.platform,
     clock: Date.now,
     uuid: () => uuid,
+    // This scenario is the `claude -p` worker; the terminal one is `terminal-worker.test.ts`.
+    engines: async () => ({ ok: true, engines: { claude: { worker: "print" } } }),
   });
   const host = humanHost(sandbox);
   const options = createWorkerOptions({
