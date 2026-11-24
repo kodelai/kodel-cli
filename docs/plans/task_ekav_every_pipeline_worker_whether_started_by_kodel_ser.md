@@ -1573,3 +1573,35 @@ claim the code does not keep.
   signal the pid.
 - **Docs:** `docs/engines.md` names `kodel agent start --pipeline` as the command that starts a run's
   background agent (`agent start` alone starts an agent of no run).
+
+### `killTree` ends what is left of a group whose leader ended, by pid (regression of the rule above)
+
+Dropping the delayed `SIGKILL` at the leader's exit left a pipeline command running on Linux: the command runs
+as `sh -c '<command>'`, the shell (the leader) ends on `SIGTERM`, and a child of it that ignores `SIGTERM`
+stayed in the group with nothing to kill it (`a command that ignores SIGTERM does not outlive the server
+either`, `cli.test.ts`; macOS hid it, its `sh` replaces itself with the last command).
+
+- **The rule stays:** a group is signalled only while its leader lives. `killTree` reads a clock right before
+  the `SIGTERM` (the leader lives, so the group of that number is the child's then) and no longer drops the
+  escalation at the child's exit. When the grace is over and the child still leads, the group gets `SIGKILL`
+  as before. When it has ended, the process table is read once and every live process whose group has that
+  number and that had started before the `SIGTERM` is killed by pid, its identity read again right before.
+  The number was in use by the child's group at the `SIGTERM`, so no other group had it then: a process that
+  old in a group of that number is a member of the child's group, whoever has the number since.
+- **Clocks** (`process-table.ts`: `systemStartClock`, `startedBefore`): on Linux `/proc/<pid>/stat` (start in
+  ticks since the boot) against `/proc/uptime`, and the session's number has to be the group's too (the child
+  is started as a session leader; an older process cannot join a newer session). Elsewhere `ps`'s `lstart`
+  (whole seconds, wall clock): a process counts when its whole second lies before the `SIGTERM`, and nothing
+  counts when the wall clock went back against the steady one in between.
+- **Stated limits:** a member that started in the tick (Linux) or second (`ps`) of the `SIGTERM`, or after it,
+  is left; nothing is signalled where the table or the clock cannot be read; with `ps` (no session column
+  read) an old process of another program that moved itself into a new group of the reused number within the
+  grace would be taken for a member. The reading needs the process that sent the `SIGTERM` to be up at the
+  end of the grace (the MCP server waits; a holder that recorded its session's end is gone by then, so the
+  limit of the section above holds for a session's own timeout).
+- **Tests:** `t47_kill_tree_leader_gone_before_the_grace_kills_its_members_by_pid_and_no_group`,
+  `..._leader_gone_with_no_member_left_signals_nothing_more`,
+  `..._member_is_killed_only_while_it_is_still_the_process_of_the_table`,
+  `..._leader_gone_signals_nothing_where_the_table_or_the_clock_cannot_be_read`,
+  `t47_started_before_takes_a_whole_second_of_ps_and_refuses_a_clock_set_back`, and with real processes
+  `t47_kill_tree_real_member_that_ignores_sigterm_does_not_outlive_its_leader` (`command.test.ts`).

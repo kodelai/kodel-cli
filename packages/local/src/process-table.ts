@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 
 /** A process identity: the same pid with another start time is another process. Compared only within one method. */
 export interface ProcessIdentity {
@@ -258,6 +258,147 @@ export const groupMembers = (
     if (!same) return { known: true, stranger: true, members: [] };
   }
   return { known: true, stranger: false, members };
+};
+
+/** A moment on the clock the start times of one method are read on; `mono` is this process's own steady clock. */
+export interface StartMark {
+  method: ProcessIdentity["method"];
+  /** `proc-ticks`: clock ticks since the boot. `ps-lstart`: milliseconds of the wall clock. */
+  at: number;
+  mono: number;
+}
+
+/** A process with the moment it started, on the clock of its identity's method. */
+export interface StartedRow {
+  pid: number;
+  pgid: number;
+  /** The session's number, where the table gives it (`/proc`). */
+  session?: number;
+  zombie: boolean;
+  started: number;
+  identity: ProcessIdentity;
+}
+
+/** What a sweep of a group whose leader is gone asks of the system; a test gives its own. */
+export interface StartClock {
+  /** Now, on the clock the start times are read on; `undefined` when it cannot be read. */
+  now(): StartMark | undefined;
+  /** The whole table, read now; `undefined` when it cannot be read. */
+  rows(): StartedRow[] | undefined;
+  identity(pid: number): ProcessIdentity | undefined;
+}
+
+/** How far the wall clock may run apart from the steady one before a `ps-lstart` reading says nothing. */
+const CLOCK_TOLERANCE_MS = 100;
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+/** The start of the second `ps` printed as `lstart` (under `LC_ALL=C TZ=UTC0`), in milliseconds. */
+export const parseLstart = (text: string): number | undefined => {
+  const m = /^\w{3}\s+(\w{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})$/.exec(text.trim());
+  if (!m) return undefined;
+  const month = MONTHS.indexOf(m[1] as string);
+  if (month < 0) return undefined;
+  return Date.UTC(Number(m[6]), month, Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5]));
+};
+
+let cachedTick: number | undefined | null = null;
+const ticksPerSecond = (): number | undefined => {
+  if (cachedTick !== null) return cachedTick;
+  const result = spawnSync("getconf", ["CLK_TCK"], { encoding: "utf8", timeout: 2_000 });
+  const value = result.status === 0 ? Number(result.stdout.trim()) : Number.NaN;
+  cachedTick = Number.isInteger(value) && value > 0 ? value : undefined;
+  return cachedTick;
+};
+
+const procRows = (): StartedRow[] | undefined => {
+  let names: string[];
+  try {
+    names = readdirSync("/proc");
+  } catch {
+    return undefined;
+  }
+  const boot = readText("/proc/sys/kernel/random/boot_id")?.trim();
+  const rows: StartedRow[] = [];
+  for (const name of names) {
+    if (!/^\d+$/.test(name)) continue;
+    const pid = Number(name);
+    const fields = procStat(pid);
+    const pgid = Number(fields?.[2]);
+    const session = Number(fields?.[3]);
+    const ticks = fields?.[19];
+    const started = Number(ticks);
+    if (fields === undefined || ticks === undefined) continue;
+    if (!Number.isInteger(pgid) || !Number.isInteger(session) || !Number.isInteger(started))
+      continue;
+    const identity: ProcessIdentity =
+      boot === undefined
+        ? { method: "proc-ticks", value: ticks }
+        : { method: "proc-ticks", value: ticks, boot };
+    rows.push({ pid, pgid, session, zombie: fields[0] === "Z", started, identity });
+  }
+  return rows;
+};
+
+export const systemStartClock: StartClock = {
+  now() {
+    const mono = performance.now();
+    if (procStat(process.pid) === undefined) return { method: "ps-lstart", at: Date.now(), mono };
+    const uptime = Number(readText("/proc/uptime")?.split(" ")[0]);
+    const tick = ticksPerSecond();
+    if (!Number.isFinite(uptime) || tick === undefined) return undefined;
+    return { method: "proc-ticks", at: Math.floor(uptime * tick), mono };
+  },
+  rows() {
+    let rows: StartedRow[] | undefined;
+    if (procStat(process.pid) !== undefined) rows = procRows();
+    else {
+      const table = systemProcesses.rows();
+      rows = table?.flatMap((row) => {
+        const started = parseLstart(row.started);
+        if (started === undefined) return [];
+        const identity: ProcessIdentity = { method: "ps-lstart", value: row.started };
+        return [
+          { pid: row.pid, pgid: row.pgid, zombie: row.state.startsWith("Z"), started, identity },
+        ];
+      });
+    }
+    // A table without this very process was not read in full.
+    return rows?.some((row) => row.pid === process.pid) ? rows : undefined;
+  },
+  identity: (pid) => processIdentity(pid),
+};
+
+/**
+ * The live processes of the group `pgid` that had started before `mark`, a moment at which the group was known
+ * to be this program's (its leader lived). The group's number was in use then, so no other group had it: a
+ * process that is in a group of that number now and started before that moment is of the group that was meant,
+ * whoever has the number since. A process that started in the same tick (`proc-ticks`) or the same second
+ * (`ps-lstart`) as the mark is left out, and so is one in another session where the table tells (a session's
+ * number is given out again only after its last process, and an older process cannot join a new one).
+ * `undefined` when it cannot be told: another method than the mark's, or a wall clock that was set back since
+ * the mark (`later` is now), which would make a new process look old.
+ */
+export const startedBefore = (
+  rows: StartedRow[],
+  pgid: number,
+  mark: StartMark,
+  later: StartMark,
+): StartedRow[] | undefined => {
+  if (later.method !== mark.method) return undefined;
+  let limit = mark.at;
+  if (mark.method === "ps-lstart") {
+    if (later.at - mark.at < later.mono - mark.mono - CLOCK_TOLERANCE_MS) return undefined;
+    // The whole second of the start lies before the mark, the tolerance taken off.
+    limit = mark.at - CLOCK_TOLERANCE_MS - 999;
+  }
+  return rows.filter(
+    (row) =>
+      row.pgid === pgid &&
+      !row.zombie &&
+      row.identity.method === mark.method &&
+      (row.session === undefined || row.session === pgid) &&
+      row.started < limit,
+  );
 };
 
 let cachedMachine: string | undefined | null = null;

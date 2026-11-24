@@ -284,12 +284,20 @@ remove no socket and it cannot attach; nothing else differs.
   such worker; there is no retention rule beyond the tail's size. What the TUI's card shows of a tail is
   stripped and redacted again.
 - **A session's own timeout signals its child's process group, and only while its leader lives.** The holder
-  sends `SIGTERM` to the group the child leads and, 2 seconds later, `SIGKILL` for what ignored it; that
-  second signal is dropped when the child ends and the child is looked at again right before it is sent, so
-  a group whose leader is gone is never signalled. A terminal session's holder signals the group only when
+  sends `SIGTERM` to the group the child leads and, 2 seconds later, `SIGKILL` for what ignored it. The child
+  is looked at again right before that second signal: while it still leads the group, the group gets it; once
+  it has ended, no group is signalled, and the process table is read once instead: each process in a group of
+  that number that had started before the `SIGTERM` is killed by its pid, its start time read again right
+  before (the number was this group's at the `SIGTERM`, so a process that old in it is a member; one that
+  started in the same clock tick as the `SIGTERM`, or with `ps` the same second, is not known to be and is
+  left, and so is everything where the table or the clock cannot be read). A pipeline command that is timed
+  out or stopped is ended the same way. That reading happens only if the process that sent the `SIGTERM` is
+  still up 2 seconds later: the MCP server waits for it when it shuts down, a holder that has recorded its
+  session's end does not. A terminal session's holder signals the group only when
   the identity it read of the child at the start is read again and is the same; when it was not read then
   or cannot be read now, the child alone is signalled, and only before its exit was reported.
-  **A member that ignored `SIGTERM` and outlives the leader is then left, and kodel does not see it:** the
+  **A member that ignored `SIGTERM`, outlives the leader and is not reached by that reading is left, and kodel
+  does not see it:** the
   holder records the end (`killed`, `timeout`), and the group of a session whose end is recorded is not
   looked at, so no status names it (`leftover` is only for a session whose holder went away without
   recording the end). A worker's terminal session lives 7 days at most; when the holder ends it

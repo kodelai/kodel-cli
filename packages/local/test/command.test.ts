@@ -1,11 +1,27 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { redactText } from "@kodel-ai/pipeline-core";
-import { DEFAULT_MAX_TAIL_BYTES, killTree, runCommand, type TreeLeader } from "../src";
+import {
+  DEFAULT_MAX_TAIL_BYTES,
+  killTree,
+  liveProcess,
+  type ProcessIdentity,
+  parseLstart,
+  processIdentity,
+  runCommand,
+  type StartClock,
+  type StartedRow,
+  type StartMark,
+  startedBefore,
+  type TreeLeader,
+} from "../src";
+
+// A sandbox may forbid `ps`; a test that needs the process table is then skipped, unless the job requires it.
+const skipTable =
+  processIdentity(process.pid) === undefined && process.env.KODEL_REQUIRE_PROCTABLE !== "1";
 
 let dir: string;
 beforeEach(async () => {
@@ -265,24 +281,52 @@ describe("cnz6 the output kept from a command", () => {
 });
 
 describe("killTree signals a process group only while its leader lives", () => {
-  class FakeLeader extends EventEmitter implements TreeLeader {
+  class FakeLeader implements TreeLeader {
     exitCode: number | null = null;
     signalCode: NodeJS.Signals | null = null;
-    constructor(readonly pid: number) {
-      super();
-    }
+    constructor(readonly pid: number) {}
     end(signal: NodeJS.Signals) {
       this.signalCode = signal;
-      this.emit("exit");
     }
   }
+  const row = (pid: number, started: number, over: Partial<StartedRow> = {}): StartedRow => ({
+    pid,
+    pgid: 4242,
+    session: 4242,
+    zombie: false,
+    started,
+    identity: { method: "proc-ticks", value: String(started) },
+    ...over,
+  });
   const world = (pid = 4242) => {
     const sent: [number, string][] = [];
-    const state = { alive: true };
+    const state: {
+      alive: boolean;
+      tick: number | undefined;
+      rows: StartedRow[] | undefined;
+      reads: number;
+      identity: (pid: number) => ProcessIdentity | undefined;
+    } = {
+      alive: true,
+      tick: 1000,
+      rows: [],
+      reads: 0,
+      identity: (target) => state.rows?.find((r) => r.pid === target)?.identity,
+    };
     const leader = new FakeLeader(pid);
+    const clock: StartClock = {
+      now: () =>
+        state.tick === undefined ? undefined : { method: "proc-ticks", at: state.tick, mono: 0 },
+      rows: () => {
+        state.reads += 1;
+        return state.rows;
+      },
+      identity: (target) => state.identity(target),
+    };
     const parts = {
       kill: (target: number, signal: NodeJS.Signals) => void sent.push([target, signal]),
       alive: () => state.alive,
+      clock,
       graceMs: 30,
       platform: "linux" as const,
     };
@@ -290,13 +334,107 @@ describe("killTree signals a process group only while its leader lives", () => {
   };
   const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  test("t47_kill_tree_leader_gone_before_the_grace_gets_no_group_sigkill", async () => {
+  test("t47_kill_tree_leader_gone_before_the_grace_kills_its_members_by_pid_and_no_group", async () => {
     const w = world();
     killTree(w.leader, w.parts);
     expect(w.sent).toEqual([[-4242, "SIGTERM"]]);
     w.leader.end("SIGTERM");
+    w.state.tick = 1200;
+    w.state.rows = [
+      row(5001, 900), // a member that ignored SIGTERM
+      row(5002, 999),
+      row(5003, 1000), // started in the tick of the SIGTERM: not known to be before it
+      row(5004, 1100), // started after the SIGTERM: the number may be another program's by then
+      row(5005, 900, { pgid: 7 }),
+      row(5006, 900, { zombie: true }),
+      row(5007, 900, { session: 7 }),
+      row(5008, 900, { identity: { method: "ps-lstart", value: "x" } }),
+    ];
+    await pause(80);
+    expect(w.sent).toEqual([
+      [-4242, "SIGTERM"],
+      [5001, "SIGKILL"],
+      [5002, "SIGKILL"],
+    ]);
+    expect(w.state.reads).toBe(1);
+  });
+
+  test("t47_kill_tree_leader_gone_with_no_member_left_signals_nothing_more", async () => {
+    const w = world();
+    killTree(w.leader, w.parts);
+    w.leader.end("SIGTERM");
     await pause(80);
     expect(w.sent).toEqual([[-4242, "SIGTERM"]]);
+  });
+
+  test("t47_kill_tree_member_is_killed_only_while_it_is_still_the_process_of_the_table", async () => {
+    const w = world();
+    killTree(w.leader, w.parts);
+    w.leader.end("SIGTERM");
+    w.state.rows = [row(5001, 900), row(5002, 900), row(5003, 900)];
+    w.state.identity = (target) =>
+      target === 5001
+        ? { method: "proc-ticks", value: "1500" } // the pid is another process by now
+        : target === 5002
+          ? undefined // gone, or cannot be read
+          : { method: "proc-ticks", value: "900" };
+    await pause(80);
+    expect(w.sent).toEqual([
+      [-4242, "SIGTERM"],
+      [5003, "SIGKILL"],
+    ]);
+  });
+
+  test("t47_kill_tree_leader_gone_signals_nothing_where_the_table_or_the_clock_cannot_be_read", async () => {
+    const table = world();
+    killTree(table.leader, table.parts);
+    table.leader.end("SIGTERM");
+    table.state.rows = undefined;
+
+    const clock = world();
+    clock.state.tick = undefined; // not read at the SIGTERM
+    killTree(clock.leader, clock.parts);
+    clock.leader.end("SIGTERM");
+    clock.state.tick = 1200;
+    clock.state.rows = [row(5001, 900)];
+
+    const later = world();
+    killTree(later.leader, later.parts);
+    later.leader.end("SIGTERM");
+    later.state.tick = undefined; // not read at the escalation
+    later.state.rows = [row(5001, 900)];
+
+    await pause(80);
+    for (const w of [table, clock, later]) expect(w.sent).toEqual([[-4242, "SIGTERM"]]);
+  });
+
+  test("t47_started_before_takes_a_whole_second_of_ps_and_refuses_a_clock_set_back", () => {
+    const at = Date.UTC(2026, 0, 1, 12, 0, 30, 500);
+    const second = (s: number) => Date.UTC(2026, 0, 1, 12, 0, s);
+    const ps = (pid: number, started: number): StartedRow => ({
+      pid,
+      pgid: 4242,
+      zombie: false,
+      started,
+      identity: { method: "ps-lstart", value: String(started) },
+    });
+    const rows = [ps(1, second(28)), ps(2, second(29)), ps(3, second(30)), ps(4, second(31))];
+    const mark = { method: "ps-lstart" as const, at, mono: 10_000 };
+    const pids = (later: StartMark) => startedBefore(rows, 4242, mark, later)?.map((r) => r.pid);
+    expect(pids({ method: "ps-lstart", at: at + 2_000, mono: 12_000 })).toEqual([1, 2]);
+    // The wall clock went back a second while two passed: a new process would look old.
+    expect(pids({ method: "ps-lstart", at: at - 1_000, mono: 12_000 })).toBeUndefined();
+    expect(pids({ method: "proc-ticks", at: 5, mono: 12_000 })).toBeUndefined();
+    // Just after the turn of a second, the second before it is not taken for wholly earlier.
+    const turn = { method: "ps-lstart" as const, at: second(30) + 50, mono: 0 };
+    expect(
+      startedBefore(rows, 4242, turn, { ...turn, at: turn.at + 2_000, mono: 2_000 })?.map(
+        (r) => r.pid,
+      ),
+    ).toEqual([1]);
+    expect(parseLstart("Tue Nov 24 10:02:03 2026")).toBe(Date.UTC(2026, 10, 24, 10, 2, 3));
+    expect(parseLstart("Sun Nov  1 00:00:00 2026")).toBe(Date.UTC(2026, 10, 1));
+    expect(parseLstart("10:02")).toBeUndefined();
   });
 
   test("t47_kill_tree_leader_that_ignores_sigterm_gets_sigkill", async () => {
@@ -309,15 +447,20 @@ describe("killTree signals a process group only while its leader lives", () => {
       [-4242, "SIGTERM"],
       [-4242, "SIGKILL"],
     ]);
+    expect(w.state.reads).toBe(0);
   });
 
   test("t47_kill_tree_looks_at_the_leader_again_before_the_sigkill", async () => {
-    // The exit was not reported yet (no event), but the process is gone: its group number may be another's.
+    // The exit was not reported yet, but the process is gone: its group number may be another's.
     const gone = world();
     killTree(gone.leader, gone.parts);
     gone.state.alive = false;
+    gone.state.rows = [row(5001, 900), row(5002, 1100)];
     await pause(80);
-    expect(gone.sent).toEqual([[-4242, "SIGTERM"]]);
+    expect(gone.sent).toEqual([
+      [-4242, "SIGTERM"],
+      [5001, "SIGKILL"],
+    ]);
 
     // reaped without the listener having run
     const reaped = world();
@@ -330,9 +473,11 @@ describe("killTree signals a process group only while its leader lives", () => {
   test("t47_kill_tree_signals_nothing_of_a_leader_that_has_ended", async () => {
     const ended = world();
     ended.leader.exitCode = 0;
+    ended.state.rows = [row(5001, 900)];
     killTree(ended.leader, ended.parts);
     const dead = world();
     dead.state.alive = false;
+    dead.state.rows = [row(5001, 900)];
     killTree(dead.leader, dead.parts);
     await pause(80);
     expect(ended.sent).toEqual([]);
@@ -342,6 +487,8 @@ describe("killTree signals a process group only while its leader lives", () => {
   test("t47_kill_tree_cancel_drops_the_pending_sigkill", async () => {
     const w = world();
     killTree(w.leader, w.parts)();
+    w.leader.end("SIGTERM");
+    w.state.rows = [row(5001, 900)];
     await pause(80);
     expect(w.sent).toEqual([[-4242, "SIGTERM"]]);
   });
@@ -367,6 +514,60 @@ describe("killTree signals a process group only while its leader lives", () => {
       await pause(500);
       expect(sent).toEqual([[-(child.pid as number), "SIGTERM"]]);
     },
+  );
+
+  // The shape of `sh -c 'node ...'` where the shell does not exec its last command (Linux): the leader ends on
+  // SIGTERM and a member of its group that ignores it lives on, in a group without a leader.
+  test.skipIf(process.platform === "win32" || skipTable)(
+    "t47_kill_tree_real_member_that_ignores_sigterm_does_not_outlive_its_leader",
+    async () => {
+      const member = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)";
+      const leader = [
+        "const { spawn } = require('node:child_process');",
+        `const c = spawn(process.execPath, ['-e', ${JSON.stringify(member)}], { stdio: 'inherit' });`,
+        "console.log(c.pid);",
+        "setInterval(() => {}, 1000);",
+      ].join("");
+      const child = spawn(process.execPath, ["-e", leader], {
+        stdio: ["ignore", "pipe", "ignore"],
+        detached: true,
+      });
+      const memberPid = await new Promise<number>((resolve) => {
+        child.stdout?.once("data", (data: Buffer) => resolve(Number(data.toString().trim())));
+      });
+      const sent: [number, string][] = [];
+      try {
+        expect(Number.isInteger(memberPid)).toBe(true);
+        // `ps` tells a start to the second: the member has to be a whole second old at the SIGTERM.
+        await pause(2_200);
+        const exited = new Promise((resolve) => child.once("exit", resolve));
+        killTree(child, {
+          graceMs: 500,
+          kill: (target, signal) => {
+            sent.push([target, signal]);
+            process.kill(target, signal);
+          },
+        });
+        await exited;
+        expect(liveProcess(memberPid)).toBe(true);
+        const until = Date.now() + 5_000;
+        while (liveProcess(memberPid) && Date.now() < until) await pause(50);
+        expect(liveProcess(memberPid)).toBe(false);
+        expect(sent).toEqual([
+          [-(child.pid as number), "SIGTERM"],
+          [memberPid, "SIGKILL"],
+        ]);
+      } finally {
+        for (const pid of [memberPid, child.pid]) {
+          try {
+            if (pid) process.kill(pid, "SIGKILL");
+          } catch {
+            // gone
+          }
+        }
+      }
+    },
+    20_000,
   );
 
   test.skipIf(process.platform === "win32")(
