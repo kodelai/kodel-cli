@@ -95,8 +95,8 @@ not.
 
 **How the agent is started.** In a terminal: `claude <flags> -- "<prompt>\n"`, with `--session-id <uuid>` (the
 launcher chooses the id of the conversation and stores it; nothing the agent prints is read as an id),
-`--mcp-config <json> --strict-mcp-config` (the run's kodel server, `kodel mcp --role worker --no-decisions`, is the only MCP
-server of the session), `--permission-mode dontAsk`, an allow list without the decision tools and a deny list
+`--mcp-config <json> --strict-mcp-config` (the run's kodel server, `kodel mcp --role worker --no-decisions
+--wait-command <command>`, is the only MCP server of the session), `--permission-mode dontAsk`, an allow list without the decision tools and a deny list
 with them and with every command that is a person's. The prompt always ends with a newline and comes after
 `--`: a one-word prompt that names a subcommand of `claude` (`doctor`, `mcp`) would otherwise run that
 subcommand. A resume is `--resume <id>`. The server is given the wait command of this very build and state

@@ -31,6 +31,7 @@ import {
 } from "node:fs";
 import { basename, join } from "node:path";
 import { agentProfile } from "../../packages/cli/src/agent-profiles";
+import { workerServedTools } from "../../packages/cli/src/worker-factory";
 import { workerNameOf } from "../../packages/cli/src/worker-launcher";
 import {
   createSessionWorkerLauncher,
@@ -38,7 +39,6 @@ import {
   findOnPath,
 } from "../../packages/cli/src/worker-launcher-session";
 import { LocalPipelineHost, type LocalRun, PipesSessionAdapter } from "../../packages/local/src";
-import { buildTaskTools, HISTORY_TOOLS, toolsFor } from "../../packages/pipeline-core/src/mcp";
 import { ARTIFACT, ptyAvailability, shortDir } from "../pty/harness";
 import { agentEnv, ENABLED, REPO_ROOT, TURN_TIMEOUT_MS } from "./harness";
 
@@ -148,17 +148,8 @@ async function setup() {
     // The adapter runs here, under Bun; the holder is Node, which the availability check proved.
     ptyProbe: () => ({ ok: true }),
   });
-  const servedTools = [
-    ...toolsFor({ taskLink: false }).map((t) => t.name),
-    ...HISTORY_TOOLS.map((t) => t.name),
-    ...buildTaskTools({
-      comment: "append",
-      runs: "attach",
-      priorities: ["high", "normal", "low"],
-      statuses: [],
-      fields: [],
-    } as never).map((t) => t.name),
-  ];
+  // The set the worker's own server serves (5M9D), worked out as the real launcher does.
+  const servedTools = () => workerServedTools(join(dir, ".kodel"));
   const launcher = createSessionWorkerLauncher({
     adapter,
     self: { exec: "node", args: [ARTIFACT] },

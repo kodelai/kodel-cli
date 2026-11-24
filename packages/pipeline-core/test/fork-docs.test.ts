@@ -104,7 +104,7 @@ describe("t40 the docs of forks", () => {
       "`pipeline_complete_step`",
       "report the answer back",
       "never write to the person",
-      "never start `kodel wait` as a worker",
+      "never start `kodel wait` as a fork worker",
       "`sequential` mode",
       "again with `subagents: {can: true}`",
       "`also_waiting`",

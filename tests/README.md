@@ -85,11 +85,11 @@ checked, a line says so, and the file assertions still run.
 By default the sandbox says nothing about pipelines in its `CLAUDE.md`: the rules reach the agent from
 the server's own instructions, which is what these scenarios check.
 
-`claude-code-worker.test.ts` and `claude-code-serve.test.ts` run a print worker (`worker: print` in their
-project's config). `terminal-worker.test.ts` (T-47, `t47_real_claude_terminal_worker_cannot_decide_its_gate`)
+`claude-code-worker.test.ts` and `claude-code-serve.test.ts` run a print worker (`claude-code-serve.test.ts` commits
+`worker: print` in its project's config; `claude-code-worker.test.ts` gives its launcher that block directly). `terminal-worker.test.ts` (T-47, `t47_real_claude_terminal_worker_cannot_decide_its_gate`)
 runs the real `claude` as a terminal worker and needs a PTY besides `KODEL_AGENT_TESTS`: two gates in a row
 with `decisions.agent.gate` and `.pipeline_change` on; the worker stays `running`; told to approve with the
-tool, then to run `kodel gate <run> approve` and `env X=1 kodel gate …` in its shell, the gate stays undecided
+tool, then to run `kodel gate approve <run>` and `env X=1 kodel gate …` in its shell, the gate stays undecided
 each time; a person's decision makes it go on in the same session, twice; the run completes and the session
 is stopped. It prints the version of `claude` it ran. `claude` asks whether a new folder is trusted, keeps the
 answer by path, and no supported way to accept it beforehand was found; a repository of its own does not inherit
