@@ -286,8 +286,13 @@ remove no socket and it cannot attach; nothing else differs.
 - **A session's own timeout signals its child's process group, and only while its leader lives.** The holder
   sends `SIGTERM` to the group the child leads and, 2 seconds later, `SIGKILL` for what ignored it; that
   second signal is dropped when the child ends and the child is looked at again right before it is sent, so
-  a group whose leader is gone is never signalled (a member that ignored `SIGTERM` is then left, and the
-  status names it as `leftover`). A worker's terminal session lives 7 days at most; when the holder ends it
+  a group whose leader is gone is never signalled. A terminal session's holder signals the group only when
+  the identity it read of the child at the start is read again and is the same; when it was not read then
+  or cannot be read now, the child alone is signalled, and only before its exit was reported.
+  **A member that ignored `SIGTERM` and outlives the leader is then left, and kodel does not see it:** the
+  holder records the end (`killed`, `timeout`), and the group of a session whose end is recorded is not
+  looked at, so no status names it (`leftover` is only for a session whose holder went away without
+  recording the end). A worker's terminal session lives 7 days at most; when the holder ends it
   by that timeout, a process the agent left in another process group (a background `kodel wait`, say) lives
   on to its own end (the wait command is given the same 7 days). `agent stop`, and the stop at the end of a
   run, reach the child's descendants as well.

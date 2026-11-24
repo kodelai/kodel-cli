@@ -862,9 +862,9 @@ describe("t44 the real session adapter", () => {
         expect(notes[0]).toMatchObject({ worker: `kw-${runId}`, id, reason: "lost" });
         expect(lines.some((l) => l.startsWith(`noted: run ${runId}`))).toBe(true);
       } finally {
-        // The holder's child leads its own process group; it outlives the holder and is stopped here.
+        // The holder's child outlives the holder and is stopped here, by its pid: its group may have no leader.
         try {
-          process.kill(-child, "SIGKILL");
+          process.kill(child, "SIGKILL");
         } catch {
           // already gone
         }

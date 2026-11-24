@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { encodeRecord, type SocketCandidate, socketCandidates } from "@kodel-ai/pipeline-core";
+import type { ProcessIdentity } from "../src/process-table";
 import { sessionEnv } from "../src/session-env";
 import { runHolder } from "../src/session-holder";
 import {
@@ -27,10 +28,12 @@ import {
   findExecutable,
   HOLDER_SIGNALS,
   type PtyHolderParts,
+  type PtyLeaderAnswer,
   type PtyLoader,
   ptyChildEnv,
   ptyCommand,
   ptyFromModule,
+  ptyLeader,
   signalName,
 } from "../src/session-pty";
 import { readStatus } from "../src/session-records";
@@ -211,7 +214,7 @@ const start = (
       drainMs: 1,
       roots: { tmpDir: undefined, systemTmp: join(base, "none") },
       // The fake terminal's pid is no process: its exit is the fake's to report, so until then it lives.
-      group: { leader: () => () => true, kill: () => {} },
+      group: { leader: () => () => "same", kill: () => {} },
       ...parts.extra,
     },
   });
@@ -1013,20 +1016,90 @@ describe("pty holder, fake terminal", () => {
   test("tA_pty_group_is_signalled_only_while_its_leader_lives", () => {
     const request = { file: "/bin/sh", args: [], cwd: "/", env: {}, cols: 80, rows: 24 };
     const sent: [number, string][] = [];
-    const state = { lives: true };
+    const state: { leader: PtyLeaderAnswer } = { leader: "same" };
     const raw = new FakeRawPty();
     const child = ptyFromModule({ spawn: () => raw }, false, undefined, {
-      leader: () => () => state.lives,
+      leader: () => () => state.leader,
       kill: (target, signal) => void sent.push([target, signal]),
     }).spawn(request);
     child.kill("SIGTERM");
     expect(sent).toEqual([[-raw.pid, "SIGTERM"]]);
     expect(raw.kills).toEqual(["SIGTERM"]);
+    // A doubt about the leader is not knowledge: the group gets nothing, the child alone is signalled.
+    state.leader = "unknown";
+    child.kill("SIGTERM");
+    expect(sent).toEqual([[-raw.pid, "SIGTERM"]]);
+    expect(raw.kills).toEqual(["SIGTERM", "SIGTERM"]);
     // the leader is gone before the exit was reported: neither its group nor its pid is signalled
-    state.lives = false;
+    state.leader = "gone";
     child.kill("SIGKILL");
     expect(sent).toEqual([[-raw.pid, "SIGTERM"]]);
-    expect(raw.kills).toEqual(["SIGTERM"]);
+    expect(raw.kills).toEqual(["SIGTERM", "SIGTERM"]);
+    // and after the exit a doubt signals nothing at all: the pid is no longer this process's child
+    state.leader = "unknown";
+    raw.exit(0);
+    child.kill("SIGKILL");
+    expect(sent).toEqual([[-raw.pid, "SIGTERM"]]);
+    expect(raw.kills).toEqual(["SIGTERM", "SIGTERM"]);
+  });
+
+  describe("the leader of a terminal's group, from the process table", () => {
+    const first: ProcessIdentity = { method: "ps-lstart", value: "Mon Jan  1 01:01:01 2025" };
+    const other: ProcessIdentity = { method: "ps-lstart", value: "Tue Feb  2 02:02:02 2025" };
+    const groupSignals = (read: Parameters<typeof ptyLeader>[1]) => {
+      const sent: [number, string][] = [];
+      const raw = new FakeRawPty();
+      const child = ptyFromModule({ spawn: () => raw }, false, undefined, {
+        leader: (pid) => ptyLeader(pid, read),
+        kill: (target, signal) => void sent.push([target, signal]),
+      }).spawn({ file: "/bin/sh", args: [], cwd: "/", env: {}, cols: 80, rows: 24 });
+      return { sent, raw, child };
+    };
+
+    test("tA_pty_group_is_not_signalled_when_the_identity_was_not_read_at_the_start", () => {
+      const leads = ptyLeader(7, { identity: () => undefined, live: () => true });
+      expect(leads()).toBe("unknown");
+      const world = groupSignals({ identity: () => undefined, live: () => true });
+      world.child.kill("SIGTERM");
+      expect(world.sent).toEqual([]);
+      expect(world.raw.kills).toEqual(["SIGTERM"]);
+    });
+
+    test("tA_pty_group_is_not_signalled_when_the_identity_cannot_be_read_now", () => {
+      let reads = 0;
+      const read = { identity: () => (reads++ === 0 ? first : undefined), live: () => true };
+      const world = groupSignals(read);
+      world.child.kill("SIGTERM");
+      expect(world.sent).toEqual([]);
+      expect(world.raw.kills).toEqual(["SIGTERM"]);
+      // nor when the two readings cannot be compared
+      let turn = 0;
+      const mixed = ptyLeader(7, {
+        identity: () => (turn++ === 0 ? first : { method: "proc-ticks", value: "42" }),
+        live: () => true,
+      });
+      expect(mixed()).toBe("unknown");
+    });
+
+    test("tA_pty_group_is_signalled_when_the_identity_matches", () => {
+      const world = groupSignals({ identity: () => ({ ...first }), live: () => true });
+      world.child.kill("SIGTERM");
+      expect(world.sent).toEqual([[-world.raw.pid, "SIGTERM"]]);
+      expect(world.raw.kills).toEqual(["SIGTERM"]);
+    });
+
+    test("tA_pty_nothing_is_signalled_when_the_pid_is_another_process_or_gone", () => {
+      let reads = 0;
+      const taken = groupSignals({
+        identity: () => (reads++ === 0 ? first : other),
+        live: () => true,
+      });
+      taken.child.kill("SIGTERM");
+      const dead = groupSignals({ identity: () => first, live: () => false });
+      dead.child.kill("SIGTERM");
+      expect([...taken.sent, ...dead.sent]).toEqual([]);
+      expect([...taken.raw.kills, ...dead.raw.kills]).toEqual([]);
+    });
   });
 
   test("tA_pty_timeout_escalation_is_dropped_when_the_child_ends: no SIGKILL after the exit", async () => {

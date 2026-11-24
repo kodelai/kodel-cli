@@ -26,7 +26,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { AttachServer, type AttachTimers, realAttachTimers } from "./attach-server";
 import { KILL_GRACE_MS } from "./command";
-import { processIdentity, sameProcess } from "./process-table";
+import { liveProcess, type ProcessIdentity, processIdentity, sameIdentity } from "./process-table";
 import type { HolderInput } from "./session-holder";
 import {
   readStatus,
@@ -251,18 +251,41 @@ export const descriptorWriter = (
 const duplicateWhereItIsADuplicate = (fd: number): number | undefined =>
   process.platform === "darwin" ? duplicateDescriptor(fd) : undefined;
 
+/**
+ * What is known of the child's pid when a signal is about to go out: `same` only when the identity read at the
+ * start is read again and is equal; `unknown` when it was not read then, cannot be read now or cannot be compared.
+ */
+export type PtyLeaderAnswer = "same" | "unknown" | "gone";
+
 /** How the child's process group is signalled; tests replace it. */
 export interface PtyGroupSignals {
   /** Called once at the start; the answer says, when asked later, whether the pid is still that live process. */
-  leader(pid: number): () => boolean;
+  leader(pid: number): () => PtyLeaderAnswer;
   kill(target: number, signal: NodeJS.Signals): void;
 }
 
+/** The leader's answer from the process table. A doubt is `unknown`, never `same`: a group is not signalled on it. */
+export const ptyLeader = (
+  pid: number,
+  read: {
+    identity: (pid: number) => ProcessIdentity | undefined;
+    live: (pid: number) => boolean;
+  } = { identity: processIdentity, live: liveProcess },
+): (() => PtyLeaderAnswer) => {
+  const recorded = read.identity(pid);
+  return () => {
+    if (!read.live(pid)) return "gone";
+    if (recorded === undefined) return "unknown";
+    const now = read.identity(pid);
+    if (now === undefined) return "unknown";
+    const same = sameIdentity(recorded, now);
+    if (same === undefined) return "unknown";
+    return same ? "same" : "gone";
+  };
+};
+
 const systemGroupSignals: PtyGroupSignals = {
-  leader(pid) {
-    const identity = processIdentity(pid);
-    return () => sameProcess(pid, identity);
-  },
+  leader: (pid) => ptyLeader(pid),
   kill: (target, signal) => void process.kill(target, signal),
 };
 
@@ -286,6 +309,10 @@ export const ptyFromModule = (
       env: request.env,
     });
     const leads = group.leader(raw.pid);
+    let exited = false;
+    raw.onExit(() => {
+      exited = true;
+    });
     const socket = terminalWritable(raw);
     const throughStream: TerminalWrite = (bytes, done) => {
       if (!socket) {
@@ -331,12 +358,18 @@ export const ptyFromModule = (
       },
       kill(signal) {
         // The child leads a session of its own, so its pid is its process group; the module signals the pid alone.
-        // The group is signalled only while that leader lives: after its end the number may be another program's.
-        if (!leads()) return;
-        try {
-          group.kill(-raw.pid, signal);
-        } catch {
-          // the group is gone
+        // The group is signalled only while that leader is known to live: after its end the number may be another
+        // program's, and a doubt (an identity not read at the start, or not readable now) is not knowledge. On a
+        // doubt the pid alone is signalled, and only before its exit was reported: until then it is this
+        // process's own child.
+        const leader = leads();
+        if (leader === "gone" || (leader === "unknown" && exited)) return;
+        if (leader === "same") {
+          try {
+            group.kill(-raw.pid, signal);
+          } catch {
+            // the group is gone
+          }
         }
         try {
           raw.kill(signal);

@@ -21,6 +21,7 @@ import {
   type ProcessRow,
   type ProcessView,
   processIdentity,
+  systemProcesses,
 } from "../src/process-table";
 import { ensurePrivateDir } from "../src/session-paths";
 import { PipesSessionAdapter } from "../src/session-pipes";
@@ -1197,6 +1198,51 @@ describe("a holder that went away: the child's process group", () => {
         expect(stopped.group).toBeUndefined();
         expect(liveProcess(stored.child.pid)).toBe(false);
         await eventually(() => !liveProcess(memberPid), 6_000);
+      } finally {
+        try {
+          process.kill(memberPid, "SIGKILL");
+        } catch {
+          // gone
+        }
+      }
+    },
+    30_000,
+  );
+  tableTest(
+    "tA_stop_looks_at_the_leader_again_before_the_group_sigterm",
+    async () => {
+      // The leader ends after its identity was checked and before the first signal (the stop record and the
+      // listing of the table lie between): the group has no leader then, so no signal goes to it. The member is
+      // signalled by its own pid, through a view that only records here, so it lives if the group got nothing.
+      const pidFile = join(root, "member.pid");
+      const { id } = await adapter.start(sh(`( sleep 300 & echo $! > ${pidFile} ); sleep 200`));
+      await eventually(() => existsSync(pidFile) && readFileSync(pidFile, "utf8").trim() !== "");
+      const memberPid = Number(readFileSync(pidFile, "utf8").trim());
+      const dir = join(adapter.place.dir, id);
+      const stored = JSON.parse(readFileSync(join(dir, "status.json"), "utf8"));
+      const signals: [number, string][] = [];
+      let ended = false;
+      const view: ProcessView = {
+        ...systemProcesses,
+        rows() {
+          if (!ended && existsSync(join(dir, "stop.json"))) {
+            ended = true;
+            process.kill(stored.child.pid, "SIGKILL");
+            const until = Date.now() + 8_000;
+            while (liveProcess(stored.child.pid) && Date.now() < until) Bun.sleepSync(20);
+          }
+          return systemProcesses.rows();
+        },
+        signal: (pid, signal) => void signals.push([pid, signal]),
+      };
+      try {
+        await make({ processes: view }).stop(id);
+        expect(ended).toBe(true);
+        expect(liveProcess(stored.child.pid)).toBe(false);
+        expect(signals).toContainEqual([memberPid, "SIGTERM"]);
+        // only what was listed in the group, each by its own pid
+        expect(signals.every(([pid]) => pid > 0 && pid !== stored.child.pid)).toBe(true);
+        expect(liveProcess(memberPid)).toBe(true);
       } finally {
         try {
           process.kill(memberPid, "SIGKILL");

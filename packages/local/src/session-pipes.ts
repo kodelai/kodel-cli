@@ -738,22 +738,24 @@ export class PipesSessionAdapter implements SessionAdapter {
       (row) => row.pgid === child.pid && row.pid !== child.pid && !row.state.startsWith("Z"),
     );
     /**
-     * `SIGKILL` for what ignored `SIGTERM`. A group is signalled only while its recorded leader lives: once the
-     * leader is gone the number may change hands, so the members listed above are signalled one by one, each
-     * only while it is still the process of that listing.
+     * A group is signalled only while its recorded leader lives, and that is looked at again right before every
+     * signal (the stop record, the listing and the walk of the table take time): once the leader is gone, or
+     * cannot be told, the number may have changed hands, so the members listed above are signalled one by one,
+     * each only while it is still the process of that listing.
      */
-    const killGroup = () => {
+    const signalGroup = (signal: NodeJS.Signals) => {
       const leader = liveProcess(child.pid) ? processIdentity(child.pid) : undefined;
       if (leader !== undefined && sameIdentity(now, leader) === true) {
         try {
-          process.kill(-child.pid, "SIGKILL");
+          process.kill(-child.pid, signal);
         } catch {
           // the group is gone
         }
         return;
       }
-      for (const member of this.stillThere(group)) this.processes.signal(member.pid, "SIGKILL");
+      for (const member of this.stillThere(group)) this.processes.signal(member.pid, signal);
     };
+    const killGroup = () => signalGroup("SIGKILL");
     const descendants = descendantsOf(child.pid).map((pid) => ({
       pid,
       identity: processIdentity(pid),
@@ -770,11 +772,7 @@ export class PipesSessionAdapter implements SessionAdapter {
         }
       }
     };
-    try {
-      process.kill(-child.pid, "SIGTERM"); // the leader's identity was checked above
-    } catch {
-      // the group is gone
-    }
+    signalGroup("SIGTERM");
     signalDescendants("SIGTERM");
     const grace = this.now() + KILL_GRACE_MS;
     let escalated = false;

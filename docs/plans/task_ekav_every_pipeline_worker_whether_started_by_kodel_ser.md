@@ -740,9 +740,10 @@ the boot time), `session-guard.ts` (new), `serve/daemon.ts`, `engines.ts`, `engi
 `packages/testkit/src/`; `scripts/take-session-fixtures.mjs`, `fixtures/session-formats/v1/`; the tests named;
 `spikes/ekav-m0/`; the docs of step 12, `AGENTS.md`.
 
-Not touched: `session-holder.ts`, `session-pty.ts`, `attach-server.ts`, `tui/tabs.ts`, the run codecs,
+Not touched: `attach-server.ts`, `tui/tabs.ts`, the run codecs,
 `init/agents.ts`, the `serve` block's schema (`local/src/config.ts`), `.mcp.json`, `.claude/settings*.json`,
-`.kodel/pipelines/`.
+`.kodel/pipelines/`. (`session-holder.ts` and `session-pty.ts` were named here and were changed by the stop
+rule: see the Implementation notes.)
 
 ## Rejected review findings
 
@@ -822,9 +823,9 @@ Round 2:
 - **tests-16, "`o` on a fork run with two live records".** A run has one live worker (the names are taken
   once; a fork's workers are subagents inside it). The `-d<seq>` half is a test.
 - **gaps-9 as "fix the PTY stop path".** `finish` and `agent stop` go through `adapter.stop`, which signals
-  the descendants and the group (`session-pipes.ts:545-567`); only the holder's own timeout signals the child
-  alone: the wait command ends by itself, a real-PTY test shows the descendants gone, a follow-up task covers
-  the timeout.
+  the descendants and the group (`session-pipes.ts:545-567`); the holder's own timeout signals the child's
+  process group, and only while its leader lives (see the Implementation notes): the wait command, in a group
+  of its own, ends by itself, and a real-PTY test shows the descendants gone.
 - **tests-13 as "a nightly canary for trust inheritance".** A CI machine has no trusted folder; the canary is
   the real-agent scenario, nightly only if the spike finds a supported way to accept trust.
 
@@ -890,8 +891,9 @@ run does not reopen, `daemon.ts:384-385`).
   `attachable` (`session.ts:364-371`); `kodel agent attach` (`agent-commands.ts:328-345`); `runAttachClient`,
   `processTerminal` (`attach-client.ts:123`, `:281`); 80x24 without a terminal (`attach-server.ts:52`); the
   tail is stripped, then redacted (`session-terminal.ts:441-448`); a terminal that cannot be spawned fails the
-  boot (`session-pty.ts:585-590`); the holder's own stop signals the child only (`:605-609`), the adapter's
-  `stop` the tree and the group (`session-pipes.ts:545-567`).
+  boot (`session-pty.ts:585-590`); the holder's own stop signalled the child only when this was written
+  (`:605-609`; it signals the child's group while its leader lives now, see the Implementation notes), the
+  adapter's `stop` the tree and the group (`session-pipes.ts:545-567`).
 - **No terminal under Bun**; the probe also checks the package and its binary (`pty-loader.ts:93-112`). This
   repository's `.mcp.json` and `bun … main.ts` are that case.
 - **Names.** A name is taken while its folder exists (`session-pipes.ts:225-240`); a failed start removes the
@@ -1528,7 +1530,9 @@ cleared, whether or not the leader had ended in between.
   also looks at the exit when it fires, and the trait over the module signals the group (and the pid) only
   while the pid is still the live process it started (identity read at the start).
 - **Stated limit:** a group member that ignores `SIGTERM` and outlives its leader is not killed by a timeout
-  or an abort; for a session the status names it (`leftover`), for a pipeline command nothing does.
+  or an abort, and nothing names it, for a session and a pipeline command alike: a holder that ends its
+  session by its own timeout records the end, and the group is looked at (`leftover`) only for a session whose
+  holder went away without recording one.
 - **Docs:** the limit in `docs/session-formats.md` and the two places above that said "the timeout signals
   only the child" now say what the code does: the child's process group, and only while its leader lives.
 - **Tests:** `t47_kill_tree_*` and `t47_run_command_timeout_kills_a_command_that_ignores_sigterm`
@@ -1536,3 +1540,36 @@ cleared, whether or not the leader had ended in between.
   `tA_pty_timeout_escalation_is_dropped_when_the_child_ends`,
   `tA_pty_timeout_kills_a_child_that_ignores_sigterm` (`session-pty.test.ts`). The cleanup of
   `tests/pty/worker-terminal.test.ts` kills its strays by pid, never by group.
+
+
+### No group signal on a doubt about the leader (second review of the stop rule)
+
+The review found two places where a group could still be signalled without a leader known to live, and one
+claim the code does not keep.
+
+- **`stop` looks at the leader again before the group `SIGTERM`** (`session-pipes.ts`, `stopNow`). Between the
+  identity check and the first signal lie the stop record, a listing of the process table, the walk of the
+  descendants and their identities. Every group signal of a stop (`SIGTERM` and `SIGKILL`) now goes through
+  one function that reads the leader's identity right before it; when the leader is gone or cannot be told,
+  the members listed while it lived are signalled one by one, each only while it is still the process of
+  that listing.
+- **The terminal holder does not signal a group on a doubt** (`session-pty.ts`). The trait's `leader` used
+  `sameProcess`, which answers "alive" when the identity was not read at the start or cannot be read now.
+  `ptyLeader` answers `same`, `unknown` or `gone`; the group is signalled only on `same`. On `unknown` the
+  child's pid alone is signalled, and only before the module reported its exit (until then it is the
+  holder's own child); on `gone` nothing is. The pid-alone signal on a doubt is kept on purpose: without it
+  a session whose identity cannot be read could not be ended by its own timeout at all. Its limit is the
+  moment between the module's reaping of the child and its report of the exit.
+- **The "named as leftover" claim was wrong** for a holder's own timeout and is now stated as a limit here
+  and in `docs/session-formats.md`: the survivor is not seen by kodel.
+- **Tests:** `tA_stop_looks_at_the_leader_again_before_the_group_sigterm` (`session-pipes.test.ts`, real
+  processes: the leader is killed between the stop record and the signal, and a member of its group lives on),
+  `tA_pty_group_is_not_signalled_when_the_identity_was_not_read_at_the_start`,
+  `tA_pty_group_is_not_signalled_when_the_identity_cannot_be_read_now`,
+  `tA_pty_group_is_signalled_when_the_identity_matches`,
+  `tA_pty_nothing_is_signalled_when_the_pid_is_another_process_or_gone`, and the widened
+  `tA_pty_group_is_signalled_only_while_its_leader_lives` (`session-pty.test.ts`). Two tests that sent
+  `SIGKILL` to a group whose leader might be gone (`cli/test/serve.test.ts`, `tests/pty/worker-terminal.test.ts`)
+  signal the pid.
+- **Docs:** `docs/engines.md` names `kodel agent start --pipeline` as the command that starts a run's
+  background agent (`agent start` alone starts an agent of no run).

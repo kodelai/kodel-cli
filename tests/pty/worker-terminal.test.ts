@@ -723,7 +723,7 @@ describe("a worker in a terminal of its own, started through the launcher", () =
       // A reboot: the holder and the agent are both gone, and nobody recorded an end.
       process.kill(worker.holder, "SIGKILL");
       try {
-        process.kill(-worker.child, "SIGKILL");
+        process.kill(worker.child, "SIGKILL");
       } catch {
         // the hangup of its terminal ended it first
       }

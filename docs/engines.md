@@ -46,7 +46,7 @@ A profile name is lowercase letters, digits, `-` and `_`. A variable name may no
 
 This part of the block is **on** in this build, whatever the flag of engine steps says. The profile named
 `claude` also says how kodel starts Claude Code as the background agent of a run (`s` in `kodel tui`,
-`kodel serve`, `kodel agent start`). Decision T-47 (`docs/decisions.md`).
+`kodel serve`, `kodel agent start --pipeline`). Decision T-47 (`docs/decisions.md`).
 
 ```yaml
 engines:
