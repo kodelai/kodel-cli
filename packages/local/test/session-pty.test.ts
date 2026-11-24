@@ -1010,7 +1010,7 @@ describe("pty holder, fake terminal", () => {
     expect(removed).toBe(HOLDER_SIGNALS.length);
   });
 
-  test("ekav_pty_group_is_signalled_only_while_its_leader_lives", () => {
+  test("tA_pty_group_is_signalled_only_while_its_leader_lives", () => {
     const request = { file: "/bin/sh", args: [], cwd: "/", env: {}, cols: 80, rows: 24 };
     const sent: [number, string][] = [];
     const state = { lives: true };
@@ -1029,7 +1029,7 @@ describe("pty holder, fake terminal", () => {
     expect(raw.kills).toEqual(["SIGTERM"]);
   });
 
-  test("ekav_pty_timeout_escalation_is_dropped_when_the_child_ends: no SIGKILL after the exit", async () => {
+  test("tA_pty_timeout_escalation_is_dropped_when_the_child_ends: no SIGKILL after the exit", async () => {
     const world = start({ timeoutMs: 20 }, { extra: { killGraceMs: 40 } });
     const spawn = await world.spawned();
     await eventually(() => spawn.process.kills.includes("SIGTERM"));
@@ -1040,7 +1040,7 @@ describe("pty holder, fake terminal", () => {
     expect(status()).toMatchObject({ state: "killed", reason: "timeout" });
   });
 
-  test("ekav_pty_timeout_kills_a_child_that_ignores_sigterm", async () => {
+  test("tA_pty_timeout_kills_a_child_that_ignores_sigterm", async () => {
     const world = start({ timeoutMs: 20 }, { extra: { killGraceMs: 30 } });
     const spawn = await world.spawned();
     await eventually(() => spawn.process.kills.includes("SIGKILL"));

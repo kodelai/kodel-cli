@@ -290,7 +290,7 @@ describe("killTree signals a process group only while its leader lives", () => {
   };
   const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  test("ekav_kill_tree_leader_gone_before_the_grace_gets_no_group_sigkill", async () => {
+  test("t47_kill_tree_leader_gone_before_the_grace_gets_no_group_sigkill", async () => {
     const w = world();
     killTree(w.leader, w.parts);
     expect(w.sent).toEqual([[-4242, "SIGTERM"]]);
@@ -299,7 +299,7 @@ describe("killTree signals a process group only while its leader lives", () => {
     expect(w.sent).toEqual([[-4242, "SIGTERM"]]);
   });
 
-  test("ekav_kill_tree_leader_that_ignores_sigterm_gets_sigkill", async () => {
+  test("t47_kill_tree_leader_that_ignores_sigterm_gets_sigkill", async () => {
     const w = world();
     killTree(w.leader, w.parts);
     killTree(w.leader, w.parts); // asked again (the holder's watcher): one escalation, not two
@@ -311,7 +311,7 @@ describe("killTree signals a process group only while its leader lives", () => {
     ]);
   });
 
-  test("ekav_kill_tree_looks_at_the_leader_again_before_the_sigkill", async () => {
+  test("t47_kill_tree_looks_at_the_leader_again_before_the_sigkill", async () => {
     // The exit was not reported yet (no event), but the process is gone: its group number may be another's.
     const gone = world();
     killTree(gone.leader, gone.parts);
@@ -327,7 +327,7 @@ describe("killTree signals a process group only while its leader lives", () => {
     expect(reaped.sent).toEqual([[-4242, "SIGTERM"]]);
   });
 
-  test("ekav_kill_tree_signals_nothing_of_a_leader_that_has_ended", async () => {
+  test("t47_kill_tree_signals_nothing_of_a_leader_that_has_ended", async () => {
     const ended = world();
     ended.leader.exitCode = 0;
     killTree(ended.leader, ended.parts);
@@ -339,7 +339,7 @@ describe("killTree signals a process group only while its leader lives", () => {
     expect(dead.sent).toEqual([]);
   });
 
-  test("ekav_kill_tree_cancel_drops_the_pending_sigkill", async () => {
+  test("t47_kill_tree_cancel_drops_the_pending_sigkill", async () => {
     const w = world();
     killTree(w.leader, w.parts)();
     await pause(80);
@@ -347,7 +347,7 @@ describe("killTree signals a process group only while its leader lives", () => {
   });
 
   test.skipIf(process.platform === "win32")(
-    "ekav_kill_tree_real_leader_that_ends_on_sigterm_is_not_signalled_again",
+    "t47_kill_tree_real_leader_that_ends_on_sigterm_is_not_signalled_again",
     async () => {
       const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
         stdio: "ignore",
@@ -370,7 +370,7 @@ describe("killTree signals a process group only while its leader lives", () => {
   );
 
   test.skipIf(process.platform === "win32")(
-    "ekav_run_command_timeout_kills_a_command_that_ignores_sigterm",
+    "t47_run_command_timeout_kills_a_command_that_ignores_sigterm",
     async () => {
       const code = "process.on('SIGTERM', () => {}); setTimeout(() => {}, 60000)";
       const result = await run(`exec node -e "${code}"`, { timeoutMs: 500 });

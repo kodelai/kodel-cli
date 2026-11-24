@@ -1531,8 +1531,8 @@ cleared, whether or not the leader had ended in between.
   or an abort; for a session the status names it (`leftover`), for a pipeline command nothing does.
 - **Docs:** the limit in `docs/session-formats.md` and the two places above that said "the timeout signals
   only the child" now say what the code does: the child's process group, and only while its leader lives.
-- **Tests:** `ekav_kill_tree_*` and `ekav_run_command_timeout_kills_a_command_that_ignores_sigterm`
-  (`command.test.ts`), `ekav_pty_group_is_signalled_only_while_its_leader_lives`,
-  `ekav_pty_timeout_escalation_is_dropped_when_the_child_ends`,
-  `ekav_pty_timeout_kills_a_child_that_ignores_sigterm` (`session-pty.test.ts`). The cleanup of
+- **Tests:** `t47_kill_tree_*` and `t47_run_command_timeout_kills_a_command_that_ignores_sigterm`
+  (`command.test.ts`), `tA_pty_group_is_signalled_only_while_its_leader_lives`,
+  `tA_pty_timeout_escalation_is_dropped_when_the_child_ends`,
+  `tA_pty_timeout_kills_a_child_that_ignores_sigterm` (`session-pty.test.ts`). The cleanup of
   `tests/pty/worker-terminal.test.ts` kills its strays by pid, never by group.
