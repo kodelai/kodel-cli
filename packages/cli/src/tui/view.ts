@@ -626,11 +626,12 @@ function withOffers(m: Model): Model {
     if (worker === undefined) continue;
     const offer = resumeOffer(s, worker, m.workPending, m.now);
     // An active daemon resumes it in its next cycle: offering it here too would only race it. A run
-    // an agent moved on since the decision, or one of another checkout, the daemon leaves alone, so
-    // the offer stays here.
+    // an agent moved on since the decision, one of another checkout, or one whose agent the person
+    // stopped, the daemon leaves alone, so the offer stays here.
     offers[s.id] =
       offer.offer !== undefined &&
       !offer.offer.moved &&
+      worker.stopped !== true &&
       s.foreignRoot === undefined &&
       m.serve.kind === "active"
         ? { line: SERVE_RESUMES_LINE, why: "kodel serve resumes the agent in its next cycle" }

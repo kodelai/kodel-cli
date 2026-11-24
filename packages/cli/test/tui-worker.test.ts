@@ -2686,6 +2686,24 @@ describe("t44 the TUI with kodel serve", () => {
     expect(screen(m, WIDER)).not.toContain("kodel serve resumes it");
   });
 
+  test("t47_tui_keeps_the_offer_of_a_stopped_worker_when_serve_is_on", () => {
+    // The daemon never resumes an agent the person stopped: the screen keeps its own offer.
+    const stopped = worker("r_1", {
+      state: "exited",
+      label: "stopped",
+      stopped: true,
+      since: NOW - 20_000,
+    });
+    const m = withWorkers(model([decidedSession()]), statuses(["r_1", stopped]), false, {
+      kind: "active",
+      pid: 4242,
+      since: NOW - 3_600_000,
+    });
+    expect(m.offers.r_1?.offer?.seq).toBe(DECIDED.seq);
+    expect(screen(m, WIDER)).not.toContain("kodel serve resumes it");
+    expect(footer(m)).toContain("s resume");
+  });
+
   test("t44_tui_keeps_the_offer_of_another_checkouts_run", async () => {
     // The daemon serves its own checkout only: a run another checkout made keeps the offer here.
     const foreign = { ...decidedSession(), foreignRoot: "/elsewhere" };
