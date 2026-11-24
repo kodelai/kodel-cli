@@ -7,9 +7,9 @@
  * the process a holder started.
  *
  * A holder is known in two ways. By its own command line, which always ends with `HOLDER_MARKER`: this
- * finds a session whatever state base its record was written under (a session's environment gets no
- * `KODEL_*`, so a command inside one resolves the default base, not the `KODEL_STATE_DIR` of the shell
- * that started it). And by the records of the state base the command resolves, which also name the
+ * finds a session whatever state base its record was written under (a session's environment carries no
+ * `KODEL_STATE_DIR`, only the mark `KODEL_ENGINE`, so a command inside one resolves the default base, not
+ * the `KODEL_STATE_DIR` of the shell that started it). And by the records of the state base the command resolves, which also name the
  * process a holder started: this finds an agent whose holder is gone, also one whose holder recorded
  * `killed` or `lost` while the process it started still runs.
  *

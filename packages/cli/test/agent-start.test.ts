@@ -331,7 +331,7 @@ describe("t47 kodel agent start, a person's own agent", () => {
     expect(without.out).not.toContain("KODEL_STATE_DIR");
   });
 
-  test("t47_agent_start_plain_says_what_its_server_may_decide", async () => {
+  test("t47_agent_start_plain_says_its_server_is_a_worker", async () => {
     project("decisions:\n  agent:\n    gate: true\n");
     const on = await start({}, "--bg", "hello");
     expect(on.code, on.err).toBe(0);
@@ -355,6 +355,7 @@ describe("t47 kodel agent start, a person's own agent", () => {
     expect(r.code, r.err).toBe(0);
     const [spec] = sessions.specs;
     // The environment the child of this session gets: what the adapter and the PTY holder make of the spec.
+    expect(spec).toBeDefined();
     const child = ptyChildEnv(sessionEnv(spec?.env, spec?.inheritEnv ?? true, {}));
     expect(child.KODEL_ENGINE).toBe("1");
     const home = mkdtempSync(join(tmpdir(), "kodel-agent-start-home-"));

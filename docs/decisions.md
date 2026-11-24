@@ -145,11 +145,12 @@ What keeps such an agent from deciding:
 
 What stays open, stated and not closed:
 
-- **`kodel mcp` by hand in a shell is accepted.** An agent with a shell can start a kodel server of its own
-  (`kodel mcp` with no `--no-decisions`) and speak to it; with `decisions.agent` on, that server serves the
-  decision tools. The person accepted this: the switches of `decisions.agent` are already "protection against
-  a mistake, not against an agent that ignores its instructions" (above), and with them off, as by default,
-  no server decides.
+- **`kodel mcp` by hand in a shell is accepted.** Inside a kodel session an agent's shell carries the mark
+  (`KODEL_ENGINE`), so a `kodel mcp` it starts is a worker (MCP roles, `docs/mcp-roles.md`) and serves no
+  decision tool. An agent that strips the mark (`env -u KODEL_ENGINE kodel mcp`) gets a server of the
+  project's configured role; with `decisions.agent` on, that server serves the decision tools. The person
+  accepted this: the switches of `decisions.agent` are already "protection against a mistake, not against an
+  agent that ignores its instructions" (above), and with them off, as by default, no server decides.
 - A process that left its session and has a pseudo-terminal of its own passes all three guards.
 - An agent whose holder is gone, in a session that was started under a `KODEL_STATE_DIR` its own environment
   does not have, is not found by the second guard (no holder runs, and its record is in another state base);

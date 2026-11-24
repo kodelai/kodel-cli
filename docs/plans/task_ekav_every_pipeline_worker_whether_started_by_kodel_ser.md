@@ -398,7 +398,7 @@ The record, the commands, the config:
 | `agent start <prompt>`: the claude profile's command, the chosen id, the prompt; no kodel MCP config and no permission flag; `KODEL_ENGINE` set; prints the argv and the unattended hint; attaches unless `--bg` | `t47_agent_start_plain_prints_argv_and_attaches` |
 | The flags of `agent start`, one row each: `--pipeline` with `worker: terminal` attaches, with `--bg` does not; `--pipeline` with `worker: print` starts today's `-p` worker, attaches nothing and says so; `--pipeline` without a prompt, `--pipeline --name`, `--resume` with a prompt, with `--pipeline` or with `--name`: refused by name, nothing started; a plain start with `decisions.dialog` on is not refused and prints the line about dialogs; `--pipeline` with it on is refused | `t47_agent_start_flag_table` |
 | With `KODEL_STATE_DIR` set it prints the warning about the agent's own server | `t47_agent_start_plain_warns_about_the_state_dir` |
-| A plain start says that a kodel server this agent starts for itself is a worker in the session and decides nothing, `decisions.agent` named when it is on | `t47_agent_start_plain_says_what_its_server_may_decide` |
+| A plain start says that a kodel server this agent starts for itself is a worker in the session and decides nothing, `decisions.agent` named when it is on | `t47_agent_start_plain_says_its_server_is_a_worker` |
 | The environment a plain session gives its child makes `kodel mcp` with no role a worker (real server from source), and `--role manager` does not start there | `t47_agent_start_plain_session_makes_the_projects_server_a_worker` |
 | `exec --pty --attach` prints `started`, then attaches; the exit code is the attach's; a command that ended before the attach gives `[ended: …]` and code 0; without `--pty` refused | `tA_exec_attach_starts_then_attaches`, `tA_exec_attach_of_a_command_that_already_ended` (`cli/test/agent.test.ts`), `tA_exec_attach_real_terminal` (`tests/pty/pty-session.test.ts`) |
 | `terminal.command` is `[<program>, then pairs of an allowed flag and its value]` (`--flag value` or `--flag=value`): element 0 is the program (a wrapper there is the person's committed choice, and the group rule above covers it); a bare word after it, a value that begins with `-`, any other flag, also in a short form, are refused by name; before the start the built argv is read back by the profile and every element must be the program, one of kodel's own fixed elements, or an allowed pair | `t47_engines_terminal_override`, `t47_engines_terminal_allows_only_listed_flags`, `t47_final_argv_is_checked` |
@@ -1285,7 +1285,7 @@ Steps 12 and 13 (the docs, the follow-up):
   would undo a rule of 5M9D inside this task. A person who wants an agent that decides or manages starts it
   outside kodel, as `docs/mcp-roles.md` says. Whether a person's own session should get the server "as
   configured" is a decision for the person (it changes 5M9D), not a fix of this merge.
-- Tests: `t47_agent_start_plain_says_what_its_server_may_decide` (the new words, with and without
+- Tests: `t47_agent_start_plain_says_its_server_is_a_worker` (the new words, with and without
   `decisions.agent`), `t47_agent_start_plain_session_makes_the_projects_server_a_worker` (new),
   `t47_doctor_decisions_dialog_and_agent` (the doctor line).
 
