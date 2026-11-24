@@ -28,11 +28,14 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",
     "@speed-highlight/core": "2.1.0",
-    "commander": "^14.0.0"
+    "commander": "^14.0.0",
+    "preact": "10",
+    "uqr": "0.1"
   },
   "devDependencies": {
     "@kodel-ai/local": "workspace:*",
-    "@kodel-ai/pipeline-core": "workspace:*"
+    "@kodel-ai/pipeline-core": "workspace:*",
+    "zod": "^3.24.0"
   },
   "optionalDependencies": {
     "@lydell/node-pty": "1.1.0"

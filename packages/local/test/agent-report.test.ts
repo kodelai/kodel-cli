@@ -210,6 +210,26 @@ describe("the agent's log", () => {
     expect(await agentLog({ root, workdir, configDir, from: 0, to: 1 })).toEqual([]);
   });
 
+  test("a subagent's own log is kept under the entry that names it, not in the run's order", async () => {
+    await installClaudeSession({ configDir, cwd: workdir });
+    const log = (await agentLog({ root, workdir, configDir, from: 0, to: Date.now() })) ?? [];
+    const started = log.filter((e) => e.kind === "subagent");
+    expect(started.length).toBeGreaterThan(0);
+    const own = started.flatMap((e) => e.children ?? []);
+    expect(own.length).toBeGreaterThan(0);
+    expect(own.some((e) => e.kind === "call" || e.kind === "text")).toBe(true);
+    // Without the subagent's file the entry stays a mark with nothing under it.
+    const bare = join(base, "bare");
+    await installClaudeSession({ configDir: bare, cwd: workdir, subagents: false });
+    const plain =
+      (await agentLog({ root, workdir, configDir: bare, from: 0, to: Date.now() })) ?? [];
+    expect(plain.filter((e) => e.kind === "subagent").every((e) => e.children === undefined)).toBe(
+      true,
+    );
+    // The run's own entries are the same either way: the subagent's are not mixed into them.
+    expect(log.map((e) => [e.ts, e.kind])).toEqual(plain.map((e) => [e.ts, e.kind]));
+  });
+
   test("no session, no log", async () => {
     expect(await agentLog({ root, workdir, configDir, from: 0, to: Date.now() })).toBeUndefined();
   });

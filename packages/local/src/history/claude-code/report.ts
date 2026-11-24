@@ -60,7 +60,11 @@ function textOf(content: unknown): string {
  * The sessions of the run that were written to at or after `from`, newest first: the ones the engine names,
  * or, when it names none, the ones that began inside `workdir`.
  */
-async function sessionsOf(options: LogOptions, from: number): Promise<SessionRef[]> {
+async function sessionsOf(
+  options: LogOptions,
+  from: number,
+  children?: Map<string, SessionRef>,
+): Promise<SessionRef[]> {
   const { root, workdir } = options;
   if (!(await isKodelProject(root))) return [];
   const store = join(options.configDir ?? claudeConfigDir(), "projects");
@@ -68,7 +72,10 @@ async function sessionsOf(options: LogOptions, from: number): Promise<SessionRef
   const home = await realOrSelf(workdir);
   const found: { ref: SessionRef; mtime: number }[] = [];
   for (const ref of await locateClaudeSessions(root, store)) {
-    if (ref.parent_session_id !== undefined) continue;
+    if (ref.parent_session_id !== undefined) {
+      children?.set(`${ref.parent_session_id}/${ref.session_id}`, ref);
+      continue;
+    }
     if (named.size > 0 && !named.has(ref.session_id)) continue;
     const mtime = await stat(ref.path)
       .then((s) => s.mtimeMs)
@@ -135,19 +142,81 @@ export interface AgentLogEntry {
   /** For a call: the tool, and how it ended once it did. */
   tool?: string;
   result?: { ok: boolean; ms?: number; size?: number; text?: string };
+  /** For a subagent: what it said and called in its own log, when that log can be read. */
+  children?: AgentLogEntry[];
 }
 
 /** Most entries kept for a run: the last ones, which are the ones a person looks for. */
 const LOG_LIMIT = 4000;
+/** Most entries kept of one subagent's own log. */
+const SUBAGENT_LOG_LIMIT = 500;
+
+type Collector = ReturnType<typeof claudeCodeCollector>;
+
+/** The entries of one log in the window, and the subagents it started by their id. */
+async function readEntries(
+  collector: Collector,
+  ref: SessionRef,
+  window: { from: string; to: string },
+  rules: RedactRule[],
+): Promise<{ entries: AgentLogEntry[]; started: Map<string, AgentLogEntry> }> {
+  const entries: AgentLogEntry[] = [];
+  const started = new Map<string, AgentLogEntry>();
+  const calls = new Map<string, AgentLogEntry>();
+  try {
+    for await (const event of collector.read(ref, window, { capture: { rules } })) {
+      const ts = Date.parse(event.ts);
+      if (event.kind === "message") {
+        entries.push({
+          ts,
+          kind: event.role === "assistant" ? "text" : "you",
+          text: event.text_preview ?? "",
+        });
+      } else if (event.kind === "tool_call") {
+        const entry: AgentLogEntry = {
+          ts,
+          kind: "call",
+          tool: event.mcp_server === undefined ? event.name : `${event.mcp_server}:${event.name}`,
+          text: event.input_preview ?? "",
+        };
+        calls.set(event.id, entry);
+        entries.push(entry);
+      } else if (event.kind === "tool_result") {
+        const call = calls.get(event.id);
+        if (call) {
+          call.result = {
+            ok: event.ok,
+            ...(event.duration_ms === undefined ? {} : { ms: event.duration_ms }),
+            ...(event.size === undefined ? {} : { size: event.size }),
+            ...(event.output_preview === undefined ? {} : { text: event.output_preview }),
+          };
+        }
+      } else if (event.kind === "subagent") {
+        const entry: AgentLogEntry = {
+          ts,
+          kind: "subagent",
+          text: event.description_preview ?? event.agent_id,
+        };
+        started.set(event.child_session_id ?? `agent-${event.agent_id}`, entry);
+        entries.push(entry);
+      }
+    }
+  } catch {
+    // A log that cannot be read adds nothing.
+  }
+  return { entries, started };
+}
 
 /**
  * What the agent said and the tools it called in the run's directory between `from` and `to`, in the order it
- * happened. The texts are the previews the history events keep (a few hundred characters each).
+ * happened. The texts are the previews the history events keep (a few hundred characters each). A subagent's
+ * own log is kept under the entry that names it (`children`), not in the order of the run.
  */
 export async function agentLog(
   options: LogOptions & { from: number; to: number; limit?: number },
 ): Promise<AgentLogEntry[] | undefined> {
-  const refs = await sessionsOf(options, options.from);
+  const children = new Map<string, SessionRef>();
+  const refs = await sessionsOf(options, options.from, children);
   if (refs.length === 0) return undefined;
   const collector = claudeCodeCollector(
     options.configDir === undefined ? {} : { configDir: options.configDir },
@@ -156,45 +225,18 @@ export async function agentLog(
     from: new Date(options.from).toISOString(),
     to: new Date(options.to).toISOString(),
   };
+  const rules = options.rules ?? [];
   const entries: AgentLogEntry[] = [];
-  const calls = new Map<string, AgentLogEntry>();
   for (const ref of refs) {
-    try {
-      for await (const event of collector.read(ref, window, {
-        capture: { rules: options.rules ?? [] },
-      })) {
-        const ts = Date.parse(event.ts);
-        if (event.kind === "message") {
-          entries.push({
-            ts,
-            kind: event.role === "assistant" ? "text" : "you",
-            text: event.text_preview ?? "",
-          });
-        } else if (event.kind === "tool_call") {
-          const entry: AgentLogEntry = {
-            ts,
-            kind: "call",
-            tool: event.mcp_server === undefined ? event.name : `${event.mcp_server}:${event.name}`,
-            text: event.input_preview ?? "",
-          };
-          calls.set(event.id, entry);
-          entries.push(entry);
-        } else if (event.kind === "tool_result") {
-          const call = calls.get(event.id);
-          if (call) {
-            call.result = {
-              ok: event.ok,
-              ...(event.duration_ms === undefined ? {} : { ms: event.duration_ms }),
-              ...(event.size === undefined ? {} : { size: event.size }),
-              ...(event.output_preview === undefined ? {} : { text: event.output_preview }),
-            };
-          }
-        } else if (event.kind === "subagent") {
-          entries.push({ ts, kind: "subagent", text: event.description_preview ?? event.agent_id });
-        }
+    const read = await readEntries(collector, ref, window, rules);
+    entries.push(...read.entries);
+    for (const [child, entry] of read.started) {
+      const childRef = children.get(`${ref.session_id}/${child}`);
+      if (childRef === undefined) continue;
+      const own = await readEntries(collector, childRef, window, rules);
+      if (own.entries.length > 0) {
+        entry.children = own.entries.sort((a, b) => a.ts - b.ts).slice(-SUBAGENT_LOG_LIMIT);
       }
-    } catch {
-      // A log that cannot be read adds nothing.
     }
   }
   entries.sort((a, b) => a.ts - b.ts);

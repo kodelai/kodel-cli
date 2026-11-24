@@ -75,6 +75,7 @@ import {
   dialogTimeoutFrom,
   noProjectHost,
   noProjectManager,
+  type ServerOptions,
   serveNoTools,
   serverToolSet,
   serveStdio,
@@ -454,6 +455,186 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     return `kodel resume ${runId} --node <slug> (paused at ${nodes})`;
   }
 
+  /** The tools a server of one role serves, said on stderr; a set the config cannot give stops it. */
+  const toolSetFor =
+    (role: ServerRole | undefined, readOnly: boolean) =>
+    (input: Parameters<typeof serverToolSet>[0]): string[] => {
+      const resolved = serverToolSet({
+        ...input,
+        ...(role === undefined ? {} : { role }),
+        readOnly,
+      });
+      if (resolved.refused !== undefined) throw new UserError(resolved.refused);
+      for (const { name, why } of resolved.unapplied) {
+        env.err(`kodel: mcp.roles: ${plain(name)} is not served here: ${plain(why)}\n`);
+      }
+      env.err(
+        `kodel: serving ${resolved.names.length} tools (${role === undefined ? "no role: every tool" : `role ${role}`}${readOnly ? ", read-only" : ""})\n`,
+      );
+      return resolved.names;
+    };
+
+  /**
+   * What `kodel mcp` serves a project: the host, the task tools and the options of the server, for one
+   * role and `--read-only`. The stdio server takes one; the web server's MCP endpoint takes one per kind
+   * of token (T-44).
+   */
+  async function projectMcp(
+    resolved: ProjectRoot,
+    input: {
+      role: ServerRole | undefined;
+      readOnly: boolean;
+      decisions: boolean;
+      waitHint: boolean;
+      toolSet: (input: Parameters<typeof serverToolSet>[0]) => string[];
+      /** A server that serves no agent working a run: no copy of the agent's log, no engine step. */
+      noEngine?: boolean;
+    },
+  ) {
+    const { role, readOnly, toolSet } = input;
+    const overrides = await loadMcpRoles(resolved.dataDir);
+    let tasks: TaskService | undefined;
+    let runLink: RunTaskLink | undefined;
+    try {
+      const opened = await openTaskService({ storeRoot: resolved.dataDir });
+      tasks = opened?.service;
+      runLink = opened?.runLink;
+    } catch (error) {
+      // Any failure (an unreadable config included) leaves the pipeline tools running.
+      const why = error instanceof Error ? error.message : String(error);
+      env.err(`kodel: the task tools are not served: ${plain(why)}\n`);
+    }
+    // The instructions are sent once, when the agent connects: a change of this setting applies
+    // when the server is started again. A config that cannot be read leaves the default, except
+    // for a valid `agent_hints` block: a bad value elsewhere must not undo `wait: false`.
+    const waitHint =
+      input.waitHint === false ? false : (await loadAgentHints(resolved.dataDir)).wait;
+    const noDecisions = input.decisions === false;
+    const fromConfig = await loadConfig(resolved.dataDir)
+      .then((config) => ({
+        dialog: config.decisions.dialog,
+        agentDecisions: {
+          gate: config.decisions.agent.gate,
+          pipelineChange: config.decisions.agent.pipeline_change,
+        },
+      }))
+      .catch(() => ({
+        dialog: false,
+        agentDecisions: { gate: false, pipelineChange: false },
+      }));
+    // `--no-decisions` serves a background agent: whatever the project lets an agent decide, this
+    // server decides nothing and asks nobody; the one line says so where the person can read it.
+    const settings = noDecisions
+      ? { waitHint, dialog: false, agentDecisions: { gate: false, pipelineChange: false } }
+      : role === "worker" || readOnly
+        ? // The worker decides nothing for the person, whatever the project lets an agent decide;
+          // a read-only server neither decides nor asks (an answer in a dialog is a write).
+          {
+            waitHint,
+            dialog: readOnly ? false : fromConfig.dialog,
+            agentDecisions: { gate: false, pipelineChange: false },
+          }
+        : { waitHint, ...fromConfig };
+    if (noDecisions) {
+      env.err(
+        "kodel: --no-decisions: this server serves no decision tool and shows no dialog; a decisions.agent allowance of the project does not apply to it\n",
+      );
+    }
+    const dialogTimeoutMs = dialogTimeoutFrom(env.environment);
+    // The place the config names when the server starts. A config that names a place that cannot
+    // be used (`home` without an id, a bad base) does not take the server down: the tools say why.
+    let storage: StoragePlace | undefined;
+    let storageError: KodelError | undefined;
+    try {
+      storage = await storagePlace();
+    } catch (error) {
+      // Whatever went wrong in finding the place (an unreadable config included) is carried to the
+      // calls that need the history; the rest of the server is served.
+      storageError =
+        error instanceof KodelError
+          ? error
+          : new KodelError(
+              "CONFIG_INVALID",
+              `the place of the history cannot be found: ${error instanceof Error ? error.message : String(error)}`,
+            );
+      env.err(`kodel: ${plain(storageError.message)}\n`);
+    }
+    const only = toolSet({
+      overrides,
+      // The local host keeps attachments with its runs.
+      attachments: true,
+      ...(tasks === undefined ? {} : { tasks }),
+      ...(runLink === undefined ? {} : { runLink }),
+      agentDecisions: settings.agentDecisions,
+    });
+    const local = new LocalPipelineHost({
+      root: resolved.root,
+      storeRoot: resolved.dataDir,
+      ...(storage === undefined ? {} : { storage, watchStorage: () => resolvePlace(true) }),
+      ...(storageError === undefined ? {} : { storageError }),
+      agentDecisions: settings.agentDecisions,
+      servedTools: only,
+      ...(input.waitHint === false ? { agentHints: { wait: false } } : {}),
+      build: BUILD,
+      // A read-only server writes nothing: no timer that copies the agent's log, and no engine
+      // step is started from it. A server that serves no agent working a run (`kodel web --mcp`)
+      // decides like a person at a terminal: it starts no engine step and copies no log.
+      ...(readOnly
+        ? {}
+        : input.noEngine === true
+          ? engineHostOptions("human", {
+              root: resolved.root,
+              ...(env.environment === undefined ? {} : { environment: env.environment }),
+              ...(env.sessionLauncher ? { launcher: env.sessionLauncher } : {}),
+            })
+          : {
+              // This process serves the agent: it copies the agent's log into the runs while they go.
+              agentLogTimer: true,
+              ...engineHostOptions("mcp", {
+                root: resolved.root,
+                ...(env.environment === undefined ? {} : { environment: env.environment }),
+                ...(env.sessionLauncher ? { launcher: env.sessionLauncher } : {}),
+              }),
+            }),
+      // The same tie the tools were built for; without one the host asks the config itself.
+      ...(runLink === undefined ? {} : { runTaskLink: runLink }),
+    });
+    const { managerPorts } = await import("./manager-ports");
+    const environment = env.environment ?? process.env;
+    const manager = {
+      ...createManagerReads({
+        host: local,
+        ...(tasks === undefined ? {} : { tasks: serveTasksOf(tasks) }),
+      }),
+      ...managerPorts({
+        root: resolved.root,
+        environment,
+        launcher: env.sessionLauncher ?? {
+          exec: process.execPath,
+          args: [process.argv[1] ?? "kodel"],
+        },
+        platform: env.platform ?? process.platform,
+      }),
+    };
+    return {
+      host: local,
+      tasks,
+      runLink,
+      options: {
+        ...(role === undefined ? {} : { role }),
+        readOnly,
+        only,
+        manager,
+        waitHint: settings.waitHint,
+        // A read-only server is given no host that decides: no dialog and no decision tool can reach one.
+        ...(readOnly ? {} : { humans: local }),
+        dialog: settings.dialog,
+        agentDecisions: settings.agentDecisions,
+        ...(dialogTimeoutMs === undefined ? {} : { dialogTimeoutMs }),
+      } satisfies ServerOptions,
+    };
+  }
+
   program
     .command("mcp")
     .description("Serve the pipeline tools to a coding agent over stdio")
@@ -495,21 +676,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
             : "--role worker cannot be --read-only: a run is worked with tools that write",
         );
       }
-      const toolSet = (input: Parameters<typeof serverToolSet>[0]): string[] => {
-        const resolved = serverToolSet({
-          ...input,
-          ...(role === undefined ? {} : { role }),
-          readOnly,
-        });
-        if (resolved.refused !== undefined) throw new UserError(resolved.refused);
-        for (const { name, why } of resolved.unapplied) {
-          env.err(`kodel: mcp.roles: ${plain(name)} is not served here: ${plain(why)}\n`);
-        }
-        env.err(
-          `kodel: serving ${resolved.names.length} tools (${role === undefined ? "no role: every tool" : `role ${role}`}${readOnly ? ", read-only" : ""})\n`,
-        );
-        return resolved.names;
-      };
+      const toolSet = toolSetFor(role, readOnly);
       // T-42: inside the process group of a live host session's child (an engine step), this server
       // would be a second Kodel client of the person, so it serves nothing. A group that cannot be
       // read fails open.
@@ -543,135 +710,14 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       }
       // Not caught: an `mcp` block that cannot be used stops the server (non-zero exit, the reason on
       // stderr) instead of serving more than the person wrote. A problem in another block is not read here.
-      const overrides = await loadMcpRoles(resolved.dataDir);
-      let tasks: TaskService | undefined;
-      let runLink: RunTaskLink | undefined;
-      try {
-        const opened = await openTaskService({ storeRoot: resolved.dataDir });
-        tasks = opened?.service;
-        runLink = opened?.runLink;
-      } catch (error) {
-        // Any failure (an unreadable config included) leaves the pipeline tools running.
-        const why = error instanceof Error ? error.message : String(error);
-        env.err(`kodel: the task tools are not served: ${plain(why)}\n`);
-      }
-      // The instructions are sent once, when the agent connects: a change of this setting applies
-      // when the server is started again. A config that cannot be read leaves the default, except
-      // for a valid `agent_hints` block: a bad value elsewhere must not undo `wait: false`.
-      const waitHint =
-        opts.waitHint === false ? false : (await loadAgentHints(resolved.dataDir)).wait;
-      const noDecisions = opts.decisions === false;
-      const fromConfig = await loadConfig(resolved.dataDir)
-        .then((config) => ({
-          dialog: config.decisions.dialog,
-          agentDecisions: {
-            gate: config.decisions.agent.gate,
-            pipelineChange: config.decisions.agent.pipeline_change,
-          },
-        }))
-        .catch(() => ({
-          dialog: false,
-          agentDecisions: { gate: false, pipelineChange: false },
-        }));
-      // `--no-decisions` serves a background agent: whatever the project lets an agent decide, this
-      // server decides nothing and asks nobody; the one line says so where the person can read it.
-      const settings = noDecisions
-        ? { waitHint, dialog: false, agentDecisions: { gate: false, pipelineChange: false } }
-        : role === "worker" || readOnly
-          ? // The worker decides nothing for the person, whatever the project lets an agent decide;
-            // a read-only server neither decides nor asks (an answer in a dialog is a write).
-            {
-              waitHint,
-              dialog: readOnly ? false : fromConfig.dialog,
-              agentDecisions: { gate: false, pipelineChange: false },
-            }
-          : { waitHint, ...fromConfig };
-      if (noDecisions) {
-        env.err(
-          "kodel: --no-decisions: this server serves no decision tool and shows no dialog; a decisions.agent allowance of the project does not apply to it\n",
-        );
-      }
-      const dialogTimeoutMs = dialogTimeoutFrom(env.environment);
-      // The place the config names when the server starts. A config that names a place that cannot
-      // be used (`home` without an id, a bad base) does not take the server down: the tools say why.
-      let storage: StoragePlace | undefined;
-      let storageError: KodelError | undefined;
-      try {
-        storage = await storagePlace();
-      } catch (error) {
-        // Whatever went wrong in finding the place (an unreadable config included) is carried to the
-        // calls that need the history; the rest of the server is served.
-        storageError =
-          error instanceof KodelError
-            ? error
-            : new KodelError(
-                "CONFIG_INVALID",
-                `the place of the history cannot be found: ${error instanceof Error ? error.message : String(error)}`,
-              );
-        env.err(`kodel: ${plain(storageError.message)}\n`);
-      }
-      const only = toolSet({
-        overrides,
-        // The local host keeps attachments with its runs.
-        attachments: true,
-        ...(tasks === undefined ? {} : { tasks }),
-        ...(runLink === undefined ? {} : { runLink }),
-        agentDecisions: settings.agentDecisions,
-      });
-      const local = new LocalPipelineHost({
-        root: resolved.root,
-        storeRoot: resolved.dataDir,
-        ...(storage === undefined ? {} : { storage, watchStorage: () => resolvePlace(true) }),
-        ...(storageError === undefined ? {} : { storageError }),
-        agentDecisions: settings.agentDecisions,
-        servedTools: only,
-        ...(opts.waitHint === false ? { agentHints: { wait: false } } : {}),
-        build: BUILD,
-        // A read-only server writes nothing: no timer that copies the agent's log, and no engine
-        // step is started from it.
-        ...(readOnly
-          ? {}
-          : {
-              // This process serves the agent: it copies the agent's log into the runs while they go.
-              agentLogTimer: true,
-              ...engineHostOptions("mcp", {
-                root: resolved.root,
-                ...(env.environment === undefined ? {} : { environment: env.environment }),
-                ...(env.sessionLauncher ? { launcher: env.sessionLauncher } : {}),
-              }),
-            }),
-        // The same tie the tools were built for; without one the host asks the config itself.
-        ...(runLink === undefined ? {} : { runTaskLink: runLink }),
-      });
-      const { managerPorts } = await import("./manager-ports");
-      const environment = env.environment ?? process.env;
-      const manager = {
-        ...createManagerReads({
-          host: local,
-          ...(tasks === undefined ? {} : { tasks: serveTasksOf(tasks) }),
-        }),
-        ...managerPorts({
-          root: resolved.root,
-          environment,
-          launcher: env.sessionLauncher ?? {
-            exec: process.execPath,
-            args: [process.argv[1] ?? "kodel"],
-          },
-          platform: env.platform ?? process.platform,
-        }),
-      };
-      await serveStdio(local, pkg.version, tasks, runLink, {
-        ...(role === undefined ? {} : { role }),
+      const parts = await projectMcp(resolved, {
+        role,
         readOnly,
-        only,
-        manager,
-        waitHint: settings.waitHint,
-        // A read-only server is given no host that decides: no dialog and no decision tool can reach one.
-        ...(readOnly ? {} : { humans: local }),
-        dialog: settings.dialog,
-        agentDecisions: settings.agentDecisions,
-        ...(dialogTimeoutMs === undefined ? {} : { dialogTimeoutMs }),
+        decisions: opts.decisions !== false,
+        waitHint: opts.waitHint !== false,
+        toolSet,
       });
+      await serveStdio(parts.host, pkg.version, parts.tasks, parts.runLink, parts.options);
     });
 
   program
@@ -1068,6 +1114,212 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         err: env.err,
         ...(env.serveSignal === undefined ? {} : { signal: env.serveSignal }),
       });
+    });
+
+  const web = program
+    .command("web")
+    .description(
+      "Serve the web UI: the runs of this project and what waits for you, from a browser or a phone",
+    )
+    .option("--port <port>", "the port to listen on", "4317")
+    .option(
+      "--host <address>",
+      "the address to listen on (0.0.0.0 for every one, as Tailscale needs)",
+      "127.0.0.1",
+    )
+    .option(
+      "--url <address>",
+      "the address the UI is opened at from outside (a TLS proxy, Tailscale Serve); it goes in the pairing code",
+    )
+    .option("--demo", "show sample runs instead of this project's")
+    .option(
+      "--ask",
+      "let paired devices ask questions about a run to a read-only copy of its Claude Code session",
+    )
+    .option(
+      "--mcp",
+      "serve the manager's MCP tools at /mcp to clients that carry a token (kodel web token add)",
+    )
+    .action(
+      async (opts: {
+        port: string;
+        host: string;
+        url?: string;
+        demo?: boolean;
+        ask?: boolean;
+        mcp?: boolean;
+      }) => {
+        const port = Number(opts.port);
+        if (!Number.isInteger(port) || port < 0 || port > 65_535) {
+          throw new UserError(`--port must be a port number (got ${opts.port})`);
+        }
+        const { demoApi, projectApi, serveWeb } = await import("./web/command");
+        const base = resolveBase(env.environment ?? process.env);
+        let api: import("./web/handler").WebApi;
+        let work: import("./tui/decide").WorkHandle | undefined;
+        let mcp: import("./web/command").ServeOptions["mcp"];
+        let redact: ((text: string) => string) | undefined;
+        if (opts.mcp === true && opts.demo === true) {
+          throw new UserError("--mcp serves a project's runs; it does not go with --demo");
+        }
+        if (opts.mcp === true && (env.environment ?? process.env).KODEL_ENGINE !== undefined) {
+          throw new UserError(
+            "--mcp does not start from a command the engine runs (KODEL_ENGINE is set): the manager is served to an agent started outside kodel",
+          );
+        }
+        if (opts.demo) {
+          api = await demoApi(Date.now());
+        } else {
+          const { createDecisionTools } = await import("./tui/decide");
+          const h = await host();
+          const { root, dataDir } = await project();
+          redact = (text) => h.historyRedact(text);
+          const tools = createDecisionTools(h, { hardStop: () => stopAndWait(h) });
+          work = tools.work;
+          // Questions to the agent are off unless the person who starts the server turns them on.
+          let asker: import("./web/ask").Asker | undefined;
+          if (opts.ask === true) {
+            const { Asker } = await import("./web/ask");
+            const { askDir, locateRunSession } = await import("./web/command");
+            asker = new Asker({
+              dir: askDir(base, root),
+              locate: (runId) => locateRunSession(h, root, runId),
+              redact: (text) => h.historyRedact(text),
+            });
+          }
+          const { openTasksForTui, tuiTaskOptions } = await import("./tui/tasks-open");
+          const taskReaders = tuiTaskOptions(await openTasksForTui(dataDir));
+          api = projectApi(h, root, tools, asker, taskReaders);
+          if (opts.mcp === true) {
+            // The manager role, read-only for a read-only token: a client on another machine works
+            // no run. Each kind is built once, at its first session; every session gets its own server.
+            const resolved = await project();
+            const kinds = new Map<boolean, ReturnType<typeof projectMcp>>();
+            const { createServer } = await import("./mcp-server");
+            mcp = async (token) => {
+              let parts = kinds.get(token.readOnly);
+              if (parts === undefined) {
+                parts = projectMcp(resolved, {
+                  role: "manager",
+                  readOnly: token.readOnly,
+                  decisions: true,
+                  waitHint: false,
+                  noEngine: true,
+                  toolSet: toolSetFor("manager", token.readOnly),
+                });
+                kinds.set(token.readOnly, parts);
+                // A server that could not be built is built again at the next session, and the
+                // person sees why where the server was started.
+                parts.catch((error: unknown) => {
+                  kinds.delete(token.readOnly);
+                  env.err(
+                    `kodel: the MCP tools cannot be served: ${plain(error instanceof Error ? error.message : String(error))}\n`,
+                  );
+                });
+              }
+              const p = await parts;
+              return createServer(p.host, pkg.version, p.tasks, p.runLink, p.options);
+            };
+          }
+        }
+        const signal = () =>
+          new Promise<void>((resolve) => {
+            const done = () => {
+              process.off("SIGINT", done);
+              process.off("SIGTERM", done);
+              resolve();
+            };
+            process.once("SIGINT", done);
+            process.once("SIGTERM", done);
+          });
+        const first = signal();
+        await serveWeb(env, {
+          api,
+          base,
+          host: opts.host,
+          port,
+          ...(opts.url === undefined ? {} : { url: opts.url }),
+          ...(work === undefined ? {} : { work }),
+          ...(mcp === undefined ? {} : { mcp }),
+          ...(redact === undefined ? {} : { redact }),
+          signals: { first, second: first.then(signal) },
+        });
+      },
+    );
+
+  web
+    .command("pair")
+    .description(
+      "Show a one-time code (and its QR) that pairs a phone or a browser with the web UI",
+    )
+    .action(async () => {
+      requireHuman();
+      const { pairCommand } = await import("./web/command");
+      await pairCommand(env, resolveBase(env.environment ?? process.env), web.opts().url);
+    });
+
+  web
+    .command("devices")
+    .description("List the devices paired with the web UI")
+    .action(async () => {
+      const { formatDevices, webDir } = await import("./web/command");
+      const { DeviceStore } = await import("./web/devices");
+      const store = new DeviceStore(webDir(resolveBase(env.environment ?? process.env)));
+      env.out(formatDevices(await store.list()));
+    });
+
+  web
+    .command("revoke <device>")
+    .description("Unpair a device: it can no longer open the web UI")
+    .action(async (id: string) => {
+      requireHuman();
+      const { webDir } = await import("./web/command");
+      const { DeviceStore } = await import("./web/devices");
+      const store = new DeviceStore(webDir(resolveBase(env.environment ?? process.env)));
+      if (!(await store.revoke(id)))
+        throw new UserError(`no device "${id}"; see kodel web devices`);
+      env.out(`Device ${id} is unpaired.\n`);
+    });
+
+  const token = web
+    .command("token")
+    .description("The tokens MCP clients send to the web server's /mcp endpoint (kodel web --mcp)");
+
+  token
+    .command("add")
+    .description("Make a token for one MCP client; it is shown once")
+    .requiredOption("--name <name>", "what the client is, to know it again in the list")
+    .option("--read-only", "serve the client only the manager's tools that write nothing")
+    .action(async (opts: { name: string; readOnly?: boolean }) => {
+      requireHuman();
+      const { tokenAddCommand } = await import("./web/command");
+      await tokenAddCommand(env, resolveBase(env.environment ?? process.env), {
+        name: opts.name,
+        readOnly: opts.readOnly === true,
+      });
+    });
+
+  token
+    .command("ls")
+    .description("List the tokens of MCP clients")
+    .action(async () => {
+      const { formatTokens, webDir } = await import("./web/command");
+      const { TokenStore } = await import("./web/tokens");
+      const store = new TokenStore(webDir(resolveBase(env.environment ?? process.env)));
+      env.out(formatTokens(await store.list()));
+    });
+
+  token
+    .command("revoke <token>")
+    .description("Take a token out: its client is refused at its next call")
+    .action(async (id: string) => {
+      requireHuman();
+      const { webDir } = await import("./web/command");
+      const { TokenStore } = await import("./web/tokens");
+      const store = new TokenStore(webDir(resolveBase(env.environment ?? process.env)));
+      if (!(await store.revoke(id)))
+        throw new UserError(`no token "${id}"; see kodel web token ls`);
+      env.out(`Token ${id} is revoked.\n`);
     });
 
   program
