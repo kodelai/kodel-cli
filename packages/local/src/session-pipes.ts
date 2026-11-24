@@ -24,6 +24,7 @@ import {
   foldSessionName,
   isLocalSessionId,
   isTerminalState,
+  leftoverInstruction,
   parseBye,
   parseSent,
   planSend,
@@ -42,12 +43,13 @@ import {
   type TailStream,
   validateSpec,
 } from "@kodel-ai/pipeline-core";
-import { KILL_GRACE_MS, killTree } from "./command";
+import { KILL_GRACE_MS } from "./command";
 import {
   descendantsOf,
   groupMembers,
   liveProcess,
   machineId,
+  type ProcessRow,
   type ProcessView,
   processIdentity,
   readOnce,
@@ -571,10 +573,16 @@ export class PipesSessionAdapter implements SessionAdapter {
   private read(id: string, view: ProcessView = readOnce(this.processes)): SessionStatus {
     const dir = sessionDirOf(this.place, id);
     let group: SessionStatus["group"];
+    let leftover: ProcessRow[] = [];
+    // Asked only when the recorded child is gone: whatever is in its group then has no leader.
     const snapshot = snapshotOf(dir, (child, since) => {
       const answer = groupMembers(child.pid, since, child.identity, view);
       if (!answer.known) group = "unread";
       else if (answer.stranger) group = "stranger";
+      else if (answer.members.length > 0) {
+        group = "leaderless";
+        leftover = answer.members;
+      }
       return answer.known && answer.members.length > 0;
     });
     const result = deriveStatus(snapshot, this.now(), this.graceMs);
@@ -589,7 +597,10 @@ export class PipesSessionAdapter implements SessionAdapter {
     if (typeof recorded !== "string" && recorded.lastOutputAt !== undefined) {
       status.lastOutputAt = recorded.lastOutputAt;
     }
-    if (group !== undefined && isTerminalState(status.state)) status.group = group;
+    if (group !== undefined && isTerminalState(status.state)) {
+      status.group = group;
+      if (group === "leaderless") status.leftover = leftover.map((row) => ({ pid: row.pid }));
+    }
     return status;
   }
 
@@ -722,6 +733,27 @@ export class PipesSessionAdapter implements SessionAdapter {
     // Another process has the pid now: the session's child is gone (the group rule then finds a stranger).
     if (!same) return this.stopGroup(id, child, by);
     writeStop(dir, by, this.now(), now);
+    // The group as it is while its leader is known to live: its members are the session's.
+    const group = (this.processes.rows() ?? []).filter(
+      (row) => row.pgid === child.pid && row.pid !== child.pid && !row.state.startsWith("Z"),
+    );
+    /**
+     * `SIGKILL` for what ignored `SIGTERM`. A group is signalled only while its recorded leader lives: once the
+     * leader is gone the number may change hands, so the members listed above are signalled one by one, each
+     * only while it is still the process of that listing.
+     */
+    const killGroup = () => {
+      const leader = liveProcess(child.pid) ? processIdentity(child.pid) : undefined;
+      if (leader !== undefined && sameIdentity(now, leader) === true) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          // the group is gone
+        }
+        return;
+      }
+      for (const member of this.stillThere(group)) this.processes.signal(member.pid, "SIGKILL");
+    };
     const descendants = descendantsOf(child.pid).map((pid) => ({
       pid,
       identity: processIdentity(pid),
@@ -738,10 +770,15 @@ export class PipesSessionAdapter implements SessionAdapter {
         }
       }
     };
-    killTree(child.pid);
+    try {
+      process.kill(-child.pid, "SIGTERM"); // the leader's identity was checked above
+    } catch {
+      // the group is gone
+    }
     signalDescendants("SIGTERM");
-    // stop waits past the kill grace so the escalation in killTree runs in this process
-    const limit = this.now() + KILL_GRACE_MS + 3_000;
+    const grace = this.now() + KILL_GRACE_MS;
+    let escalated = false;
+    const limit = grace + 3_000;
     const descendantsAlive = () =>
       descendants.some((d) => {
         const alive = processIdentity(d.pid);
@@ -751,23 +788,39 @@ export class PipesSessionAdapter implements SessionAdapter {
       const s = this.settle(id);
       const over = s.state !== "running" && s.state !== "starting" && !liveProcess(child.pid);
       if (over && !descendantsAlive()) break;
+      if (!escalated && this.now() >= grace) {
+        escalated = true;
+        killGroup();
+      }
       await sleep(this.poll);
     }
     signalDescendants("SIGKILL");
-    try {
-      process.kill(-child.pid, "SIGKILL"); // members of the group that ignored SIGTERM (the identity was checked above)
-    } catch {
-      // the group is gone
-    }
+    killGroup();
     return this.settle(id);
   }
 
+  /** The rows that are still the processes of an earlier listing: the same pid, group and start time. */
+  private stillThere(members: ProcessRow[]): ProcessRow[] {
+    if (members.length === 0) return [];
+    const rows = this.processes.rows();
+    if (rows === undefined) return [];
+    return members.filter((member) =>
+      rows.some(
+        (row) =>
+          row.pid === member.pid &&
+          row.pgid === member.pgid &&
+          row.started === member.started &&
+          !row.state.startsWith("Z"),
+      ),
+    );
+  }
+
   /**
-   * The recorded child is gone. If its holder went away without recording that, and processes of the child's
-   * group are still there by the group rule (`groupMembers`), they are the session's and are ended: a stop record,
-   * then each member by its pid, after its start time was read again (never `kill(-pgid)`: the leader is gone and
-   * the number could change hands between the listing and the signal). A group that could not be looked at, or
-   * that is a stranger's, is not signalled; the status says which (`group`).
+   * The recorded child is gone, so nothing is signalled: kodel never signals a group without its live leader.
+   * If its holder went away without recording the end and processes are still in the child's group
+   * (`groupMembers`), they may be the session's or, the group's number given out again, another program's. The
+   * stop record is written all the same (somebody did ask: a person's stop is never resumed by the daemon), and
+   * the status names the processes with their commands for the person to look at and end.
    */
   private async stopGroup(
     id: string,
@@ -781,32 +834,15 @@ export class PipesSessionAdapter implements SessionAdapter {
     if (typeof record === "string") return status;
     const answer = groupMembers(child.pid, record.started, child.identity, this.processes);
     if (!answer.known || answer.stranger || answer.members.length === 0) return this.settle(id);
-    const members = answer.members;
     writeStop(dir, by, this.now());
-    /** The members that are still the processes of the listing: the same pid, group and start time. */
-    const left = () => {
-      const rows = this.processes.rows();
-      if (rows === undefined) return [];
-      return members.filter((member) =>
-        rows.some(
-          (row) =>
-            row.pid === member.pid &&
-            row.pgid === member.pgid &&
-            row.started === member.started &&
-            !row.state.startsWith("Z"),
-        ),
-      );
-    };
-    for (const member of left()) this.processes.signal(member.pid, "SIGTERM");
-    const limit = this.now() + KILL_GRACE_MS;
-    let remaining = left();
-    while (remaining.length > 0 && this.now() < limit) {
-      await sleep(this.poll);
-      remaining = left();
+    const after = this.settle(id);
+    if (after.leftover !== undefined) {
+      after.leftover = after.leftover.map((left) => {
+        const command = this.processes.command(left.pid);
+        return command === undefined ? left : { ...left, command };
+      });
     }
-    for (const member of remaining) this.processes.signal(member.pid, "SIGKILL");
-    for (let i = 0; i < 20 && remaining.length > 0 && left().length > 0; i++) await sleep(50);
-    return this.settle(id);
+    return after;
   }
 
   /**
@@ -1014,6 +1050,12 @@ export class PipesSessionAdapter implements SessionAdapter {
       );
     }
     const status = this.settle(id);
+    if (status.group === "leaderless" && status.childAlive) {
+      throw new SessionError(
+        "STILL_RUNNING",
+        `session ${id} is not removed: ${leftoverInstruction(id, status.leftover ?? [])}`,
+      );
+    }
     if (status.state === "starting" || status.state === "running" || status.childAlive) {
       throw new SessionError("STILL_RUNNING", `session ${id} still runs; stop it first`);
     }

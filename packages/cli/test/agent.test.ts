@@ -14,6 +14,7 @@ import {
   pipesAdapter,
   resolveSession,
   stateLabel,
+  stopLabel,
 } from "../src/agent-commands";
 import type { AttachClientOptions, AttachResult, AttachTerminal } from "../src/attach-client";
 import { type CliEnv, runCli } from "../src/cli";
@@ -597,6 +598,32 @@ describe("kodel agent", () => {
       expect(groupNote(undefined)).toBeUndefined();
       expect(groupNote("unread")).toContain("process table could not be read");
       expect(groupNote("stranger")).toContain("belongs to another process");
+      // a group without its leader is never signalled: the processes are named, and what the person does
+      const leaderless = groupNote("leaderless", "a_000000000_0001", [
+        { pid: 700, command: "sleep 300" },
+        { pid: 701 },
+      ]) as string;
+      expect(leaderless).toContain("nothing was signalled");
+      expect(leaderless).toContain("700 (sleep 300), 701");
+      expect(leaderless).toContain("`kill <pid>`");
+      expect(leaderless).toContain("`kodel agent stop a_000000000_0001`");
+      const left = {
+        state: "killed",
+        reason: "stopped",
+        stoppedBy: "person",
+        childAlive: true,
+        group: "leaderless",
+      } as const;
+      expect(stopLabel(left)).toContain("not stopped");
+      expect(stopLabel({ state: "killed", reason: "stopped", stoppedBy: "person" })).toBe(
+        "stopped",
+      );
+      expect(stopLabel({ state: "lost", reason: "holder_gone", stoppedBy: "person" })).toBe(
+        "stopped",
+      );
+      expect(stopLabel({ state: "lost", reason: "holder_gone", group: "stranger" })).toBe(
+        "lost (holder_gone)",
+      );
     },
     30_000,
   );

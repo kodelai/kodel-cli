@@ -954,22 +954,38 @@ describe("a worker in a terminal of its own, started through the launcher", () =
   );
 
   ptyTest(
-    "t47_real_stop_ends_an_agent_behind_a_dead_wrapper",
+    "t47_real_stop_leaves_an_agent_behind_a_dead_wrapper_to_the_person",
     async () => {
       const { s, run, worker } = await behindADeadWrapper("be stopped behind the wrapper");
       expect((await s.adapter.status(worker.id)).childAlive).toBe(true);
       // `rm` refuses it while the agent runs.
       await expect(s.adapter.remove(worker.id)).rejects.toMatchObject({ code: "STILL_RUNNING" });
-      // The person's command ends it: the agent is found by its group and signalled by its pid.
-      const shell = await s.shell();
-      const from = shell.begin(`${KODEL} agent stop ${worker.id}`);
-      await shell.sees("[y/N]", 60_000, from);
-      shell.type("y\r");
-      const done = await shell.finished(from, 120_000);
-      expect(done.code, done.shown).toBe(0);
-      expect(done.shown).toContain(`${worker.id}: stopped`);
-      expect(done.shown).not.toContain("nothing was signalled");
+      // The person's command signals nothing of a group without its leader: it names the agent's process and
+      // says what to do.
+      const stop = async () => {
+        const shell = await s.shell();
+        const from = shell.begin(`${KODEL} agent stop ${worker.id}`);
+        await shell.sees("[y/N]", 60_000, from);
+        shell.type("y\r");
+        const done = await shell.finished(from, 120_000);
+        expect(done.code, done.shown).toBe(0);
+        return done.shown;
+      };
+      const first = await stop();
+      expect(first).toContain(`${worker.id}: not stopped`);
+      expect(first).toContain("nothing was signalled");
+      expect(first).toContain(`${worker.agent.pid} (`);
+      expect(first).toContain("kill <pid>");
+      expect(alive(worker.agent.pid)).toBe(true);
+      const held = await s.adapter.status(worker.id);
+      expect(held).toMatchObject({ childAlive: true, group: "leaderless", stoppedBy: "person" });
+      await expect(s.adapter.remove(worker.id)).rejects.toMatchObject({ code: "STILL_RUNNING" });
+      // The person ends it, and the same command settles the record.
+      process.kill(worker.agent.pid, "SIGKILL");
       await until(() => !alive(worker.agent.pid), "the agent to end");
+      const second = await stop();
+      expect(second).toContain(`${worker.id}: stopped`);
+      expect(second).not.toContain("nothing was signalled");
       const after = await s.adapter.status(worker.id);
       expect(after.childAlive).not.toBe(true);
       expect(after.state === "running" || after.state === "starting").toBe(false);

@@ -186,7 +186,11 @@ export function parseEntry(raw: unknown): SessionListEntry | undefined {
   if (raw.status.childAlive === true) status.childAlive = true;
   if (typeof raw.status.since === "number") status.since = raw.status.since;
   if (typeof raw.status.lastOutputAt === "number") status.lastOutputAt = raw.status.lastOutputAt;
-  if (raw.status.group === "unread" || raw.status.group === "stranger") {
+  if (
+    raw.status.group === "unread" ||
+    raw.status.group === "stranger" ||
+    raw.status.group === "leaderless"
+  ) {
     status.group = raw.status.group;
   }
   const entry: SessionListEntry = { id: raw.id, status };

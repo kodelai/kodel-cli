@@ -32,7 +32,11 @@ export function pruneKeeps(
 ): string | undefined {
   if (entry.problem !== undefined) return "cannot be read";
   if (!isTerminalState(entry.status.state)) return "runs";
-  if (entry.status.childAlive === true) return "its process still runs";
+  if (entry.status.childAlive === true) {
+    return entry.status.group === "leaderless"
+      ? `processes are left in its group; kodel agent stop ${entry.id} names them`
+      : "its process still runs";
+  }
   if (input.olderThanMs > 0) {
     const ended = entry.status.since ?? startedOf(entry.id);
     if (input.now - ended < input.olderThanMs) return "ended too recently";

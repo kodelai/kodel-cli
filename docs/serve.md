@@ -177,7 +177,9 @@ or ends`. When the count falls, the waiting resumes and starts follow.
 **A worker whose process still runs without a holder** (its record says `lost` or `killed` with "child still
 runs", `docs/session-formats.md`) holds both places and is never resumed, finished or noted as gone: a
 second agent must not be started beside the first. The daemon says once `kw-…: its process still runs
-without a holder; stop it: kodel agent stop <id>`, and the card says the same. After your stop the worker
+without a holder; stop it: kodel agent stop <id>`, and the card says the same. (When the process kodel
+started is gone and only others of its process group are left, that command signals none of them: it names
+them, and you end them yourself; see below.) After your stop the worker
 reads `stopped` (`stopped (after timeout)`, say, when its holder had recorded another end before you stopped
 what it left) and holds no `max_workers` place. Its `max_runs` place goes by where your stop found it. At work:
 it is a session that is over, the place is free at once and nothing resumes it. At a wait you have not decided:
@@ -302,7 +304,10 @@ be read, are never finished.
 A worker whose holder went away without recording its agent's end is looked at through its agent's process
 group: while a member of that group lives (the agent itself, or a program a wrapper started in it), the
 session counts as having a live process (`child_alive`, and `agent ls` says so), and the run is not noted as
-left by its agent and nothing resumes it, until you run `kodel agent stop kw-<run>` or the process ends.
+left by its agent and nothing resumes it, until the process ends. `kodel agent stop kw-<run>` signals nothing of
+a group whose first process is gone (kodel cannot tell an agent left there from another program that got the
+group's number): it names the processes of the group for you to look at and end (`kill <pid>`), records your
+stop, and settles the record when you run it again with none of them left (`docs/session-formats.md`).
 Claude Code starts every shell command in a session and group of its own (spike criterion 10), so a
 `kodel wait` it left in the background is not such a member and does not hold the run.
 

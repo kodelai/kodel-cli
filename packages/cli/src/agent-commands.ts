@@ -16,6 +16,7 @@ import {
   isLocalSessionId,
   isSessionName,
   isTerminalState,
+  leftoverInstruction,
   type RedactRule,
   type RunState,
   type SessionAdapter,
@@ -222,13 +223,36 @@ export const conversationLabel = (entry: SessionListEntry): string => {
     : id;
 };
 
-/** Why a `stop` signalled nothing of a process group it could not call the session's, or nothing to say. */
-export const groupNote = (group: SessionListEntry["status"]["group"]): string | undefined =>
+/**
+ * Why a `stop` signalled nothing of a process group it could not call the session's, or nothing to say. A group
+ * without its leader is never signalled: the note names its processes and says what the person does.
+ */
+export const groupNote = (
+  group: SessionListEntry["status"]["group"],
+  id = "<agent>",
+  leftover: NonNullable<SessionListEntry["status"]["leftover"]> = [],
+): string | undefined =>
   group === "unread"
     ? "the process table could not be read: a process this agent left behind a wrapper that died would not be seen, and none was signalled"
     : group === "stranger"
       ? "the number of its process group belongs to another process now: nothing of this agent is left, and nothing was signalled"
-      : undefined;
+      : group === "leaderless"
+        ? `nothing was signalled: ${leftoverInstruction(id, leftover)}`
+        : undefined;
+
+/**
+ * The word `agent stop` prints. A session whose holder had recorded another end, and whose leftover the stop
+ * ended, is stopped too; one whose group has no leader was not signalled, whatever its stop record makes of it.
+ */
+export const stopLabel = (status: SessionListEntry["status"]): string =>
+  status.group === "leaderless" && status.childAlive === true
+    ? "not stopped (its process is gone, others are in its group)"
+    : (status.state === "killed" && status.reason === "stopped") ||
+        (status.stoppedBy === "person" &&
+          (status.state === "killed" || status.state === "lost") &&
+          status.childAlive !== true)
+      ? "stopped"
+      : `${status.state}${status.reason ? ` (${status.reason})` : ""}`;
 
 /** The flags of `kodel agent start`. */
 export interface StartFlags {
@@ -559,16 +583,11 @@ export function registerAgentCommands(
       await ctx.mustConfirm(`Stop agent ${plain(targetLabel(target))}?`);
       const status = await guard(() => all.stop(id));
       // A session whose holder had recorded another end, and whose leftover this stop ended, is stopped too.
-      const label =
-        (status.state === "killed" && status.reason === "stopped") ||
-        (status.stoppedBy === "person" &&
-          (status.state === "killed" || status.state === "lost") &&
-          status.childAlive !== true)
-          ? "stopped"
-          : `${status.state}${status.reason ? ` (${status.reason})` : ""}`;
+      const label = stopLabel(status);
       ctx.out(`${plain(id)}: ${label}\n`);
-      const note = groupNote(status.group);
-      if (note !== undefined) ctx.out(`${plain(id)}: ${note}\n`);
+      const note = groupNote(status.group, id, status.leftover);
+      // a command line is another program's text: it must not move the cursor in the person's terminal
+      if (note !== undefined) ctx.out(`${plain(id)}: ${plain(note)}\n`);
     });
 
   agent

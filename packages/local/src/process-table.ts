@@ -127,6 +127,8 @@ export interface ProcessView {
   /** When the machine was started, in milliseconds; `undefined` when it cannot be read. */
   bootTime(): number | undefined;
   identity(pid: number): ProcessIdentity | undefined;
+  /** The command line of a process, for a person to read; `undefined` when it cannot be read. */
+  command(pid: number): string | undefined;
   signal(pid: number, signal: NodeJS.Signals): void;
 }
 
@@ -178,6 +180,10 @@ export const systemProcesses: ProcessView = {
   },
   bootTime: readBootTime,
   identity: (pid) => processIdentity(pid),
+  command(pid) {
+    const text = ps(["-o", "command=", "-p", String(pid)])?.trim();
+    return text === undefined || text === "" ? undefined : text;
+  },
   signal(pid, signal) {
     try {
       process.kill(pid, signal);
@@ -201,6 +207,7 @@ export const readOnce = (view: ProcessView): ProcessView => {
       return boot.value;
     },
     identity: (pid) => view.identity(pid),
+    command: (pid) => view.command(pid),
     signal: (pid, signal) => view.signal(pid, signal),
   };
 };
@@ -215,12 +222,15 @@ export type GroupAnswer =
   | { known: true; stranger: boolean; members: ProcessRow[] };
 
 /**
- * The live processes left in the process group `pgid` of a session that began at `since`, whose recorded leader
- * (the holder's child, `leader` its identity) may be gone. A member counts as the session's own only when the
- * table was read, the machine was not restarted after `since` (numbers start over), and no process that is not
- * the recorded leader has the group's number as its pid: the kernel gives a group's number to a new process only
- * once the group is empty, so with such a process every member is a stranger's. Otherwise, while one member
- * lives the number is not given out again, and the members are the session's.
+ * The live processes in the process group `pgid` of a session that began at `since`, whose recorded leader
+ * (the holder's child, `leader` its identity) may be gone. No member counts when the machine was restarted after
+ * `since` (numbers start over), or when a process that is not the recorded leader has the group's number as its
+ * pid (`stranger`): the kernel gives a group's number to a new process only once the group is empty.
+ *
+ * Members of a group whose leader is gone are **not known to be the session's**: once the group was empty its
+ * number may have gone to a process that made a group of it and went away, leaving its own children there. So
+ * they count for "something may still run" (fail closed: nothing takes the session for finished), and nobody
+ * signals them: a group is signalled only while its recorded leader lives.
  */
 export const groupMembers = (
   pgid: number,

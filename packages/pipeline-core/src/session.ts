@@ -218,10 +218,38 @@ export interface SessionStatus {
    * Only for a session whose holder went away without recording its child's end, with the recorded child gone:
    * what is left of the child's process group could not be looked at (`unread`: the process table, the boot
    * time, or whether the process that has the group's number is the recorded child; `childAlive` is then about the recorded child alone), or the group's number belongs to another
-   * process now (`stranger`: nothing of the session is left). Absent when the group was looked at, or need not be.
+   * process now (`stranger`: nothing of the session is left), or processes are in the group with no leader
+   * (`leaderless`: they may be the session's or, the number given out again, another program's; `childAlive` is
+   * set, `leftover` names them, and kodel never signals them). Absent when the group is empty, or need not be
+   * looked at.
    */
-  group?: "unread" | "stranger";
+  group?: "unread" | "stranger" | "leaderless";
+  /** With `group: "leaderless"`: the processes of the group; `command` is there when it was asked for and read. */
+  leftover?: LeftoverProcess[];
 }
+
+/** A process of a session's group that kodel does not signal: a person looks at it and ends it. */
+export interface LeftoverProcess {
+  pid: number;
+  command?: string;
+}
+
+/**
+ * What a person is told of a group without its leader: kodel signalled nothing, which processes are there,
+ * and what to do. One text for `agent stop`, `agent rm` and `agent prune`.
+ */
+export const leftoverInstruction = (id: string, leftover: readonly LeftoverProcess[]): string => {
+  const pids = leftover.map((p) =>
+    p.command === undefined ? `${p.pid}` : `${p.pid} (${p.command})`,
+  );
+  return (
+    `the process kodel started for ${id} is gone, and its process group still has ` +
+    `${pids.length === 0 ? "processes" : pids.join(", ")}. kodel cannot tell whether they are this agent's or ` +
+    "another program's (the group's number may have been given out again), so it signals none of them. " +
+    "Look at each (`ps -o pid,lstart,command -p <pid>`), end the ones that are this agent's yourself " +
+    `(\`kill <pid>\`), then run \`kodel agent stop ${id}\`: it settles the record once none is left`
+  );
+};
 
 /** What an adapter hands to `deriveStatus`: facts only, read once. */
 export interface SessionSnapshot {

@@ -777,6 +777,7 @@ describe("a holder that went away: the child's process group", () => {
         return "boot" in over ? over.boot : STARTED - 86_400_000;
       },
       identity: over.identity ?? (() => undefined),
+      command: (pid) => (pid === 701 ? undefined : `prog-${pid} --flag`),
       signal(pid, signal) {
         fake.signals.push([pid, signal]);
         over.onSignal?.(fake, pid, signal);
@@ -823,13 +824,17 @@ describe("a holder that went away: the child's process group", () => {
     record("a_000000000_0010");
     const table = fakeTable([member(700), member(900, { pgid: 900 })]);
     const seeing = make({ processes: table });
+    // The group has no leader any more: it counts as running, and the status names what is in it.
     expect(await seeing.status("a_000000000_0010")).toEqual({
       state: "lost",
       reason: "holder_gone",
       childAlive: true,
+      group: "leaderless",
+      leftover: [{ pid: 700 }],
     });
     await expect(seeing.remove("a_000000000_0010")).rejects.toMatchObject({
       code: "STILL_RUNNING",
+      message: expect.stringContaining("kill <pid>"),
     });
     // the group empty: the session is over
     table.table = [member(900, { pgid: 900 })];
@@ -860,7 +865,7 @@ describe("a holder that went away: the child's process group", () => {
   test("tA_child_alive_pgid_reuse", async () => {
     record("a_000000000_0020");
     // The group's number is the pid of a live process that is not the recorded child: the kernel gave the number
-    // out again, which it does only once the group is empty, so everything in that group is a stranger's.
+    // out again, which it does only once the group is empty, so nothing of the session is left.
     const stranger = fakeTable([member(GONE, { pgid: GONE }), member(701)], {
       identity: () => ({ method: "ps-lstart", value: "Tue Feb  2 02:02:02 2025" }),
     });
@@ -883,7 +888,7 @@ describe("a holder that went away: the child's process group", () => {
         members: [],
       });
     }
-    // The number held by the recorded child itself (the same identity) is no stranger: its group is the session's.
+    // The number held by the recorded child itself (the same identity) is no stranger: its group is listed.
     const ours = groupMembers(
       GONE,
       STARTED,
@@ -907,7 +912,7 @@ describe("a holder that went away: the child's process group", () => {
         group: "unread",
       });
     }
-    // a leader that is a zombie holds the number and is nobody's process: the members are ours
+    // a leader that is a zombie is nobody's process: the members are listed (and, with no live leader, not signalled)
     const defunct = fakeTable([member(GONE, { state: "Z" }), member(701)]);
     expect(groupMembers(GONE, STARTED, LEADER, defunct)).toMatchObject({
       stranger: false,
@@ -980,55 +985,79 @@ describe("a holder that went away: the child's process group", () => {
     expect(quiet.boots).toBe(0);
   });
 
-  // 700 ends at SIGTERM; 701 ignores it and ends at SIGKILL; the pid 702 is taken by another process AFTER the
-  // members were listed and BEFORE the first signal: that one is never signalled. The stop record is written
-  // between the listing and the first re-read of the table, so its presence marks the moment.
-  for (const [what, id, change] of [
-    ["start_time", "a_000000000_0060", { started: "Wed Mar  3 03:03:03 2026" }],
-    ["group", "a_000000000_0061", { pgid: 702 }],
-  ] as const) {
-    test(`tA_stop_ends_a_group_only_orphan_${what}_changed_after_the_listing`, async () => {
+  // The person chose: a group without its live leader is never signalled. The stop says what is there instead.
+  for (const by of ["person", "finish"] as const) {
+    test(`tA_stop_never_signals_a_group_without_its_leader_by_${by}`, async () => {
+      const id = by === "person" ? "a_000000000_0060" : "a_000000000_0061";
       const dir = record(id);
-      const table = fakeTable([member(700), member(701), member(702)], {
-        onSignal(fake, pid, signal) {
-          if (pid === 700 || signal === "SIGKILL") {
-            fake.table = (fake.table ?? []).filter((row) => row.pid !== pid);
-          }
-        },
-      });
-      const rows = table.rows.bind(table);
-      let changedAtRead: number | undefined;
-      table.rows = () => {
-        if (changedAtRead === undefined && existsSync(join(dir, "stop.json"))) {
-          changedAtRead = table.reads + 1;
-          table.table = (table.table ?? []).map((row) =>
-            row.pid === 702 ? { ...row, ...change } : row,
-          );
-        }
-        return rows();
-      };
+      const table = fakeTable([member(700), member(701), member(900, { pgid: 900 })]);
       const stopping = make({ processes: table });
       expect((await stopping.status(id)).childAlive).toBe(true);
-      const readsBefore = table.reads;
-      const stopped = await stopping.stop(id);
-      // the members were listed with 702 as it was (a read of the stop itself), and nothing was signalled
-      // before the table was read again
-      expect(changedAtRead).toBeGreaterThan(readsBefore + 1);
-      expect(table.signals).toEqual([
-        [700, "SIGTERM"],
-        [701, "SIGTERM"],
-        [701, "SIGKILL"],
-      ]);
-      // a stop record was written, by the stop and before any signal could matter
+      const stopped = await stopping.stop(id, { by });
+      expect(table.signals).toEqual([]);
+      // Who asked is recorded (the daemon never resumes what a person stopped); nothing else is.
       expect(JSON.parse(readFileSync(join(dir, "stop.json"), "utf8"))).toMatchObject({
         v: 1,
-        by: "stop",
+        by: by === "person" ? "stop" : "finish",
       });
-      expect(stopped).toMatchObject({ state: "killed", reason: "stopped" });
-      // the holder's own record was not touched
       expect(JSON.parse(readFileSync(join(dir, "status.json"), "utf8")).state).toBe("running");
-    }, 20_000);
+      // Still not over: the processes are named, with the command of each that could be read.
+      expect(stopped).toEqual({
+        state: "killed",
+        reason: "stopped",
+        childAlive: true,
+        stoppedBy: by,
+        group: "leaderless",
+        leftover: [{ pid: 700, command: "prog-700 --flag" }, { pid: 701 }],
+      });
+      expect(stoppedByPerson(stopped)).toBe(by === "person");
+      await expect(stopping.remove(id)).rejects.toMatchObject({
+        code: "STILL_RUNNING",
+        message: expect.stringContaining(`700, 701. kodel cannot tell`),
+      });
+      // A second stop signals nothing either.
+      await stopping.stop(id, { by });
+      expect(table.signals).toEqual([]);
+      // The person ended them: the next stop settles the record, and it reads as stopped.
+      table.table = [member(900, { pgid: 900 })];
+      const settled = await stopping.stop(id, { by });
+      expect(settled).toEqual({
+        state: "killed",
+        reason: "stopped",
+        childAlive: false,
+        stoppedBy: by,
+      });
+      expect(table.signals).toEqual([]);
+    });
   }
+
+  test("tA_stop_never_signals_a_leaderless_group_a_stranger_took_over", async () => {
+    // The session's group emptied, its number went to another program's process, which made a group of it
+    // (`setsid`), started children there and went away. No process has the number as its pid now, so nothing
+    // tells these members from an agent left behind a wrapper: they are another program's, and are not signalled.
+    const dir = record("a_000000000_0062");
+    const later = "Fri Jun  6 06:06:06 2025";
+    const taken = fakeTable([member(810, { started: later }), member(811, { started: later })]);
+    const person = make({ processes: taken });
+    const stopped = await person.stop("a_000000000_0062");
+    expect(taken.signals).toEqual([]);
+    expect(stopped).toMatchObject({
+      childAlive: true,
+      group: "leaderless",
+      leftover: [
+        { pid: 810, command: "prog-810 --flag" },
+        { pid: 811, command: "prog-811 --flag" },
+      ],
+    });
+    // Fail closed: the record is neither finished nor removable while they live, and no later stop signals them.
+    expect((await person.status("a_000000000_0062")).childAlive).toBe(true);
+    await expect(person.remove("a_000000000_0062")).rejects.toMatchObject({
+      code: "STILL_RUNNING",
+    });
+    await person.stop("a_000000000_0062", { by: "finish" });
+    expect(taken.signals).toEqual([]);
+    expect(existsSync(dir)).toBe(true);
+  });
 
   test("tA_stop_never_signals_a_stranger_group", async () => {
     const dir = record("a_000000000_0070");
@@ -1072,22 +1101,25 @@ describe("a holder that went away: the child's process group", () => {
     expect(existsSync(join(dir, "stop.json"))).toBe(false);
   });
 
-  test("tA_rm_after_the_group_is_stopped", async () => {
+  test("tA_rm_after_the_person_ended_the_group", async () => {
     const dir = record(
       "a_000000000_0080",
       {},
       { name: "orphan", spec: { cwd: root, envNames: [], name: "orphan", origin: "cli" } },
     );
-    const table = fakeTable([member(700)], {
-      onSignal(fake, pid) {
-        fake.table = (fake.table ?? []).filter((row) => row.pid !== pid);
-      },
-    });
+    const table = fakeTable([member(700)]);
     const person = make({ processes: table });
     await expect(person.remove("a_000000000_0080")).rejects.toMatchObject({
       code: "STILL_RUNNING",
     });
     expect(existsSync(dir)).toBe(true);
+    // The stop signals nothing of a group without its leader, and the record stays until the person ended it.
+    expect(await person.stop("a_000000000_0080")).toMatchObject({ childAlive: true });
+    expect(table.signals).toEqual([]);
+    await expect(person.remove("a_000000000_0080")).rejects.toMatchObject({
+      code: "STILL_RUNNING",
+    });
+    table.table = [];
     const stopped = await person.stop("a_000000000_0080");
     expect(stopped).toMatchObject({ state: "killed", reason: "stopped", childAlive: false });
     const [row] = await person.list();
@@ -1098,7 +1130,7 @@ describe("a holder that went away: the child's process group", () => {
   });
 
   tableTest(
-    "tA_real_group_orphan_is_seen_and_stopped",
+    "tA_real_group_orphan_is_seen_and_left_to_the_person",
     async () => {
       // Real processes: a wrapper (`sh`) that the holder starts and an agent (`sleep`) behind it, in its group.
       const pidFile = join(root, "agent.pid");
@@ -1117,14 +1149,57 @@ describe("a holder that went away: the child's process group", () => {
           childAlive: true,
         });
         await expect(adapter.remove(id)).rejects.toMatchObject({ code: "STILL_RUNNING" });
+        // The stop does not signal a group without its leader: it names the process and leaves it to the person.
+        const left = await adapter.stop(id);
+        expect(left).toMatchObject({ childAlive: true, group: "leaderless", stoppedBy: "person" });
+        expect(left.leftover).toEqual([
+          { pid: agentPid, command: expect.stringContaining("sleep 300") },
+        ]);
+        expect(liveProcess(agentPid)).toBe(true);
+        await expect(adapter.remove(id)).rejects.toMatchObject({
+          code: "STILL_RUNNING",
+          message: expect.stringContaining(`kill <pid>`),
+        });
+        // The person ends it, and the stop settles the record.
+        process.kill(agentPid, "SIGKILL");
+        await eventually(() => !liveProcess(agentPid), 6_000);
         const stopped = await adapter.stop(id);
         expect(stopped).toMatchObject({ state: "killed", reason: "stopped", childAlive: false });
-        await eventually(() => !liveProcess(agentPid), 6_000);
         await adapter.remove(id);
         expect(existsSync(join(adapter.place.dir, id))).toBe(false);
       } finally {
         try {
           process.kill(agentPid, "SIGKILL");
+        } catch {
+          // gone
+        }
+      }
+    },
+    30_000,
+  );
+  tableTest(
+    "tA_stop_ends_what_outlives_the_live_leader_by_pid",
+    async () => {
+      // The recorded child lives, so its group is the session's and is stopped as ever. A member that is no
+      // descendant (its parent left) and ignores SIGTERM outlives the leader: it is ended by its own pid, as it
+      // was listed while the leader lived, not by a signal to a group that has no leader any more.
+      const pidFile = join(root, "member.pid");
+      const { id } = await adapter.start(
+        sh(`( (trap '' TERM; exec sleep 300) & echo $! > ${pidFile} ); sleep 200`),
+      );
+      await eventually(() => existsSync(pidFile) && readFileSync(pidFile, "utf8").trim() !== "");
+      const memberPid = Number(readFileSync(pidFile, "utf8").trim());
+      const stored = JSON.parse(readFileSync(join(adapter.place.dir, id, "status.json"), "utf8"));
+      try {
+        expect(liveProcess(memberPid)).toBe(true);
+        const stopped = await adapter.stop(id);
+        expect(stopped).toMatchObject({ state: "killed", reason: "stopped", stoppedBy: "person" });
+        expect(stopped.group).toBeUndefined();
+        expect(liveProcess(stored.child.pid)).toBe(false);
+        await eventually(() => !liveProcess(memberPid), 6_000);
+      } finally {
+        try {
+          process.kill(memberPid, "SIGKILL");
         } catch {
           // gone
         }
@@ -1373,6 +1448,7 @@ describe("a resumed session takes the name of the one it continues", () => {
       rows: () => [orphan],
       bootTime: () => 0,
       identity: () => undefined,
+      command: () => undefined,
       signal: () => {},
     };
     const withOrphan = make({ processes: view });

@@ -19,7 +19,8 @@
   `worker: print`. (3) No budget cap; a session lives up to 7 days.
 - **What this critique changed (round 6; 48 findings: 40 fixed, 7 rejected, 1 is yours below):**
   - **An agent left behind a dead wrapper** is told from a stranger (no group member counts after a restart
-    of the machine, or when another process took the group's number), `kodel agent stop` now ends it, and a
+    of the machine, or when another process took the group's number), `kodel agent stop` names its processes
+    for the person to end (kodel never signals a group without its live leader), and a
     process table that cannot be read falls back to today's rule: nothing is held for good.
   - **A `-p` worker that waits at a gate during the update is still resumed:** with no `agent.json` its id
     is read from its argv; `print` workers get the record too.
@@ -108,8 +109,9 @@ only; kodel makes the run itself; test id T-47; `kodel mcp` by hand in `Bash` re
   at: what it left behind, a `kodel wait` say, must not keep it from being resumed). A
   group member counts only when all of this holds: the process table was read; the machine has not been
   restarted since the session began; no other process now has the group's number as its pid (that would be
-  a stranger that took the number after the group was empty). **`kodel agent stop <id>` ends such a group**
-  (each member by pid, its start time read at the listing and checked again just before the signal), after
+  a stranger that took the number after the group was empty). **`kodel agent stop <id>` never signals such a
+  group** (it has no live leader, so its members may be another program's): it records the stop, names each
+  member (pid, command) and tells the person to end them (`kill <pid>`) and run it again, after
   which `rm`, `prune` and the resume rules see an ended session. Where the process table cannot be read (a
   sandbox), the group is not looked at: today's rule holds (the recorded process only), nothing is held for
   good, and the daemon says once `cannot read the process table: an agent left behind a dead wrapper would
@@ -349,7 +351,7 @@ The serve rule (`pipeline-core/test/serve-plan.test.ts`, `serve-resume.test.ts`;
 | **`lost` or `killed` with `childAlive`, terminal or print, at a wait or not, decided or not: verdict `child_alive`, no resume, no `finish`, no `gone` note, both places held, one log line with `kodel agent stop <id>`; after the person's stop (the child gone) the ordinary rules apply** | `t44_child_alive_is_never_resumed_or_finished`, `t44_child_alive_holds_both_places` (rows: a readable run, and a run that cannot be read, where today `unreadableHoldsRun` frees the place of every `lost` or `killed` worker, `plan.ts:225-226`), `t44_child_alive_then_stopped_follows_the_rules` |
 | The holder's child is gone but a process of its group lives (a wrapper that died, the agent behind it alive), for a record whose holder went away without recording its child's end: the record says `childAlive`; a record whose holder recorded the end (`exited`, `stopped`, `killed` by its timeout with a `kodel wait` left in the group) is not looked at and is resumed by the ordinary rule | `tA_child_alive_looks_at_the_process_group` (`local/test/session-pipes.test.ts`, a fake process table), `t47_real_orphan_behind_a_wrapper_is_not_doubled` (`tests/pty/worker-terminal.test.ts`) |
 | A stranger is not a member: the group's number is now the pid of a process that is not the recorded child (its identity differs): not alive; the machine was restarted after the session began (boot time later than the record's start): not alive, and a run left at a gate by that restart is resumed after the decision; the table cannot be read: the group is not looked at, the recorded-child rule decides, one log line of the daemon; the table is read once for a listing with many records and not at all for one with no such record | `tA_child_alive_pgid_reuse`, `tA_child_alive_after_a_restart`, `tA_child_alive_unreadable_group`, `tA_group_table_is_read_once_per_listing` (`local/test/session-pipes.test.ts`), `t44_unreadable_process_table_is_logged_once` (`local/test/serve-daemon.test.ts`) |
-| `agent stop` of a record whose child is gone and whose group has members: a stop record is written, each member whose start time is unchanged is signalled (`SIGTERM`, then `SIGKILL`), a member whose pid was reused in between is not; then the record has no `childAlive`, `rm` and `prune` remove it and the resume rules apply; a stranger group is never signalled | `tA_stop_ends_a_group_only_orphan`, `tA_stop_never_signals_a_stranger_group`, `tA_rm_after_the_group_is_stopped` (`local/test/session-pipes.test.ts`), `t47_real_stop_ends_an_agent_behind_a_dead_wrapper` (`tests/pty/worker-terminal.test.ts`) |
+| `agent stop` of a record whose child is gone and whose group has members: nothing is signalled (a group without its live leader never is), a stop record is written, the answer names each member (pid, command) and what the person does; the record keeps `childAlive`, `rm` and `prune` refuse; once the person ended the members the next stop settles it, `rm` and `prune` remove it and the resume rules apply; a group another program took over, and a stranger group, are never signalled; a session whose recorded child lives is stopped with its group, and a member that outlives the child is ended by its own pid | `tA_stop_never_signals_a_group_without_its_leader_by_{person,finish}`, `tA_stop_never_signals_a_leaderless_group_a_stranger_took_over`, `tA_stop_never_signals_a_stranger_group`, `tA_rm_after_the_person_ended_the_group`, `tA_real_group_orphan_is_seen_and_left_to_the_person`, `tA_stop_ends_what_outlives_the_live_leader_by_pid` (`local/test/session-pipes.test.ts`), `t47_real_stop_leaves_an_agent_behind_a_dead_wrapper_to_the_person` (`tests/pty/worker-terminal.test.ts`) |
 | A `lost` worker noticed only after the decision, with no output after it, and an agent's line after the decision: `moved`, no `gone` note, not counted dead; the same record with output after the decision: `not_at_wait` | `t44_lost_noticed_late_is_not_a_death` |
 | `childAlive` is carried from `agent ls --json` through `WorkerStatus` and `serveWorkerOf` to `ServeWorkerView`; the TUI's offer of `s resumes` is withheld for it | `t47_child_alive_reaches_the_rule` (`cli/test/worker-launcher.test.ts`), `t47_tui_offers_no_resume_while_the_child_lives` (`cli/test/worker-resume.test.ts`) |
 | Real PTY: the holder killed with `SIGKILL` while a fake agent that ignores the hangup lives on, the run decided: no second session is started; the holder and the agent both killed (a reboot), the state read again, the run decided: resumed once | `t47_real_orphan_is_not_doubled`, `t47_real_holder_and_agent_gone_at_a_wait_is_resumed` (`tests/pty/worker-terminal.test.ts`) |
@@ -536,13 +538,14 @@ there, else on your machine before a release (`tests/README.md`).
      `btime`, macOS `sysctl kern.boottime`; not readable: "not known");
    - no member counts when a live process has the group's number as its pid and is not the recorded child
      by identity: the number was given out again, which the kernel does only once the group is empty
-     (spike criterion 10 confirms this for both systems), so every process in that group is a stranger's;
-   - otherwise the members are ours: while one lives, the number is not reused.
+     (spike criterion 10 confirms this for both systems), so nothing of the session is left;
+   - otherwise the members count as "may still run", and are not known to be ours: with the leader gone the
+     number may have been given out and left again (see the Implementation notes).
 
    `stop` (`session-pipes.ts:503-570`) gets the matching path: today it returns through `settle` when the
    recorded child is not live or its identity differs, and never reaches the group. With the child gone and
-   members found by the rules above it writes the stop record, signals each member by pid after reading its
-   start time again (`SIGTERM`, the grace, `SIGKILL`), never `kill(-pgid)` for this case, and settles; a
+   members found by the rules above it writes the stop record and signals nothing (a group without its live
+   leader is never signalled): the command names the members and what the person does; a
    group that is "not known" or a stranger's is not signalled and the command says why. `remove` keeps
    `STILL_RUNNING` for `childAlive` (`:778-781`) and so follows the same answer. This holds for every
    session, pipes ones too; `rm`, `prune` and `agent ls` see one meaning of "still runs".
@@ -1484,3 +1487,26 @@ Review round: a person's stop is read from the stop record, for every end.
   `t47_real_persons_stop_of_what_a_final_record_left_is_left_to_the_person` (a real terminal session and the
   built `kodel agent stop`). `tA_pty_holder_signal_ends_as_stop` is now
   `tA_pty_holder_signal_stops_the_child_and_names_the_signal` (it never ended as a stop).
+
+Review of the group rule (after step 12):
+
+- **The person chose: never signal a group without a live leader.** The review found that a group whose
+  number is no live process's pid is not proven to be the session's: after the group emptied, another program
+  can get the number, make a group of it (`setsid`), start children there and exit, and `agent stop` would
+  have signalled those. So `stopGroup` signals nothing. `SessionStatus.group` has a third value, `leaderless`
+  (members are in the group of a recorded child that is gone), with `leftover` (the members; `command` filled
+  in by a stop). `agent stop` prints `not stopped`, the members and the instruction (`kill <pid>`, then
+  `kodel agent stop <id>` again); `agent rm` refuses with the same instruction.
+- **The stop record is still written** when nothing is signalled: it says who asked, not what was signalled,
+  and without it the daemon would resume an agent the person asked to stop once its processes are gone. The
+  record keeps `childAlive` until then, so nothing reads it as ended.
+- **Liveness is unchanged** (fail closed): such a group counts as "still runs", the daemon holds both places
+  and resumes nothing. Stated limit: while a process of the group lives, another program's too, the record
+  cannot be removed through kodel.
+- **The stop of a live child follows the same rule:** the last `SIGKILL` goes to the group only while the
+  recorded child still lives; after its end the members listed while it lived are signalled by pid, each only
+  with an unchanged start time (`killTree`'s delayed group signal is no longer used by `stop`). Where the
+  process table cannot be read, a member that is no descendant and ignores `SIGTERM` is then left.
+- **Tests replaced:** `tA_stop_ends_a_group_only_orphan_*`, `tA_rm_after_the_group_is_stopped`,
+  `tA_real_group_orphan_is_seen_and_stopped` and `t47_real_stop_ends_an_agent_behind_a_dead_wrapper` expected
+  signals to a leaderless group; the tests named in the acceptance table expect none and the instruction.

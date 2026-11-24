@@ -126,7 +126,7 @@ looked at. A member of the group counts only when all of this holds:
 - the machine was not restarted after the session began (Linux `/proc/stat` `btime`, macOS `sysctl
   kern.boottime`): after a restart every number is given out anew;
 - no live process that is not the recorded child has the group's number as its pid: the kernel gives a group's
-  number to a new process only once the group is empty, so with such a process every member is a stranger's.
+  number to a new process only once the group is empty, so with such a process nothing of the session is left.
 
 Where the table or the boot time cannot be read (a sandbox), or the process that has the group's number as
 its pid cannot be told from the recorded child (its start time cannot be read now), the group is not looked at and the recorded child
@@ -134,11 +134,26 @@ alone decides, as before this rule: nothing is held for good, and the stated lim
 wrapper is not seen there. The status then carries `group: "unread"`; `group: "stranger"` says that the number
 changed hands.
 
-`kodel agent stop <id>` ends such a group: it writes the stop record, then signals each member by its pid
-(`SIGTERM`, the grace, `SIGKILL`), after reading the member's start time again, so a pid that changed hands since
-the listing is not signalled. It never signals the group as a whole for this case, and never a group that is
-unread or a stranger's (the command says which). After it the session is `stopped` with no process left, and
-`agent rm` removes it.
+A member that counts is **not known to be the session's**. The group has no leader any more, so once it was
+empty its number may have gone to another program's process that made a group of it (`setsid`), started its own
+processes there and went away: nothing in the process table tells those from an agent left behind a wrapper. So
+the members count only for "something may still run" (fail closed: the session is not taken for finished, the
+daemon holds its places and resumes nothing, `rm` and `prune` refuse), the status says `group: "leaderless"` and
+names them in `leftover` (`pid`, and `command` in the answer of a stop), and **kodel never signals a process
+group without its live leader**.
+
+`kodel agent stop <id>` therefore signals nothing of such a group. It writes the stop record (you did ask: a
+session a person stopped is never resumed by the daemon), prints `not stopped`, each process of the group with
+its pid and command line, and what to do: look at each (`ps -o pid,lstart,command -p <pid>`), end the ones that
+are this agent's yourself (`kill <pid>`), and run `kodel agent stop <id>` again. With no member left that
+command settles the record: the session is `stopped`, and `agent rm` removes it. `agent rm` refuses with the
+same instruction until then. The stated limit: while a process of the group lives, another program's too, the
+record stays and its run is held.
+
+A session whose recorded child lives is stopped as ever: the child's identity is checked, its group gets
+`SIGTERM`, and what ignores it gets `SIGKILL` after the grace. That last signal goes to the group only while the
+recorded child still lives; once it is gone, the members that were listed while it lived are signalled one by
+one, each only while its pid, group and start time are still those of the listing.
 
 ## Who asked for a stop
 
