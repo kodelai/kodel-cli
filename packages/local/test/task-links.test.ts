@@ -217,7 +217,7 @@ describe("t45 the two keys in format 1", () => {
       const lines = (text: string) =>
         text.split("\n").filter((l) => !l.startsWith("updated_at:") && l !== "");
       const added = lines(after).filter((l) => !lines(before).includes(l));
-      for (const line of added) expect(line).toMatch(/^(comments:| {2}- at: | {4}text: read back)/);
+      for (const line of added) expect(line).toMatch(/^(comments:|  - at: |    text: read back)/);
       expect(lines(before).filter((l) => !lines(after).includes(l))).toEqual([]);
     }
     expect(Object.keys(await onDisk("TASK-KKKK"))).toEqual([
