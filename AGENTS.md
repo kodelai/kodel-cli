@@ -41,12 +41,12 @@ This repository adds these rules:
 - Do not run `gate`, `ack`, `seal`, `resume`, `migrate`, `pipeline changes apply|discard|restore`,
   `pipeline proposals apply|discard`, `task approve`, `web pair|revoke`, `web token add|revoke` or
   `agent stop|rm|exec|forget-name|attach|start|prune`: they
-  refuse to run without a terminal, and most ask for a confirmation before they change anything (`agent
+  refuse to run without a terminal; the web UI's pairing and token commands ask for no confirmation, and of the
+  others all but three ask for a confirmation before they change anything (`agent
   exec`, which starts a command as an agent, and `agent attach`, which connects a person's terminal to an agent that
   runs in one of its own, ask for none; `agent start`, which starts the coding agent in a terminal of its own, asks
   only when the `engines` block is not the committed one; `agent prune` asks nothing when it removes nothing: with
-  `--dry-run`, or with no finished agent to remove; the `web` ones, which pair or unpair a device of the web UI and
-  make or revoke a token of its MCP endpoint, ask for none), so trying them only fails.
+  `--dry-run`, or with no finished agent to remove), so trying them only fails.
   `agent ls`, `agent logs` and `agent doctor` (whether a background agent can start here) only read and are yours.
 - Do not run `kodel serve` (it refuses under `KODEL_ENGINE`, but not in your own shell): the person starts it. A
   task you create or change with the `task_*` tools is not started by it until the person runs
