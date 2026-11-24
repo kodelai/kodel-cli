@@ -209,7 +209,7 @@ export interface ServeWorkerView {
   childAlive?: boolean;
   /** A session in a terminal of its own: it stays alive at a wait, so its end at one is no death (T-47). */
   terminal?: boolean;
-  /** How the record ended, as it says (`stopped`, `timeout`, `holder_error`, `holder_gone`, …). */
+  /** How the record ended: its reason (`stopped`, `timeout`, `holder_error`, `holder_gone`, …), or `signal`. */
   endedBy?: string;
   /** The agent keeps writing to its terminal while idle: output is no sign of work, only engine calls are. */
   idleWrites?: boolean;
@@ -257,13 +257,19 @@ function exitedAtWait(worker: ServeWorkerView, wait: WaitMark): boolean {
   return wait.ts >= worker.started && (worker.since === undefined || worker.since >= wait.ts);
 }
 
+/**
+ * How a record that names no reason but a signal ended (`endedBy`): the holder was told to end, or the
+ * program was killed, by a signal nobody recorded a stop for (a shutdown of the machine, a `kill`).
+ */
+export const ENDED_BY_SIGNAL = "signal";
+
 /** Ends of a terminal session that say nothing about its work: the agent may have been waiting when it came. */
-const ENDS_AT_A_WAIT: readonly string[] = ["stopped", "timeout", "holder_error"];
+const ENDS_AT_A_WAIT: readonly string[] = ["stopped", "timeout", "holder_error", ENDED_BY_SIGNAL];
 
 /**
  * Whether a worker that is `killed` or `lost` may have ended at a wait. A print worker never: its turn
  * ends at a wait, so it exits there, and any other end is a death. A worker in a terminal stays alive
- * at a wait, so a holder that went away, a timeout or a stop may have found it waiting.
+ * at a wait, so a holder that went away, a timeout, a signal or a stop may have found it waiting.
  */
 function mayHaveWaited(worker: ServeWorkerView): boolean {
   if (worker.terminal !== true) return false;

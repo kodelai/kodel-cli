@@ -134,6 +134,7 @@ import {
 } from "./tasks";
 import type { CardSlot, NewTaskInput, TaskRow, TasksLoad } from "./tasks-load";
 import {
+  endedWord,
   NOT_GONE_ON_LINE,
   type ResumeOffer,
   resumeOffer,
@@ -150,8 +151,14 @@ export const SECTIONS = ["Sessions", "Pipeline", "Tasks", "Report"] as const;
  */
 export type ServeView = { kind: "off" } | { kind: "active" | "silent"; pid: number; since: number };
 
-/** The card's line for a run whose resume the daemon does. */
-export const SERVE_RESUMES_LINE = "agent exited at your decision · kodel serve resumes it";
+const SERVE_RESUMES = " at your decision · kodel serve resumes it";
+
+/** The card's line for a run whose resume the daemon does: how the agent ended, then who resumes it. */
+export const serveResumesLine = (worker: WorkerStatus): string =>
+  `${endedWord(worker)}${SERVE_RESUMES}`;
+
+const isServeResumesLine = (line: string | undefined): boolean =>
+  line?.endsWith(SERVE_RESUMES) === true;
 
 export interface Model {
   section: number;
@@ -634,7 +641,7 @@ function withOffers(m: Model): Model {
       worker.stopped !== true &&
       s.foreignRoot === undefined &&
       m.serve.kind === "active"
-        ? { line: SERVE_RESUMES_LINE, why: "kodel serve resumes the agent in its next cycle" }
+        ? { line: serveResumesLine(worker), why: "kodel serve resumes the agent in its next cycle" }
         : offer;
   }
   return { ...m, offers };
@@ -967,7 +974,7 @@ function workerTag(m: Model, s: Session): string | undefined {
   if (w === undefined) return undefined;
   const offer = m.offers[s.id];
   if (offer?.offer !== undefined) return `${WORKER_MARK} s resumes`;
-  if (offer?.line === SERVE_RESUMES_LINE) return `${WORKER_MARK} serve resumes`;
+  if (isServeResumesLine(offer?.line)) return `${WORKER_MARK} serve resumes`;
   if (offer?.line === "agent waiting for you") return `${WORKER_MARK} for you`;
   if (offer?.line === WAITS_WITH_YOU_LINE) return `${WORKER_MARK} with you`;
   if (offer?.line === STALLED_LINE) return `${WORKER_MARK} stalled`;
@@ -989,7 +996,7 @@ function workerStyle(m: Model, s: Session, line: string): string {
   ) {
     return cyan(line);
   }
-  if (line === SERVE_RESUMES_LINE) return cyan(line);
+  if (isServeResumesLine(line)) return cyan(line);
   if (line.startsWith("agent stopped")) return dim(line);
   return red(line);
 }

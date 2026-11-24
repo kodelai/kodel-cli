@@ -373,16 +373,19 @@ is cut from `HEAD` at that moment, whether or not the dependency's branch has be
   lines it leaves are bookkeeping the engine skips in several cases), so the resume is your `s` then `y`: `s`
   opens the same kind of window, `Resume the agent of r_… after your gate "node" approved (time)?` with `y resume
   · Esc or any other key cancels` on its own line and, when the journal shows one, the line `an agent was served
-  a step since your decision` (true whenever shown, silent otherwise). `y` starts the same conversation again with `claude -p --resume <session id>` as the
+  a step since your decision` (true whenever shown, silent otherwise). `y` starts the same conversation again in the way the `engines` setting names
+  (`claude -p --resume <session id>` with `worker: print`, a terminal session of `claude --resume <session id>` otherwise) as the
   record `kw-<run>-d<seq>`, `seq` the journal line of the decision: one record per decision, so two TUIs or a
   second `s`+`y` make one resume and the other is told `already resumed`. The row reads `agent resuming`, then
-  `agent running (session N)`. Not offered, and the card says why: an agent that still runs, was stopped
-  (`kodel agent stop`), timed out or is lost; an exit that was not at a wait (a crash: `agent exited (1), not at
+  `agent running (session N)`. Not offered, and the card says why: an agent that still runs; a print agent
+  that was stopped (`kodel agent stop`), timed out or is lost (a terminal agent that ended in one of those ways
+  at the wait is offered `s`, and one you stopped is offered it even while `kodel serve` runs, which never
+  resumes it); an exit that was not at a wait (a crash: `agent exited (1), not at
   a gate`; any agent continues the run with `pipeline_next_step` and the run id); a run that is over or waits
   again; a decision an agent made for you (`decisions.agent`: it goes on itself); a record of that decision that
   already exists, even one that died at boot (`kw-<run>-d<seq> ended`); no known session id; the TUI's own
   decision work still running its step. `kodel agent rm` of a resume record frees its name, so the same decision
-  is offered once more and `s`+`y` makes the record again; `kodel agent stop` alone ends the offer. A failed
+  is offered once more and `s`+`y` makes the record again; `kodel agent stop` of a print agent ends the offer (a terminal agent you stopped keeps it). A failed
   resume is one notice; the offer stays and `s`+`y` is the retry. A resume re-sends the conversation: on a
   subscription it counts against the plan's usage, with an API key it is the cache-miss tokens of the whole
   context; three gates of `dev.yaml` are three `s`+`y`.

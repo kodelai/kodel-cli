@@ -2461,6 +2461,31 @@ describe("t47 the id of a worker's conversation", () => {
     expect(workerStatusOf([entry({ agent: { engine: "claude" } })])?.sessionId).toBeUndefined();
   });
 
+  test("t47_only_a_persons_stop_is_stopped", () => {
+    const entry = (status: SessionListEntry["status"]): SessionListEntry => ({
+      id: "a_000000001_fake",
+      name: `kw-${RUN}`,
+      command: "claude",
+      status,
+      mode: "pty",
+    });
+    // `kodel agent stop` records the reason; the daemon leaves that worker to the person.
+    const stopped = workerStatusOf([entry({ state: "killed", reason: "stopped" })]);
+    expect(stopped).toMatchObject({ stopped: true, endedBy: "stopped", terminal: true });
+    // A holder told to end by a signal (a shutdown) records the signal: not a stop, and an end the rule resumes.
+    const signalled = workerStatusOf([entry({ state: "killed", signal: "SIGTERM" })]);
+    expect(signalled).toMatchObject({
+      endedBy: "signal",
+      terminal: true,
+      label: "killed (SIGTERM)",
+    });
+    expect(signalled?.stopped).toBeUndefined();
+    expect(serveWorkerOf(signalled as WorkerStatus).stopped).toBeUndefined();
+    expect(serveWorkerOf(signalled as WorkerStatus).endedBy).toBe("signal");
+    // An exit names neither.
+    expect(workerStatusOf([entry({ state: "exited", exitCode: 0 })])?.endedBy).toBeUndefined();
+  });
+
   test("t47_session_id_never_from_the_screen", async () => {
     for (const worker of ["terminal", "print"] as const) {
       const adapter = new ScriptedSessionAdapter();

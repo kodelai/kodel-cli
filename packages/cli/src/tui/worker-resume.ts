@@ -115,7 +115,7 @@ const notAtGate = (session: Session, worker: WorkerStatus): ResumeOffer => {
 };
 
 /** How a worker that ended at a wait reads: a print worker exited there; one in a terminal ended in its own way. */
-const endedWord = (worker: WorkerStatus) =>
+export const endedWord = (worker: WorkerStatus) =>
   worker.state === "exited" ? "agent exited" : `agent ${worker.label}`;
 
 /**
@@ -171,7 +171,7 @@ export function resumeOffer(
   if (verdict.kind === "resume") {
     if (pending) {
       return {
-        line: `${exitWord(worker)} at your decision; the TUI is running the step`,
+        line: `${endedWord(worker)} at your decision; the TUI is running the step`,
         why: "the TUI is running the step; wait for it",
       };
     }

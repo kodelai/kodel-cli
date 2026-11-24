@@ -448,7 +448,9 @@ describe("a terminal session on a real PTY", () => {
       await until(() => !alive(record.holder.pid), "the holder to end");
       expect(alive(record.child.pid)).toBe(false);
       expect(existsSync(record.sock)).toBe(false);
-      expect(w.status(id)).toMatchObject({ state: "killed", reason: "stopped" });
+      // It is not the person's stop: the record names the signal, and `stopped` is left to `kodel agent stop`.
+      expect(w.status(id)).toMatchObject({ state: "killed", signal });
+      expect("reason" in w.status(id)).toBe(false);
       expect("sock" in w.status(id)).toBe(false);
       expect((await w.adapter().status(id)).state).toBe("killed");
     });

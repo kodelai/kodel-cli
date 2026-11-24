@@ -203,7 +203,9 @@ wait), and a terminal worker that ended while its run waited for you (it quit, a
 a lost holder), or after your decision without any agent having called the engine since. One you stopped
 (`kodel agent stop`) is not resumed by the daemon; the TUI offers `s resumes`. An agent you quit from inside
 (`/exit`, `Ctrl+D` while attached) is `exited`, not `stopped`: kodel does not read what is typed, so it is
-resumed like any worker that ended at a wait; `kodel agent stop` is the way to end one for good.
+resumed like any worker that ended at a wait; `kodel agent stop` is the way to end one for the daemon. A
+holder that a signal ended (`SIGTERM` or `SIGHUP`: a shutdown, a closed login) is not a stop of yours either:
+its record says `killed` with the signal, and the worker is resumed.
 
 **A terminal worker that ended after it had gone on** (it ended after your decision, and the journal has an
 agent's line after that decision) is a dead worker: noted, counted, its `max_runs` place freed; the card says
@@ -547,7 +549,8 @@ builds with this change:
 - after an act of the daemon more agents are working than `max_workers`, unless the excess are workers a
   person's decision woke, or more open worker runs than `max_runs` exist;
 - a decided run whose worker ended at the wait is not resumed within two cycles of a free worker place with no
-  TUI open, or is resumed twice for one decision without a person removing a record; or a decided run whose
+  TUI open (except a worker a person stopped with `kodel agent stop`: the daemon leaves that one to the
+  person's `s` in the TUI, and resuming it is the refutation), or is resumed twice for one decision without a person removing a record; or a decided run whose
   worker is alive neither goes on nor is reported by the daemon within 2 minutes (and the minute of its
   journal read);
 - the TUI and an active daemon both resume one decision;
@@ -570,7 +573,7 @@ line was added. The list above is the revised one. What it replaced, kept here a
 | T-44 before | Now | Why |
 | --- | --- | --- |
 | "more worker processes than `max_workers`, or more open worker runs than `max_runs`, exist after an act of the daemon" | "after an act of the daemon more agents are working than `max_workers`, unless the excess are workers a person's decision woke, or more open worker runs than `max_runs` exist" | A waiting worker is alive and does no work: it holds a `max_runs` place only. A person's decision can wake more workers than the limit, and the daemon acts against none of them. |
-| "a decided run of a worker is not resumed within two cycles of a free worker place with no TUI open" | "a decided run whose worker ended at the wait is not resumed within two cycles of a free worker place; or one whose worker is alive neither goes on nor is reported within 2 minutes" | A live worker is not resumed: there is nothing to start. It goes on by itself, and the daemon says so when it does not. |
+| "a decided run of a worker is not resumed within two cycles of a free worker place with no TUI open" | "a decided run whose worker ended at the wait is not resumed within two cycles of a free worker place (except a worker a person stopped with `kodel agent stop`); or one whose worker is alive neither goes on nor is reported within 2 minutes" | A live worker is not resumed: there is nothing to start. It goes on by itself, and the daemon says so when it does not. A worker the person stopped is theirs to resume (`s` in the TUI): the daemon starting it again would undo the stop. |
 | "a holder that is gone is not noted in its run (format 2) in the next cycle" | the same, "except for a worker that ended while its run waited for the person" | Such a worker is resumed after the decision; a note would call a reboot at a gate a death. |
 | `max_workers`: "worker processes alive at once" | "agents that are working: a live worker whose run does not only wait for the person" | As the first line. |
 | (no such line) | "a second agent is started for a run whose first agent's process still runs" | Since a worker is resumed after a lost holder, a holder that died while its agent lived on would otherwise get a second agent. |

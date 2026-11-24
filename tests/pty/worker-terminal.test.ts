@@ -29,7 +29,7 @@ import {
   sessionDirOf,
 } from "../../packages/local/src";
 import { SessionError } from "../../packages/pipeline-core/src";
-import { decisionOf } from "../../packages/pipeline-core/src/serve";
+import { decisionOf, resumeVerdict } from "../../packages/pipeline-core/src/serve";
 import {
   type FakeTerminalAgent,
   type FakeTerminalAgentOptions,
@@ -767,6 +767,73 @@ describe("a worker in a terminal of its own, started through the launcher", () =
       expect(again).toBe("NAME_TAKEN");
       expect(await workerNames(s)).toEqual([worker.name, name].sort());
       expect(s.agent.starts().length).toBe(2);
+    },
+    240_000,
+  );
+
+  ptyTest(
+    "t47_real_holder_told_to_end_at_a_wait_is_not_a_stop",
+    async () => {
+      const s = await workerScene();
+      const run = await s.run("come back after a shutdown", true);
+      const worker = await startWorker(s, run, "come back after a shutdown");
+      // A shutdown: the holder is told to end, and nobody ran `kodel agent stop`. It stops its agent and
+      // records the end itself.
+      process.kill(worker.holder, "SIGTERM");
+      await until(
+        async () => (await s.adapter.status(worker.id)).state === "killed",
+        "the record to say killed",
+      );
+      await until(() => !alive(worker.holder) && !alive(worker.agent.pid), "both to end");
+      const status = await s.adapter.status(worker.id);
+      expect(status).toMatchObject({ state: "killed", signal: "SIGTERM" });
+      expect(status.reason).toBeUndefined();
+      // Not a worker the person stopped, for the screen and for the daemon.
+      const waiting = (await s.launcher().statuses([run.runId])).get(run.runId) as WorkerStatus;
+      expect(waiting).toMatchObject({ state: "killed", terminal: true, endedBy: "signal" });
+      expect(waiting.stopped).toBeUndefined();
+      expect(waiting.label).toBe("killed (SIGTERM)");
+      const verdict = async () =>
+        resumeVerdict(
+          {
+            runId: run.runId,
+            status: "running",
+            waitsForPerson: "waiting" in (await run.inspect()),
+            marks: decisionOf(await run.journal()),
+          },
+          // The scene's run is at its gate before its worker starts: the rule is asked as for a worker
+          // that was there when the wait began.
+          serveWorkerOf({ ...waiting, started: 0 }),
+          { refuseMoved: true },
+        );
+      expect(await verdict()).toEqual({ kind: "no", why: "waiting_person" });
+      // The person decides: the daemon's rule resumes it (it would answer `stopped` for a stopped one).
+      await approve(await s.shell(), run.runId);
+      const decision = await decisionIn(run);
+      expect(await verdict()).toMatchObject({ kind: "resume", seq: decision.seq });
+      // The same record with a person's stop on it is the one the daemon leaves alone.
+      expect(
+        resumeVerdict(
+          {
+            runId: run.runId,
+            status: "running",
+            waitsForPerson: false,
+            marks: decisionOf(await run.journal()),
+          },
+          serveWorkerOf({ ...waiting, started: 0, stopped: true, endedBy: "stopped" }),
+          { refuseMoved: true },
+        ),
+      ).toEqual({ kind: "no", why: "stopped" });
+      const { name } = await s.launcher().resume({
+        runId: run.runId,
+        workdir: s.root,
+        sessionId: waiting.sessionId ?? "",
+        decision,
+      });
+      expect(name).toBe(`kw-${run.runId}-d${decision.seq}`);
+      const resumed = await until(() => s.agent.starts()[1], "the resumed agent to start");
+      s.strays.push(resumed.pid);
+      expect(resumed).toMatchObject({ session: worker.agent.session, resumed: true, tty: true });
     },
     240_000,
   );

@@ -916,7 +916,9 @@ describe("pty holder, fake terminal", () => {
       await eventually(() => spawn.process.kills.includes("SIGKILL"));
       spawn.process.exit(0, 9);
       expect(await world.done, signal).toBe(0);
-      expect(status(), signal).toMatchObject({ state: "killed", reason: "stopped" });
+      // Nobody asked for a stop (no `stop.json`): the record names the signal, and `stopped` stays the person's.
+      expect(status(), signal).toMatchObject({ state: "killed", signal });
+      expect("reason" in status(), signal).toBe(false);
       expect("sock" in status(), signal).toBe(false);
       expect(client.bye?.reason, signal).toBe("killed");
       expect(world.binder.state.closed, signal).toBe(1);
@@ -952,7 +954,8 @@ describe("pty holder, fake terminal", () => {
     // the holder listens right after the bind, before anything else can end it
     expect(order).toEqual(["bind", "listen:SIGTERM", "listen:SIGHUP"]);
     expect(world.spawns.length).toBe(0);
-    expect(status()).toMatchObject({ state: "killed", reason: "stopped" });
+    expect(status()).toMatchObject({ state: "killed", signal: "SIGTERM" });
+    expect("reason" in status()).toBe(false);
     expect("sock" in status()).toBe(false);
     expect(binder.state.closed).toBe(1);
     expect(world.lines.length).toBe(1);

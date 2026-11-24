@@ -56,6 +56,7 @@ describe("t47 the docs and the registry of the person's commands", () => {
       "a decided run whose worker ended at the wait is not resumed within two cycles of a free worker place",
       "worker is alive neither goes on nor is reported by the daemon within 2 minutes",
       "except for a worker that ended while its run waited for the person",
+      "except a worker a person stopped with `kodel agent stop`: the daemon leaves that one to the person's `s`",
       "a second agent is started for a run whose first agent's process still runs",
     ]) {
       expect(decision, line).toContain(line);

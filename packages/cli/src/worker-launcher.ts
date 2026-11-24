@@ -60,7 +60,7 @@ export interface WorkerStatus {
   decisionSeq?: number;
   /** When the latest record's session last printed anything (milliseconds); absent when the record does not say. */
   lastOutputAt?: number;
-  /** A person stopped the latest record (`kodel agent stop`): it is not a worker that died. */
+  /** A person stopped the latest record (`kodel agent stop`, the only writer of that reason): it is not a worker that died. */
   stopped?: true;
   /**
    * The latest record's session is over (`lost` or `killed`) while its process still runs without a holder: the
@@ -69,7 +69,10 @@ export interface WorkerStatus {
   childAlive?: true;
   /** The latest record is a session in a terminal of its own (`mode: pty`): it stays alive at a wait. */
   terminal?: true;
-  /** How the latest record ended, as the record says (`stopped`, `timeout`, `holder_error`, `holder_gone`, …). */
+  /**
+   * How the latest record ended: its reason (`stopped`, `timeout`, `holder_error`, `holder_gone`, …), or
+   * `signal` for one that names only a signal (a holder told to end by a shutdown, a program that was killed).
+   */
   endedBy?: string;
   /** The agent's profile says an idle session keeps writing to its terminal: output is no sign of work. */
   idleWrites?: true;

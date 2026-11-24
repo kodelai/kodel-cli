@@ -197,7 +197,10 @@ It is optional and added without a change of `v`: a reader that ignores it deriv
   writes `sock` with the `running` record and reports `ready`: an attach right after the start finds the socket.
 - The final record has no `sock`, and the holder removes the socket file on every way out it can take.
 - A holder that is told to end (`SIGTERM`, `SIGHUP`) stops the program as `stop` does and ends the same way: the
-  clients are told, the socket is removed, the final record says `killed` with the reason `stopped`.
+  clients are told, the socket is removed, and the final record says `killed` with that `signal`. Only a stop a
+  person asked for (`kodel agent stop`, which leaves `stop.json`) is recorded with the reason `stopped`: a
+  shutdown of the machine sends the same signals, and the agent of a run it ended is resumed like any that ended
+  at a wait (`docs/serve.md`).
 - A holder that was killed (`SIGKILL`) leaves the record with `sock` and the file. So `sock` never means "somebody
   listens": `attach` asks the status first, and anything but a live `running` session, a missing file or a refused
   connect is `NOT_ATTACHABLE` with the reason. `agent rm`, `agent stop` (when it finds the holder gone) and a failed

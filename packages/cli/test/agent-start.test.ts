@@ -774,7 +774,7 @@ describe("t47 kodel agent start --resume", () => {
       [
         "the worker of a run",
         stopped({ name: "kw-r_0mw53d7fj_o2lc" }),
-        "is the agent of a run: the TUI (s) or kodel serve resumes it",
+        "is the agent of a run that you stopped: after your decision only s in kodel tui resumes it; kodel serve leaves it to you",
       ],
       [
         "the resumed worker of a run",
@@ -808,6 +808,51 @@ describe("t47 kodel agent start --resume", () => {
       expect(resumeHints([row]), what).toEqual([]);
     }
     expect(resumeProblem(stopped())).toBeUndefined();
+
+    // The agent of a run: who resumes it depends on how it ended (a stop is the person's, the daemon leaves it).
+    const kw = (over: Partial<SessionListEntry>) =>
+      resumeProblem(stopped({ name: "kw-r_0mw53d7fj_o2lc", ...over }));
+    const BOTH =
+      "when it ended at a wait, kodel serve or s in kodel tui resumes it after your decision";
+    const NOBODY = "did not end at a wait: nothing resumes it";
+    const ends: [string, Partial<SessionListEntry>, string, string?][] = [
+      ["stopped by the person", {}, "only s in kodel tui resumes it", "kodel serve or s"],
+      ["quit", { status: { state: "exited", exitCode: 0 } }, BOTH],
+      ["the holder told to end", { status: { state: "killed", signal: "SIGTERM" } }, BOTH],
+      ["a timeout", { status: { state: "killed", reason: "timeout" } }, BOTH],
+      ["the holder gone", { status: { state: "lost", reason: "holder_gone" } }, BOTH],
+      ["a start that never came", { status: { state: "killed", reason: "start_late" } }, NOBODY],
+      [
+        "a print worker at a wait",
+        { mode: "pipes", status: { state: "exited", exitCode: 0 } },
+        BOTH,
+      ],
+      [
+        "a print worker that died",
+        { mode: "pipes", status: { state: "killed", signal: "SIGKILL" } },
+        NOBODY,
+      ],
+      ["a print worker stopped", { mode: "pipes" }, NOBODY],
+      ["one that runs", { status: { state: "running" } }, "still runs: kodel agent attach kw-"],
+      [
+        "a print one that runs",
+        { mode: "pipes", status: { state: "running" } },
+        "still runs: kodel agent logs kw-",
+      ],
+      [
+        "its process still runs",
+        { status: { state: "lost", reason: "holder_gone", childAlive: true } },
+        `stop it: kodel agent stop ${OLD}`,
+      ],
+    ];
+    for (const [what, over, said, notSaid] of ends) {
+      expect(kw(over), what).toContain(said);
+      expect(kw(over), what).toContain("is the agent of a run");
+      if (notSaid !== undefined) expect(kw(over), what).not.toContain(notSaid);
+      if (said !== BOTH) expect(kw(over), what).not.toContain("kodel serve or s");
+    }
+    const both = await start({}, "--resume", "cc", "--pipeline", "one");
+    expect(both.err).toContain("(one you stopped: only by s)");
 
     // No such agent.
     const empty = await start({}, "--resume", "nobody");

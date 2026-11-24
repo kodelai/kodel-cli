@@ -14,6 +14,7 @@ import { delimiter, join } from "node:path";
 import type { UnattendedEngines, WorkerMechanism, WorkerSettings } from "@kodel-ai/local";
 import type { SessionAdapter, SessionListEntry, SessionState } from "@kodel-ai/pipeline-core";
 import { agentProblem, type RedactRule, redactText, SessionError } from "@kodel-ai/pipeline-core";
+import { ENDED_BY_SIGNAL } from "@kodel-ai/pipeline-core/serve";
 import { stateLabel } from "./agent-commands";
 import {
   type AgentProfile,
@@ -238,6 +239,11 @@ function conversationOf(
   );
 }
 
+/** How a record ended, for the rule: the reason it names, or that only a signal is named. */
+const endedByOf = (status: SessionListEntry["status"]): string | undefined =>
+  status.reason ??
+  (status.state === "killed" && status.signal !== undefined ? ENDED_BY_SIGNAL : undefined);
+
 /** The records of one run grouped into what the screen knows of its worker. */
 export function workerStatusOf(
   entries: readonly SessionListEntry[],
@@ -279,7 +285,9 @@ export function workerStatusOf(
     ...(!unknown && entry.status.reason === "stopped" ? { stopped: true as const } : {}),
     ...(!unknown && entry.status.childAlive === true ? { childAlive: true as const } : {}),
     ...(terminal ? { terminal: true as const } : {}),
-    ...(unknown || entry.status.reason === undefined ? {} : { endedBy: entry.status.reason }),
+    ...(unknown || endedByOf(entry.status) === undefined
+      ? {}
+      : { endedBy: endedByOf(entry.status) }),
     ...(terminal && profile.idleWrites ? { idleWrites: true as const } : {}),
     ...(!unknown && entry.status.group === "unread" ? { groupUnread: true as const } : {}),
   };

@@ -303,6 +303,8 @@ const ENDS: [string, Partial<ServeWorkerView>][] = [
   ["lost", { state: "lost", label: "lost (holder gone)", endedBy: "holder_gone" }],
   ["timeout", { state: "killed", label: "killed (timeout)", endedBy: "timeout" }],
   ["holder error", { state: "killed", label: "failed (could not start)", endedBy: "holder_error" }],
+  // The holder was told to end without a stop of the person (a shutdown), or the program was killed.
+  ["signal", { state: "killed", label: "killed (SIGTERM)", endedBy: "signal" }],
 ];
 
 describe("t44 a worker in a terminal that ended (T-47)", () => {
@@ -323,6 +325,7 @@ describe("t44 a worker in a terminal that ended (T-47)", () => {
     // A print worker that is `lost` or `killed` is dead, as before: its turn ends at a wait by an exit.
     expect(verdict(run(), worker({ state: "lost" }))).toBe("dead");
     expect(verdict(run(), worker({ state: "killed", endedBy: "timeout" }))).toBe("dead");
+    expect(verdict(run(), worker({ state: "killed", endedBy: "signal" }))).toBe("dead");
     // A terminal session that never came up did not wait.
     expect(verdict(run(), terminal({ state: "killed", endedBy: "start_late" }))).toBe("dead");
     expect(verdict(run(), terminal({ state: "killed" }))).toBe("dead");

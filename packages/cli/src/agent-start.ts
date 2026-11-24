@@ -119,7 +119,7 @@ function checkFlags(ctx: AgentContext, flags: StartFlags, prompt: string): void 
     }
     if (flags.pipeline !== undefined) {
       ctx.fail(
-        "--resume takes no --pipeline: the agent of a run is resumed by the TUI or kodel serve",
+        "--resume takes no --pipeline: the agent of a run is resumed after your decision by kodel serve or s in kodel tui (one you stopped: only by s)",
       );
     }
     if (flags.name !== undefined) ctx.fail("--resume takes no --name: the agent keeps its name");

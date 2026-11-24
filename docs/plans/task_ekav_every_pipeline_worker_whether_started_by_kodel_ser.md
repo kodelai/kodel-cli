@@ -1416,3 +1416,21 @@ config) and run attachments kept with a dev run. Where the plan and `main` disag
 - **`5m9d_worker_without_its_server_ends_as_a_dead_worker`** (`main`'s row on a real holder) names the print
   mechanism, as the other rows with a `claude -p` stand-in do: without an `engines` block the default is a
   terminal, which Bun cannot start.
+
+Review round: what "stopped" means.
+
+- **Only a person's stop is `stopped`.** The holder of a terminal session used to record `killed` with the
+  reason `stopped` for any `SIGTERM` or `SIGHUP` it got; since the daemon leaves a `stopped` worker to the
+  person, a shutdown at a gate would never have been resumed. The holder now writes that reason only when
+  `stop.json` is there (`kodel agent stop` writes it before it signals anything); a signal without it is
+  recorded as `killed` with `signal` (the holder's signal), a shape the status record already had, so the
+  session format does not change. The pipes holder never had the conflation (it reads `stop.json` only).
+- **The rule resumes a signal end.** `WorkerStatus.endedBy` is the record's reason, or `signal`
+  (`ENDED_BY_SIGNAL`) for a `killed` record that names only a signal; `signal` is one of the ends of a
+  terminal session at which the agent may have waited. This also covers a terminal agent whose own process a
+  signal killed at the wait (a shutdown reaches it too, sometimes before the holder); a print worker killed by
+  a signal stays a dead worker.
+- **`kodel agent start --resume kw-<run>`** says who resumes it by how it ended: still running, its process
+  left without a holder, stopped by the person (only `s`), ended where it may have waited (the daemon or `s`),
+  or an end that was no wait (nobody). The card's "kodel serve resumes it" line and the "TUI is running the
+  step" line name the end as the offer does (`agent killed (SIGTERM) at your decision · …`).

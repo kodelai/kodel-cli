@@ -230,6 +230,39 @@ const ENGINE_STEP_NAME = /^ke-/;
 /** The engines whose conversation `kodel agent start --resume` can continue. */
 export const RESUMABLE_ENGINES: readonly string[] = ["claude"];
 
+/** The ends of a terminal session at which the agent never worked or cannot have waited: nothing resumes it. */
+const NEVER_AT_A_WAIT: readonly string[] = ["start_late", "rules_unknown"];
+
+/**
+ * Who goes on with the agent of a run (`kw-<run>`), by the rule of `resumeVerdict`: one that still runs
+ * needs nobody; one the person stopped is resumed only by `s` in the TUI; one that ended in another way
+ * where it may have waited is resumed by the daemon too; any other end is a death, and nothing resumes it.
+ * Whether it did end at a wait is the run's to say, so the text says "when".
+ */
+function runAgentProblem(entry: SessionListEntry, ref: string): string {
+  const head = `${ref} is the agent of a run`;
+  const { state, reason, childAlive } = entry.status;
+  const terminal = entry.mode === "pty";
+  if (state === "starting" || state === "running") {
+    return terminal
+      ? `${head} and still runs: kodel agent attach ${ref}`
+      : `${head} and still runs: kodel agent logs ${ref}`;
+  }
+  if (childAlive === true) {
+    return `${head}, and its process still runs without a holder; stop it: kodel agent stop ${entry.id}`;
+  }
+  // A print worker never waits alive: a stop of one found it at work, like any other kill.
+  if (terminal && state === "killed" && reason === "stopped") {
+    return `${head} that you stopped: after your decision only s in kodel tui resumes it; kodel serve leaves it to you`;
+  }
+  const mayHaveWaited = terminal
+    ? !(state === "killed" && reason !== undefined && NEVER_AT_A_WAIT.includes(reason))
+    : state === "exited";
+  return mayHaveWaited
+    ? `${head}: when it ended at a wait, kodel serve or s in kodel tui resumes it after your decision`
+    : `${head} that did not end at a wait: nothing resumes it; any agent continues the run`;
+}
+
 /**
  * Why `kodel agent start --resume` does not continue the conversation of this session, or nothing. One
  * rule for the command and for the hint of `agent ls`.
@@ -238,7 +271,7 @@ export function resumeProblem(entry: SessionListEntry): string | undefined {
   const ref = entry.name ?? entry.id;
   if (entry.problem !== undefined) return `the records of agent ${ref} cannot be read`;
   if (entry.name !== undefined && WORKER_NAME.test(entry.name)) {
-    return `${ref} is the agent of a run: the TUI (s) or kodel serve resumes it after your decision`;
+    return runAgentProblem(entry, ref);
   }
   if (entry.name !== undefined && ENGINE_STEP_NAME.test(entry.name)) {
     return `${ref} is the session of an engine step: the engine starts those`;

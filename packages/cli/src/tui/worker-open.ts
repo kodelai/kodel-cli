@@ -105,7 +105,7 @@ export function createOpenWorker(
     const name = plain(latest.name);
     const live = latest.id === id && (latest.state === "running" || latest.state === "starting");
     if (!live) {
-      return `Back: agent ${name} ended while you were in it (${plain(latest.label)}). An agent that ended at a wait is resumed after your decision; kodel agent stop ends one for good.`;
+      return `Back: agent ${name} ended while you were in it (${plain(latest.label)}). An agent that ended at a wait is resumed after your decision; one you stop with kodel agent stop is resumed only by s here.`;
     }
     if (failed) {
       return `Back from ${name}: the connection ended with an error; the agent still runs (o opens it again).`;

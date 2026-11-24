@@ -476,7 +476,7 @@ export async function runPtyHolder(context: PtyHolderContext): Promise<number> {
     server.end(bye);
     socket.close();
   };
-  const live: LiveSession = { cleanups: [], signalled: false, exited: false };
+  const live: LiveSession = { cleanups: [], exited: false };
   // From the bind on a signal must not end the holder by itself: the socket would stay bound and the record
   // would say `starting` for good. Before the child exists the signal is only remembered.
   for (const signal of HOLDER_SIGNALS) {
@@ -484,7 +484,7 @@ export async function runPtyHolder(context: PtyHolderContext): Promise<number> {
       (parts.onSignal ?? onProcessSignal)(signal, () => {
         // A child that ended by itself is not stopped, and its end is not recorded as a stop.
         if (live.exited) return;
-        live.signalled = true;
+        live.signalled ??= signal;
         live.stop?.();
       }),
     );
@@ -531,15 +531,19 @@ export async function runPtyHolder(context: PtyHolderContext): Promise<number> {
 interface LiveSession {
   child?: PtyChild;
   cleanups: (() => void)[];
-  /** The holder was told to end (`HOLDER_SIGNALS`) while its child had not ended. */
-  signalled: boolean;
+  /** The signal that told the holder to end (`HOLDER_SIGNALS`) while its child had not ended. */
+  signalled?: HolderSignal;
   /** The child's exit was seen: from here on nothing signals it (its process group may be another's by now). */
   exited: boolean;
   /** Stops the child as `stop` does; there is none before the spawn. */
   stop?: () => void;
 }
 
-/** The signals that end a holder as `stop` ends its session: the child is stopped, and the end is recorded. */
+/**
+ * The signals that end a holder as `stop` ends its session: the child is stopped, and the end is recorded. The
+ * record names the signal, not `stopped`: that reason is a person's `stop` (it leaves `stop.json`), and a
+ * shutdown of the machine sends these signals to every holder without anybody having asked for a stop.
+ */
 export const HOLDER_SIGNALS = ["SIGTERM", "SIGHUP"] as const;
 export type HolderSignal = (typeof HOLDER_SIGNALS)[number];
 
@@ -568,12 +572,19 @@ async function holdTerminal(
   }
 
   // The holder was told to end before it had a child: it starts none.
-  if (live.signalled) {
+  if (live.signalled !== undefined) {
     leave({ reason: "killed", text: "the holder was stopped" });
     try {
       replaceRecord(
         statusPath,
-        encodeRecord("status", { ...first, state: "killed", reason: "stopped", since: now() }),
+        encodeRecord("status", {
+          ...first,
+          state: "killed",
+          ...(existsSync(join(input.dir, STOP_FILE))
+            ? { reason: "stopped" as const }
+            : { signal: live.signalled }),
+          since: now(),
+        }),
       );
     } catch {
       // the folder was removed
@@ -704,14 +715,16 @@ async function holdTerminal(
   clearInterval(watcher);
   flush();
 
-  const stopped = live.signalled || existsSync(join(input.dir, STOP_FILE));
+  const stopped = existsSync(join(input.dir, STOP_FILE));
   const end: Pick<StatusRecord, "state" | "reason" | "signal" | "exitCode"> = timedOut
     ? { state: "killed", reason: "timeout" }
     : stopped
       ? { state: "killed", reason: "stopped" }
-      : exit.signal !== undefined
-        ? { state: "killed", signal: exit.signal }
-        : { state: "exited", exitCode: exit.exitCode };
+      : live.signalled !== undefined
+        ? { state: "killed", signal: live.signalled }
+        : exit.signal !== undefined
+          ? { state: "killed", signal: exit.signal }
+          : { state: "exited", exitCode: exit.exitCode };
   // The clients hear of the end, and the socket is gone, before the record says the session is over: whoever
   // reads a final record never finds a client still attached.
   leave(

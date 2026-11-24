@@ -2688,20 +2688,40 @@ describe("t44 the TUI with kodel serve", () => {
 
   test("t47_tui_keeps_the_offer_of_a_stopped_worker_when_serve_is_on", () => {
     // The daemon never resumes an agent the person stopped: the screen keeps its own offer.
+    const serve = { kind: "active" as const, pid: 4242, since: NOW - 3_600_000 };
     const stopped = worker("r_1", {
-      state: "exited",
+      state: "killed",
       label: "stopped",
       stopped: true,
+      terminal: true,
+      endedBy: "stopped",
       since: NOW - 20_000,
     });
-    const m = withWorkers(model([decidedSession()]), statuses(["r_1", stopped]), false, {
-      kind: "active",
-      pid: 4242,
-      since: NOW - 3_600_000,
-    });
+    const m = withWorkers(model([decidedSession()]), statuses(["r_1", stopped]), false, serve);
     expect(m.offers.r_1?.offer?.seq).toBe(DECIDED.seq);
+    expect(screen(m, WIDER)).toContain("agent stopped at your decision · s resumes");
     expect(screen(m, WIDER)).not.toContain("kodel serve resumes it");
     expect(footer(m)).toContain("s resume");
+    // One that a signal ended at the wait (a shutdown) was not stopped by the person: the daemon resumes
+    // it, and the line says how it ended, not "exited".
+    const signalled = worker("r_1", {
+      state: "killed",
+      label: "killed (SIGTERM)",
+      terminal: true,
+      endedBy: "signal",
+      since: NOW - 20_000,
+    });
+    const left = withWorkers(model([decidedSession()]), statuses(["r_1", signalled]), false, serve);
+    expect(left.offers.r_1?.offer).toBeUndefined();
+    expect(screen(left, WIDER)).toContain(
+      "agent killed (SIGTERM) at your decision · kodel serve resumes it",
+    );
+    expect(footer(left)).not.toContain("s resume");
+    // While the TUI runs a step of its own the line names the same end.
+    const busy = withWorkers(model([decidedSession()]), statuses(["r_1", signalled]), true);
+    expect(screen(busy, WIDER)).toContain(
+      "agent killed (SIGTERM) at your decision; the TUI is running the step",
+    );
   });
 
   test("t44_tui_keeps_the_offer_of_another_checkouts_run", async () => {

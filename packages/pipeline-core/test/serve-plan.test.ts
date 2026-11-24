@@ -1039,6 +1039,8 @@ const ENDS: [string, Partial<ServeWorkerView>][] = [
   ["lost", { state: "lost", label: "lost (holder gone)", endedBy: "holder_gone" }],
   ["timeout", { state: "killed", label: "killed (timeout)", endedBy: "timeout" }],
   ["holder error", { state: "killed", label: "failed (could not start)", endedBy: "holder_error" }],
+  // The holder was told to end without a stop of the person (a shutdown), or the program was killed.
+  ["signal", { state: "killed", label: "killed (SIGTERM)", endedBy: "signal" }],
 ];
 
 const kinds = (actions: ServeAction[]) => actions.map((a) => a.kind);
