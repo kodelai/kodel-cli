@@ -18,6 +18,7 @@ import {
   type SessionSpec,
   type SessionStatus,
   type StartResult,
+  type StopAsker,
   type TailResult,
 } from "@kodel-ai/pipeline-core";
 
@@ -151,9 +152,11 @@ export class ScriptedSessionAdapter implements SessionAdapter {
     };
   }
 
-  async stop(id: string): Promise<SessionStatus> {
+  async stop(id: string, opts: { by?: StopAsker } = {}): Promise<SessionStatus> {
     const session = this.get(id);
-    if (session.status.state === "running") this.finish(id, { state: "killed", reason: "stopped" });
+    if (session.status.state === "running") {
+      this.finish(id, { state: "killed", reason: "stopped", stoppedBy: opts.by ?? "person" });
+    }
     return { ...session.status };
   }
 

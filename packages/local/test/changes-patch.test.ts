@@ -411,7 +411,9 @@ describe("a patch is not influenced by what the agent wrote into the repository"
     const was = listing();
     await patchBetween(s.root, before, after, { maxBytes: MAX });
     await expect(patchBetween(s.root, before, "0".repeat(40), { maxBytes: MAX })).rejects.toThrow();
-    expect(listing()).toEqual(was);
+    // Other kodel processes on the machine share the temporary folder and may remove their own folders
+    // meanwhile: only a folder that was not there before would be ours.
+    expect(listing().filter((n) => !was.includes(n))).toEqual([]);
   });
 
   test("t36tw_hardening_tree_id_option_injection", async () => {

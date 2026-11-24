@@ -37,7 +37,7 @@ export interface StartHost {
     pipeline: string;
     task: string;
     restart: boolean;
-    task_key: string;
+    task_key?: string;
     caller: Caller;
   }): Promise<{
     status: "started" | "reused" | "terminal";
@@ -67,6 +67,8 @@ export interface WorkerOptionsInput {
   root: string;
   /** This build's version, for `caller`. */
   version: string;
+  /** The folder the worktrees of the runs are made in, for the launcher's trust probe. */
+  worktreesDir?: string;
 }
 
 /** The task text a run gets: the title, a blank line, the body; the title alone without a body. */
@@ -75,10 +77,81 @@ export function taskTextOf(card: { title: string; body?: string }): string {
   return body === "" ? card.title : `${card.title}\n\n${body}`;
 }
 
+export interface LaunchRunInput {
+  host: Pick<StartHost, "start">;
+  launcher: Pick<WorkerLauncher, "start">;
+  /** The project root: where a run without a worktree works. */
+  root: string;
+  caller: Caller;
+  pipeline: string;
+  /** The task's text, as the run gets it. */
+  task: string;
+  /** What the agent's first prompt calls the task. */
+  title: string;
+  /** What the messages call the thing started: a task's key, or words for a run with no task. */
+  subject: string;
+  /** Absent for a run with no task (`kodel agent start --pipeline`): nothing is written to a tracker. */
+  taskKey?: string;
+}
+
+/**
+ * The launch half of every start by a person: the run through the host, then its agent through the one
+ * launcher. The caller holds the start lock. A run that was made stays when its agent could not be
+ * started: any agent of the project continues it.
+ */
+export async function launchRun(input: LaunchRunInput): Promise<StartResult & { agent?: string }> {
+  const { host, launcher, subject } = input;
+  let outcome: Awaited<ReturnType<StartHost["start"]>>;
+  try {
+    outcome = await host.start({
+      pipeline: input.pipeline,
+      task: input.task,
+      restart: true,
+      ...(input.taskKey === undefined ? {} : { task_key: input.taskKey }),
+      caller: input.caller,
+    });
+  } catch (error) {
+    if (error instanceof ChoiceNeeded) {
+      return {
+        ok: false,
+        message: `Could not start ${subject}: the pipeline file ${error.choice.file} has changes that are not committed. Commit ${error.choice.file} or start the run from an agent.`,
+      };
+    }
+    return { ok: false, message: `Could not start ${subject}: ${messageOf(error)}` };
+  }
+  const runId = outcome.run.runId;
+  if (outcome.status !== "started") {
+    return {
+      ok: false,
+      message:
+        input.taskKey === undefined
+          ? `Could not start ${subject}: a run with this very task is already going: ${runId} (kodel status ${runId}).`
+          : `${subject} has a run already going: ${runId} (started outside the TUI).`,
+    };
+  }
+  const workdir = outcome.workdir?.path ?? input.root;
+  try {
+    const { name } = await launcher.start({ runId, workdir, title: input.title });
+    return {
+      ok: true,
+      runId,
+      agent: name,
+      message: `Started ${subject}: run ${runId} (agent ${name}).`,
+    };
+  } catch (error) {
+    // The run stays as it is: any agent of the project can continue it.
+    return {
+      ok: false,
+      runId,
+      message: `run ${runId} was made but no agent was started: ${messageOf(error)}. Any agent in the project continues it with pipeline_next_step and this run id.`,
+    };
+  }
+}
+
 /** The options of the loop that start and resume background agents. */
 export function createWorkerOptions(
   input: WorkerOptionsInput,
-): Pick<TuiOptions, "prepareStart" | "startTask" | "resumeWorker" | "workers"> {
+): Pick<TuiOptions, "prepareStart" | "startTask" | "resumeWorker" | "workers" | "finishWorker"> {
   const { host, tasks, launcher } = input;
   const caller: Caller = { name: "kodel-tui", version: input.version };
 
@@ -127,10 +200,23 @@ export function createWorkerOptions(
       dialog: input.dialog,
       taskLink: link !== undefined,
       pipelines: pipelines.length,
+      ...(input.worktreesDir === undefined ? {} : { worktreesDir: input.worktreesDir }),
     });
-    if (!check.ok) return { ok: false, message: `Could not start ${key}: ${check.reason}.` };
+    if (!check.ok) {
+      return {
+        ok: false,
+        message: `Could not start ${key}: ${check.reason}.`,
+        reason: check.reason,
+      };
+    }
     const warning = await linkWarning(key);
-    return { ok: true, pipelines, ...(warning === undefined ? {} : { warning }) };
+    // What a person's start is told once though it may go on (a folder whose trust is not known).
+    return {
+      ok: true,
+      pipelines,
+      ...(warning === undefined ? {} : { warning }),
+      ...(check.note === undefined ? {} : { note: check.note }),
+    };
   };
 
   const startLocked = async (key: string, pipeline: string): Promise<StartResult> => {
@@ -151,43 +237,18 @@ export function createWorkerOptions(
     if (active) {
       return { ok: false, message: `${key} is already started: run ${active.meta.runId}.` };
     }
-    let outcome: Awaited<ReturnType<StartHost["start"]>>;
-    try {
-      outcome = await host.start({
-        pipeline,
-        task: taskTextOf(card),
-        restart: true,
-        task_key: key,
-        caller,
-      });
-    } catch (error) {
-      if (error instanceof ChoiceNeeded) {
-        return {
-          ok: false,
-          message: `Could not start ${key}: the pipeline file ${error.choice.file} has changes that are not committed. Commit ${error.choice.file} or start the run from an agent.`,
-        };
-      }
-      return { ok: false, message: `Could not start ${key}: ${messageOf(error)}` };
-    }
-    const runId = outcome.run.runId;
-    if (outcome.status !== "started") {
-      return {
-        ok: false,
-        message: `${key} has a run already going: ${runId} (started outside the TUI).`,
-      };
-    }
-    const workdir = outcome.workdir?.path ?? input.root;
-    try {
-      const { name } = await launcher.start({ runId, workdir, title: card.title });
-      return { ok: true, runId, message: `Started ${key}: run ${runId} (agent ${name}).` };
-    } catch (error) {
-      // The run stays as it is: any agent of the project can continue it.
-      return {
-        ok: false,
-        runId,
-        message: `run ${runId} was made but no agent was started: ${messageOf(error)}. Any agent in the project continues it with pipeline_next_step and this run id.`,
-      };
-    }
+    const { agent: _agent, ...result } = await launchRun({
+      host,
+      launcher,
+      root: input.root,
+      caller,
+      pipeline,
+      task: taskTextOf(card),
+      title: card.title,
+      subject: key,
+      taskKey: key,
+    });
+    return result;
   };
 
   // From the check that the task is not started to the agent's launch, under the daemon's lock.
@@ -206,7 +267,7 @@ export function createWorkerOptions(
     }
   };
 
-  const resumeWorker = async (
+  const resumeLocked = async (
     runId: string,
     seq: number,
     sessionId?: string,
@@ -219,7 +280,12 @@ export function createWorkerOptions(
     if (decision === undefined || decision.seq !== seq) {
       return { ok: false, message: notResumed("the run moved on.") };
     }
-    const id = sessionId ?? (await launcher.statuses([runId])).get(runId)?.sessionId;
+    // The records too, under the lock: the daemon may have resumed it, or the agent went on by itself.
+    const now = (await launcher.statuses([runId])).get(runId);
+    if (now !== undefined && (now.state === "starting" || now.state === "running")) {
+      return { ok: false, message: notResumed(`its agent ${now.name} is alive (kodel agent ls).`) };
+    }
+    const id = now?.sessionId ?? sessionId;
     if (id === undefined) return { ok: false, message: notResumed("no session id is known.") };
     const located = await run.location();
     const workdir = located === undefined ? input.root : await run.inProject(located.path);
@@ -237,10 +303,55 @@ export function createWorkerOptions(
     }
   };
 
+  // Under the lock the daemon takes for its starts and resumes: one of the two resumes a decision.
+  const resumeWorker = async (
+    runId: string,
+    seq: number,
+    sessionId?: string,
+  ): Promise<StartResult> => {
+    if (host.withWorkerStartLock === undefined) return resumeLocked(runId, seq, sessionId);
+    try {
+      return await host.withWorkerStartLock(() => resumeLocked(runId, seq, sessionId));
+    } catch (error) {
+      if (error instanceof KodelError && error.code === "STATE_LOCKED") {
+        return {
+          ok: false,
+          message: `run ${runId} was not resumed: another start is in progress, try again.`,
+        };
+      }
+      throw error;
+    }
+  };
+
+  /** Whether the run is one of this checkout that has ended, as read now. */
+  const endedHere = async (runId: string): Promise<boolean> => {
+    const found = (await host.runSummaries()).find((s) => s.meta.runId === runId);
+    if (found === undefined || host.foreignRootOf?.(found.meta) !== undefined) return false;
+    const status = found.state?.status;
+    return status === "completed" || status === "failed" || status === "canceled";
+  };
+
+  // The daemon's `finish`, for when none is active: under the same lock, the state and the records
+  // read again inside it. A run that cannot be read, or another checkout's, is never touched.
+  const finishWorker = async (runId: string): Promise<void> => {
+    const finishLocked = async () => {
+      if (await endedHere(runId)) await launcher.finish(runId);
+    };
+    if (host.withWorkerStartLock === undefined) return finishLocked();
+    try {
+      await host.withWorkerStartLock(finishLocked);
+    } catch (error) {
+      // Another start holds the lock: the next read of the records asks again.
+      if (error instanceof KodelError && error.code === "STATE_LOCKED") return;
+      throw error;
+    }
+  };
+
   return {
     prepareStart,
     startTask,
     resumeWorker,
+    finishWorker,
     workers: { statuses: (ids) => launcher.statuses(ids), progress: (id) => launcher.progress(id) },
   };
 }

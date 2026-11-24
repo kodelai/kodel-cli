@@ -59,14 +59,24 @@ async function select(question: string, choices: Choice[]): Promise<string[]> {
 
 async function runKodel() {
   const { runCli } = await import("./cli");
+  const { insideSessionOf, resolveBase } = await import("@kodel-ai/local");
   const code = await runCli(process.argv.slice(2), {
     cwd: process.cwd(),
     out: (text) => process.stdout.write(text),
     err: (text) => process.stderr.write(text),
     interactive: process.stdin.isTTY === true && process.stdout.isTTY === true,
+    outIsTerminal: process.stdout.isTTY === true,
     confirm,
     select,
     environment: process.env,
+    // Asked only by a person's command, so a read of the process table costs the other commands nothing.
+    insideSession: () => {
+      try {
+        return insideSessionOf(resolveBase(process.env));
+      } catch {
+        return "unknown";
+      }
+    },
     readStdin: async () => {
       const chunks: Buffer[] = [];
       for await (const chunk of process.stdin) chunks.push(chunk as Buffer);

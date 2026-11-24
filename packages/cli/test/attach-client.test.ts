@@ -21,7 +21,10 @@ import {
   type AttachSignal,
   type AttachTerminal,
   attachLine,
+  createScreenSwitchFilter,
   HOLDER_ERROR_TEXT,
+  KEPT_SCREEN_ENTER,
+  KEPT_SCREEN_LEAVE,
   processTerminal,
   runAttachClient,
 } from "../src/attach-client";
@@ -85,7 +88,7 @@ class FakeTerminal implements AttachTerminal {
   }
 }
 
-function attached(name = "worker") {
+function attached(name = "worker", keepScreen = false) {
   const pair = memoryPair();
   const holder = new TestClient(pair.holder);
   const terminal = new FakeTerminal();
@@ -95,7 +98,13 @@ function attached(name = "worker") {
     set: (fn: () => void, ms: number) => clock.setTimeout(fn, ms),
     clear: (handle: unknown) => (handle as (() => void) | undefined)?.(),
   };
-  void runAttachClient({ stream: pair.client, terminal, name, timers }).then((r) => {
+  void runAttachClient({
+    stream: pair.client,
+    terminal,
+    name,
+    timers,
+    ...(keepScreen ? { keepScreen } : {}),
+  }).then((r) => {
     result = r;
   });
   const say = (text: string) => pair.holder.write(encodeFrame(FRAME.OUTPUT, fromBinary(text)));
@@ -250,6 +259,89 @@ describe("the attach client", () => {
     c.say(`${ESC}[?1049h${ESC}[?1000h`);
     c.terminal.type("\u001c");
     expect(c.terminal.screen).toContain(`${TERMINAL_RESET}\r\n[detached: worker]`);
+  });
+
+  test("tA_attach_client_keeps_the_screen_of_its_starter", async () => {
+    const CLEAR = `${ESC}[2J${ESC}[H`;
+    // Started by the TUI on its alternate screen: nothing is written until the session has something
+    // to show (the starter's own line stays up), then the screen is cleared once and the output drawn.
+    const c = attached("kw-r_1", true);
+    expect(c.terminal.screen).toBe("");
+    c.say("first");
+    c.say("second");
+    expect(c.terminal.screen).toBe(`${CLEAR}firstsecond`);
+    const ways: [string, (c: ReturnType<typeof attached>) => void, string | undefined][] = [
+      ["detach", (x) => x.terminal.type("\u001c"), undefined],
+      ["exit", (x) => x.bye({ reason: "exited", exitCode: 3 }), undefined],
+      ["kill", (x) => x.bye({ reason: "killed", signal: "SIGTERM" }), undefined],
+      ["socket dropped", (x) => x.pair.holder.end(), "connection"],
+      ["SIGTERM", (x) => x.terminal.signal("SIGTERM"), "SIGTERM"],
+      ["SIGHUP", (x) => x.terminal.signal("SIGHUP"), "SIGHUP"],
+      ["terminal gone", (x) => x.terminal.type(undefined), "the input of the terminal ended"],
+    ];
+    for (const [way, act, problem] of ways) {
+      const k = attached("kw-r_1", true);
+      // The session's program had entered an alternate screen of its own, with the mouse on.
+      k.say(`${ESC}[?1049h${ESC}[?1000hdrawn`);
+      act(k);
+      // On every way out: the modes are put back, the screen is not left and no line is written on
+      // it (the starter draws over it), and the terminal's own settings come back after the drain.
+      expect(k.terminal.screen, way).toBe(`${CLEAR}${KEPT_SCREEN_ENTER}${ESC}[?1000hdrawn${RESET}`);
+      expect(k.terminal.screen, way).not.toContain("1049");
+      expect(k.terminal.screen, way).not.toContain("kw-r_1");
+      expect(k.terminal.log, way).not.toContain("raw:off");
+      const result = await k.settle();
+      if (problem === undefined) expect(result.problem, way).toBeUndefined();
+      else expect(result.problem, way).toContain(problem);
+      expect(k.terminal.log.slice(-2), way).toEqual(["raw:off", "release"]);
+      expect(k.pair.client.closed, way).toBe(true);
+    }
+    // The result still carries the line, for whoever started the client.
+    const d = attached("kw-r_1", true);
+    d.terminal.type("\u001c");
+    expect((await d.settle()).line).toBe("[detached: kw-r_1]");
+    // A session that ends before it drew anything: the starter's screen is not even cleared.
+    expect(d.terminal.screen).toBe(RESET);
+    // Input, the late answers of the terminal and the chord work as without the flag.
+    const i = attached("kw-r_1", true);
+    i.terminal.type("abc");
+    expect(i.inputs()).toBe("abc");
+  });
+
+  test("tA_screen_switch_filter", () => {
+    const run = (...chunks: string[]) => {
+      const filter = createScreenSwitchFilter();
+      return chunks.map((chunk) => toBinary(filter(fromBinary(chunk))));
+    };
+    // The three forms of the switch, on and off; everything else passes as it is.
+    for (const mode of ["1049", "1047", "47"]) {
+      expect(run(`a${ESC}[?${mode}hb`), mode).toEqual([`a${KEPT_SCREEN_ENTER}b`]);
+      expect(run(`a${ESC}[?${mode}lb`), mode).toEqual([`a${KEPT_SCREEN_LEAVE}b`]);
+    }
+    const others = `${ESC}[?25l${ESC}[?2004h${ESC}[1;1H${ESC}[2Jtext${ESC}[0m${ESC}[?1000;1006h`;
+    expect(run(others)).toEqual([others]);
+    // The other modes of one sequence are kept.
+    expect(run(`${ESC}[?1049;25h`)).toEqual([`${ESC}[?25h${KEPT_SCREEN_ENTER}`]);
+    expect(run(`${ESC}[?25;1049l`)).toEqual([`${ESC}[?25l${KEPT_SCREEN_LEAVE}`]);
+    // A mode whose number only contains one of them is not one of them.
+    expect(run(`${ESC}[?10490h${ESC}[?147h`)).toEqual([`${ESC}[?10490h${ESC}[?147h`]);
+    // A switch cut anywhere between two chunks is still found, and nothing of it leaks out early.
+    const whole = `x${ESC}[?1049ly`;
+    for (let at = 1; at < whole.length; at++) {
+      const out = run(whole.slice(0, at), whole.slice(at));
+      expect(out.join(""), String(at)).toBe(`x${KEPT_SCREEN_LEAVE}y`);
+      expect(out[0], String(at)).not.toContain("1049");
+    }
+    // Byte by byte, too; bytes that are not ASCII pass as they are.
+    const filter = createScreenSwitchFilter();
+    const text = toBinary(new TextEncoder().encode(`é◆${ESC}[?1049hё${ESC}[?47l`));
+    const out = [...text].map((char) => toBinary(filter(fromBinary(char)))).join("");
+    expect(out).toBe(
+      toBinary(new TextEncoder().encode(`é◆${KEPT_SCREEN_ENTER}ё${KEPT_SCREEN_LEAVE}`)),
+    );
+    // A tail that is no switch is held only while it may become one.
+    expect(run(`a${ESC}`, "b")).toEqual(["a", `${ESC}b`]);
+    expect(run(`a${ESC}[?${"1".repeat(40)}`)).toEqual([`a${ESC}[?${"1".repeat(40)}`]);
   });
 
   test("tA_attach_client_drains_late_answer", async () => {

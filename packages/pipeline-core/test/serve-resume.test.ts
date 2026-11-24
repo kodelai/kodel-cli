@@ -12,6 +12,7 @@ import {
   type ResumeVerdict,
   resumeVerdict,
   type ServeWorkerView,
+  servePlaces,
 } from "../src/serve";
 
 const RUN = "r_0mwplcrq9_pavk";
@@ -284,5 +285,205 @@ describe("t44 the resume verdicts", () => {
       { event: "pipeline_accepted", source: "file", nodes: [] },
     ]);
     expect(decisionOf(journal).lastWait).toMatchObject({ seq: 2, kind: "pipeline_change" });
+  });
+});
+
+/** The gate journal with an agent's line after the decision (seq 5, ts 6000). */
+const MOVED = [...GATE, ...build([{ event: "step_served" }]).map((r) => ({ ...r, seq: 5 }))];
+/** The gate journal before the decision. */
+const WAITING = GATE.slice(0, 3);
+
+/** A worker in a terminal of its own, ended at 4500 (after the wait at 4000, before the decision at 5000). */
+const terminal = (over: Partial<ServeWorkerView> = {}): ServeWorkerView =>
+  worker({ terminal: true, ...over });
+
+/** The ends of a terminal session that may have found the agent waiting. */
+const ENDS: [string, Partial<ServeWorkerView>][] = [
+  ["exited", { state: "exited" }],
+  ["lost", { state: "lost", label: "lost (holder gone)", endedBy: "holder_gone" }],
+  ["timeout", { state: "killed", label: "killed (timeout)", endedBy: "timeout" }],
+  ["holder error", { state: "killed", label: "failed (could not start)", endedBy: "holder_error" }],
+  // The holder was told to end without a stop of the person (a shutdown), or the program was killed.
+  ["signal", { state: "killed", label: "killed (SIGTERM)", endedBy: "signal" }],
+];
+
+describe("t44 a worker in a terminal that ended (T-47)", () => {
+  test("t44_ended_after_the_decision_without_going_on_is_resumed", () => {
+    // It was alive at the decision and ended after it, and no agent called the engine since: it never
+    // went on, so it is resumed like one that ended at the wait. The same second, seconds, days later.
+    for (const [what, end] of ENDS) {
+      for (const since of [5_000, 5_001, 12_000, 5_000 + 3 * 86_400_000]) {
+        const w = terminal({ since, lastOutputAt: 4_200, ...end });
+        expect(verdict(run(), w), `${what} at ${since}`).toBe("resume");
+      }
+      // And one that ended at the wait, before any decision: it waits, then it is resumed.
+      const w = terminal(end);
+      expect(verdict(run({ waitsForPerson: true }, WAITING), w), what).toBe("waiting_person");
+      expect(verdict(run({}, WAITING), w), what).toBe("undecided");
+      expect(verdict(run(), w), what).toBe("resume");
+    }
+    // A print worker that is `lost` or `killed` is dead, as before: its turn ends at a wait by an exit.
+    expect(verdict(run(), worker({ state: "lost" }))).toBe("dead");
+    expect(verdict(run(), worker({ state: "killed", endedBy: "timeout" }))).toBe("dead");
+    expect(verdict(run(), worker({ state: "killed", endedBy: "signal" }))).toBe("dead");
+    // A terminal session that never came up did not wait.
+    expect(verdict(run(), terminal({ state: "killed", endedBy: "start_late" }))).toBe("dead");
+    expect(verdict(run(), terminal({ state: "killed" }))).toBe("dead");
+  });
+
+  test("t44_stopped_at_a_wait_is_left_to_the_person", () => {
+    const stopped = terminal({
+      state: "killed",
+      label: "stopped",
+      stopped: true,
+      endedBy: "stopped",
+    });
+    // The daemon does not resume a worker a person stopped.
+    expect(resumeVerdict(run(), stopped, { refuseMoved: true })).toEqual({
+      kind: "no",
+      why: "stopped",
+    });
+    // The TUI offers it (`s resumes`).
+    expect(
+      resumeVerdict(run(), stopped, { refuseMoved: false, resumeStopped: true }),
+    ).toMatchObject({ kind: "resume", seq: 4 });
+    // Until the decision it waits like any other.
+    expect(verdict(run({ waitsForPerson: true }, WAITING), stopped)).toBe("waiting_person");
+    // Stopped outside a wait, and a print worker that was stopped: a session that is over.
+    expect(verdict(run(), { ...stopped, since: 3_000 })).toBe("dead");
+    expect(verdict(run(), worker({ state: "killed", stopped: true, endedBy: "stopped" }))).toBe(
+      "dead",
+    );
+    expect(
+      why(
+        resumeVerdict(run(), worker({ state: "killed", stopped: true }), {
+          refuseMoved: false,
+          resumeStopped: true,
+        }),
+      ),
+    ).toBe("dead");
+  });
+
+  test("t44_a_persons_stop_is_never_resumed_by_the_daemon_whatever_the_record_says", () => {
+    // The holder had recorded its own end (or was gone) and the person stopped what it left: the record
+    // keeps that end, the worker is the person's all the same. Every end at which the agent may have waited.
+    for (const [what, end] of ENDS) {
+      const stopped = terminal({ ...end, stopped: true });
+      // Every time the worker may have ended at: at the wait, and after the decision without going on.
+      for (const since of [4_500, 5_000, 5_001, 12_000]) {
+        const w = { ...stopped, since, lastOutputAt: 4_200 };
+        expect(resumeVerdict(run(), w, { refuseMoved: true }), `${what} at ${since}`).toEqual({
+          kind: "no",
+          why: "stopped",
+        });
+        // The same worker without the person's stop is the one the daemon resumes.
+        expect(verdict(run(), { ...w, stopped: undefined }), `${what} at ${since}`).toBe("resume");
+        // The TUI offers it.
+        expect(
+          resumeVerdict(run(), w, { refuseMoved: false, resumeStopped: true }),
+          `${what} at ${since}`,
+        ).toMatchObject({ kind: "resume", seq: 4 });
+      }
+      // Until the decision it waits like any other, and keeps its run.
+      expect(verdict(run({ waitsForPerson: true }, WAITING), stopped), what).toBe("waiting_person");
+      expect(verdict(run({}, WAITING), stopped), what).toBe("undecided");
+      // Stopped at work, before any wait: a session that is over.
+      expect(verdict(run(), { ...stopped, since: 3_000 }), what).toBe("dead");
+      // A run that is over is over.
+      expect(verdict(run({ status: "completed" }), stopped), what).toBe("over");
+    }
+    // No option but the TUI's own returns `resume` for a worker the person stopped.
+    for (const refuseMoved of [true, false]) {
+      for (const [what, end] of ENDS) {
+        const v = resumeVerdict(run(), terminal({ ...end, stopped: true }), { refuseMoved });
+        expect(v.kind, what).toBe("no");
+      }
+    }
+    // A session kodel ended because its run was over is stopped, but not by the person: the rule reads its
+    // end alone (an open run with such a worker is one whose worker ended, and it is resumed at a decision).
+    const finished = terminal({ state: "killed", label: "stopped", endedBy: "stopped" });
+    expect(verdict(run({ status: "completed" }), finished)).toBe("over");
+    expect(verdict(run(), finished)).toBe("resume");
+  });
+
+  test("t44_ended_before_the_decision_and_moved_is_not_a_death", () => {
+    // It ended at W1 before D1; then another agent worked the run (an agent's line after D1).
+    for (const [what, end] of ENDS) {
+      const w = terminal({ since: 4_500, lastOutputAt: 4_400, ...end });
+      expect(verdict(run({}, MOVED), w), what).toBe("moved");
+      // The TUI words that case itself and still offers the resume.
+      expect(verdict(run({}, MOVED), w, false), what).toBe("resume");
+    }
+  });
+
+  test("t44_same_instant_end_and_decision", () => {
+    // The order is the journal's and the record's end; an end in the instant of the decision is before it.
+    for (const [what, end] of ENDS) {
+      const at = (since: number) => terminal({ since, lastOutputAt: since, ...end });
+      expect(verdict(run({}, MOVED), at(5_000)), what).toBe("moved");
+      expect(verdict(run({}, MOVED), at(5_001)), what).toBe("not_at_wait");
+      expect(verdict(run({}, MOVED), at(4_999)), what).toBe("moved");
+    }
+  });
+
+  test("t44_lost_noticed_late_is_not_a_death", () => {
+    // A `lost` record has no known end: `since` is when the loss was noticed. Noticed long after the
+    // decision, with no output after it, and an agent's line after the decision: it is taken as ended
+    // before the decision, so another agent went on. No death.
+    const late = terminal({
+      state: "lost",
+      endedBy: "holder_gone",
+      since: 900_000,
+      lastOutputAt: 4_200,
+    });
+    expect(verdict(run({}, MOVED), late)).toBe("moved");
+    // The same record with output after the decision did end after it: it died at work.
+    expect(verdict(run({}, MOVED), { ...late, lastOutputAt: 5_500 })).toBe("not_at_wait");
+    // A record that names no output at all is taken as ended before the decision.
+    const { lastOutputAt: _none, ...silent } = late;
+    expect(verdict(run({}, MOVED), silent)).toBe("moved");
+    // With no agent's line after the decision either is resumed.
+    expect(verdict(run(), late)).toBe("resume");
+  });
+
+  test("t44_child_alive_verdict", () => {
+    // `lost` or `killed` while its process still runs: alive for every rule, whatever else holds.
+    for (const state of ["lost", "killed"] as const) {
+      for (const isTerminal of [true, false]) {
+        for (const journal of [WAITING, GATE, MOVED]) {
+          const w = worker({ state, childAlive: true, ...(isTerminal ? { terminal: true } : {}) });
+          expect(verdict(run({}, journal), w)).toBe("child_alive");
+          expect(verdict(run({ status: "completed" }, journal), w)).toBe("child_alive");
+          expect(
+            why(resumeVerdict(run({}, journal), w, { refuseMoved: false, resumeStopped: true })),
+          ).toBe("child_alive");
+        }
+      }
+    }
+    // A live session is `active` whatever the flag says.
+    expect(verdict(run(), worker({ state: "running", childAlive: true }))).toBe("active");
+  });
+
+  test("t44_older_print_worker_at_a_gate_keeps_its_place", () => {
+    // A `claude -p` worker from before the `agent` record: exited at its gate, its id read from its
+    // argv. It keeps its `max_runs` place while the run waits and is resumed once after the decision.
+    const old = worker();
+    expect(old.terminal).toBeUndefined();
+    const view = (journal: JournalRecord[], waitsForPerson: boolean) => ({
+      ...run({ waitsForPerson }, journal),
+      canNote: true,
+      noted: [],
+      worker: old,
+    });
+    expect(verdict(view(WAITING, true), old)).toBe("waiting_person");
+    expect(servePlaces([view(WAITING, true)])).toEqual({ workers: 0, runs: [RUN] });
+    expect(verdict(view(GATE, false), old)).toBe("resume");
+    expect(servePlaces([view(GATE, false)])).toEqual({ workers: 0, runs: [RUN] });
+    // Without the id from its argv it would be released for good: that is the case the reader avoids.
+    const { sessionId: _none, ...noId } = old;
+    expect(verdict(view(GATE, false), noId)).toBe("no_session_id");
+    expect(servePlaces([{ ...view(GATE, false), worker: noId }])).toEqual({ workers: 0, runs: [] });
+    // Resumed once: the record of the decision exists.
+    expect(verdict(view(GATE, false), { ...old, resumed: [4] })).toBe("already_resumed");
   });
 });

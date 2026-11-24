@@ -6,6 +6,7 @@
  * Session errors have their own code set, outside the MCP `ERROR_CODES` (which stay pinned).
  */
 
+import { ENGINE_PROFILE_NAME } from "./registry";
 import type { AttachStream } from "./session-frames";
 import { isTerminalSize } from "./session-frames";
 
@@ -57,6 +58,45 @@ export type SessionMode = "pipes" | "pty";
 export type SessionLifetime = "detached" | "with-starter";
 export type SessionOrigin = "cli" | "host";
 
+/**
+ * The coding agent a session runs, as its starter knows it: the engine's profile name, the id of the agent's own
+ * conversation (chosen by the starter, never read from what the agent prints) and the session whose conversation
+ * this one continues. It names which conversation to continue, never whether anything is done.
+ */
+export interface SessionAgent {
+  engine: string;
+  session?: string;
+  resumes?: string;
+}
+
+/** An engine's profile name, as the `engines` block spells it. */
+export const AGENT_ENGINE_PATTERN = ENGINE_PROFILE_NAME;
+/** The id of an agent's conversation: one word an argv can carry, never a flag. */
+export const AGENT_SESSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+/** Why an `agent` is refused, or `undefined`. Shared by the spec and by the record that stores it. */
+export const agentProblem = (agent: unknown): string | undefined => {
+  if (typeof agent !== "object" || agent === null || Array.isArray(agent)) {
+    return "agent is not an object";
+  }
+  const { engine, session, resumes, ...rest } = agent as Record<string, unknown>;
+  const unknown = Object.keys(rest)[0];
+  if (unknown !== undefined) return `agent.${unknown} is not known`;
+  if (typeof engine !== "string" || !AGENT_ENGINE_PATTERN.test(engine)) {
+    return "agent.engine is not a profile name";
+  }
+  if (
+    session !== undefined &&
+    (typeof session !== "string" || !AGENT_SESSION_PATTERN.test(session))
+  ) {
+    return "agent.session is not valid";
+  }
+  if (resumes !== undefined && (typeof resumes !== "string" || !isSessionId(resumes))) {
+    return "agent.resumes is not a session id";
+  }
+  return undefined;
+};
+
 export interface SessionSpec {
   /** One of `command` (run through a shell) or `argv` (no shell). */
   command?: string;
@@ -75,6 +115,8 @@ export interface SessionSpec {
   lifetime?: SessionLifetime;
   origin?: SessionOrigin;
   parent?: string;
+  /** Kept in a record of its own (`agent.json`), never in the stored spec. */
+  agent?: SessionAgent;
 }
 
 /** The longest timer a process can set (Node fires at once above it). */
@@ -112,6 +154,10 @@ export const validateSpec = (spec: SessionSpec): string | undefined => {
   if (spec.input !== undefined && typeof spec.input !== "boolean") return "input must be a boolean";
   if (spec.name !== undefined && !isSessionName(spec.name)) return "name is not valid";
   if (spec.parent !== undefined && !isSessionId(spec.parent)) return "parent is not a session id";
+  if (spec.agent !== undefined) {
+    const problem = agentProblem(spec.agent);
+    if (problem !== undefined) return problem;
+  }
   if (spec.mode !== undefined && spec.mode !== "pipes" && spec.mode !== "pty")
     return "mode is not valid";
   if (spec.size !== undefined) {
@@ -144,16 +190,66 @@ export const isTerminalState = (state: SessionState): boolean => TERMINAL_STATES
 
 export type KilledReason = "stopped" | "timeout" | "start_late" | "rules_unknown" | "holder_error";
 
+/**
+ * Who asked for a stop: a person (`kodel agent stop`), or kodel itself when the run of the session was over
+ * (`finish`). A stop record that does not say is a person's: nobody else may be taken for the person's word.
+ */
+export type StopAsker = "person" | "finish";
+/** The `by` of a stop record, per asker. `stop` is what every record said before the askers were told apart. */
+export const STOP_BY: Readonly<Record<StopAsker, string>> = { person: "stop", finish: "finish" };
+export const stopAskerOf = (by: string): StopAsker => (by === STOP_BY.finish ? "finish" : "person");
+
 export interface SessionStatus {
   state: SessionState;
   exitCode?: number;
   signal?: string;
   reason?: KilledReason | "no_status" | "holder_gone";
+  /**
+   * Somebody asked for the session to be stopped, and who (the stop record). It is read beside whatever the
+   * record says of the end: a stop that ended only what a holder left behind (a record that was final already)
+   * changes no `reason`, and is a stop all the same. Never set while the session is live.
+   */
+  stoppedBy?: StopAsker;
   /** True when the child still runs although the session is over (a consumer treats it as unfinished). */
   childAlive?: boolean;
   lastOutputAt?: number;
   since?: number;
+  /**
+   * Only for a session whose holder went away without recording its child's end, with the recorded child gone:
+   * what is left of the child's process group could not be looked at (`unread`: the process table, the boot
+   * time, or whether the process that has the group's number is the recorded child; `childAlive` is then about the recorded child alone), or the group's number belongs to another
+   * process now (`stranger`: nothing of the session is left), or processes are in the group with no leader
+   * (`leaderless`: they may be the session's or, the number given out again, another program's; `childAlive` is
+   * set, `leftover` names them, and kodel never signals them). Absent when the group is empty, or need not be
+   * looked at.
+   */
+  group?: "unread" | "stranger" | "leaderless";
+  /** With `group: "leaderless"`: the processes of the group; `command` is there when it was asked for and read. */
+  leftover?: LeftoverProcess[];
 }
+
+/** A process of a session's group that kodel does not signal: a person looks at it and ends it. */
+export interface LeftoverProcess {
+  pid: number;
+  command?: string;
+}
+
+/**
+ * What a person is told of a group without its leader: kodel signalled nothing, which processes are there,
+ * and what to do. One text for `agent stop`, `agent rm` and `agent prune`.
+ */
+export const leftoverInstruction = (id: string, leftover: readonly LeftoverProcess[]): string => {
+  const pids = leftover.map((p) =>
+    p.command === undefined ? `${p.pid}` : `${p.pid} (${p.command})`,
+  );
+  return (
+    `the process kodel started for ${id} is gone, and its process group still has ` +
+    `${pids.length === 0 ? "processes" : pids.join(", ")}. kodel cannot tell whether they are this agent's or ` +
+    "another program's (the group's number may have been given out again), so it signals none of them. " +
+    "Look at each (`ps -o pid,lstart,command -p <pid>`), end the ones that are this agent's yourself " +
+    `(\`kill <pid>\`), then run \`kodel agent stop ${id}\`: it settles the record once none is left`
+  );
+};
 
 /** What an adapter hands to `deriveStatus`: facts only, read once. */
 export interface SessionSnapshot {
@@ -165,8 +261,17 @@ export interface SessionSnapshot {
     | { state: SessionState; exitCode?: number; signal?: string; reason?: SessionStatus["reason"] };
   holderAlive: boolean;
   childAlive: boolean;
-  stop: "missing" | "unreadable" | "present";
+  /** The stop record: who asked, when it is there and can be read. */
+  stop: "missing" | "unreadable" | StopAsker;
 }
+
+/**
+ * Whether a person stopped the session. The stop record says so for any end the status record names (a holder
+ * that had recorded its own end before the person stopped what was left is stopped by the person too). A status
+ * that says `stopped` and names no asker (an adapter that keeps no stop record) is the person's.
+ */
+export const stoppedByPerson = (status: SessionStatus): boolean =>
+  status.stoppedBy === "person" || (status.reason === "stopped" && status.stoppedBy === undefined);
 
 export type DerivedStatus =
   | { ok: true; status: SessionStatus }
@@ -177,7 +282,9 @@ export const DEFAULT_START_GRACE_MS = 30_000;
 
 /**
  * The one decision table. Order matters: it is the order of the plan's design (no directory,
- * unreadable record, newer format, no status yet, terminal, running).
+ * unreadable record, newer format, no status yet, terminal, running). Every answer for a session that is
+ * over goes through `over`: the stop record is read for each of them, whatever the status record says, so
+ * no end hides who asked for a stop; one that cannot be read is `CANNOT_READ`, never "nobody asked".
  */
 export const deriveStatus = (
   snap: SessionSnapshot,
@@ -190,12 +297,14 @@ export const deriveStatus = (
   }
   if (snap.session.v > SESSION_FORMAT_VERSION) return { ok: false, code: "NEWER_FORMAT" };
   if (snap.status === "unreadable") return { ok: false, code: "CANNOT_READ" };
+  const over = (status: SessionStatus): DerivedStatus => {
+    if (snap.stop === "unreadable") return { ok: false, code: "CANNOT_READ" };
+    if (snap.stop !== "missing") status.stoppedBy = snap.stop;
+    return { ok: true, status };
+  };
   if (snap.status === "missing") {
     if (now - snap.session.started < graceMs) return { ok: true, status: { state: "starting" } };
-    return {
-      ok: true,
-      status: { state: "lost", reason: "no_status", childAlive: snap.childAlive },
-    };
+    return over({ state: "lost", reason: "no_status", childAlive: snap.childAlive });
   }
   const recorded = snap.status;
   if (isTerminalState(recorded.state)) {
@@ -204,28 +313,14 @@ export const deriveStatus = (
     if (recorded.signal !== undefined) status.signal = recorded.signal;
     if (recorded.reason !== undefined) status.reason = recorded.reason;
     if (snap.childAlive) status.childAlive = true;
-    return { ok: true, status };
+    return over(status);
   }
-  if (recorded.state === "starting") {
-    if (snap.holderAlive) return { ok: true, status: { state: "starting" } };
-    return {
-      ok: true,
-      status: { state: "lost", reason: "holder_gone", childAlive: snap.childAlive },
-    };
+  if (snap.holderAlive) return { ok: true, status: { state: recorded.state } };
+  // The holder went away without recording the end: a stop record says it was stopped, else it is lost.
+  if (recorded.state === "running" && snap.stop !== "missing") {
+    return over({ state: "killed", reason: "stopped", childAlive: snap.childAlive });
   }
-  // running
-  if (snap.holderAlive) return { ok: true, status: { state: "running" } };
-  if (snap.stop === "unreadable") return { ok: false, code: "CANNOT_READ" };
-  if (snap.stop === "present") {
-    return {
-      ok: true,
-      status: { state: "killed", reason: "stopped", childAlive: snap.childAlive },
-    };
-  }
-  return {
-    ok: true,
-    status: { state: "lost", reason: "holder_gone", childAlive: snap.childAlive },
-  };
+  return over({ state: "lost", reason: "holder_gone", childAlive: snap.childAlive });
 };
 
 /**
@@ -343,6 +438,10 @@ export interface SessionListEntry {
   /** The command as the starter gave it, redacted (a shell command, or the argv joined by spaces). */
   command?: string;
   status: SessionStatus;
+  /** `pipes` or `pty`, as the record says; absent for an entry that could not be read. */
+  mode?: SessionMode;
+  /** The session's `agent` record, when it has one (an older session has none). Never a prompt or an argv. */
+  agent?: SessionAgent & { source?: "chosen" | "observed" };
   /** The entry could not be read (`CANNOT_READ`), was written by a newer kodel (`NEWER_FORMAT`) or by another machine (`FOREIGN`); its status is not real. */
   problem?: "CANNOT_READ" | "NEWER_FORMAT" | "FOREIGN";
 }
@@ -357,7 +456,11 @@ export interface SessionAdapter {
     opts?: { timeoutMs?: number; signal?: AbortSignal },
   ): Promise<SessionStatus & { timedOut?: boolean }>;
   tail(id: string, bytes?: number, stream?: TailStream): Promise<TailResult>;
-  stop(id: string): Promise<SessionStatus>;
+  /**
+   * `by` says who asks (a person, when absent). A person's stop is never replaced by a `finish`, and it
+   * replaces one: the stop record keeps the person's word.
+   */
+  stop(id: string, opts?: { by?: StopAsker }): Promise<SessionStatus>;
   remove(id: string): Promise<void>;
   list(filter?: { name?: string }): Promise<SessionListEntry[]>;
   /** Only with `capabilities().send`. Returns the bytes written; promises nothing about a program that does not read. */

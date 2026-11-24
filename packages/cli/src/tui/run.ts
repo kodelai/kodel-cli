@@ -61,13 +61,50 @@ import {
   withWorkers,
   withWorkersUnknown,
 } from "./view";
+import { finishOf } from "./worker-resume";
 
 const FRAME_MS = 100;
 
-/** What `prepareStart` answers: the pipelines to offer, or why `s` does nothing. */
+/**
+ * What `prepareStart` answers: the pipelines to offer (with what the preflight tells the person once),
+ * or why `s` does nothing (`reason`: what keeps an agent from starting here, for the task's row).
+ */
 export type StartCheck =
   /** `warning`: the task's links would hold it back from `kodel serve`; the question says so and still starts. */
-  { ok: true; pipelines: string[]; warning?: string } | { ok: false; message: string };
+  | { ok: true; pipelines: string[]; warning?: string; note?: string }
+  | { ok: false; message: string; reason?: string };
+
+/** The child that has the terminal while the screen is away (`kodel agent attach`). */
+export interface AttachedChild {
+  /** Settles when the child is gone, with the notice for the return. */
+  done: Promise<string>;
+  /** Sends the child a signal; one that is gone ignores it. */
+  signal(signal: NodeJS.Signals): void;
+}
+
+/**
+ * What `openWorker` answers, before the screen is left: why the terminal is not handed over, or the
+ * call that starts the child once the screen is away.
+ */
+export type WorkerOpening =
+  | { ok: false; message: string }
+  | { ok: true; attach: () => AttachedChild };
+
+/** How long the input is read and thrown away after the return from an agent's terminal. */
+export const HANDOVER_DROP_MS = 150;
+
+const SCREEN_ON = `\u001b[?1049h\u001b[?25l\u001b[2J${PASTE_ON}`;
+const SCREEN_OFF = `${MOUSE_OFF}${PASTE_OFF}\u001b[?25h\u001b[?1049l`;
+/**
+ * What the screen writes when it hands its terminal to an agent (`o`): its own modes off, and the
+ * alternate screen kept, cleared, with one line on it. The child draws into this screen and the TUI over
+ * it on the return, so the shell behind is seen at neither moment (the child takes about a second to
+ * come up).
+ */
+export const handoverScreen = (name: string): string =>
+  `${MOUSE_OFF}${PASTE_OFF}\u001b[?25h\u001b[2J\u001b[H${neutralize(plain(`opening ${name}…`))}`;
+const ALT_SCREEN_ON = "\u001b[?1049h";
+const ALT_SCREEN_OFF = "\u001b[?1049l";
 
 /** What `startTask` and `resumeWorker` answer: the notice, and the run that got an agent. */
 export interface StartResult {
@@ -142,6 +179,18 @@ export interface TuiOptions {
   platform?: string;
   /** Reads whether `kodel serve` runs for this checkout; with each read of the worker records. */
   serve?: () => Promise<ServeStatus>;
+  /**
+   * `o` on a run: checks that the terminal of the agent's record `id` can be handed over (the platform,
+   * the runtime, the record, the child's program) while the screen still stands. A person's act.
+   */
+  openWorker?: (runId: string, id: string) => Promise<WorkerOpening>;
+  /**
+   * Ends the live agent of a run that is over, when no daemon does it. It decides nothing about a run;
+   * the state and the records are read again behind it.
+   */
+  finishWorker?: (runId: string) => Promise<void>;
+  /** How long the input is dropped after a return (milliseconds); tests make it short. */
+  handoverDropMs?: number;
 }
 
 /**
@@ -282,6 +331,7 @@ export async function runTui(
             model = read.ok
               ? withWorkers(model, read.statuses, options.work?.pending() ?? false, read.serve)
               : withWorkersUnknown(model);
+            if (read.ok) finishEnded();
             draw();
           },
           onCard: () => draw(),
@@ -331,6 +381,51 @@ export async function runTui(
         draw();
       });
   };
+  // With no active daemon the screen ends the live agent of a run it read as over: one at a time, a
+  // failure told once and not tried again from here.
+  let finishing = false;
+  const finishFailed = new Set<string>();
+  // A finish may end nothing without failing (the start lock was held, the state read again was not
+  // an ended one): the run stands aside until every other ended run had its turn, so it blocks none.
+  const finishAsked = new Set<string>();
+  const finishEnded = () => {
+    const end = options.finishWorker;
+    if (!end || finishing || isAway) return;
+    const pick = () =>
+      finishOf(
+        model.sessions,
+        Object.fromEntries(
+          Object.entries(model.workers).filter(
+            ([runId]) => !finishFailed.has(runId) && !finishAsked.has(runId),
+          ),
+        ),
+        model.serve,
+      );
+    let runId = pick();
+    if (runId === undefined && finishAsked.size > 0) {
+      finishAsked.clear();
+      runId = pick();
+    }
+    if (runId === undefined) return;
+    const asked = runId;
+    finishing = true;
+    finishAsked.add(asked);
+    end(asked)
+      .catch((error: unknown) => {
+        finishFailed.add(asked);
+        model = {
+          ...model,
+          notice: `Could not stop the agent of ${asked} (the run is over): ${plain(messageOf(error))}`,
+        };
+        draw();
+      })
+      .finally(() => {
+        finishing = false;
+      });
+  };
+  // Set while the terminal is the agent's (`o`): nothing is drawn and no timer works meanwhile.
+  let isAway = false;
+  let attachWorker: (effect: Extract<Effect, { type: "attach_worker" }>) => void = () => undefined;
   /** What the screen asked for and cannot do itself: a diff to read, a comment to write. */
   const perform = (effect: Effect) => {
     const failed = (what: string) => (error: unknown) => {
@@ -434,8 +529,15 @@ export async function runTui(
       prepare(effect.key)
         .then((check) => {
           model = check.ok
-            ? withStartReady(model, effect.seq, effect.key, check.pipelines, check.warning)
-            : withStartRefused(model, effect.seq, effect.key, check.message);
+            ? withStartReady(
+                model,
+                effect.seq,
+                effect.key,
+                check.pipelines,
+                check.warning,
+                check.note,
+              )
+            : withStartRefused(model, effect.seq, effect.key, check.message, check.reason);
         })
         .catch((error: unknown) => {
           model = withStartRefused(
@@ -500,6 +602,10 @@ export async function runTui(
           workersRefresh?.openScreen(Date.now());
           draw();
         });
+      return;
+    }
+    if (effect.type === "attach_worker") {
+      attachWorker(effect);
       return;
     }
     if (effect.type === "check_decision") {
@@ -604,7 +710,7 @@ export async function runTui(
   const told: string[] = [];
   let leaving = false;
   const draw = () => {
-    if (closed) return;
+    if (closed || isAway) return;
     if (model.mouse !== mouseSent) {
       stdout.write(model.mouse ? MOUSE_ON : MOUSE_OFF);
       mouseSent = model.mouse;
@@ -616,15 +722,32 @@ export async function runTui(
   // Always turned off on the way out, whatever was sent: a terminal left reporting the mouse
   // fills the person's shell with escape codes.
   let restored = false;
+  // The child that has the terminal while the screen is away; it is ended before the terminal is put back.
+  let child: AttachedChild | undefined;
   const restore = () => {
     if (restored) return;
     restored = true;
     closed = true;
-    stdout.write(`${MOUSE_OFF}${PASTE_OFF}\u001b[?25h\u001b[?1049l`);
+    const wasAway = isAway;
+    if (child !== undefined) {
+      // The child only connects a terminal to a session: ending it ends no session.
+      try {
+        child.signal("SIGTERM");
+      } catch {
+        // already gone
+      }
+    }
+    // While away the screen's own modes are off already and the keys are not raw: only the alternate
+    // screen, which the child draws into, is left. The child leaves it alone and writes no line.
+    if (wasAway) {
+      stdout.write(ALT_SCREEN_OFF);
+      return;
+    }
+    stdout.write(SCREEN_OFF);
     if (stdin.isTTY) stdin.setRawMode(false);
   };
 
-  stdout.write(`\u001b[?1049h\u001b[?25l\u001b[2J${PASTE_ON}`);
+  stdout.write(SCREEN_ON);
   stdin.setRawMode(true);
   stdin.setEncoding("utf8");
   stdin.resume();
@@ -646,6 +769,7 @@ export async function runTui(
   return await new Promise<number>((resolve) => {
     let refreshing = false;
     const frames = setInterval(() => {
+      if (isAway) return;
       // A paste that never ended is given up, and its dropped rest ends, with the clock and not only with the next
       // key: what the paste held so far then appears in the input without a keypress.
       const late = reader.flush(Date.now());
@@ -656,7 +780,7 @@ export async function runTui(
       if (isAnimated(model)) draw();
     }, FRAME_MS);
     const refresh = setInterval(() => {
-      if (refreshing) return;
+      if (refreshing || isAway) return;
       refreshing = true;
       reload().finally(() => {
         refreshing = false;
@@ -666,7 +790,7 @@ export async function runTui(
     }, options.refreshMs ?? REFRESH_MS);
 
     const statsRefresh = setInterval(() => {
-      if (model.section === 3 && model.rep.selected !== "") {
+      if (!isAway && model.section === 3 && model.rep.selected !== "") {
         perform({ type: "load_stats", pipeline: model.rep.selected });
       }
     }, STATS_REFRESH_MS);
@@ -679,8 +803,11 @@ export async function runTui(
       clearInterval(refresh);
       clearInterval(statsRefresh);
       if (holdTimer) clearTimeout(holdTimer);
+      if (dropTimer) clearTimeout(dropTimer);
       for (const name of SIGNALS) process.off(name, onSignal);
+      awaySignals(false);
       stdin.off("data", onData);
+      stdin.off("data", dropInput);
       stdout.off("resize", onResize);
       stdin.pause();
       try {
@@ -768,6 +895,119 @@ export async function runTui(
       stdout.write("\u001b[2J");
       draw();
     };
+
+    // ── `o`: the terminal goes to the agent and comes back ──────────────────
+    // While the terminal is not raw (before the child is up, after it left) the detach chord Ctrl+\ is
+    // the terminal's QUIT key: it is taken and ignored. A stop from outside stops the child too, and a
+    // continue brings both back; neither ends a session.
+    const noQuit = () => undefined;
+    const onStop = () => {
+      child?.signal("SIGTSTP");
+      // The shell has the terminal while both are stopped: it gets its own screen.
+      stdout.write(ALT_SCREEN_OFF);
+      process.kill(process.pid, "SIGSTOP");
+    };
+    const onContinue = () => {
+      stdout.write(ALT_SCREEN_ON);
+      child?.signal("SIGCONT");
+    };
+    let awayHandled = false;
+    const awaySignals = (on: boolean) => {
+      if (on === awayHandled || process.platform === "win32") return;
+      awayHandled = on;
+      const set = on ? process.on.bind(process) : process.off.bind(process);
+      set("SIGQUIT", noQuit);
+      set("SIGTSTP", onStop);
+      set("SIGCONT", onContinue);
+    };
+    let dropTimer: ReturnType<typeof setTimeout> | undefined;
+    const dropInput = () => undefined;
+    /**
+     * Gives the terminal away and keeps the model: no listener, no raw keys, no drawing until
+     * `resumeScreen`. The alternate screen is kept (`handoverScreen`).
+     */
+    const suspend = (name: string) => {
+      isAway = true;
+      if (holdTimer) clearTimeout(holdTimer);
+      if (dropTimer) clearTimeout(dropTimer);
+      dropTimer = undefined;
+      awaySignals(true);
+      stdout.write(handoverScreen(name));
+      mouseSent = false;
+      if (stdin.isTTY) stdin.setRawMode(false);
+      stdin.off("data", onData);
+      stdin.off("data", dropInput);
+      stdout.off("resize", onResize);
+      stdin.pause();
+    };
+    /** Takes the screen back where it was: the notice, fresh data, a full redraw. */
+    const resumeScreen = (notice: string) => {
+      child = undefined;
+      if (finished) return;
+      // The terminal was given back for good while the screen was away (a signal): the loop is over.
+      if (restored) {
+        finish();
+        return;
+      }
+      isAway = false;
+      stdout.write(SCREEN_ON);
+      if (stdin.isTTY) stdin.setRawMode(true);
+      stdin.resume();
+      stdout.on("resize", onResize);
+      // What was typed during the handover (a second detach chord, keys meant for the agent) is read and
+      // thrown away before the keys are the screen's again.
+      stdin.on("data", dropInput);
+      dropTimer = setTimeout(() => {
+        dropTimer = undefined;
+        stdin.off("data", dropInput);
+        if (finished) return;
+        stdin.on("data", onData);
+        awaySignals(false);
+      }, options.handoverDropMs ?? HANDOVER_DROP_MS);
+      model = { ...model, notice };
+      draw();
+      workersRefresh?.openScreen(Date.now());
+      void reload().finally(() => {
+        ensureDetail();
+        draw();
+      });
+    };
+    let opening = false;
+    attachWorker = (effect) => {
+      const open = options.openWorker;
+      if (!open) {
+        model = { ...model, notice: "Could not open the agent: not available here." };
+        return;
+      }
+      if (opening || isAway) return;
+      opening = true;
+      const failed = (error: unknown) => `Could not open the agent: ${plain(messageOf(error))}`;
+      open(effect.runId, effect.id)
+        .catch((error: unknown): WorkerOpening => ({ ok: false, message: failed(error) }))
+        .then((answer) => {
+          opening = false;
+          if (finished || closed || leaving) return;
+          if (!answer.ok) {
+            // The screen was not left: only the notice changes.
+            model = { ...model, notice: answer.message };
+            draw();
+            return;
+          }
+          suspend(model.workers[effect.runId]?.name ?? effect.id);
+          let started: AttachedChild;
+          try {
+            started = answer.attach();
+          } catch (error) {
+            resumeScreen(failed(error));
+            return;
+          }
+          child = started;
+          started.done.catch(failed).then((notice) => {
+            if (child === started) resumeScreen(notice);
+          });
+        });
+    };
+
     stdin.on("data", onData);
     stdout.on("resize", onResize);
     tasksRefresh?.start(Date.now());

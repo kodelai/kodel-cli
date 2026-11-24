@@ -28,6 +28,7 @@ import {
   ARTIFACT,
   alive,
   Host,
+  KODEL,
   realPtyTests,
   shortDir,
   until,
@@ -430,27 +431,32 @@ describe("a terminal session on a real PTY", () => {
   });
 
   for (const signal of ["SIGTERM", "SIGHUP"] as const) {
-    ptyTest(`tA_pty_holder_signal_ends_as_stop: ${signal} to the holder`, async () => {
-      const w = newWorld();
-      const { id } = await w.adapter().start(pty(w, ["cat"]));
-      const record = w.status(id) as {
-        holder: { pid: number };
-        child: { pid: number };
-        sock: string;
-      };
-      const client = await attach(w, id);
-      await until(() => client.welcome, "the welcome");
-      process.kill(record.holder.pid, signal);
-      // the holder does not just end: its client is told, the socket goes, and the record says what happened
-      await until(() => client.bye, "the client to be told");
-      expect(client.bye?.reason).toBe("killed");
-      await until(() => !alive(record.holder.pid), "the holder to end");
-      expect(alive(record.child.pid)).toBe(false);
-      expect(existsSync(record.sock)).toBe(false);
-      expect(w.status(id)).toMatchObject({ state: "killed", reason: "stopped" });
-      expect("sock" in w.status(id)).toBe(false);
-      expect((await w.adapter().status(id)).state).toBe("killed");
-    });
+    ptyTest(
+      `tA_pty_holder_signal_stops_the_child_and_names_the_signal: ${signal} to the holder`,
+      async () => {
+        const w = newWorld();
+        const { id } = await w.adapter().start(pty(w, ["cat"]));
+        const record = w.status(id) as {
+          holder: { pid: number };
+          child: { pid: number };
+          sock: string;
+        };
+        const client = await attach(w, id);
+        await until(() => client.welcome, "the welcome");
+        process.kill(record.holder.pid, signal);
+        // the holder does not just end: its client is told, the socket goes, and the record says what happened
+        await until(() => client.bye, "the client to be told");
+        expect(client.bye?.reason).toBe("killed");
+        await until(() => !alive(record.holder.pid), "the holder to end");
+        expect(alive(record.child.pid)).toBe(false);
+        expect(existsSync(record.sock)).toBe(false);
+        // Nobody asked for a stop (no stop record): the record names the signal, not `stopped`.
+        expect(w.status(id)).toMatchObject({ state: "killed", signal });
+        expect("reason" in w.status(id)).toBe(false);
+        expect("sock" in w.status(id)).toBe(false);
+        expect((await w.adapter().status(id)).state).toBe("killed");
+      },
+    );
   }
 
   ptyTest("tA_rm_unlinks_only_derived_sock", async () => {
@@ -639,6 +645,55 @@ describe("a terminal session on a real PTY", () => {
     expect(client.output).toContain("this command is for a person");
     expect((await w.adapter().status(target.id)).state).toBe("running");
   });
+
+  ptyTest(
+    "tA_exec_attach_real_terminal",
+    async () => {
+      // TASK-K6MA: `exec --pty --attach` starts the session and opens it at once, in the same terminal.
+      const w = newWorld();
+      const host = new Host();
+      hosts.push(host);
+      const term = await host.shell(w);
+      const from = term.begin(`${KODEL} agent exec --pty --attach --name cc -- cat`);
+      // `started` first, then the terminal is the session's: what is typed comes back from `cat`.
+      await term.sees(/started (a_[0-9a-z_]+) \(cc\)/, 30_000, from);
+      const id = /started (a_[0-9a-z_]+) \(cc\)/.exec(term.output.slice(from))?.[1] ?? "";
+      term.type("typed-in\r");
+      await term.sees("typed-in\r\ntyped-in", undefined, from);
+      expect(term.output.slice(from)).not.toContain("attach with:");
+      // The detach chord gives the terminal back; the exit code is the attach's.
+      term.type("\u001c");
+      const done = await term.finished(from);
+      expect(done.code).toBe(0);
+      expect(done.shown).toContain("[detached: cc]");
+      // The session is left running, and the person comes back to it by name.
+      expect((await w.adapter().status(id)).state).toBe("running");
+      const again = term.begin(`${KODEL} agent attach cc`);
+      await term.sees("typed-in\r\ntyped-in", undefined, again);
+      term.type("\u001c");
+      expect((await term.finished(again)).shown).toContain("[detached: cc]");
+
+      // `-a` is the same flag; a command that ends while attached gives its end, and code 0.
+      const short = term.begin(
+        `${KODEL} agent exec --pty -a --name dd -- sh -c 'read line; exit 3'`,
+      );
+      await term.sees(/started a_[0-9a-z_]+ \(dd\)/, 30_000, short);
+      term.type("go\r");
+      const ended = await term.finished(short);
+      expect(ended.code).toBe(0);
+      expect(ended.shown).toContain("[ended: dd, exit 3]");
+      // One that is over before the terminal could be connected gives the same line.
+      const quick = await term.sh(`${KODEL} agent exec --pty --attach --name ee -- true`, 60_000);
+      expect(quick.code).toBe(0);
+      expect(quick.shown).toMatch(/\[ended: ee(, exit 0)?\]/);
+      // Without `--pty` it is refused, and nothing is started.
+      const refused = await term.sh(`${KODEL} agent exec --attach --name ff -- cat`);
+      expect(refused.code).toBe(1);
+      expect(refused.shown).toContain("--attach needs --pty");
+      expect(await w.adapter().list({ name: "ff" })).toEqual([]);
+    },
+    180_000,
+  );
 });
 
 describe("a terminal session passes the session contract", () => {

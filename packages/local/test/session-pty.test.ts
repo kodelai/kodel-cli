@@ -8,6 +8,7 @@ import {
   fstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   readSync,
   rmSync,
@@ -16,6 +17,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { encodeRecord, type SocketCandidate, socketCandidates } from "@kodel-ai/pipeline-core";
+import type { ProcessIdentity } from "../src/process-table";
 import { sessionEnv } from "../src/session-env";
 import { runHolder } from "../src/session-holder";
 import {
@@ -26,10 +28,12 @@ import {
   findExecutable,
   HOLDER_SIGNALS,
   type PtyHolderParts,
+  type PtyLeaderAnswer,
   type PtyLoader,
   ptyChildEnv,
   ptyCommand,
   ptyFromModule,
+  ptyLeader,
   signalName,
 } from "../src/session-pty";
 import { readStatus } from "../src/session-records";
@@ -209,6 +213,8 @@ const start = (
       watchMs: 10,
       drainMs: 1,
       roots: { tmpDir: undefined, systemTmp: join(base, "none") },
+      // The fake terminal's pid is no process: its exit is the fake's to report, so until then it lives.
+      group: { leader: () => () => "same", kill: () => {} },
       ...parts.extra,
     },
   });
@@ -216,6 +222,8 @@ const start = (
 };
 
 const status = () => readStatus(dir) as Exclude<ReturnType<typeof readStatus>, string>;
+/** The record `kodel agent stop` leaves before it signals anything. */
+const STOP_RECORD = JSON.stringify({ v: 1, by: "stop", at: 1 });
 
 /**
  * Opens files until one of them gets the number `wanted`: a new file takes the lowest free number, which is the one
@@ -851,7 +859,7 @@ describe("pty holder, fake terminal", () => {
       [
         "stop",
         (_w, s) => {
-          writeFileSync(join(dir, "stop.json"), "{}");
+          writeFileSync(join(dir, "stop.json"), STOP_RECORD);
           s.process.exit(0, 15);
         },
         { state: "killed", reason: "stopped" },
@@ -881,7 +889,7 @@ describe("pty holder, fake terminal", () => {
     expect("sock" in status()).toBe(false);
   });
 
-  test("tA_pty_holder_signal_ends_as_stop: SIGTERM and SIGHUP stop the child, and the session ends with a record", async () => {
+  test("tA_pty_holder_signal_stops_the_child_and_names_the_signal: SIGTERM and SIGHUP stop the child, and the session ends with a record", async () => {
     expect([...HOLDER_SIGNALS]).toEqual(["SIGTERM", "SIGHUP"]);
     for (const signal of HOLDER_SIGNALS) {
       const listeners = new Map<string, () => void>();
@@ -915,13 +923,58 @@ describe("pty holder, fake terminal", () => {
       await eventually(() => spawn.process.kills.includes("SIGKILL"));
       spawn.process.exit(0, 9);
       expect(await world.done, signal).toBe(0);
-      expect(status(), signal).toMatchObject({ state: "killed", reason: "stopped" });
+      // Nobody asked for a stop (no `stop.json`): the record names the signal, and `stopped` stays the person's.
+      expect(status(), signal).toMatchObject({ state: "killed", signal });
+      expect("reason" in status(), signal).toBe(false);
       expect("sock" in status(), signal).toBe(false);
       expect(client.bye?.reason, signal).toBe("killed");
       expect(world.binder.state.closed, signal).toBe(1);
       expect(removed, signal).toBe(HOLDER_SIGNALS.length);
       rmSync(join(dir, "status.json"));
     }
+  });
+
+  test("tA_pty_holder_signal_with_a_stop_record_is_a_stop: with a child, and before one", async () => {
+    // A stop that reaches the holder as a signal (the stop record is written first) is recorded as a stop.
+    const listeners = new Map<string, () => void>();
+    const world = start(
+      {},
+      {
+        extra: {
+          killGraceMs: 20,
+          onSignal: (name, listener) => {
+            listeners.set(name, listener);
+            return () => listeners.delete(name);
+          },
+        },
+      },
+    );
+    const spawn = await world.spawned();
+    writeFileSync(join(dir, "stop.json"), STOP_RECORD);
+    listeners.get("SIGTERM")?.();
+    spawn.process.exit(0, 15);
+    expect(await world.done).toBe(0);
+    expect(status()).toMatchObject({ state: "killed", reason: "stopped" });
+    expect("signal" in status()).toBe(false);
+    rmSync(join(dir, "status.json"));
+
+    // the signal is there before the child: none is started, and the record still names the stop
+    const early = start(
+      {},
+      {
+        extra: {
+          onSignal: (name, listener) => {
+            if (name === "SIGTERM") listener();
+            return () => {};
+          },
+        },
+      },
+    );
+    expect(await early.done).toBe(1);
+    expect(early.spawns.length).toBe(0);
+    expect(status()).toMatchObject({ state: "killed", reason: "stopped" });
+    expect("signal" in status()).toBe(false);
+    rmSync(join(dir, "stop.json"));
   });
 
   test("tA_pty_holder_signal_before_spawn_starts_no_child: the socket goes and the record ends", async () => {
@@ -951,12 +1004,123 @@ describe("pty holder, fake terminal", () => {
     // the holder listens right after the bind, before anything else can end it
     expect(order).toEqual(["bind", "listen:SIGTERM", "listen:SIGHUP"]);
     expect(world.spawns.length).toBe(0);
-    expect(status()).toMatchObject({ state: "killed", reason: "stopped" });
+    expect(status()).toMatchObject({ state: "killed", signal: "SIGTERM" });
+    expect("reason" in status()).toBe(false);
     expect("sock" in status()).toBe(false);
     expect(binder.state.closed).toBe(1);
     expect(world.lines.length).toBe(1);
     expect(world.lines[0]).toStartWith("HOLDER_BOOT_FAILED:");
     expect(removed).toBe(HOLDER_SIGNALS.length);
+  });
+
+  test("tA_pty_group_is_signalled_only_while_its_leader_lives", () => {
+    const request = { file: "/bin/sh", args: [], cwd: "/", env: {}, cols: 80, rows: 24 };
+    const sent: [number, string][] = [];
+    const state: { leader: PtyLeaderAnswer } = { leader: "same" };
+    const raw = new FakeRawPty();
+    const child = ptyFromModule({ spawn: () => raw }, false, undefined, {
+      leader: () => () => state.leader,
+      kill: (target, signal) => void sent.push([target, signal]),
+    }).spawn(request);
+    child.kill("SIGTERM");
+    expect(sent).toEqual([[-raw.pid, "SIGTERM"]]);
+    expect(raw.kills).toEqual(["SIGTERM"]);
+    // A doubt about the leader is not knowledge: the group gets nothing, the child alone is signalled.
+    state.leader = "unknown";
+    child.kill("SIGTERM");
+    expect(sent).toEqual([[-raw.pid, "SIGTERM"]]);
+    expect(raw.kills).toEqual(["SIGTERM", "SIGTERM"]);
+    // the leader is gone before the exit was reported: neither its group nor its pid is signalled
+    state.leader = "gone";
+    child.kill("SIGKILL");
+    expect(sent).toEqual([[-raw.pid, "SIGTERM"]]);
+    expect(raw.kills).toEqual(["SIGTERM", "SIGTERM"]);
+    // and after the exit a doubt signals nothing at all: the pid is no longer this process's child
+    state.leader = "unknown";
+    raw.exit(0);
+    child.kill("SIGKILL");
+    expect(sent).toEqual([[-raw.pid, "SIGTERM"]]);
+    expect(raw.kills).toEqual(["SIGTERM", "SIGTERM"]);
+  });
+
+  describe("the leader of a terminal's group, from the process table", () => {
+    const first: ProcessIdentity = { method: "ps-lstart", value: "Mon Jan  1 01:01:01 2025" };
+    const other: ProcessIdentity = { method: "ps-lstart", value: "Tue Feb  2 02:02:02 2025" };
+    const groupSignals = (read: Parameters<typeof ptyLeader>[1]) => {
+      const sent: [number, string][] = [];
+      const raw = new FakeRawPty();
+      const child = ptyFromModule({ spawn: () => raw }, false, undefined, {
+        leader: (pid) => ptyLeader(pid, read),
+        kill: (target, signal) => void sent.push([target, signal]),
+      }).spawn({ file: "/bin/sh", args: [], cwd: "/", env: {}, cols: 80, rows: 24 });
+      return { sent, raw, child };
+    };
+
+    test("tA_pty_group_is_not_signalled_when_the_identity_was_not_read_at_the_start", () => {
+      const leads = ptyLeader(7, { identity: () => undefined, live: () => true });
+      expect(leads()).toBe("unknown");
+      const world = groupSignals({ identity: () => undefined, live: () => true });
+      world.child.kill("SIGTERM");
+      expect(world.sent).toEqual([]);
+      expect(world.raw.kills).toEqual(["SIGTERM"]);
+    });
+
+    test("tA_pty_group_is_not_signalled_when_the_identity_cannot_be_read_now", () => {
+      let reads = 0;
+      const read = { identity: () => (reads++ === 0 ? first : undefined), live: () => true };
+      const world = groupSignals(read);
+      world.child.kill("SIGTERM");
+      expect(world.sent).toEqual([]);
+      expect(world.raw.kills).toEqual(["SIGTERM"]);
+      // nor when the two readings cannot be compared
+      let turn = 0;
+      const mixed = ptyLeader(7, {
+        identity: () => (turn++ === 0 ? first : { method: "proc-ticks", value: "42" }),
+        live: () => true,
+      });
+      expect(mixed()).toBe("unknown");
+    });
+
+    test("tA_pty_group_is_signalled_when_the_identity_matches", () => {
+      const world = groupSignals({ identity: () => ({ ...first }), live: () => true });
+      world.child.kill("SIGTERM");
+      expect(world.sent).toEqual([[-world.raw.pid, "SIGTERM"]]);
+      expect(world.raw.kills).toEqual(["SIGTERM"]);
+    });
+
+    test("tA_pty_nothing_is_signalled_when_the_pid_is_another_process_or_gone", () => {
+      let reads = 0;
+      const taken = groupSignals({
+        identity: () => (reads++ === 0 ? first : other),
+        live: () => true,
+      });
+      taken.child.kill("SIGTERM");
+      const dead = groupSignals({ identity: () => first, live: () => false });
+      dead.child.kill("SIGTERM");
+      expect([...taken.sent, ...dead.sent]).toEqual([]);
+      expect([...taken.raw.kills, ...dead.raw.kills]).toEqual([]);
+    });
+  });
+
+  test("tA_pty_timeout_escalation_is_dropped_when_the_child_ends: no SIGKILL after the exit", async () => {
+    const world = start({ timeoutMs: 20 }, { extra: { killGraceMs: 40 } });
+    const spawn = await world.spawned();
+    await eventually(() => spawn.process.kills.includes("SIGTERM"));
+    spawn.process.exit(0, 15);
+    expect(await world.done).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(spawn.process.kills).toEqual(["SIGTERM"]);
+    expect(status()).toMatchObject({ state: "killed", reason: "timeout" });
+  });
+
+  test("tA_pty_timeout_kills_a_child_that_ignores_sigterm", async () => {
+    const world = start({ timeoutMs: 20 }, { extra: { killGraceMs: 30 } });
+    const spawn = await world.spawned();
+    await eventually(() => spawn.process.kills.includes("SIGKILL"));
+    expect(spawn.process.kills).toEqual(["SIGTERM", "SIGKILL"]);
+    spawn.process.exit(0, 9);
+    expect(await world.done).toBe(0);
+    expect(status()).toMatchObject({ state: "killed", reason: "timeout" });
   });
 
   test("tA_pty_holder_signal_after_exit_changes_nothing: the child that ended by itself is not signalled", async () => {
@@ -1039,6 +1203,18 @@ describe("pty holder, fake terminal", () => {
     expect(HOLDER_SIGNALS.map((signal) => process.listenerCount(signal))).toEqual(
       signals.map((count) => count - 1),
     );
+    rmSync(join(dir, "status.json"));
+
+    // The same way out after a stop was asked for: the record names the stop, as every other end does.
+    const stopped = start();
+    const last = await stopped.spawned();
+    stopped.binder.state.flush = () => Promise.reject(new Error("boom at the end"));
+    writeFileSync(join(dir, "stop.json"), STOP_RECORD);
+    last.process.exit(0, 15);
+    expect(await stopped.done).toBe(1);
+    expect(status()).toMatchObject({ state: "killed", reason: "stopped" });
+    expect("sock" in status()).toBe(false);
+    rmSync(join(dir, "stop.json"));
   });
 
   test("tA_pty_final_record_write_failure_is_not_a_crash: a folder that cannot be written at the end", async () => {
@@ -1068,6 +1244,68 @@ describe("pty holder, fake terminal", () => {
       const text = readFileSync(join(dir, file), "utf8");
       expect(text.includes("\u001b") || text.includes("ZZSECRETZZ"), file).toBe(false);
     }
+  });
+
+  test("tA_terminal_tail_redacts_a_printed_secret", async () => {
+    // A worker in a terminal prints a secret as a line, as a tool's output or an echoed variable does:
+    // a project rule and the built-in rules both find it, in colour or not, cut by a chunk border or not.
+    const token = `ghp_${"A1b2C3d4E5f6G7h8I9".repeat(2)}`;
+    const world = start({ rules: [{ name: "zz", source: "ZZSECRETZZ", flags: "g" }] });
+    const spawn = await world.spawned();
+    spawn.process.emit("$ echo $API_KEY\r\n");
+    spawn.process.emit("ZZSECRETZZ\r\n");
+    spawn.process.emit(`\u001b[32mexport GH_TOKEN=${token}\u001b[0m\r\n`);
+    spawn.process.emit(`again ${token.slice(0, 12)}`);
+    spawn.process.emit(`${token.slice(12)} and ZZSEC`);
+    spawn.process.emit("RETZZ\r\nthe step is done\r\n");
+    spawn.process.exit(0);
+    await world.done;
+    const tail = readFileSync(join(dir, "tail.txt"), "utf8");
+    expect(tail).not.toContain("ZZSECRETZZ");
+    expect(tail).not.toContain(token);
+    expect(tail).not.toContain(token.slice(4, 16));
+    expect(tail).toContain("[REDACTED:zz]");
+    expect(tail).toContain("[REDACTED:github-token]");
+    // what is not a secret is still there to read
+    expect(tail).toContain("$ echo $API_KEY\n");
+    expect(tail.endsWith("the step is done\n")).toBe(true);
+    // and no other file of the session holds it
+    for (const file of readdirSync(dir, { withFileTypes: true })) {
+      if (!file.isFile()) continue;
+      const text = readFileSync(join(dir, file.name), "utf8");
+      expect(text.includes("ZZSECRETZZ") || text.includes(token), file.name).toBe(false);
+    }
+  });
+
+  test("tA_terminal_tail_painted_secret_is_the_known_limit", async () => {
+    // A full-screen program paints its screen in pieces: it moves the cursor between the halves of a
+    // word, so the text of the tail never holds the word in one piece and no rule can find it. This is
+    // the documented limit of a terminal's tail (`docs/session-formats.md`): the tail is bounded, newer
+    // output replaces it, and `kodel agent rm` or `prune` removes it. The test pins the limit, so a
+    // change of it (a screen model, say) is seen and the docs are changed with it.
+    const world = start({ rules: [{ name: "zz", source: "ZZSECRETZZ", flags: "g" }] });
+    const spawn = await world.spawned();
+    // The second half is painted first, at its column; then the cursor goes back for the first half.
+    spawn.process.emit("\u001b[2J\u001b[5;10HRETZZ\u001b[5;5HZZSEC\u001b[6;1H\r\n");
+    spawn.process.exit(0);
+    await world.done;
+    const tail = readFileSync(join(dir, "tail.txt"), "utf8");
+    // The escape sequences are gone, and the pieces stay as they were written: not the secret as a word.
+    expect(tail.includes("\u001b")).toBe(false);
+    expect(tail).not.toContain("ZZSECRETZZ");
+    expect(tail).not.toContain("[REDACTED:zz]");
+    expect(tail).toContain("RETZZ");
+    expect(tail).toContain("ZZSEC");
+    // The same bytes painted in reading order are a printed word, and that one is caught.
+    rmSync(join(dir, "status.json"));
+    const printed = start({ rules: [{ name: "zz", source: "ZZSECRETZZ", flags: "g" }] });
+    const again = await printed.spawned();
+    again.process.emit("\u001b[2J\u001b[5;5HZZSEC\u001b[5;10HRETZZ\u001b[6;1H\r\n");
+    again.process.exit(0);
+    await printed.done;
+    const caught = readFileSync(join(dir, "tail.txt"), "utf8");
+    expect(caught).toContain("[REDACTED:zz]");
+    expect(caught).not.toContain("ZZSECRETZZ");
   });
 });
 

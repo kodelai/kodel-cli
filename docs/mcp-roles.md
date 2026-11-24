@@ -123,7 +123,8 @@ or a bare `--read-only`.
 ## Under `KODEL_ENGINE`
 
 Every child of a kodel session carries `KODEL_ENGINE=1`: the background workers of `kodel serve` and of the TUI,
-a command or a check the engine runs, an agent a person started with `kodel agent exec`. There a server with no
+a command or a check the engine runs, an agent a person started with `kodel agent exec` or `kodel agent start`
+(their own agent in a terminal session; the command says it before the agent starts). There a server with no
 `--role` is a worker, and a manager does not start. Such an agent has no history tools and none of the
 `decisions.agent` allowance; connect a manager from an agent started outside kodel. A pipeline step whose
 command starts `kodel mcp` gets the worker for the same reason. The mark is a guard against mistakes, not a
@@ -135,7 +136,8 @@ answers that there is no project.
 
 ## Background workers
 
-The server of a background worker is `kodel mcp --role worker --no-decisions --no-wait-hint`. The launcher works
+The server of a background worker is `kodel mcp --role worker --no-decisions --no-wait-hint` (a worker in a
+terminal of its own has `--wait-command <command>` in place of `--no-wait-hint`, `docs/engines.md`). The launcher works
 out the worker's set from the config the way that server does, at the preflight and again just before every
 start and every resume, and allows the worker exactly those tools. If the set does not resolve (an unusable
 `mcp` block), nothing is spawned: `kodel serve` is idle with the reason (it reads the whole config every cycle),

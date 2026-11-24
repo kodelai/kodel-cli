@@ -6,6 +6,8 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  renameSync,
+  writeFileSync,
   writeSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -22,6 +24,7 @@ import {
   foldSessionName,
   isLocalSessionId,
   isTerminalState,
+  leftoverInstruction,
   parseBye,
   parseSent,
   planSend,
@@ -35,18 +38,24 @@ import {
   type SessionSpec,
   type SessionStatus,
   type StartResult,
+  type StopAsker,
   type TailResult,
   type TailStream,
   validateSpec,
 } from "@kodel-ai/pipeline-core";
-import { KILL_GRACE_MS, killTree } from "./command";
+import { KILL_GRACE_MS } from "./command";
 import {
   descendantsOf,
+  groupMembers,
   liveProcess,
   machineId,
+  type ProcessRow,
+  type ProcessView,
   processIdentity,
+  readOnce,
   sameIdentity,
   sameProcess,
+  systemProcesses,
 } from "./process-table";
 import { sessionEnv } from "./session-env";
 import {
@@ -65,9 +74,11 @@ import {
   sessionPlace,
 } from "./session-paths";
 import {
+  type AgentRecord,
   createExclusive,
   type NameMarker,
   publishSession,
+  readAgent,
   readMarker,
   readSession,
   readStatus,
@@ -75,9 +86,9 @@ import {
   replaceRecord,
   type SessionRecord,
   STATUS_FILE,
-  STOP_FILE,
   type StatusRecord,
   snapshotOf,
+  writeStop,
 } from "./session-records";
 import {
   connectSocket,
@@ -117,7 +128,32 @@ export interface PipesAdapterOptions {
    * that throws stands for a process that dies there (nothing is rolled back). Inert when absent.
    */
   testHooks?: { afterPublish?(id: string): void };
+  /** Tests only: the process table, the boot time and the signals the group rule uses. The system's by default. */
+  processes?: ProcessView;
+  /**
+   * Tests only: the named steps of a start at which this process "dies": the start throws there and nothing
+   * is rolled back, as after a crash. Inert when absent.
+   */
+  faults?: readonly StartFault[];
 }
+
+/** The steps of a start that takes a name over (`takeName`) at which a test can stop it for good. */
+export type StartFault = "take_claimed" | "take_published" | "take_moved";
+
+export interface StartOptions {
+  /**
+   * The id of a finished session whose place this one takes (a resumed conversation): its name, when it has
+   * one, goes to the new session. The marker is replaced in one rename after the new record exists, and put
+   * back if the start fails. Only for a session a person started at the command line (`origin: "cli"`) that
+   * is over, with no process of its own left.
+   */
+  takeName?: string;
+}
+
+/** The claim of a start that takes a name over: beside the marker, gone with the rename that moves it. */
+const TAKE_SUFFIX = ".take";
+/** A claim whose session folder has not appeared after this long was left by a process that died. */
+const TAKE_PUBLISH_MS = 15_000;
 
 /** The command a person typed, for `ls`: a shell command, or the argv joined (already redacted in the record). */
 const commandOf = (record: SessionRecord): string =>
@@ -130,6 +166,7 @@ export class PipesSessionAdapter implements SessionAdapter {
   private readonly now: () => number;
   private readonly graceMs: number;
   private readonly poll: number;
+  private readonly processes: ProcessView;
 
   constructor(private readonly opts: PipesAdapterOptions) {
     this.place = sessionPlace({
@@ -140,6 +177,7 @@ export class PipesSessionAdapter implements SessionAdapter {
     this.now = opts.now ?? Date.now;
     this.graceMs = opts.graceMs ?? DEFAULT_START_GRACE_MS;
     this.poll = opts.pollMs ?? 100;
+    this.processes = opts.processes ?? systemProcesses;
   }
 
   /** `streams` is about the adapter: its pipes sessions have two; a terminal session has one (`tail` says so). */
@@ -180,7 +218,104 @@ export class PipesSessionAdapter implements SessionAdapter {
     return join(this.place.namesDir, `${foldSessionName(name)}.json`);
   }
 
-  async start(spec: SessionSpec): Promise<StartResult> {
+  /** A fault of the tests: the process "dies" at this step. */
+  private fault(step: StartFault): void {
+    if (this.opts.faults?.includes(step)) throw new Error(`fault: ${step}`);
+  }
+
+  /**
+   * Why the name of `old` cannot go to a new session, checked before anything is written: the session must be
+   * a person's own (`cli`), over, with nothing of it still running.
+   */
+  private takeProblem(old: string, name: string | undefined): SessionError | undefined {
+    const dir = sessionDirOf(this.place, old);
+    const record = isLocalSessionId(old) ? readSession(dir) : "missing";
+    if (typeof record === "string") {
+      return new SessionError(
+        record === "newer" ? "NEWER_FORMAT" : record === "missing" ? "NOT_FOUND" : "CANNOT_READ",
+        record === "newer"
+          ? `session ${old} was written by a newer kodel; upgrade kodel`
+          : record === "missing"
+            ? `no session ${old}`
+            : `session ${old} cannot be read`,
+      );
+    }
+    if (this.isForeign(dir)) {
+      return new SessionError("IDENTITY_UNKNOWN", `session ${old} belongs to another machine`);
+    }
+    if (record.spec.origin !== "cli") {
+      return new SessionError(
+        "UNSUPPORTED",
+        `session ${old} was started by the engine, not by a person: its name is never moved`,
+      );
+    }
+    let status: SessionStatus;
+    try {
+      status = this.settle(old);
+    } catch (error) {
+      return error instanceof SessionError
+        ? error
+        : new SessionError("CANNOT_READ", (error as Error).message);
+    }
+    if (status.childAlive && isTerminalState(status.state)) {
+      return new SessionError(
+        "STILL_RUNNING",
+        `session ${old}: its process still runs without a holder; stop it: kodel agent stop ${old}`,
+      );
+    }
+    if (!isTerminalState(status.state)) {
+      return new SessionError("STILL_RUNNING", `session ${old} still runs; stop it first`);
+    }
+    if ((record.name ?? undefined) !== (name === undefined ? undefined : foldSessionName(name))) {
+      return new SessionError(
+        "SPEC_INVALID",
+        `the name of session ${old} is ${record.name ?? "none"}: a session that takes its place keeps it`,
+      );
+    }
+    return undefined;
+  }
+
+  /**
+   * Whether the claim beside a marker belongs to a start that is at it now. One whose session never began
+   * (a moment is given for the folder to appear) or is over was left by a process that died.
+   */
+  private takeInProgress(claimFile: string): boolean {
+    const claim = readMarker(claimFile);
+    if (claim === "missing") return false;
+    if (typeof claim === "string") return true; // cannot be judged: not ours to take away
+    if (!existsSync(sessionDirOf(this.place, claim.id))) {
+      return this.now() - claim.started < TAKE_PUBLISH_MS;
+    }
+    try {
+      return !isTerminalState(this.read(claim.id).state);
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * Claims the move of a name from `old` to `id`: the new marker, written beside the old one, exclusively. One
+   * of two resumes gets it. A claim left by a process that died is taken away once.
+   */
+  private claimTake(name: string, old: string, claim: NameMarker): string {
+    const markerFile = this.markerPath(name);
+    const claimFile = `${markerFile}${TAKE_SUFFIX}`;
+    const taken = () => new SessionError("NAME_TAKEN", `a session named ${name} exists`);
+    for (let attempt = 0; ; attempt++) {
+      const held = readMarker(markerFile);
+      if (held === "newer") {
+        throw new SessionError("NEWER_FORMAT", "the name marker was written by a newer kodel");
+      }
+      // The marker must still name the session whose place is taken: another resume, or a start, was first.
+      if (typeof held === "string" || held.id !== old) throw taken();
+      if (createExclusive(claimFile, encodeRecord("name", claim))) return claimFile;
+      if (attempt > 0) throw taken();
+      if (this.takeInProgress(claimFile)) throw taken();
+      removeDir(claimFile);
+    }
+  }
+
+  async start(spec: SessionSpec, options: StartOptions = {}): Promise<StartResult> {
     if (process.platform === "win32") {
       throw new SessionError("PLATFORM_UNSUPPORTED", "sessions are not supported on Windows yet");
     }
@@ -194,6 +329,12 @@ export class PipesSessionAdapter implements SessionAdapter {
       throw new SessionError("UNSUPPORTED", "lifetime with-starter and parent are not built yet");
     }
 
+    const takeName = options.takeName;
+    if (takeName !== undefined) {
+      const refused = this.takeProblem(takeName, spec.name);
+      if (refused) throw refused;
+    }
+
     ensurePrivateDir(this.place.runDir);
     ensurePrivateDir(this.place.dir);
     ensurePrivateDir(this.place.namesDir);
@@ -203,7 +344,19 @@ export class PipesSessionAdapter implements SessionAdapter {
     while (existsSync(sessionDirOf(this.place, id))) id = newSessionId(started);
     const dir = sessionDirOf(this.place, id);
     let marker: string | undefined;
-    if (spec.name !== undefined) {
+    /** A name that is being taken over: the claim beside the marker, and the marker as it was. */
+    let take: { claim: string; marker: string; before: string; moved: boolean } | undefined;
+    if (spec.name !== undefined && takeName !== undefined) {
+      const markerFile = this.markerPath(spec.name);
+      const claim = this.claimTake(spec.name, takeName, {
+        v: SESSION_FORMAT_VERSION,
+        name: foldSessionName(spec.name),
+        id,
+        started,
+      });
+      take = { claim, marker: markerFile, before: readFileSync(markerFile, "utf8"), moved: false };
+      this.fault("take_claimed");
+    } else if (spec.name !== undefined) {
       const markerFile = this.markerPath(spec.name);
       marker = markerFile;
       const claim: NameMarker = {
@@ -246,6 +399,20 @@ export class PipesSessionAdapter implements SessionAdapter {
 
     let published = false;
     const rollback = async () => {
+      if (take !== undefined) {
+        // The old marker first, by a rename, so the name is never without a session; then what was claimed.
+        if (take.moved && takeName !== undefined) {
+          if (existsSync(sessionDirOf(this.place, takeName))) {
+            const back = `${take.marker}.${process.pid}.back`;
+            writeFileSync(back, take.before, { mode: 0o600 });
+            renameSync(back, take.marker);
+          } else {
+            // The old session was removed meanwhile: its name is nobody's, as after `rm`.
+            removeDir(take.marker);
+          }
+        }
+        removeDir(take.claim);
+      }
       if (published) removeDir(dir);
       removeDir(`${dir}.tmp-${process.pid}`);
       if (marker) removeDir(marker);
@@ -254,7 +421,19 @@ export class PipesSessionAdapter implements SessionAdapter {
     };
 
     // `env` holds secrets, and the size is the attached terminal's from the first resize on: neither is stored.
-    const { env: _env, size, command, ...safeSpec } = spec;
+    // The agent goes into a record of its own, written before `session.json`.
+    const { env: _env, size, command, agent, ...safeSpec } = spec;
+    const agentRecord: AgentRecord | undefined =
+      agent === undefined
+        ? undefined
+        : {
+            v: SESSION_FORMAT_VERSION,
+            engine: agent.engine,
+            ...(agent.session !== undefined
+              ? { session: agent.session, source: "chosen" as const }
+              : {}),
+            ...(agent.resumes !== undefined ? { resumes: agent.resumes } : {}),
+          };
     const record: SessionRecord = {
       v: SESSION_FORMAT_VERSION,
       id,
@@ -273,13 +452,25 @@ export class PipesSessionAdapter implements SessionAdapter {
       ...(machineId() ? { machine: machineId() as string } : {}),
     };
     try {
-      publishSession(dir, record);
+      publishSession(dir, record, agentRecord);
       published = true;
     } catch (error) {
       await rollback();
       throw new SessionError("STATE_UNWRITABLE", (error as Error).message);
     }
     this.opts.testHooks?.afterPublish?.(id);
+    if (take !== undefined) {
+      this.fault("take_published");
+      // One rename: the name goes from the old session to this one, and the claim is gone with it.
+      try {
+        renameSync(take.claim, take.marker);
+        take.moved = true;
+      } catch (error) {
+        await rollback();
+        throw new SessionError("STATE_UNWRITABLE", (error as Error).message);
+      }
+      this.fault("take_moved");
+    }
 
     const rules = this.opts.rules ?? [];
     const wire: WireRule[] = rules
@@ -375,10 +566,26 @@ export class PipesSessionAdapter implements SessionAdapter {
     }
   }
 
-  /** Read-only: never writes a tombstone. */
-  private read(id: string): SessionStatus {
+  /**
+   * Read-only: never writes a tombstone. `view` is the process table of one listing: it is read at most once,
+   * and only for a record whose holder went away without recording its child's end.
+   */
+  private read(id: string, view: ProcessView = readOnce(this.processes)): SessionStatus {
     const dir = sessionDirOf(this.place, id);
-    const result = deriveStatus(snapshotOf(dir), this.now(), this.graceMs);
+    let group: SessionStatus["group"];
+    let leftover: ProcessRow[] = [];
+    // Asked only when the recorded child is gone: whatever is in its group then has no leader.
+    const snapshot = snapshotOf(dir, (child, since) => {
+      const answer = groupMembers(child.pid, since, child.identity, view);
+      if (!answer.known) group = "unread";
+      else if (answer.stranger) group = "stranger";
+      else if (answer.members.length > 0) {
+        group = "leaderless";
+        leftover = answer.members;
+      }
+      return answer.known && answer.members.length > 0;
+    });
+    const result = deriveStatus(snapshot, this.now(), this.graceMs);
     if (!result.ok) {
       throw new SessionError(
         result.code === "UNKNOWN" ? "NOT_FOUND" : result.code,
@@ -389,6 +596,10 @@ export class PipesSessionAdapter implements SessionAdapter {
     const recorded = readStatus(dir);
     if (typeof recorded !== "string" && recorded.lastOutputAt !== undefined) {
       status.lastOutputAt = recorded.lastOutputAt;
+    }
+    if (group !== undefined && isTerminalState(status.state)) {
+      status.group = group;
+      if (group === "leaderless") status.leftover = leftover.map((row) => ({ pid: row.pid }));
     }
     return status;
   }
@@ -474,15 +685,15 @@ export class PipesSessionAdapter implements SessionAdapter {
     };
   }
 
-  async stop(id: string): Promise<SessionStatus> {
+  async stop(id: string, opts: { by?: StopAsker } = {}): Promise<SessionStatus> {
     const stored = this.storedSock(id);
-    const status = await this.stopNow(id);
+    const status = await this.stopNow(id, opts.by ?? "person");
     // The holder removes its socket on its way out; one that was killed could not.
     if (isTerminalState(status.state)) await this.sweep(id, stored);
     return status;
   }
 
-  private async stopNow(id: string): Promise<SessionStatus> {
+  private async stopNow(id: string, by: StopAsker): Promise<SessionStatus> {
     const dir = sessionDirOf(this.place, id);
     let before = this.settle(id);
     if (this.isForeign(dir)) {
@@ -502,7 +713,7 @@ export class PipesSessionAdapter implements SessionAdapter {
     const child = recorded.child;
     if (before.state !== "running" && !(before.childAlive && child)) return before;
     if (!child) return before;
-    if (!liveProcess(child.pid)) return this.settle(id);
+    if (!liveProcess(child.pid)) return this.stopGroup(id, child, by);
 
     // The recorded identity must be the live process. Without a recorded identity, or when it cannot be read or
     // compared now, nothing is signalled: a pid may have been taken by a stranger.
@@ -519,18 +730,32 @@ export class PipesSessionAdapter implements SessionAdapter {
     if (same === undefined) {
       throw new SessionError("IDENTITY_UNKNOWN", `cannot compare the identity of ${child.pid}`);
     }
-    if (!same) return this.settle(id); // another process has the pid now: the session's child is gone
-    if (!existsSync(join(dir, STOP_FILE))) {
-      replaceRecord(
-        join(dir, STOP_FILE),
-        encodeRecord("stop", {
-          v: SESSION_FORMAT_VERSION,
-          by: "stop",
-          at: this.now(),
-          identity: now,
-        }),
-      );
-    }
+    // Another process has the pid now: the session's child is gone (the group rule then finds a stranger).
+    if (!same) return this.stopGroup(id, child, by);
+    writeStop(dir, by, this.now(), now);
+    // The group as it is while its leader is known to live: its members are the session's.
+    const group = (this.processes.rows() ?? []).filter(
+      (row) => row.pgid === child.pid && row.pid !== child.pid && !row.state.startsWith("Z"),
+    );
+    /**
+     * A group is signalled only while its recorded leader lives, and that is looked at again right before every
+     * signal (the stop record, the listing and the walk of the table take time): once the leader is gone, or
+     * cannot be told, the number may have changed hands, so the members listed above are signalled one by one,
+     * each only while it is still the process of that listing.
+     */
+    const signalGroup = (signal: NodeJS.Signals) => {
+      const leader = liveProcess(child.pid) ? processIdentity(child.pid) : undefined;
+      if (leader !== undefined && sameIdentity(now, leader) === true) {
+        try {
+          process.kill(-child.pid, signal);
+        } catch {
+          // the group is gone
+        }
+        return;
+      }
+      for (const member of this.stillThere(group)) this.processes.signal(member.pid, signal);
+    };
+    const killGroup = () => signalGroup("SIGKILL");
     const descendants = descendantsOf(child.pid).map((pid) => ({
       pid,
       identity: processIdentity(pid),
@@ -547,10 +772,11 @@ export class PipesSessionAdapter implements SessionAdapter {
         }
       }
     };
-    killTree(child.pid);
+    signalGroup("SIGTERM");
     signalDescendants("SIGTERM");
-    // stop waits past the kill grace so the escalation in killTree runs in this process
-    const limit = this.now() + KILL_GRACE_MS + 3_000;
+    const grace = this.now() + KILL_GRACE_MS;
+    let escalated = false;
+    const limit = grace + 3_000;
     const descendantsAlive = () =>
       descendants.some((d) => {
         const alive = processIdentity(d.pid);
@@ -560,15 +786,61 @@ export class PipesSessionAdapter implements SessionAdapter {
       const s = this.settle(id);
       const over = s.state !== "running" && s.state !== "starting" && !liveProcess(child.pid);
       if (over && !descendantsAlive()) break;
+      if (!escalated && this.now() >= grace) {
+        escalated = true;
+        killGroup();
+      }
       await sleep(this.poll);
     }
     signalDescendants("SIGKILL");
-    try {
-      process.kill(-child.pid, "SIGKILL"); // members of the group that ignored SIGTERM (the identity was checked above)
-    } catch {
-      // the group is gone
-    }
+    killGroup();
     return this.settle(id);
+  }
+
+  /** The rows that are still the processes of an earlier listing: the same pid, group and start time. */
+  private stillThere(members: ProcessRow[]): ProcessRow[] {
+    if (members.length === 0) return [];
+    const rows = this.processes.rows();
+    if (rows === undefined) return [];
+    return members.filter((member) =>
+      rows.some(
+        (row) =>
+          row.pid === member.pid &&
+          row.pgid === member.pgid &&
+          row.started === member.started &&
+          !row.state.startsWith("Z"),
+      ),
+    );
+  }
+
+  /**
+   * The recorded child is gone, so nothing is signalled: kodel never signals a group without its live leader.
+   * If its holder went away without recording the end and processes are still in the child's group
+   * (`groupMembers`), they may be the session's or, the group's number given out again, another program's. The
+   * stop record is written all the same (somebody did ask: a person's stop is never resumed by the daemon), and
+   * the status names the processes with their commands for the person to look at and end.
+   */
+  private async stopGroup(
+    id: string,
+    child: NonNullable<StatusRecord["child"]>,
+    by: StopAsker,
+  ): Promise<SessionStatus> {
+    const dir = sessionDirOf(this.place, id);
+    const status = this.settle(id);
+    if (!isTerminalState(status.state) || !status.childAlive) return status;
+    const record = readSession(dir);
+    if (typeof record === "string") return status;
+    const answer = groupMembers(child.pid, record.started, child.identity, this.processes);
+    if (!answer.known || answer.stranger || answer.members.length === 0) return this.settle(id);
+    writeStop(dir, by, this.now());
+    const after = this.settle(id);
+    if (after.leftover !== undefined) {
+      after.leftover = after.leftover.map((left) => {
+        const command = this.processes.command(left.pid);
+        return command === undefined ? left : { ...left, command };
+      });
+    }
+    return after;
   }
 
   /**
@@ -776,6 +1048,12 @@ export class PipesSessionAdapter implements SessionAdapter {
       );
     }
     const status = this.settle(id);
+    if (status.group === "leaderless" && status.childAlive) {
+      throw new SessionError(
+        "STILL_RUNNING",
+        `session ${id} is not removed: ${leftoverInstruction(id, status.leftover ?? [])}`,
+      );
+    }
     if (status.state === "starting" || status.state === "running" || status.childAlive) {
       throw new SessionError("STILL_RUNNING", `session ${id} still runs; stop it first`);
     }
@@ -785,14 +1063,36 @@ export class PipesSessionAdapter implements SessionAdapter {
     if (record.name !== undefined && record.spec.origin === "cli") {
       const markerFile = this.markerPath(record.name);
       const held = readMarker(markerFile);
+      // A resume is moving the name away from this record: until it is done (or given up) the record stays,
+      // so a failed resume has a session to give the name back to.
+      if (
+        typeof held !== "string" &&
+        held.id === id &&
+        this.takeInProgress(`${markerFile}${TAKE_SUFFIX}`)
+      ) {
+        throw new SessionError(
+          "STILL_RUNNING",
+          `session ${id} is being resumed under its name; try again`,
+        );
+      }
       if (typeof held !== "string" && held.id === id) removeDir(markerFile);
     }
     removeDir(dir);
   }
 
+  /** The `agent` record as a listing shows it; nothing for a session without one, or one that cannot be read. */
+  private agentOf(dir: string): Pick<SessionListEntry, "agent"> {
+    const stored = readAgent(dir);
+    if (typeof stored === "string") return {};
+    const { v: _v, ...agent } = stored;
+    return { agent };
+  }
+
   async list(filter?: { name?: string }): Promise<SessionListEntry[]> {
     if (!existsSync(this.place.dir)) return [];
     const entries: SessionListEntry[] = [];
+    // One read of the process table for the whole listing, and none when no record needs it.
+    const view = readOnce(this.processes);
     const wanted = filter?.name === undefined ? undefined : foldSessionName(filter.name);
     for (const entry of readdirSync(this.place.dir)) {
       if (!isLocalSessionId(entry)) continue;
@@ -823,7 +1123,9 @@ export class PipesSessionAdapter implements SessionAdapter {
           id: entry,
           ...(record.name !== undefined ? { name: record.name } : {}),
           command: commandOf(record),
-          status: this.read(entry),
+          mode: record.mode,
+          ...this.agentOf(join(this.place.dir, entry)),
+          status: this.read(entry, view),
         });
       } catch (error) {
         entries.push({

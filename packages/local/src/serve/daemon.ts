@@ -1,9 +1,9 @@
 /**
  * The loop of `kodel serve` (TASK-G8KM, T-44). Each cycle reads the config, the runs, the worker
  * records and (when a start is possible) the tasks, asks `planServe` what to do and does it, one action
- * at a time: a note that a worker is gone, a resume after a person's decision, a give-up comment, a
- * start of a task. It decides nothing about a run: the host port it is given has no gate, ack, seal,
- * resume of a pause or accept call.
+ * at a time: a note that a worker is gone, the end of the terminal session of a run that is over, a
+ * resume after a person's decision, a give-up comment, a start of a task. It decides nothing about a
+ * run: the host port it is given has no gate, ack, seal, resume of a pause or accept call.
  *
  * Fail closed: a config that does not load, worker records that cannot be read, a tracker that cannot
  * keep the task mark or lists only part of the tasks mean no start (and, for the records, nothing at
@@ -11,7 +11,7 @@
  */
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   type Caller,
   ChoiceNeeded,
@@ -37,6 +37,7 @@ import {
   DEAD_IN_A_ROW,
   decisionOf,
   giveUpComment,
+  lastAgentCallOf,
   planServe,
   type RunDecision,
   resumeVerdict,
@@ -71,6 +72,8 @@ export const PREFLIGHT_TTL_MS = 60_000;
 /** One page of the task list, and how many pages a cycle reads at most. */
 export const SERVE_TASK_PAGE = 200;
 export const SERVE_TASK_PAGES = 5;
+/** How long the journal of a run whose worker is alive is believed: it is read at most this often. */
+export const LIVE_JOURNAL_TTL_MS = 60_000;
 /** A pause between two cycles longer than this (a sleep of the machine) starts the quiet time of every worker again. */
 const GAP_MS = 60_000;
 
@@ -124,7 +127,11 @@ export interface ServeLauncherPort {
     dialog: boolean;
     taskLink: boolean;
     pipelines: number;
-  }): Promise<{ ok: true } | { ok: false; reason: string }>;
+    /** The folder the worktrees of the runs are made in: where an agent's question about trust would come. */
+    worktreesDir?: string;
+    /** Nobody watches the daemon's starts: what would stop at a question is refused. */
+    unattended?: boolean;
+  }): Promise<{ ok: true; note?: string } | { ok: false; reason: string }>;
   /** Starts the first session of a run (`kw-<run>`); throws with the reason. */
   start(input: { runId: string; workdir: string; title: string }): Promise<{ name: string }>;
   /** Starts `kw-<run>-d<seq>`; a `SessionError` `NAME_TAKEN` means someone did it already. */
@@ -136,6 +143,11 @@ export interface ServeLauncherPort {
   }): Promise<{ name: string }>;
   /** The latest record of each run named; a run without a record is absent. Throws when the records cannot be read. */
   statuses(runIds: readonly string[]): Promise<Map<string, ServeWorkerView>>;
+  /**
+   * Ends the live session of a run that is over, with the processes it started. A session that is already
+   * stopped or gone is no error; it decides nothing about a run.
+   */
+  finish(runId: string): Promise<void>;
 }
 
 /** The tracker as the daemon uses it. */
@@ -233,6 +245,11 @@ export interface ServeDaemonDeps {
   buildStamp?: () => Promise<string | undefined>;
   /** Reads the project config; `loadConfig` by default. */
   loadConfig?: (storeRoot: string) => Promise<ProjectConfig>;
+  /**
+   * Since when a worker's quiet time counts, in place of this daemon's own start: `--status` gives the
+   * start of the daemon that runs (or nothing ever watched), so that it can list the stalled workers.
+   */
+  quietFrom?: number;
 }
 
 export type ServeCycleResult =
@@ -407,12 +424,25 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
   // Ended runs of this checkout whose worker may still be alive (an agent finishing its last answer, a run
   // canceled under it): their records are read until the worker has stopped, so it keeps its worker place.
   const endedWatch = new Set<string>();
+  /** What the journal of a run with a live worker said when it was last read, and the run's answer then. */
+  const liveJournals = new Map<
+    string,
+    {
+      at: number;
+      waiting: boolean;
+      marks: ReturnType<typeof decisionOf>;
+      noted: string[];
+      lastAgentAt?: number;
+    }
+  >();
   /** `UNPARSED` when the first read of the config did not parse: the first one that does is a change. */
   let baseConfig: string | undefined;
   let baseBuild: string | undefined;
   let lastCycleAt: number | undefined;
-  let quietFrom = started;
-  let preflight: { at: number; result: { ok: true } | { ok: false; reason: string } } | undefined;
+  let quietFrom = deps.quietFrom ?? started;
+  let preflight:
+    | { at: number; result: { ok: true; note?: string } | { ok: false; reason: string } }
+    | undefined;
   /** Lines said once per change of a condition outside the plan (idle, a failed write, a start's environment). */
   const said = new Map<string, string>();
   const sayOnChange = (topic: string, line: string | undefined) => {
@@ -489,12 +519,24 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
         : await deps.launcher.statuses(ids).catch((error: unknown) => {
             throw new Error(`the worker records cannot be read: ${messageOf(error)}`);
           });
+    // Where the process table cannot be read an agent left behind a wrapper that died is not seen:
+    // the recorded process alone answers, and it is said once.
+    sayOnChange(
+      "process-table",
+      [...workers.values()].some((worker) => worker.groupUnread === true)
+        ? "environment: cannot read the process table: an agent left behind a dead wrapper would not be seen"
+        : undefined,
+    );
     for (const runId of watched) {
       const view = ended.get(runId) as ServeRunView;
       const worker = workers.get(runId);
       if (
         worker !== undefined &&
-        (worker.state === "starting" || worker.state === "running" || worker.state === "unknown")
+        (worker.state === "starting" ||
+          worker.state === "running" ||
+          worker.state === "unknown" ||
+          // Its process still runs without a holder: alive, until a person stops it.
+          worker.childAlive === true)
       ) {
         runs.push({ ...view, worker });
       } else {
@@ -536,29 +578,61 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
       const settled =
         worker !== undefined &&
         (worker.state === "exited" || worker.state === "lost" || worker.state === "killed");
-      if (!settled) {
+      // A worker in a terminal stays alive at a wait: whether its run only waits for the person is
+      // asked every cycle, because that is what frees its worker place.
+      const liveTerminal =
+        worker !== undefined &&
+        worker.terminal === true &&
+        (worker.state === "starting" || worker.state === "running");
+      if (!settled && !liveTerminal) {
+        liveJournals.delete(runId);
         runs.push(base);
         continue;
       }
       try {
         const run = await deps.host.open(runId);
         if (run === undefined) throw new KodelError("UNKNOWN_RUN", `there is no run "${runId}"`);
-        if ((await run.integrityStatus()) === "modified") {
-          throw new KodelError(
-            "STATE_MODIFIED_EXTERNALLY",
-            `the state of run ${runId} was changed outside kodel`,
-          );
+        const next = await run.inspect();
+        const waiting = "waiting" in next;
+        const at = now();
+        const kept = liveTerminal ? liveJournals.get(runId) : undefined;
+        // The journal of a live worker's run is read at most once a minute, and when its answer changed
+        // (a decision, a new wait); a worker that ended is read every cycle, as before.
+        let read = kept;
+        if (kept === undefined || kept.waiting !== waiting || at - kept.at >= LIVE_JOURNAL_TTL_MS) {
+          if ((await run.integrityStatus()) === "modified") {
+            throw new KodelError(
+              "STATE_MODIFIED_EXTERNALLY",
+              `the state of run ${runId} was changed outside kodel`,
+            );
+          }
+          const journal = await run.journal();
+          const lastAgentAt = lastAgentCallOf(journal);
+          read = {
+            at,
+            waiting,
+            marks: decisionOf(journal),
+            noted: journal
+              .filter((r) => r.event === "worker_note")
+              .map((r) => (typeof r.id === "string" ? r.id : String(r.worker))),
+            ...(lastAgentAt === undefined ? {} : { lastAgentAt }),
+          };
         }
-        const [journal, next] = await Promise.all([run.journal(), run.inspect()]);
+        if (liveTerminal) liveJournals.set(runId, read as NonNullable<typeof read>);
+        else liveJournals.delete(runId);
+        const known = read as NonNullable<typeof read>;
         runs.push({
           ...base,
-          waitsForPerson: "waiting" in next,
-          marks: decisionOf(journal),
-          noted: journal
-            .filter((r) => r.event === "worker_note")
-            .map((r) => (typeof r.id === "string" ? r.id : String(r.worker))),
+          waitsForPerson: waiting,
+          ...(liveTerminal ? { idleAtWait: waiting } : {}),
+          marks: known.marks,
+          noted: known.noted,
+          ...(known.lastAgentAt === undefined ? {} : { lastAgentAt: known.lastAgentAt }),
+          marksAt: known.at,
         });
       } catch (error) {
+        // A read that failed keeps both places of a live worker (the unreadable path), and is tried again.
+        liveJournals.delete(runId);
         const code = error instanceof KodelError ? error.code : "ERROR";
         const why = unreadableWhy(code, messageOf(error));
         unreadable.push({
@@ -569,6 +643,9 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
         });
       }
     }
+    // A run that left the list (it ended, or is another checkout's now) is not read here again.
+    const listed = new Set(own.map((o) => o.runId));
+    for (const runId of liveJournals.keys()) if (!listed.has(runId)) liveJournals.delete(runId);
     return { runs, unreadable, unreadableOpen };
   };
 
@@ -611,9 +688,13 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
           dialog: config.decisions.dialog,
           taskLink: true,
           pipelines: listed.pipelines.length,
+          worktreesDir: resolve(deps.root, config.worktree.dir),
+          unattended: true,
         }),
       };
     }
+    // What the launcher only remarks on (a config git does not track, a trust it cannot tell): said once.
+    sayOnChange("preflight-note", preflight.result.ok ? preflight.result.note : undefined);
     return preflight.result.ok
       ? { ok: true }
       : { ok: false, reason: `${preflight.result.reason}; nothing is started` };
@@ -791,7 +872,36 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
     markNoted(action.runId);
   };
 
-  const resume = async (
+  /**
+   * Ends the terminal session of a run that is over, with the processes it started. Under the start
+   * lock, with the records read again inside it: only a session that still lives, of a run that has
+   * ended, is stopped. It decides nothing about a run.
+   */
+  const finish = (action: Extract<ServeAction, { kind: "finish" }>) =>
+    deps.host.withWorkerStartLock(async () => {
+      const fresh = await gatherRuns();
+      const view = fresh.runs.find((r) => r.runId === action.runId);
+      const worker = view?.worker;
+      if (
+        view === undefined ||
+        worker === undefined ||
+        !ENDED.includes(view.status) ||
+        worker.id !== action.id ||
+        worker.terminal !== true ||
+        (worker.state !== "starting" && worker.state !== "running")
+      ) {
+        return;
+      }
+      await deps.launcher.finish(action.runId);
+      say(`finished: run ${action.runId}: agent ${action.worker} stopped (the run is over)`);
+    });
+
+  // Under the start lock, as the TUI's resume is: one of the two resumes a decision, and a worker
+  // that went on by itself meanwhile is found by the reads inside.
+  const resume = (action: Extract<ServeAction, { kind: "resume" }>, config: ProjectConfig) =>
+    deps.host.withWorkerStartLock(() => resumeLocked(action, config));
+
+  const resumeLocked = async (
     action: Extract<ServeAction, { kind: "resume" }>,
     config: ProjectConfig,
   ) => {
@@ -1122,6 +1232,9 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
           case "note":
             await note(action);
             break;
+          case "finish":
+            await finish(action);
+            break;
           case "resume":
             await resume(action, config);
             break;
@@ -1150,6 +1263,7 @@ export function createServeDaemon(deps: ServeDaemonDeps): ServeDaemon {
       cycle_at: now(),
       counts: {
         workers: plan.counts.workers,
+        alive: plan.counts.alive,
         max_workers: plan.counts.max_workers,
         runs: plan.counts.runs.length,
         max_runs: plan.counts.max_runs,

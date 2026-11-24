@@ -26,7 +26,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { AttachServer, type AttachTimers, realAttachTimers } from "./attach-server";
 import { KILL_GRACE_MS } from "./command";
-import { processIdentity } from "./process-table";
+import { liveProcess, type ProcessIdentity, processIdentity, sameIdentity } from "./process-table";
 import type { HolderInput } from "./session-holder";
 import {
   readStatus,
@@ -252,6 +252,44 @@ const duplicateWhereItIsADuplicate = (fd: number): number | undefined =>
   process.platform === "darwin" ? duplicateDescriptor(fd) : undefined;
 
 /**
+ * What is known of the child's pid when a signal is about to go out: `same` only when the identity read at the
+ * start is read again and is equal; `unknown` when it was not read then, cannot be read now or cannot be compared.
+ */
+export type PtyLeaderAnswer = "same" | "unknown" | "gone";
+
+/** How the child's process group is signalled; tests replace it. */
+export interface PtyGroupSignals {
+  /** Called once at the start; the answer says, when asked later, whether the pid is still that live process. */
+  leader(pid: number): () => PtyLeaderAnswer;
+  kill(target: number, signal: NodeJS.Signals): void;
+}
+
+/** The leader's answer from the process table. A doubt is `unknown`, never `same`: a group is not signalled on it. */
+export const ptyLeader = (
+  pid: number,
+  read: {
+    identity: (pid: number) => ProcessIdentity | undefined;
+    live: (pid: number) => boolean;
+  } = { identity: processIdentity, live: liveProcess },
+): (() => PtyLeaderAnswer) => {
+  const recorded = read.identity(pid);
+  return () => {
+    if (!read.live(pid)) return "gone";
+    if (recorded === undefined) return "unknown";
+    const now = read.identity(pid);
+    if (now === undefined) return "unknown";
+    const same = sameIdentity(recorded, now);
+    if (same === undefined) return "unknown";
+    return same ? "same" : "gone";
+  };
+};
+
+const systemGroupSignals: PtyGroupSignals = {
+  leader: (pid) => ptyLeader(pid),
+  kill: (target, signal) => void process.kill(target, signal),
+};
+
+/**
  * The trait over a loaded module. `ownWrites` says the module's stream cannot be trusted with a program that
  * does not read (see `descriptorWriter`): it is so on macOS and on Linux alike, because libuv writes to a terminal
  * opened for reading and writing in the loop's own thread and tries again at once and without end.
@@ -260,6 +298,7 @@ export const ptyFromModule = (
   module: RawPtyModule,
   ownWrites = true,
   duplicate: (fd: number) => number | undefined = duplicateWhereItIsADuplicate,
+  group: PtyGroupSignals = systemGroupSignals,
 ): Pty => ({
   spawn(request) {
     const raw = module.spawn(request.file, request.args, {
@@ -268,6 +307,11 @@ export const ptyFromModule = (
       rows: request.rows,
       cwd: request.cwd,
       env: request.env,
+    });
+    const leads = group.leader(raw.pid);
+    let exited = false;
+    raw.onExit(() => {
+      exited = true;
     });
     const socket = terminalWritable(raw);
     const throughStream: TerminalWrite = (bytes, done) => {
@@ -314,10 +358,18 @@ export const ptyFromModule = (
       },
       kill(signal) {
         // The child leads a session of its own, so its pid is its process group; the module signals the pid alone.
-        try {
-          process.kill(-raw.pid, signal);
-        } catch {
-          // the group is gone
+        // The group is signalled only while that leader is known to live: after its end the number may be another
+        // program's, and a doubt (an identity not read at the start, or not readable now) is not knowledge. On a
+        // doubt the pid alone is signalled, and only before its exit was reported: until then it is this
+        // process's own child.
+        const leader = leads();
+        if (leader === "gone" || (leader === "unknown" && exited)) return;
+        if (leader === "same") {
+          try {
+            group.kill(-raw.pid, signal);
+          } catch {
+            // the group is gone
+          }
         }
         try {
           raw.kill(signal);
@@ -399,6 +451,8 @@ export interface PtyHolderParts {
   onSignal?: (signal: HolderSignal, listener: () => void) => () => void;
   /** How long a child that was told to end has before it is killed. */
   killGraceMs?: number;
+  /** How the child's process group is signalled (the system's way by default). */
+  group?: PtyGroupSignals;
 }
 
 /**
@@ -454,7 +508,7 @@ export async function runPtyHolder(context: PtyHolderContext): Promise<number> {
   try {
     const loaded = await parts.load();
     if (!loaded.ok) return failBoot("holder_error", loaded.reason);
-    pty = ptyFromModule(loaded.pty);
+    pty = ptyFromModule(loaded.pty, true, undefined, parts.group);
   } catch (error) {
     return failBoot("holder_error", (error as Error).message);
   }
@@ -476,7 +530,7 @@ export async function runPtyHolder(context: PtyHolderContext): Promise<number> {
     server.end(bye);
     socket.close();
   };
-  const live: LiveSession = { cleanups: [], signalled: false, exited: false };
+  const live: LiveSession = { cleanups: [], exited: false };
   // From the bind on a signal must not end the holder by itself: the socket would stay bound and the record
   // would say `starting` for good. Before the child exists the signal is only remembered.
   for (const signal of HOLDER_SIGNALS) {
@@ -484,7 +538,7 @@ export async function runPtyHolder(context: PtyHolderContext): Promise<number> {
       (parts.onSignal ?? onProcessSignal)(signal, () => {
         // A child that ended by itself is not stopped, and its end is not recorded as a stop.
         if (live.exited) return;
-        live.signalled = true;
+        live.signalled ??= signal;
         live.stop?.();
       }),
     );
@@ -510,7 +564,8 @@ export async function runPtyHolder(context: PtyHolderContext): Promise<number> {
           encodeRecord("status", {
             ...rest,
             state: "killed",
-            reason: "holder_error",
+            // A stop that was asked for is the end the record names, here as on every other way out.
+            reason: existsSync(join(input.dir, STOP_FILE)) ? "stopped" : "holder_error",
             since: now(),
           }),
         );
@@ -531,15 +586,19 @@ export async function runPtyHolder(context: PtyHolderContext): Promise<number> {
 interface LiveSession {
   child?: PtyChild;
   cleanups: (() => void)[];
-  /** The holder was told to end (`HOLDER_SIGNALS`) while its child had not ended. */
-  signalled: boolean;
+  /** The signal that told the holder to end (`HOLDER_SIGNALS`) while its child had not ended. */
+  signalled?: HolderSignal;
   /** The child's exit was seen: from here on nothing signals it (its process group may be another's by now). */
   exited: boolean;
   /** Stops the child as `stop` does; there is none before the spawn. */
   stop?: () => void;
 }
 
-/** The signals that end a holder as `stop` ends its session: the child is stopped, and the end is recorded. */
+/**
+ * The signals that end a holder as `stop` ends its session: the child is stopped, and the end is recorded. The
+ * record names the signal, not `stopped`: that reason is a stop somebody asked for (it leaves `stop.json`, which
+ * says who), and a shutdown of the machine sends these signals to every holder without anybody having asked.
+ */
 export const HOLDER_SIGNALS = ["SIGTERM", "SIGHUP"] as const;
 export type HolderSignal = (typeof HOLDER_SIGNALS)[number];
 
@@ -568,12 +627,19 @@ async function holdTerminal(
   }
 
   // The holder was told to end before it had a child: it starts none.
-  if (live.signalled) {
+  if (live.signalled !== undefined) {
     leave({ reason: "killed", text: "the holder was stopped" });
     try {
       replaceRecord(
         statusPath,
-        encodeRecord("status", { ...first, state: "killed", reason: "stopped", since: now() }),
+        encodeRecord("status", {
+          ...first,
+          state: "killed",
+          ...(existsSync(join(input.dir, STOP_FILE))
+            ? { reason: "stopped" as const }
+            : { signal: live.signalled }),
+          since: now(),
+        }),
       );
     } catch {
       // the folder was removed
@@ -605,7 +671,10 @@ async function holdTerminal(
   const stopChild = (): void => {
     if (live.exited) return;
     child.kill("SIGTERM");
-    escalate ??= setTimeout(() => child.kill("SIGKILL"), parts.killGraceMs ?? KILL_GRACE_MS);
+    // Dropped at the child's exit (above), and asked again when it fires: nothing is signalled after the exit.
+    escalate ??= setTimeout(() => {
+      if (!live.exited) child.kill("SIGKILL");
+    }, parts.killGraceMs ?? KILL_GRACE_MS);
   };
   live.cleanups.push(() => {
     if (timer) clearTimeout(timer);
@@ -704,14 +773,16 @@ async function holdTerminal(
   clearInterval(watcher);
   flush();
 
-  const stopped = live.signalled || existsSync(join(input.dir, STOP_FILE));
+  const stopped = existsSync(join(input.dir, STOP_FILE));
   const end: Pick<StatusRecord, "state" | "reason" | "signal" | "exitCode"> = timedOut
     ? { state: "killed", reason: "timeout" }
     : stopped
       ? { state: "killed", reason: "stopped" }
-      : exit.signal !== undefined
-        ? { state: "killed", signal: exit.signal }
-        : { state: "exited", exitCode: exit.exitCode };
+      : live.signalled !== undefined
+        ? { state: "killed", signal: live.signalled }
+        : exit.signal !== undefined
+          ? { state: "killed", signal: exit.signal }
+          : { state: "exited", exitCode: exit.exitCode };
   // The clients hear of the end, and the socket is gone, before the record says the session is over: whoever
   // reads a final record never finds a client still attached.
   leave(

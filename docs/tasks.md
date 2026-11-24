@@ -303,16 +303,22 @@ is cut from `HEAD` at that moment, whether or not the dependency's branch has be
   is not drawn is refused (`Pipeline 7 is not visible: make the terminal taller`) and the window stays, and
   `y` counts only when the whole question is in view (the resume window too). The question is cancelled when the card
   moves to another task. It starts the task's run (the task text is the title, a blank line and the body; the task goes
-  to `progress`) and a detached `claude -p` session named `kw-<run id>`, in the run's working directory, that
-  drives the run through its own `kodel mcp --role worker --no-decisions --no-wait-hint`: a server that serves
-  the worker's tools only (`docs/mcp-roles.md`: no history tool and no `task_update`), no decision
-  tool and no dialog, whatever the project config allows an agent, and never offers `kodel wait`. The
+  to `progress`) and a detached session named `kw-<run id>`, in the run's working directory: `claude` in a
+  terminal of its own (`engines.claude.worker: terminal`, the default) or `claude -p` (`worker: print`); see the
+  next two points and `docs/serve.md`. Either drives the run through its own `kodel mcp --role worker
+  --no-decisions`: a server that serves the worker's tools only (`docs/mcp-roles.md`: no history tool and no
+  `task_update`), no decision tool and no dialog, whatever the project config allows an agent. A
+  terminal agent's server offers the wait command of this build at every wait (`--wait-command`); a print
+  agent's never offers `kodel wait` (`--no-wait-hint`). The
   agent runs with `--permission-mode dontAsk`, an allowlist (the kodel tools its server serves, `Read`, `Write`,
   `Edit`, `Glob`, `Grep`, `Bash`, `Agent`) and a deny list (the two decision tools; `Bash` patterns for `gate`,
-  `ack`, `seal`, `resume`, `migrate`, `wait r_*`, `pipeline changes apply|discard|restore`, `pipeline proposals
-  apply|discard` and `agent stop|rm|exec|forget-name` in the three spellings of the binary; `Edit`/`Write` of
+  `ack`, `seal`, `resume`, `migrate`, `pipeline changes apply|discard|restore`, `pipeline proposals
+  apply|discard`, `task approve` and `agent stop|rm|exec|forget-name|attach|start|prune` in the three spellings
+  of the binary, and `wait r_*` for a print agent; `Edit` of
   `.kodel/runs`, `.kodel/pipelines`, `.kodel/tasks`, `.kodel/config.yaml`, `.kodel/proposals`, `.mcp.json` and
-  `.claude/settings*.json`, relative and absolute, and of the state base). Both lists live in
+  `.claude/settings*.json`, relative and absolute, and of the state base: a terminal agent gets the `Edit(...)`
+  rules alone, which cover every file-editing tool, and a print agent the same paths as `Write(...)` rules
+  besides). Both lists live in
   `packages/cli/src/claude-worker.ts`. A substring pattern can refuse an innocent command that names `kodel`
   and a verb (`grep gate_decided` after a `cd` into a worktree), as the repository's own settings do. The
   agent acts with **your** git and GitHub identity (`git commit -s` in your name, `gh` with your credentials)
@@ -327,8 +333,39 @@ is cut from `HEAD` at that moment, whether or not the dependency's branch has be
   then **your decision**: the gate's question and the keys in words (`a Approve · r Reject`, or the command
   when the gate is decided with one). `kodel agent stop kw-<run>` ends the agent. `s` refuses, with the reason, on Windows, when `decisions.dialog` is on,
   when `claude` is not on PATH or not signed in, when the tracker cannot attach runs, when a project redaction
-  rule cannot be given to the agent and when no pipeline loads; `--demo` has no `s`.
-- **At a gate the agent exits; `s` resumes it after your decision.** With no `kodel wait` the agent writes what
+  rule cannot be given to the agent, when no pipeline loads, when the setting says `terminal` and no terminal
+  can run here (under Bun, say; the reason spells the line that keeps print agents) and when the `engines`
+  block is not as committed; `--demo` has no `s`. A refusal stays on the task's Backlog row as `cannot start:
+  <reason>` until a start of that task is let through.
+- **`o` opens a run's agent, and `Ctrl+\` brings you back to the same place.** On a run row or card whose
+  agent runs in a terminal, `o` gives your terminal to the agent (`kodel agent attach --keep-screen` of
+  the run's latest record, also `kw-<run>-d<seq>`). The TUI keeps its alternate screen for that: it clears
+  it, writes `opening kw-<run>…`, the agent's screen is drawn into it when the client is up, and the TUI
+  draws over it on the return, so your shell is seen neither on the way in nor on the way back. The cost: the
+  terminal's own scrollback does not hold the agent's output while you are in it from the TUI (`kodel agent
+  attach kw-<run>` at a shell does), and a program of the agent that switches to an alternate screen of its
+  own gets this one, cleared. `Ctrl+\` detaches, the agent runs on, and the TUI is back
+  as you left it: the same screen and tab, the same selected run, the same open card and its scroll, the same
+  list scroll, filter and picked decision; only the data is fresh, and a notice carries the agent's last line
+  (`Back from kw-… · …`). The same holds when the agent ended while you were in it; the notice then says so
+  and names `kodel agent stop`. If the run you were on left the list meanwhile, the selection moves as on any
+  refresh. A print agent, Windows, or a child that cannot be started answers with a notice and the screen is
+  not left. A TUI that runs under Bun does not open an agent: the notice spells `node
+  packages/cli/dist/kodel.js agent attach <id>`. Keys typed during the handover are dropped for 150 ms after
+  the return. A signal that ends the TUI while you are in the agent ends the client and leaves the alternate
+  screen once; a stop from outside (`SIGTSTP`) leaves it for the time both are stopped.
+- **At a gate a terminal agent stays.** It tells what waits and starts its wait command in the background;
+  the row reads `◆ with you` and the card `agent waits with you`. After your decision it goes on within
+  seconds, with or without a TUI or a daemon; nothing is typed for you. If it has not gone on after 2 minutes
+  the row reads `◆ not moving` and the card `the agent has not gone on since your decision · o opens it`. A
+  terminal agent with a step open that printed nothing and called nothing for 30 minutes reads `◆ stalled`
+  (card: `agent stalled · o opens it`). One that ended at the wait (it quit, a reboot) is offered `s resumes`
+  after your decision, as below, or resumed by `kodel serve`; one that ended after it had gone on reads `agent
+  died after your decision`. One whose process still runs without a holder reads `agent lost (holder gone,
+  child still runs)` with `its process still runs without a holder; stop it: kodel agent stop <id>`, and no
+  resume is offered until you stop it. When the run is over, its terminal session is stopped (by `kodel serve`,
+  else by an open TUI at its next refresh).
+- **A print agent (`worker: print`) exits at a gate; `s` resumes it after your decision.** With no `kodel wait` the agent writes what
   you have to decide and ends its turn, so `claude -p` exits 0: the row reads `agent waiting for you`. Decide
   as usual (the TUI, `kodel gate|resume|pipeline changes`, a dialog of your own client): the card then reads
   `agent exited at your decision · s resumes`, and **nothing starts by itself**. The TUI cannot know whether
@@ -336,16 +373,19 @@ is cut from `HEAD` at that moment, whether or not the dependency's branch has be
   lines it leaves are bookkeeping the engine skips in several cases), so the resume is your `s` then `y`: `s`
   opens the same kind of window, `Resume the agent of r_… after your gate "node" approved (time)?` with `y resume
   · Esc or any other key cancels` on its own line and, when the journal shows one, the line `an agent was served
-  a step since your decision` (true whenever shown, silent otherwise). `y` starts the same conversation again with `claude -p --resume <session id>` as the
+  a step since your decision` (true whenever shown, silent otherwise). `y` starts the same conversation again in the way the `engines` setting names
+  (`claude -p --resume <session id>` with `worker: print`, a terminal session of `claude --resume <session id>` otherwise) as the
   record `kw-<run>-d<seq>`, `seq` the journal line of the decision: one record per decision, so two TUIs or a
   second `s`+`y` make one resume and the other is told `already resumed`. The row reads `agent resuming`, then
-  `agent running (session N)`. Not offered, and the card says why: an agent that still runs, was stopped
-  (`kodel agent stop`), timed out or is lost; an exit that was not at a wait (a crash: `agent exited (1), not at
+  `agent running (session N)`. Not offered, and the card says why: an agent that still runs; a print agent
+  that was stopped (`kodel agent stop`), timed out or is lost (a terminal agent that ended in one of those ways
+  at the wait is offered `s`, and one you stopped is offered it even while `kodel serve` runs, which never
+  resumes it); an exit that was not at a wait (a crash: `agent exited (1), not at
   a gate`; any agent continues the run with `pipeline_next_step` and the run id); a run that is over or waits
   again; a decision an agent made for you (`decisions.agent`: it goes on itself); a record of that decision that
   already exists, even one that died at boot (`kw-<run>-d<seq> ended`); no known session id; the TUI's own
   decision work still running its step. `kodel agent rm` of a resume record frees its name, so the same decision
-  is offered once more and `s`+`y` makes the record again; `kodel agent stop` alone ends the offer. A failed
+  is offered once more and `s`+`y` makes the record again; `kodel agent stop` of a print agent ends the offer (a terminal agent you stopped at the wait keeps it; one you stopped at work is over). A failed
   resume is one notice; the offer stays and `s`+`y` is the retry. A resume re-sends the conversation: on a
   subscription it counts against the plan's usage, with an API key it is the cache-miss tokens of the whole
   context; three gates of `dev.yaml` are three `s`+`y`.

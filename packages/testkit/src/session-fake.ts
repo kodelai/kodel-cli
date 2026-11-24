@@ -15,6 +15,7 @@ import {
   type SessionState,
   type SessionStatus,
   type StartResult,
+  type StopAsker,
   type TailResult,
   type TailStream,
   validateSpec,
@@ -26,6 +27,7 @@ interface Entry {
   state: SessionState;
   exitCode?: number;
   reason?: "stopped" | "timeout";
+  stoppedBy?: StopAsker;
   tail: string;
   started: number;
   timer?: ReturnType<typeof setTimeout>;
@@ -104,7 +106,7 @@ export class FakeSessionAdapter implements SessionAdapter {
         },
         holderAlive: entry.state === "running",
         childAlive: false,
-        stop: "missing",
+        stop: entry.stoppedBy ?? "missing",
       },
       Date.now(),
     );
@@ -137,11 +139,12 @@ export class FakeSessionAdapter implements SessionAdapter {
     return { text: stream === "stderr" ? "" : entry.tail, complete: true };
   }
 
-  async stop(id: string): Promise<SessionStatus> {
+  async stop(id: string, opts: { by?: StopAsker } = {}): Promise<SessionStatus> {
     const entry = this.entry(id);
     if (entry.state === "running") {
       entry.state = "killed";
       entry.reason = "stopped";
+      entry.stoppedBy = opts.by ?? "person";
     }
     return this.derive(entry);
   }
@@ -212,8 +215,8 @@ export class RemoteStyleSessionAdapter implements SessionAdapter {
     }
     return this.inner.tail(this.inside(id), bytes);
   }
-  async stop(id: string): Promise<SessionStatus> {
-    return this.inner.stop(this.inside(id));
+  async stop(id: string, opts?: { by?: StopAsker }): Promise<SessionStatus> {
+    return this.inner.stop(this.inside(id), opts);
   }
   async remove(id: string): Promise<void> {
     await this.inner.remove(this.inside(id));

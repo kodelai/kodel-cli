@@ -262,17 +262,46 @@ const TELL_AT_GATE =
   "words, concretely, and do not leave out a step), and anything else they should check; (4) how to decide, with the command in " +
   "`how_to_decide`. Do not decide for them and do not run that command. Then end your turn.";
 
+/** The command an answer names when the host gives none: the program as the other texts name it. */
+export const DEFAULT_WAIT_COMMAND = "kodel wait {run}";
+
+/** A wait command for one run: every `{run}` of the template is the run id. */
+export const spellWaitCommand = (template: string, runId: string): string =>
+  template.split("{run}").join(runId);
+
+/** How an answer names the command that watches the run; `undefined` when it offers none. */
+interface WaitWords {
+  /** The command to start for this run. */
+  command: string;
+  /** How the texts that only forbid it name it. */
+  name: string;
+}
+
+/**
+ * A given command (`waitCommand`) is offered whatever the project's hint says: it is the command of an
+ * agent that stays alive at a wait and has no other way to go on. Without one the words are as they
+ * always were, and the project's hint turns them off.
+ */
+function waitWordsOf(runId: string, options: NextStepOptions): WaitWords | undefined {
+  if (options.waitCommand !== undefined) {
+    const command = spellWaitCommand(options.waitCommand, runId);
+    return { command, name: command };
+  }
+  if (options.waitHint === false) return undefined;
+  return { command: spellWaitCommand(DEFAULT_WAIT_COMMAND, runId), name: "kodel wait" };
+}
+
 /**
  * How the agent can be woken when the person has decided, without asking again and without spending
  * tokens while it waits. The command is the same one the other texts name (`kodel`), whatever the
  * agent's shell calls it. The agent that cannot run a command in the background loses nothing: it ends
  * its turn and the person tells it.
  */
-function tellToWait(runId: string, on: boolean): string {
-  if (!on) return "";
+function tellToWait(wait: WaitWords | undefined): string {
+  if (wait === undefined) return "";
   return (
     " If your tools can run a command in the background, then after you have written to the person " +
-    `start \`kodel wait ${runId}\` that way and end your turn: it only watches, and prints one line ` +
+    `start \`${wait.command}\` that way and end your turn: it only watches, and prints one line ` +
     "when the person has decided, so you are woken then and nothing is spent while you wait. In " +
     "Claude Code use the Bash tool with run_in_background (not the Monitor tool: it stops after 30 " +
     "minutes and wakes you then). When it reports, call pipeline_next_step. If the line says `still " +
@@ -299,13 +328,13 @@ const TELL_WHEN_PAUSED =
  * A worker (a call that carries a claim token) never talks to the person and never watches the run:
  * it hands the answer to the agent that started it, which does both.
  */
-const tellWorker = (waitHint: boolean) =>
+const tellWorker = (wait: WaitWords | undefined) =>
   `You are a worker on one step of this run: do not write to the person${
-    waitHint ? " and do not start `kodel wait`" : ""
+    wait ? ` and do not start \`${wait.name}\`` : ""
   }. Report this answer as it is to the agent that started you, and stop.`;
 
 /** The rules of working several open steps, one worker each. */
-const parallelRules = (waitHint: boolean) =>
+const parallelRules = (wait: WaitWords | undefined) =>
   "Several steps of this run are open at once (`steps`) and this project works them in parallel: " +
   "start one subagent per step in `steps` that has no `taken_by`, and give each worker these rules. " +
   "A worker calls pipeline_take_step with the run_id and its step's slug (node_slug) and keeps the " +
@@ -316,7 +345,7 @@ const parallelRules = (waitHint: boolean) =>
   "pipeline_complete_step with node_slug, attempt and that claim_token, and reports the answer back " +
   "to you as it is, whether it says `node` (its own step again), `waiting`, `running`, `done` or " +
   `\`also_waiting\`; a worker never writes to the person${
-    waitHint ? " and never starts `kodel wait`" : ""
+    wait ? ` and never starts \`${wait.name}\`` : ""
   }. When your workers are back, call pipeline_next_step yourself: it hands out what is open ` +
   "then, and what waits for a person is told to you, not to the workers.";
 
@@ -358,6 +387,12 @@ const sequentialRules = (undeclared: boolean) =>
 export interface NextStepOptions {
   /** Whether a waiting answer offers the agent `kodel wait`; on unless the project turned it off. */
   waitHint?: boolean;
+  /**
+   * The command that watches a run, as every answer is to spell it (`{run}` is the run id), in place of
+   * `kodel wait <run>`. With it the offer is made whatever `waitHint` says. Nothing of it comes from the
+   * run or from an agent: the host that starts the agent builds it.
+   */
+  waitCommand?: string;
   /** A change of the run's pipeline that waits for a person. */
   pending?: PendingChange;
   /** The agent has just said a step is done: a change that holds the run is met here, not before. */
@@ -415,8 +450,7 @@ const CHANGE_WORDS: Record<string, string> = {
 };
 
 function changedWaiting(
-  runId: string,
-  waitHint: boolean,
+  wait: WaitWords | undefined,
   change: PipelineChange,
   slug: string,
   behind: "gate" | "paused" | "step",
@@ -437,9 +471,7 @@ function changedWaiting(
       // Behind a step the run still reads as the agent's step to anyone who only looks, so a
       // command that only looks would return at once; there the agent just ends its turn.
       tell_the_person:
-        behind === "step"
-          ? TELL_PIPELINE_CHANGED
-          : TELL_PIPELINE_CHANGED + tellToWait(runId, waitHint),
+        behind === "step" ? TELL_PIPELINE_CHANGED : TELL_PIPELINE_CHANGED + tellToWait(wait),
       ...(also === undefined ? {} : { also_waiting: also }),
     },
   };
@@ -481,7 +513,7 @@ function forWorker(
   now: number,
   options: NextStepOptions,
 ): NextStep {
-  const tell = tellWorker(options.waitHint !== false);
+  const tell = tellWorker(waitWordsOf(state.runId, options));
   if ("waiting" in step) return { waiting: { ...step.waiting, tell_the_person: tell } };
   if ("done" in step) return { ...step, tell_the_person: tell };
   if ("running" in step) {
@@ -537,16 +569,15 @@ function nextStepBase(
   registry: Registry,
   options: NextStepOptions,
 ): NextStep {
-  const waitHint = options.waitHint !== false;
-  const step = baseStep(spec, state, now, registry, waitHint, options);
+  const wait = waitWordsOf(state.runId, options);
+  const step = baseStep(spec, state, now, registry, wait, options);
   const pending = options.pending;
   if (!pending || "done" in step) return step;
   const { blocking, ...change } = pending;
   if ("waiting" in step) {
     if (!blocking) return { waiting: { ...step.waiting, pipeline_change: change } };
     return changedWaiting(
-      state.runId,
-      waitHint,
+      wait,
       change,
       step.waiting.node_slug,
       step.waiting.reason as "gate" | "paused",
@@ -555,14 +586,7 @@ function nextStepBase(
   }
   if ("node" in step) {
     if (blocking && options.atCompletion) {
-      return changedWaiting(
-        state.runId,
-        waitHint,
-        change,
-        step.node.slug,
-        "step",
-        step.node.also_waiting,
-      );
+      return changedWaiting(wait, change, step.node.slug, "step", step.node.also_waiting);
     }
     return { node: { ...step.node, pipeline_change: change } };
   }
@@ -574,7 +598,7 @@ function baseStep(
   state: RunState,
   now: number,
   registry: Registry,
-  waitHint: boolean,
+  wait: WaitWords | undefined,
   options: NextStepOptions,
 ): NextStep {
   if (state.status === "completed" || state.status === "failed" || state.status === "canceled") {
@@ -629,11 +653,10 @@ function baseStep(
   };
   const noteOf = (also: AlsoWaiting[] | undefined): string | undefined => {
     // A worker never watches the run: the offer of `kodel wait` is the coordinator's.
-    const offerWait = waitHint && options.worker !== true;
-    const parts = [
-      deadBranchNote(state.forks),
-      alsoWaitingNote(also, offerWait ? state.runId : undefined),
-    ].filter((part): part is string => part !== undefined);
+    const offered = options.worker === true ? undefined : wait;
+    const parts = [deadBranchNote(state.forks), alsoWaitingNote(also, offered?.command)].filter(
+      (part): part is string => part !== undefined,
+    );
     return parts.length === 0 ? undefined : parts.join(" ");
   };
 
@@ -647,8 +670,7 @@ function baseStep(
         node_slug: pause.node,
         prompt: pauseText(pause.node, pause.reason),
         how_to_decide: { cli: resumeCli(pause.node) },
-        tell_the_person:
-          TELL_WHEN_PAUSED + alsoWaitingTell(also) + tellToWait(state.runId, waitHint),
+        tell_the_person: TELL_WHEN_PAUSED + alsoWaitingTell(also) + tellToWait(wait),
         ...(also === undefined ? {} : { also_waiting: also }),
       },
     };
@@ -744,7 +766,7 @@ function baseStep(
       const mode = options.agents?.mode ?? "sequential";
       const rules =
         mode === "parallel"
-          ? parallelRules(waitHint) + workerModels(spec, registry, handed)
+          ? parallelRules(wait) + workerModels(spec, registry, handed)
           : sequentialRules(options.agents?.undeclared === true);
       const steps = [...handed, ...taken].map((v) => stepOf(v, stepMode));
       const queued = free.length - handed.length;
@@ -794,7 +816,7 @@ function baseStep(
             ? `${TELL_AT_GATE} ${TELL_RESULTS}`
             : TELL_AT_GATE) +
           alsoWaitingTell(also) +
-          tellToWait(state.runId, waitHint),
+          tellToWait(wait),
         ...(also === undefined ? {} : { also_waiting: also }),
       },
     };
@@ -941,16 +963,16 @@ export function deadBranchNote(forks: Record<string, ForkState> | undefined): st
   return `A branch of the fork is dead (${dead.join("; ")}): finish the open steps; the run ends failed when the others have settled.`;
 }
 
-/** `waitFor` is the run to offer `kodel wait` for, when the project's hint is on and the caller is no worker. */
+/** `command` is the wait command to offer, when one is offered and the caller is no worker. */
 function alsoWaitingNote(
   also: AlsoWaiting[] | undefined,
-  waitFor: string | undefined,
+  command: string | undefined,
 ): string | undefined {
   if (also === undefined) return undefined;
   const wait =
-    waitFor === undefined
+    command === undefined
       ? ""
-      : ` Once you have told them and nothing else is left for you to do, start \`kodel wait ${waitFor}\` in the background and end your turn: it prints one line when they have decided.`;
+      : ` Once you have told them and nothing else is left for you to do, start \`${command}\` in the background and end your turn: it prints one line when they have decided.`;
   return `Besides this, the run waits for a person: ${describeAlso(also)}. Tell them when you report; do not run those commands.${wait}`;
 }
 

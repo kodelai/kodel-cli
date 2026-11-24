@@ -6,6 +6,13 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:os";
 import { redactCutPrivateKey } from "@kodel-ai/pipeline-core";
+import {
+  liveProcess,
+  type StartClock,
+  sameIdentity,
+  startedBefore,
+  systemStartClock,
+} from "./process-table";
 
 export interface CommandOptions {
   cwd: string;
@@ -44,27 +51,91 @@ const OMITTED = "[earlier output omitted]\n";
 export const KILL_GRACE_MS = 2_000;
 const PIPE_GRACE_MS = 2_000;
 
-export function killTree(pid: number | undefined) {
-  if (pid === undefined) return;
-  if (process.platform === "win32") {
+/** What `killTree` needs of the command it ends: a `ChildProcess` that was started as the leader of its group. */
+export interface TreeLeader {
+  readonly pid?: number | undefined;
+  readonly exitCode: number | null;
+  readonly signalCode: NodeJS.Signals | null;
+}
+
+export interface KillTreeParts {
+  /** `process.kill` by default. */
+  kill?: (pid: number, signal: NodeJS.Signals) => void;
+  /** Whether the pid is a live process (not a zombie); the process table by default. */
+  alive?: (pid: number) => boolean;
+  /** The process table with start times, for what is left of a group whose leader ended; the system's by default. */
+  clock?: StartClock;
+  graceMs?: number;
+  platform?: NodeJS.Platform;
+}
+
+const escalations = new WeakMap<TreeLeader, () => void>();
+
+/**
+ * Ends a command and everything in its process group: `SIGTERM` to the group, then `SIGKILL` for what ignored
+ * that. A group is signalled only while its leader is this live child: once the child has ended, its group's
+ * number may belong to another program. So the `SIGKILL` goes to the group only when the child is looked at
+ * again and still leads it; when it has ended, the process table is read once and each process of that group
+ * number that had started before the `SIGTERM` (when the number was this group's, so they are its members) is
+ * killed by pid, its identity read again right before. Where the table or the clock cannot be read, nothing
+ * is signalled then. Returns what drops a pending `SIGKILL`.
+ */
+export function killTree(child: TreeLeader, parts: KillTreeParts = {}): () => void {
+  const pid = child.pid;
+  if (pid === undefined) return () => {};
+  if ((parts.platform ?? process.platform) === "win32") {
     spawn("taskkill", ["/pid", String(pid), "/t", "/f"], { stdio: "ignore", windowsHide: true }).on(
       "error",
       () => {},
     );
-    return;
+    return () => {};
   }
+  const kill = parts.kill ?? ((target, signal) => void process.kill(target, signal));
+  const alive = parts.alive ?? liveProcess;
+  const clock = parts.clock ?? systemStartClock;
+  // Not reaped by this process, so the pid is still the child's own; and not a zombie waiting to be.
+  const leads = (): boolean => child.exitCode === null && child.signalCode === null && alive(pid);
+  if (!leads()) return () => {};
+  // Read before the signal: the leader lives, so the group of this number is the child's at this moment.
+  const mark = clock.now();
   try {
-    process.kill(-pid, "SIGTERM");
+    kill(-pid, "SIGTERM");
   } catch {
-    return;
+    return () => {};
   }
-  setTimeout(() => {
+  const pending = escalations.get(child);
+  if (pending) return pending;
+  const sweep = (): void => {
+    const later = mark === undefined ? undefined : clock.now();
+    if (mark === undefined || later === undefined) return;
+    const rows = clock.rows();
+    if (rows === undefined) return;
+    for (const member of startedBefore(rows, pid, mark, later) ?? []) {
+      const now = clock.identity(member.pid);
+      if (now === undefined || sameIdentity(member.identity, now) !== true) continue;
+      try {
+        kill(member.pid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+  };
+  const timer = setTimeout(() => {
+    escalations.delete(child);
+    if (!leads()) return sweep();
     try {
-      process.kill(-pid, "SIGKILL");
+      kill(-pid, "SIGKILL");
     } catch {
       // already gone
     }
-  }, KILL_GRACE_MS).unref();
+  }, parts.graceMs ?? KILL_GRACE_MS);
+  timer.unref();
+  const cancel = (): void => {
+    clearTimeout(timer);
+    escalations.delete(child);
+  };
+  escalations.set(child, cancel);
+  return cancel;
 }
 
 export function runCommand(command: string, options: CommandOptions): Promise<CommandResult> {
@@ -142,7 +213,7 @@ export function runCommand(command: string, options: CommandOptions): Promise<Co
 
     const onAbort = () => {
       aborted = true;
-      killTree(child.pid);
+      killTree(child);
     };
     if (options.signal) {
       if (options.signal.aborted) onAbort();
@@ -151,7 +222,7 @@ export function runCommand(command: string, options: CommandOptions): Promise<Co
     if (options.timeoutMs !== undefined) {
       timer = setTimeout(() => {
         timedOut = true;
-        killTree(child.pid);
+        killTree(child);
       }, options.timeoutMs);
     }
 

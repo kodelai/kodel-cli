@@ -1,5 +1,6 @@
 /** The Tasks screen and the Backlog block as lines of text, and the state they keep. Pure: nothing here reads or writes a task. */
 import { dependencyWords } from "@kodel-ai/pipeline-core";
+import { plain } from "../plain";
 import { bold, cyan, dim, fit, green, inverse, red, stripAnsi, wrapText, yellow } from "./ansi";
 import type { Session } from "./session";
 import { prose } from "./tabs";
@@ -153,10 +154,12 @@ const PRIORITY_WIDTH = 6;
 const STATUS_WIDTH = 11;
 
 /** Key, title and priority; the rest is in the card. A child of a task on the list has `└` before its key. */
-function rowText(row: TaskRow, width: number, child: boolean): string {
+function rowText(row: TaskRow, width: number, child: boolean, refused?: string): string {
   const lead = child ? dim("└ ") : "";
   const titleWidth = Math.max(4, width - 1 - (child ? 2 : 0) - KEY_WIDTH - 1 - PRIORITY_WIDTH - 1);
-  const title = `${row.waitsForApproval ? "[waits for approval] " : ""}${row.title}`;
+  const marked = row.waitsForApproval ? `[waits for approval] ${row.title}` : row.title;
+  // A start that was refused before anything was made: the row says why until one is let through.
+  const title = refused === undefined ? marked : `[cannot start: ${plain(refused)}] ${marked}`;
   return ` ${lead}${dim(fit(row.key, KEY_WIDTH))} ${fit(title, titleWidth)} ${priorityStyle(row.priority, fit(row.priority ?? "", PRIORITY_WIDTH))}`;
 }
 
@@ -166,8 +169,9 @@ function styledRow(
   child: boolean,
   selected: boolean,
   listFocus: boolean,
+  refused?: string,
 ): string {
-  const text = rowText(row, width, child);
+  const text = rowText(row, width, child, refused);
   if (!selected) return fit(text, width);
   const plainRow = fit(stripAnsi(text), width);
   // With the card in focus the list keeps its place but stops shouting.
@@ -189,6 +193,7 @@ export function backlogBlock(
   selectedKey: string | undefined,
   listFocus: boolean,
   width: number,
+  refused: Readonly<Record<string, string>> = {},
 ): Block {
   const lines: string[] = [];
   const ids: (RowId | undefined)[] = [];
@@ -222,7 +227,7 @@ export function backlogBlock(
     `${bold(yellow("BACKLOG"))}${dim(` · ${backlog.rows.length} of ${backlog.total}${backlog.cut ? "+" : ""}`)}`,
   );
   for (const row of backlog.rows) {
-    lines.push(styledRow(row, width, false, row.key === selectedKey, listFocus));
+    lines.push(styledRow(row, width, false, row.key === selectedKey, listFocus, refused[row.key]));
     ids.push({ kind: "task", key: row.key });
   }
   if (s.error !== undefined) say(red(`  Cannot read the tasks now: ${s.error}`));
