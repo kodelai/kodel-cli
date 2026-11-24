@@ -230,6 +230,12 @@ export interface HostOptions {
    */
   agentDecisions?: { gate?: boolean; pipelineChange?: boolean };
   /**
+   * The names of the tools the server serves (5M9D), so that an answer never names one it does not:
+   * the note about a task the engine does not close says `task_update` only where it is served.
+   * Absent: every tool.
+   */
+  servedTools?: readonly string[];
+  /**
    * The hints the waiting answers carry, over the `agent_hints` block of the config: a server that
    * serves an agent whose turn must end at a wait (`kodel mcp --no-wait-hint`) passes `wait: false`
    * whatever the project says; what is not set here is read from the config at each answer.
@@ -933,6 +939,8 @@ export class LocalHost {
                 : { indexPath: this.options.storage.sessionsPath }),
               dirs: [...(workdir ? [workdir.path] : []), this.options.root],
               rules: this.rules,
+              // A new run starts in the current format.
+              withRole: capabilitiesOf(CURRENT_RECORD_VERSION).executorRole,
               ...(this.options.environment === undefined ? {} : { env: this.options.environment }),
             })
           : undefined;
@@ -3215,7 +3223,11 @@ export class LocalRun {
           : doneHint(this.host.options.root, where.path, where.branch);
       }
       if (state.taskKey !== undefined && (await this.host.taskLink())?.mode === "ask") {
-        const ask = `The run was started for task ${state.taskKey} and the engine does not close it by itself (tasks.on_run.mode is ask): ask the person whether to close it, and if they agree call task_update with the done status from task_schema.`;
+        const served = this.host.options.servedTools;
+        const closes = served === undefined || served.includes("task_update");
+        const ask = closes
+          ? `The run was started for task ${state.taskKey} and the engine does not close it by itself (tasks.on_run.mode is ask): ask the person whether to close it, and if they agree call task_update with the done status from task_schema.`
+          : `The run was started for task ${state.taskKey} and the engine does not close it by itself (tasks.on_run.mode is ask): tell the person the task is still open; they close it (\`kodel task set\`, or through a manager).`;
         step.tell_the_person = step.tell_the_person ? `${step.tell_the_person}\n\n${ask}` : ask;
       }
     }
@@ -3775,6 +3787,7 @@ export class LocalRun {
       ],
       rules: this.host.rules,
       ...(options.environment === undefined ? {} : { env: options.environment }),
+      withRole: capabilitiesOf(state.v).executorRole,
     };
   }
 

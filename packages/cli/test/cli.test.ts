@@ -13,6 +13,10 @@ import { SKILLS } from "../src/init/skills";
 
 let dir: string;
 
+// A run of this repository's own pipeline has KODEL_ENGINE=1, and under it `kodel mcp` is a worker (5M9D):
+// the servers these tests start are the person's, with every tool.
+const { KODEL_ENGINE: _engineMark, ...OUTSIDE_ENGINE } = process.env as Record<string, string>;
+
 const DEMO = [
   "name: demo",
   "nodes:",
@@ -812,7 +816,7 @@ describe("mcp over stdio", () => {
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: [join(import.meta.dir, "../src/main.ts"), "--root", dir, "mcp"],
-      env: { ...(process.env as Record<string, string>) },
+      env: { ...OUTSIDE_ENGINE },
       stderr: "pipe",
     });
     const client = new Client({ name: "agent", version: "0.0.0" });
@@ -837,7 +841,7 @@ describe("mcp over stdio", () => {
         new StdioClientTransport({
           command: process.execPath,
           args: [join(import.meta.dir, "../src/main.ts"), "--root", dir, "mcp"],
-          env: { ...(process.env as Record<string, string>) },
+          env: { ...OUTSIDE_ENGINE },
           stderr: "pipe",
         }),
       );
@@ -868,7 +872,7 @@ describe("mcp over stdio", () => {
     const child = spawn(
       process.execPath,
       [join(import.meta.dir, "../src/main.ts"), "--root", dir, "mcp"],
-      { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } },
+      { stdio: ["pipe", "pipe", "pipe"], env: { ...OUTSIDE_ENGINE } },
     );
     const exited = new Promise<number | null>((resolve) =>
       child.on("exit", (code) => resolve(code)),
@@ -909,7 +913,7 @@ describe("mcp over stdio", () => {
       const transport = new StdioClientTransport({
         command: process.execPath,
         args: [join(import.meta.dir, "../src/main.ts"), "--root", dir, "mcp"],
-        env: { ...(process.env as Record<string, string>) },
+        env: { ...OUTSIDE_ENGINE },
         stderr: "pipe",
       });
       const client = new Client({ name: "agent", version: "0.0.0" });

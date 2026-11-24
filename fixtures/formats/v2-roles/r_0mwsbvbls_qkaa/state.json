@@ -1,0 +1,90 @@
+{
+  "v": 2,
+  "runId": "r_0mwsbvbls_qkaa",
+  "task": "worked by two roles",
+  "specHash": "aa9bf79e22eca23c",
+  "status": "completed",
+  "startedAt": 1795381635256,
+  "nodes": {
+    "write": {
+      "slug": "write",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 1
+    },
+    "ship": {
+      "slug": "ship",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 2
+    }
+  },
+  "active": [],
+  "trail": [
+    "write",
+    "ship"
+  ],
+  "pauses": [],
+  "nextVisitId": 3,
+  "seq": 11,
+  "slug": "worked-by-two-roles",
+  "workdir": "/kodel-fixture/workdir/r_0mwsbvbls_qkaa",
+  "pipelineFile": ".kodel/pipelines/two.yaml",
+  "history": {
+    "changes": {
+      "enabled": true,
+      "exclude": [],
+      "max_kb": 512
+    },
+    "output": {
+      "enabled": true,
+      "max_kb": 64
+    },
+    "prompts": {
+      "enabled": true
+    },
+    "executor": {
+      "enabled": true
+    },
+    "tool_log": {
+      "enabled": true
+    },
+    "agent_log": {
+      "enabled": false,
+      "mode": "full",
+      "preview_chars": {
+        "user": 4000,
+        "agent": 4000,
+        "tool_input": 4000,
+        "tool_result": 8000
+      },
+      "max_kb": 20480,
+      "interval_s": 10
+    },
+    "usage": {
+      "enabled": false,
+      "prices": {}
+    },
+    "tool_calls": {
+      "enabled": false,
+      "preview_chars": 200
+    }
+  },
+  "engineVersion": "0.1.0",
+  "served": {
+    "write:1": [
+      "e4bde8ce70f551e5"
+    ],
+    "ship:1": [
+      "9bbe164ec88e65b5"
+    ]
+  },
+  "servedEvents": 2,
+  "finishedAt": 1795381638283
+}

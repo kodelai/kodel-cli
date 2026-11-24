@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "node": "write",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "d24a1c8829a0e6278c6f83339bb28e6a9a70a97bde55008e9b0cb9957b556c60",
+  "answer": {
+    "slug": "write",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "write it"
+  }
+}

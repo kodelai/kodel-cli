@@ -71,6 +71,17 @@ There is no switch for `ack`, `resume` or `seal`: they stay with a person, and t
 for them. An agent that can propose a change of the pipeline and also accept it can weaken the checks
 that judge its own work; prefer to leave `pipeline_change` off.
 
+## Roles of the server (5M9D)
+
+The two tools are served by a server with no role and by a manager (`kodel mcp --role manager`), never by a worker:
+a server started with `--role worker`, and any server under `KODEL_ENGINE` (a background worker, an agent started
+with `kodel agent exec`), decides nothing for the person whatever this block says, and its texts have no word of the
+tools. On a manager the tools point to `manager_inbox`, their answer is a short state of the run and no step, and the
+journal marks the decision `decided_via: manager`; `kodel serve` then resumes the run's worker as after a person's
+decision. The `mcp.roles` block cannot give the worker a decision tool, and it can give a manager the tools that work
+a run: such a manager, with `decisions.agent` on, approves the gates of its own work, which is what a server with no
+role already allows (`docs/mcp-roles.md`).
+
 ## `kodel serve` decides nothing (T-44)
 
 The daemon (`docs/serve.md`) starts and resumes background workers by the person's `serve` block: one pure

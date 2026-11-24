@@ -4,7 +4,13 @@
  * by the daemon is the same process, with the same lists and the same server, as one started with `s`.
  */
 import { randomUUID } from "node:crypto";
-import { openTaskService, resolveBase, type ServeLauncherPort } from "@kodel-ai/local";
+import {
+  loadMcpRoles,
+  openTaskService,
+  resolveBase,
+  type ServeLauncherPort,
+} from "@kodel-ai/local";
+import { KodelError, resolveToolSet } from "@kodel-ai/pipeline-core";
 import type { ServeWorkerView } from "@kodel-ai/pipeline-core/serve";
 import { pipesAdapter } from "./agent-commands";
 import type { WorkerLauncher, WorkerStatus } from "./worker-launcher";
@@ -20,18 +26,31 @@ export interface WorkerLauncherInput {
 }
 
 /**
- * The names of the tools the worker's own server serves, which is what the worker may call: the same
- * lists `createServer` registers for the local host, attachments included (a worker that could not call
- * their tools could never satisfy an `attachment` check).
+ * The tools the worker's own server (`kodel mcp --role worker`) serves, which are what the worker may
+ * call: worked out the way that server does it, from the config as it is now. A tracker that cannot be
+ * opened only drops the task tools, as in the server; an `mcp` block that cannot be used throws
+ * (`CONFIG_INVALID`), as the server would not start.
  */
-export async function workerToolNames(dataDir: string): Promise<string[]> {
-  const { buildTaskTools, HISTORY_TOOLS, toolsFor } = await import("@kodel-ai/pipeline-core/mcp");
+export async function workerServedTools(dataDir: string): Promise<string[]> {
+  const { buildTaskTools, HISTORY_TOOLS, MANAGER_TOOLS, toolsFor } = await import(
+    "@kodel-ai/pipeline-core/mcp"
+  );
+  const overrides = await loadMcpRoles(dataDir);
   const opened = await openTaskService({ storeRoot: dataDir }).catch(() => undefined);
-  return [
-    ...toolsFor({ taskLink: opened?.runLink !== undefined, attachments: true }).map((t) => t.name),
-    ...HISTORY_TOOLS.map((t) => t.name),
-    ...(opened === undefined ? [] : buildTaskTools(opened.service.capabilities).map((t) => t.name)),
-  ];
+  const resolved = resolveToolSet({
+    role: "worker",
+    overrides,
+    available: [
+      // Attachments included, as the local host keeps them: a worker that could not call their tools
+      // could never satisfy an `attachment` check.
+      ...toolsFor({ taskLink: opened?.runLink !== undefined, attachments: true }),
+      ...HISTORY_TOOLS,
+      ...MANAGER_TOOLS,
+      ...(opened === undefined ? [] : buildTaskTools(opened.service.capabilities)),
+    ],
+  });
+  if (resolved.refused !== undefined) throw new KodelError("CONFIG_INVALID", resolved.refused);
+  return resolved.names;
 }
 
 export async function openWorkerLauncher(input: WorkerLauncherInput): Promise<WorkerLauncher> {
@@ -39,7 +58,8 @@ export async function openWorkerLauncher(input: WorkerLauncherInput): Promise<Wo
     "./worker-launcher-session"
   );
   const { root, environment, self } = input;
-  const servedTools = await workerToolNames(input.dataDir);
+  // Asked again at every start and resume: the list is what the config says at that moment.
+  const servedTools = () => workerServedTools(input.dataDir);
   return createSessionWorkerLauncher({
     adapter: pipesAdapter({ root, environment, launcher: self, rules: [] }),
     self,

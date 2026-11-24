@@ -13,6 +13,7 @@ import {
   clientOf,
   type EngineRecord,
   type ExecutorRecord,
+  isExecutorRole,
   RECORD_VERSION,
   type RedactRule,
   redactText,
@@ -58,6 +59,7 @@ export function engineRecord(build: BuildInfo, surface: ServedSurface | undefine
           contract_version: surface.contract_version,
           instructions_hash: sha256(surface.instructions),
           tools_hash: sha256(surface.tools),
+          ...(isExecutorRole(surface.role) ? { role: surface.role } : {}),
         }),
   };
 }
@@ -231,11 +233,20 @@ export interface ExecutorContext {
   env?: NodeJS.ProcessEnv;
   /** The redaction rules of the project: the name of the session is redacted before it is cut. */
   rules?: readonly RedactRule[];
+  /**
+   * Whether the record may name the role of the server (the caller's): only where the format of the
+   * run can hold it (`capabilities.executorRole`).
+   */
+  withRole?: boolean;
 }
+
+/** The role the transport's caller carries, when the record of this run may hold one. */
+const roleOf = (caller: Caller | undefined, context: ExecutorContext) =>
+  context.withRole === true && isExecutorRole(caller?.role) ? { role: caller.role } : {};
 
 async function observe(caller: Caller | undefined, context: ExecutorContext) {
   const env = context.env ?? process.env;
-  const record: ExecutorRecord = {};
+  const record: ExecutorRecord = { ...roleOf(caller, context) };
   const client = clientOf(caller);
   if (client) record.client = client;
 
@@ -295,6 +306,6 @@ export async function observeExecutor(
     return await observe(caller, context);
   } catch {
     const client = clientOf(caller);
-    return client ? { client } : {};
+    return { ...roleOf(caller, context), ...(client ? { client } : {}) };
   }
 }

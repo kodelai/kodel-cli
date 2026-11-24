@@ -32,6 +32,11 @@ export interface FormatCapabilities {
   sessionNames: boolean;
   /** The event that says a background worker of the run is gone (`worker_note`). Format 1 never wrote it. */
   workerNotes: boolean;
+  /**
+   * The role of the server on the `engine` and `executor` records of the journal (5M9D). Format 1 is
+   * frozen as its published engine wrote it: a run of it goes on and records no role.
+   */
+  executorRole: boolean;
   /** The event that says a version of an attachment was stored (`attachment_written`, T-45). */
   attachments: boolean;
   /** The pipeline features a snapshot of this format can use. */

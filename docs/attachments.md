@@ -15,6 +15,9 @@ The local host keeps attachments. A host that keeps none offers neither the tool
 | `pipeline_attachment_read` | one version (the latest, or `version`): a text in `content`, marked as data an agent wrote; for an image the facts only, never its bytes |
 | `pipeline_attachment_list` | the latest version of each name; with `name`, every version of it (number, step, attempt, time, bytes, lines, hash) |
 
+On a server started with a role (`docs/mcp-roles.md`) the worker has all three; the manager has the two that
+read, and `manager_gate_changes` lists a run's attachments with the fingerprint an approval is held against.
+
 `path` is the only way for an image: the bytes of a screenshot sent through the model as text would cost
 tens of thousands of tokens and invite corrupted bytes.
 

@@ -1,7 +1,7 @@
 /**
  * Claude-specific: how a worker is a `claude -p` process (TASK-9PNS). The argv and its flags
  * (`--session-id` for the first session, `--resume` for the one after a decision), the shape of the
- * `--mcp-config` that points it at its own `kodel mcp --no-decisions --no-wait-hint`, the two tool
+ * `--mcp-config` that points it at its own `kodel mcp --role worker --no-decisions --no-wait-hint`, the two tool
  * lists Claude Code enforces, the auth probe, the two prompts and the environment markers. To put
  * another agent behind the TUI, replace this file and `claude-stream.ts`; `WorkerLauncher`, the TUI
  * and `kodel mcp`'s two flags do not know which agent runs.
@@ -121,13 +121,22 @@ export interface McpConfigInput {
   stateDir?: string;
 }
 
-/** The `--mcp-config` JSON: one server, this binary, `--no-decisions --no-wait-hint`. No task text. */
+/** The `--mcp-config` JSON: one server, this binary, `--role worker --no-decisions --no-wait-hint`. No task text. */
 export function workerMcpConfig(input: McpConfigInput): string {
   return JSON.stringify({
     mcpServers: {
       kodel: {
         command: input.exec,
-        args: [...input.args, "--root", input.root, "mcp", "--no-decisions", "--no-wait-hint"],
+        args: [
+          ...input.args,
+          "--root",
+          input.root,
+          "mcp",
+          "--role",
+          "worker",
+          "--no-decisions",
+          "--no-wait-hint",
+        ],
         ...(input.stateDir === undefined ? {} : { env: { KODEL_STATE_DIR: input.stateDir } }),
       },
     },
@@ -171,13 +180,17 @@ export function workerArgv(input: ArgvInput): string[] {
   ];
 }
 
+/** A worker whose server did not start has Bash and Edit and no kodel tool: it must not go on without them. */
+const NO_TOOLS =
+  "If you have no pipeline_next_step tool (the kodel tools are missing), stop at once: change nothing and say so.";
+
 /** The first prompt: the run, the title and where to work. The run holds the task text, so the body is never argv. */
 export function workerPrompt(runId: string, title: string, workdir: string): string {
   const name = plain(redactText(title)).replace(/\s+/g, " ").trim();
   return (
     `Kodel run ${runId} exists for the task "${name}" and is yours to drive. ` +
     `Call pipeline_next_step with run_id ${runId} and do what each answer says; ` +
-    `never call pipeline_start (it would make a second run). Work in ${workdir}.`
+    `never call pipeline_start (it would make a second run). Work in ${workdir}. ${NO_TOOLS}`
   );
 }
 
@@ -212,7 +225,7 @@ export function resumePrompt(
     `The person decided: ${KIND_WORDS[decision.kind]} "${node}" ${decision.outcome}` +
     `${reason === "" ? "" : ` — ${reason}`}. ` +
     `Continue Kodel run ${runId}: call pipeline_next_step with run_id ${runId} and go on from its answer; ` +
-    "never call pipeline_start."
+    `never call pipeline_start. The kodel tools you have may have changed since this session began: use the ones you have now. ${NO_TOOLS}`
   );
 }
 

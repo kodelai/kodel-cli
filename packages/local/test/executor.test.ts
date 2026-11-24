@@ -1,6 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -64,7 +74,12 @@ const newHost = (over: { version?: string; environment?: NodeJS.ProcessEnv } = {
     environment: over.environment ?? { CLAUDE_CONFIG_DIR: claude },
   });
 
-async function connect(host: LocalPipelineHost, client = { name: "agent", version: "9.1.0" }) {
+async function connect(
+  host: LocalPipelineHost,
+  client = { name: "agent", version: "9.1.0" },
+  /** The role the server was started with, as `kodel mcp` puts it on what it serves (5M9D). */
+  role?: "worker" | "manager" | "all",
+) {
   const server = new McpServer({ name: "kodel-test", version: "0.0.0" });
   const service = new PipelineService(host, {
     waitBudgetMs: 10_000,
@@ -76,6 +91,7 @@ async function connect(host: LocalPipelineHost, client = { name: "agent", versio
       instructions: SERVER_INSTRUCTIONS,
       tools: toolsFingerprint(TOOLS),
       contract_version: CONTRACT_VERSION,
+      ...(role === undefined ? {} : { role }),
     },
   });
   registerPipelineTools(server, service);
@@ -103,8 +119,10 @@ interface Rec {
     contract_version: number;
     instructions_hash: string;
     tools_hash: string;
+    role?: string;
   };
   executor: {
+    role?: string;
     client?: Sourced<{ name: string; version: string }>;
     session?: Sourced<string>;
     model?: Sourced<string>;
@@ -719,5 +737,125 @@ describe("an event the running engine does not know", () => {
     expect(done.ok).toBe(true);
     expect(done.next?.node?.slug).toBe("b");
     await close();
+  });
+});
+
+describe("5m9d the role of the server on the records", () => {
+  const journalOf = async (host: LocalPipelineHost, runId: string) =>
+    ((await (await host.open(runId))?.journal()) ?? []) as unknown as Rec[];
+
+  /** Start with one server and work both steps with another; what each record says of the role. */
+  async function twoServers(
+    first: "worker" | "manager" | "all" | undefined,
+    second: "worker" | "manager" | "all" | undefined,
+    task: string,
+  ) {
+    const host = newHost();
+    const one = await connect(host, { name: "starter", version: "1" }, first);
+    const runId = (await one.call("pipeline_start", { task, pipeline: "two" })).run_id as string;
+    await one.close();
+    const two = await connect(host, { name: "doer", version: "1" }, second);
+    await two.call("pipeline_next_step", { run_id: runId });
+    await two.call("pipeline_complete_step", { run_id: runId, node_slug: "a", attempt: 1 });
+    const end = await two.call("pipeline_complete_step", {
+      run_id: runId,
+      node_slug: "b",
+      attempt: 1,
+    });
+    await two.close();
+    const journal = await journalOf(host, runId);
+    return {
+      host,
+      runId,
+      done: end.next?.done === true,
+      events: journal.map((r) => r.event),
+      started: journal.find((r) => r.event === "run_started"),
+      served: journal.filter((r) => r.event === "step_served").map((r) => r.executor.role),
+      completed: journal.filter((r) => r.event === "agent_completed").map((r) => r.executor.role),
+    };
+  }
+
+  test("5m9d_the_role_is_recorded_with_the_run", async () => {
+    const run = await twoServers("all", "worker", "a role on the records");
+    expect(run.done).toBe(true);
+    expect(run.started?.engine.role).toBe("all");
+    expect(run.started?.executor.role).toBe("all");
+    expect(run.completed).toEqual(["worker", "worker"]);
+    expect(run.served).toContain("all");
+    expect(run.served).toContain("worker");
+    // `kodel report` and history_run_details show it.
+    const report = await (await run.host.open(run.runId))?.report();
+    expect(report?.server_roles).toEqual({ started_by: "all", steps: ["all", "worker"] });
+    const details = (await new PipelineService(run.host).historyRunDetails({
+      run_id: run.runId,
+    })) as unknown as { run: { server_roles?: unknown } };
+    expect(details.run.server_roles).toEqual({ started_by: "all", steps: ["all", "worker"] });
+    // A host that was told no role (another server of the contract) records none, as before.
+    const none = await twoServers(undefined, undefined, "no role at all");
+    expect(none.started?.engine.role).toBeUndefined();
+    expect(none.started?.executor.role).toBeUndefined();
+    expect(none.completed).toEqual([undefined, undefined]);
+    expect((await (await none.host.open(none.runId))?.report())?.server_roles).toBeUndefined();
+  });
+
+  test("5m9d_a_run_worked_by_two_roles_records_both", async () => {
+    const mixed = await twoServers("all", "worker", "started by a person's server");
+    const reverse = await twoServers("worker", "all", "started by a worker's server");
+    const single = await twoServers("all", "all", "one server from start to end");
+    expect(mixed.started?.engine.role).toBe("all");
+    expect(mixed.completed).toEqual(["worker", "worker"]);
+    expect(reverse.started?.engine.role).toBe("worker");
+    expect(reverse.started?.executor.role).toBe("worker");
+    expect(reverse.completed).toEqual(["all", "all"]);
+    // Every decision is the same as with one server: the same records in the same order, to the same end.
+    for (const run of [mixed, reverse]) {
+      expect(run.done).toBe(true);
+      expect(run.events).toEqual(single.events);
+    }
+  });
+
+  test("5m9d_format_1_run_goes_on_without_a_role", async () => {
+    // An open run of the published format, at an agent step (`fixtures/formats/v1-open/`): a worker's
+    // server works it on. Format 1 is frozen: nothing names a role.
+    const id = "r_0mvxulxyp_gmed";
+    const from = fileURLToPath(new URL(`../../../fixtures/formats/v1-open/${id}`, import.meta.url));
+    const runDir = join(dir, ".kodel", "runs", id);
+    await cp(from, runDir, { recursive: true });
+    for (const file of ["state.json", "meta.json"]) {
+      const value = JSON.parse(await readFile(join(runDir, file), "utf8"));
+      if (typeof value.workdir === "string") {
+        await writeFile(join(runDir, file), `${JSON.stringify({ ...value, workdir: dir })}\n`);
+      }
+    }
+    // The run is made to keep who acted, so that a record with an executor is written at all.
+    const statePath = join(runDir, "state.json");
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    await writeFile(
+      statePath,
+      JSON.stringify({ ...state, history: { ...state.history, executor: { enabled: true } } }),
+    );
+    const host = newHost();
+    const worker = await connect(host, { name: "worker-agent", version: "1" }, "worker");
+    const next = await worker.call("pipeline_next_step", { run_id: id });
+    expect(next.ok).toBe(true);
+    const slug = next.node?.slug as string;
+    expect(typeof slug).toBe("string");
+    const done = await worker.call("pipeline_complete_step", {
+      run_id: id,
+      node_slug: slug,
+      attempt: next.node.attempt,
+    });
+    expect(done.ok).toBe(true);
+    await worker.close();
+    const lines = (await readFile(join(runDir, "journal.jsonl"), "utf8"))
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line) as { v: number; event: string; executor?: Rec["executor"] });
+    expect(lines.every((line) => line.v === 1)).toBe(true);
+    const handIn = lines.findLast((line) => line.event === "agent_completed");
+    // The record says who acted, and no role.
+    expect(handIn?.executor?.client?.value.name).toBe("worker-agent");
+    expect(JSON.stringify(lines)).not.toContain('"role"');
+    expect(JSON.parse(await readFile(statePath, "utf8")).v).toBe(1);
   });
 });

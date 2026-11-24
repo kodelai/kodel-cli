@@ -240,7 +240,7 @@ async function runOnce(outputEnabled) {
     command: process.execPath,
     args: [artifact, "--root", dir, "mcp"],
     cwd: dir,
-    env: { ...process.env },
+    env: outsideEngine(),
     stderr: "ignore",
   });
   const client = new Client({ name: "check-artifact", version: "0" });
@@ -315,7 +315,7 @@ async function runChanges(enabled) {
     command: process.execPath,
     args: [artifact, "--root", dir, "mcp"],
     cwd: dir,
-    env: { ...process.env },
+    env: outsideEngine(),
     stderr: "ignore",
   });
   const client = new Client({ name: "check-artifact", version: "0" });
@@ -441,7 +441,7 @@ async function runHome() {
   const base = tempDir("kodel-artifact-home-state-");
   const id = "check-aaaa1111";
   const place = join(base, "projects", id);
-  const env = { ...process.env, KODEL_STATE_DIR: base };
+  const env = { ...outsideEngine(), KODEL_STATE_DIR: base };
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [artifact, "--root", dir, "mcp"],
@@ -564,7 +564,7 @@ async function checkEngineStepsOff() {
     command: process.execPath,
     args: [artifact, "--root", dir, "mcp"],
     cwd: dir,
-    env: { ...process.env },
+    env: outsideEngine(),
     stderr: "ignore",
   });
   const client = new Client({ name: "check-artifact", version: "0" });
@@ -620,3 +620,10 @@ try {
 }
 
 console.log(`artifact ok under node ${process.version}: ${size} bytes, version ${version}`);
+
+// A run of this repository's own pipeline has KODEL_ENGINE=1 in its environment, and under it `kodel mcp`
+// is a worker (5M9D); the server checked here is the person's, with every tool.
+function outsideEngine() {
+  const { KODEL_ENGINE: _mark, ...rest } = process.env;
+  return rest;
+}

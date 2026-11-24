@@ -7,6 +7,7 @@ import type { JournalRecord, RunState } from "./run";
 import { runSlug } from "./slug";
 import type { TaskSize } from "./task-size";
 import { type ToolCallsReport, toolCallsReport } from "./tool-calls";
+import { type ExecutorRole, isExecutorRole } from "./tool-roles";
 import { type UsageLine, type UsageReport, usageReport } from "./usage-report";
 
 export interface AttemptReport {
@@ -259,6 +260,35 @@ export interface RunReport {
   models?: ModelMarksReport;
   /** Background workers of the run that a daemon saw gone (`worker_note`), in order; absent when none. */
   workers_gone?: WorkerGoneReport[];
+  /**
+   * The roles of the servers behind the run (5M9D), from its records: the one that started it, and
+   * those that served or completed its steps. Absent for a run whose records carry no role.
+   */
+  server_roles?: { started_by?: ExecutorRole; steps: ExecutorRole[] };
+}
+
+/** The roles the journal names; information only. */
+function serverRoles(journal: readonly JournalRecord[]): RunReport["server_roles"] {
+  const roleOf = (value: unknown): ExecutorRole | undefined => {
+    const role =
+      typeof value === "object" && value !== null ? (value as { role?: unknown }).role : undefined;
+    return isExecutorRole(role) ? role : undefined;
+  };
+  let startedBy: ExecutorRole | undefined;
+  const steps = new Set<ExecutorRole>();
+  for (const record of journal) {
+    if (record.event === "run_started") {
+      startedBy ??= roleOf(record.engine) ?? roleOf(record.executor);
+    } else if (record.event === "step_served" || record.event === "agent_completed") {
+      const role = roleOf(record.executor);
+      if (role !== undefined) steps.add(role);
+    }
+  }
+  if (startedBy === undefined && steps.size === 0) return undefined;
+  return {
+    ...(startedBy === undefined ? {} : { started_by: startedBy }),
+    steps: [...steps].sort(),
+  };
 }
 
 /** A worker of the run that is gone, as its `worker_note` says. */
@@ -653,6 +683,7 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
   if (state.forks !== undefined) {
     failedBranches = forkList.some((fork) => fork.joined > 0 && fork.failed.length > 0);
   }
+  const roles = serverRoles(journal);
   return {
     runId: state.runId,
     task: state.task,
@@ -687,6 +718,7 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
     usage,
     tool_calls: toolCallsReport(state, journal),
     ...(workersGone.length === 0 ? {} : { workers_gone: workersGone }),
+    ...(roles === undefined ? {} : { server_roles: roles }),
   };
 }
 

@@ -34,6 +34,11 @@ export interface WaitMark {
 /** A decision as the journal records it, and whether an agent made it for the person. */
 export interface DecisionMark extends RunDecision {
   byAgent: boolean;
+  /**
+   * The agent decided through a manager's server (5M9D), which works no step: nobody goes on with the
+   * run by itself, so its worker is resumed as after a person's decision.
+   */
+  viaManager?: boolean;
 }
 
 export interface DecisionInfo {
@@ -78,7 +83,12 @@ function changedNodes(record: JournalRecord): string {
 /** The decision a record is, if it is one. */
 function decisionRecord(record: JournalRecord): DecisionMark | undefined {
   const byAgent = record.decided_by === "agent";
-  const base = { seq: record.seq, ts: record.ts, byAgent };
+  const base = {
+    seq: record.seq,
+    ts: record.ts,
+    byAgent,
+    ...(byAgent && record.decided_via === "manager" ? { viaManager: true } : {}),
+  };
   switch (record.event) {
     case "gate_decided": {
       const outcome = record.decision === "approved" ? "approved" : "rejected";
@@ -262,7 +272,9 @@ export function resumeVerdict(
   }
   if (run.waitsForPerson) return no("waiting_person");
   if (decision === undefined || decision.seq <= lastWait.seq) return no("undecided");
-  if (decision.byAgent) return no("agent_decided");
+  // An agent that decided where the run is worked goes on with it itself; one that decided through a
+  // manager does not, and the worker is resumed.
+  if (decision.byAgent && decision.viaManager !== true) return no("agent_decided");
   if (worker.resumed.includes(decision.seq)) return no("already_resumed");
   if (worker.sessionId === undefined) return no("no_session_id");
   if (opts.refuseMoved && run.marks?.moved === true) return no("moved");

@@ -1,0 +1,7 @@
+name: two
+description: two steps
+nodes:
+  - { slug: write, kind: agent, prompt: write it }
+  - { slug: ship, kind: agent, prompt: ship it with a note }
+edges:
+  - { from: write, to: ship }

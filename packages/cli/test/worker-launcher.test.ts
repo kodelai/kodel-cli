@@ -17,8 +17,15 @@ import {
   ownProcessGroup,
   PipesSessionAdapter,
 } from "@kodel-ai/local";
-import { SessionError, type SessionListEntry, validateSpec } from "@kodel-ai/pipeline-core";
+import {
+  type JournalRecord,
+  KodelError,
+  SessionError,
+  type SessionListEntry,
+  validateSpec,
+} from "@kodel-ai/pipeline-core";
 import { decisionTools, HISTORY_TOOLS, TOOLS } from "@kodel-ai/pipeline-core/mcp";
+import { resumeVerdict, decisionOf as serveDecisionOf } from "@kodel-ai/pipeline-core/serve";
 import { ScriptedSessionAdapter } from "../../testkit/src/engine-fakes";
 import { AGENT_HUMAN_COMMANDS } from "../src/agent-commands";
 import {
@@ -38,10 +45,12 @@ import { openTasksForTui } from "../src/tui/tasks-open";
 import { initialModel, withWorkers } from "../src/tui/view";
 import { decisionOf, resumeOffer } from "../src/tui/worker-resume";
 import { createWorkerOptions, taskTextOf } from "../src/tui/worker-start";
+import { openWorkerLauncher, serveWorkerOf, workerServedTools } from "../src/worker-factory";
 import {
   WORKER_TIMEOUT_MS,
   type WorkerDecision,
   type WorkerLauncher,
+  type WorkerStatus,
   workerNameOf,
 } from "../src/worker-launcher";
 import {
@@ -192,6 +201,8 @@ describe("task_9pns the claude profile", () => {
       "--root",
       ROOT,
       "mcp",
+      "--role",
+      "worker",
       "--no-decisions",
       "--no-wait-hint",
     ]);
@@ -966,6 +977,157 @@ describe("task_9pns the start through a real host", () => {
   });
 });
 
+// ── the worker's set (5M9D) ─────────────────────────────────────────────────
+
+describe("5m9d the launcher and the worker's own server", () => {
+  const BAD = `${CONFIG}mcp:\n  roles:\n    worker:\n      add: [pipeline_strat]\n`;
+  const NARROW = `${CONFIG}mcp:\n  roles:\n    worker:\n      remove: [pipeline_plan]\n`;
+  const setConfig = (text: string) => writeFileSync(join(dir, ".kodel", "config.yaml"), text);
+  const allowedOf = (argv: readonly string[] = []) =>
+    (argv[argv.indexOf("--allowedTools") + 1] ?? "").split(",");
+  const liveSet = (adapter: ScriptedSessionAdapter) =>
+    createSessionWorkerLauncher(
+      deps(adapter, { root: dir, servedTools: () => workerServedTools(storeRoot()) }),
+    );
+
+  test("5m9d_claude_worker_starts_the_worker_role", async () => {
+    const adapter = new ScriptedSessionAdapter();
+    const launcher = liveSet(adapter);
+    await launcher.start({ runId: RUN, workdir: dir, title: "t" });
+    adapter.finish(adapter.only().id, { state: "exited", exitCode: 0, since: 9_000 }, "");
+    await launcher.resume({ runId: RUN, workdir: dir, sessionId: UUID, decision: DECISION });
+    expect(adapter.specs).toHaveLength(2);
+    for (const spec of adapter.specs) {
+      const argv = spec.argv ?? [];
+      const mcp = JSON.parse(argv[argv.indexOf("--mcp-config") + 1] ?? "{}") as {
+        mcpServers: { kodel: { args: string[] } };
+      };
+      const args = mcp.mcpServers.kodel.args;
+      expect(args.slice(args.indexOf("mcp"))).toEqual([
+        "mcp",
+        "--role",
+        "worker",
+        "--no-decisions",
+        "--no-wait-hint",
+      ]);
+      // The allow-list is the worker's set: no history, no change of a task, no decision.
+      const allowed = allowedOf(argv);
+      expect(allowed).toContain("mcp__kodel__pipeline_next_step");
+      expect(allowed).toContain("mcp__kodel__task_create");
+      for (const name of ["history_runs", "task_update", "pipeline_decide_gate", "manager_inbox"]) {
+        expect(allowed).not.toContain(`mcp__kodel__${name}`);
+      }
+    }
+  });
+
+  test("5m9d_resume_over_a_changed_set_goes_on", async () => {
+    const adapter = new ScriptedSessionAdapter();
+    const launcher = liveSet(adapter);
+    await launcher.start({ runId: RUN, workdir: dir, title: "t" });
+    expect(allowedOf(adapter.specs[0]?.argv)).toContain("mcp__kodel__pipeline_plan");
+    adapter.finish(adapter.only().id, { state: "exited", exitCode: 0, since: 9_000 }, "");
+    // The person narrows the worker's set while the run waits for them.
+    setConfig(NARROW);
+    const { name } = await launcher.resume({
+      runId: RUN,
+      workdir: dir,
+      sessionId: UUID,
+      decision: DECISION,
+    });
+    expect(name).toBe(`kw-${RUN}-d17`);
+    const argv = adapter.specs[1]?.argv ?? [];
+    // The resumed session is allowed what the server serves now, and is told its tools may have changed.
+    expect(allowedOf(argv)).not.toContain("mcp__kodel__pipeline_plan");
+    expect(allowedOf(argv)).toContain("mcp__kodel__pipeline_next_step");
+    expect(argv[2]).toContain("may have changed since this session began");
+    expect(argv[2]).toContain(`Continue Kodel run ${RUN}`);
+    // Both prompts say what to do when the kodel tools are missing altogether.
+    for (const prompt of [workerPrompt(RUN, "t", dir), resumePrompt(RUN, DECISION)]) {
+      expect(prompt).toContain("If you have no pipeline_next_step tool");
+      expect(prompt).toContain("stop at once");
+    }
+  });
+
+  test("5m9d_launcher_spawns_no_worker_whose_set_does_not_resolve", async () => {
+    const adapter = new ScriptedSessionAdapter();
+    const launcher = liveSet(adapter);
+    const input = { dialog: false, taskLink: true, pipelines: 1 };
+    // A good config: the preflight passes (the daemon keeps that answer for a minute).
+    expect(await launcher.preflight(input)).toEqual({ ok: true });
+    setConfig(BAD);
+    // Within that minute no preflight is asked again: the start and the resume check for themselves.
+    const refused = async (work: Promise<unknown>) => {
+      const error = await work.catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(KodelError);
+      expect((error as KodelError).code).toBe("CONFIG_INVALID");
+      expect((error as KodelError).message).toContain('"pipeline_strat"');
+    };
+    await refused(launcher.start({ runId: RUN, workdir: dir, title: "t" }));
+    await refused(
+      launcher.resume({ runId: RUN, workdir: dir, sessionId: UUID, decision: DECISION }),
+    );
+    expect(adapter.specs).toEqual([]);
+    const preflight = await launcher.preflight(input);
+    expect(preflight.ok).toBe(false);
+    expect(!preflight.ok && preflight.reason).toContain("the agent's kodel server would not start");
+    expect(!preflight.ok && preflight.reason).toContain('"pipeline_strat"');
+
+    // The launcher the CLI builds does not swallow it either: the reason, and nothing spawned.
+    const real = await openWorkerLauncher({
+      root: dir,
+      dataDir: storeRoot(),
+      environment: { PATH: "/usr/bin:/bin", HOME: dir, KODEL_STATE_DIR: join(dir, "state") },
+      self: { exec: process.execPath, args: [join(import.meta.dir, "../src/main.ts")] },
+      platform: "linux",
+    });
+    const fromCli = await real.preflight(input);
+    expect(!fromCli.ok && fromCli.reason).toContain('"pipeline_strat"');
+    await refused(real.start({ runId: RUN, workdir: dir, title: "t" }));
+    // A tracker that cannot be opened still only drops the task tools, as in the server.
+    setConfig("worktree:\n  mode: off\ntasks:\n  enabled: maybe\n");
+    const served = await workerServedTools(storeRoot());
+    expect(served).toContain("pipeline_start");
+    expect(served.some((name) => name.startsWith("task_"))).toBe(false);
+  });
+
+  test("5m9d_tui_shows_the_config_refusal", async () => {
+    const reason =
+      '.kodel/config.yaml: mcp.roles.worker names "pipeline_strat", which is not a tool';
+    const refusal = new KodelError("CONFIG_INVALID", reason);
+    // At the question: the preflight's reason is what the person reads.
+    const asked = new FakeLauncher();
+    asked.preflightResult = {
+      ok: false,
+      reason: `the agent's kodel server would not start: ${reason}`,
+    };
+    const key = await seedTask();
+    const h = host();
+    const check = await (await options(h, asked)).prepareStart?.(key);
+    expect(check?.ok).toBe(false);
+    expect(!check?.ok && check?.message).toContain("pipeline_strat");
+    // At the start (the config changed after the question): the run exists, no agent, and why.
+    const failing = new FakeLauncher();
+    failing.failStart = refusal;
+    const opts = await options(h, failing);
+    const started = await opts.startTask?.(key, "one");
+    expect(started?.ok).toBe(false);
+    expect(started?.message).toContain("no agent was started");
+    expect(started?.message).toContain("pipeline_strat");
+    // At the resume after a decision.
+    const runId = started?.runId ?? "";
+    const run = (await h.open(runId)) as LocalRun;
+    await run.completeStep("write", 1);
+    await run.waitForRest(5_000);
+    await run.decideHuman("approve", "approved");
+    const seq = decisionOf(await run.journal()).decision?.seq ?? 0;
+    failing.failResume = refusal;
+    const resumed = await opts.resumeWorker?.(runId, seq, UUID);
+    expect(resumed?.ok).toBe(false);
+    expect(resumed?.message).toContain("was not resumed");
+    expect(resumed?.message).toContain("pipeline_strat");
+  });
+});
+
 // ── the real adapter ─────────────────────────────────────────────────────────
 
 const groupReadable = ownProcessGroup() !== undefined;
@@ -1138,6 +1300,122 @@ describe("task_9pns the real adapter", () => {
         started.map((id) => workerNameOf(id)).sort(),
       );
       expect((await h.runSummaries()).length).toBe(5);
+    },
+    90_000,
+  );
+
+  real(
+    "5m9d_worker_without_its_server_ends_as_a_dead_worker",
+    async () => {
+      // The accepted residual: the config is broken in the moment between the launcher's own check and
+      // `claude` starting its server. The stand-in for `claude` breaks the config itself, starts the
+      // kodel server its `--mcp-config` names as `claude` would, and, with no kodel tool, stops.
+      const base = mkdtempSync(join(tmpdir(), "kodel-worker-dead-"));
+      made.push(base);
+      const bin = join(base, "bin");
+      mkdirSync(bin, { recursive: true });
+      const seen = join(base, "seen.jsonl");
+      const script = join(base, "claude.mjs");
+      const config = join(dir, ".kodel", "config.yaml");
+      const bad = `${CONFIG}mcp:\n  roles:\n    worker:\n      add: [pipeline_strat]\n`;
+      writeFileSync(
+        script,
+        [
+          "import { spawnSync } from 'node:child_process';",
+          "import { appendFileSync, writeFileSync } from 'node:fs';",
+          "const argv = process.argv.slice(2);",
+          "const valueOf = (flag) => { const at = argv.indexOf(flag); return at < 0 ? undefined : argv[at + 1]; };",
+          "const id = valueOf('--session-id') ?? valueOf('--resume') ?? 'none';",
+          `writeFileSync(${JSON.stringify(config)}, ${JSON.stringify(bad)});`,
+          "const server = JSON.parse(valueOf('--mcp-config')).mcpServers.kodel;",
+          "const { KODEL_ENGINE: _mark, ...env } = process.env;",
+          "const ended = spawnSync(server.command, server.args, { input: '', encoding: 'utf8', env: { ...env, ...server.env } });",
+          `appendFileSync(${JSON.stringify(seen)}, JSON.stringify({ prompt: argv[1], code: ended.status, stderr: ended.stderr, stdout: ended.stdout }) + '\\n');`,
+          "process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', session_id: id, tools: ['Bash'] }) + '\\n');",
+          "process.stdout.write(JSON.stringify({ type: 'result', session_id: id, num_turns: 1, is_error: true }) + '\\n');",
+          "process.exit(1);",
+          "",
+        ].join("\n"),
+      );
+      const claude = join(bin, "claude");
+      writeFileSync(
+        claude,
+        `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"\n`,
+      );
+      chmodSync(claude, 0o755);
+      const stateDir = join(base, "state");
+      const environment = {
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        HOME: base,
+        KODEL_STATE_DIR: stateDir,
+      };
+      const adapter = new PipesSessionAdapter({
+        base: stateDir,
+        root: dir,
+        baseEnv: environment,
+        holder: { exec: process.execPath, args: [entry, "holder"] },
+        intermediate: { exec: process.execPath, args: [entry] },
+      });
+      const launcher = createSessionWorkerLauncher({
+        adapter,
+        self: { exec: process.execPath, args: [main] },
+        root: dir,
+        stateBase: stateDir,
+        environment,
+        rules: [],
+        servedTools: () => workerServedTools(storeRoot()),
+        which: async () => claude,
+        exec: (await import("../src/worker-launcher-session")).execChild,
+        platform: process.platform,
+        clock: Date.now,
+        uuid: () => UUID,
+      });
+      const h = host();
+      const started = await h.start({ pipeline: "one", task: "left alone", restart: false });
+      const runId = started.run.runId;
+      const before = readFileSync(join(dir, ".kodel", "runs", runId, "journal.jsonl"), "utf8");
+      const lines = () =>
+        readFileSync(seen, "utf8")
+          .trim()
+          .split("\n")
+          .map(
+            (line) =>
+              JSON.parse(line) as { prompt: string; code: number; stderr: string; stdout: string },
+          );
+
+      // The start: the launcher's check passes (the config is good then), the worker's server does not start.
+      await launcher.start({ runId, workdir: dir, title: "left alone" });
+      const first = (await adapter.list({ name: `kw-${runId}` }))[0];
+      if (!first) throw new Error("no record");
+      await adapter.wait(first.id, { timeoutMs: 30_000 });
+      expect(lines()[0]).toMatchObject({ code: 1, stdout: "" });
+      expect(lines()[0]?.stderr).toContain('"pipeline_strat"');
+      expect(lines()[0]?.prompt).toContain("If you have no pipeline_next_step tool");
+      // A dead worker, as the daemon and the TUI report one: it exited with a failure outside a wait.
+      const status = (await launcher.statuses([runId])).get(runId);
+      expect(status).toMatchObject({ state: "exited", exitCode: 1 });
+      const journal = journalOf(runId) as unknown as JournalRecord[];
+      expect(
+        resumeVerdict(
+          { runId, status: "running", waitsForPerson: false, marks: serveDecisionOf(journal) },
+          serveWorkerOf(status as WorkerStatus),
+          { refuseMoved: true },
+        ),
+      ).toEqual({ kind: "no", why: "not_at_wait" });
+      // The same at a resume: the session it resumes finds no kodel tool and stops.
+      writeFileSync(config, CONFIG);
+      await launcher.resume({ runId, workdir: dir, sessionId: UUID, decision: DECISION });
+      const second = (await adapter.list({ name: `kw-${runId}-d17` }))[0];
+      if (!second) throw new Error("no resume record");
+      await adapter.wait(second.id, { timeoutMs: 30_000 });
+      expect(lines()).toHaveLength(2);
+      expect(lines()[1]).toMatchObject({ code: 1, stdout: "" });
+      expect(lines()[1]?.prompt).toContain("may have changed since this session began");
+      // No tool was called: the run is as it was, byte for byte.
+      expect(readFileSync(join(dir, ".kodel", "runs", runId, "journal.jsonl"), "utf8")).toBe(
+        before,
+      );
+      expect((await (await host().open(runId))?.state())?.status).toBe("running");
     },
     90_000,
   );

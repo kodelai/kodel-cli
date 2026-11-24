@@ -737,8 +737,10 @@ describe("where a run works", () => {
 describe("the tool surface", () => {
   test("t40_contract_version_and_surface_snapshot", () => {
     // Bumped from 2 for pipeline_take_step, node_slug/subagents on next_step, claim_token on complete;
-    // from 3 for UNSUPPORTED_FORMAT_FEATURE and details.how_to_upgrade (T-41); from 4 for the history tools.
-    expect(CONTRACT_VERSION).toBe(6);
+    // from 3 for UNSUPPORTED_FORMAT_FEATURE and details.how_to_upgrade (T-41); from 4 for the history tools;
+    // from 5 for the attachment tools (T-45); from 6 for the roles of a server (5M9D): the manager tools,
+    // and pipeline_next_step marked a write.
+    expect(CONTRACT_VERSION).toBe(7);
     expect(TOOLS.map((t) => t.name)).toEqual([
       "pipeline_list",
       "pipeline_docs",
@@ -759,7 +761,7 @@ describe("the tool surface", () => {
       pipeline_resolve: [true, true],
       pipeline_plan: [true, true],
       pipeline_start: [false, true],
-      pipeline_next_step: [true, true],
+      pipeline_next_step: [false, true],
       pipeline_take_step: [false, false],
       pipeline_report_result: [false, false],
       pipeline_complete_step: [false, true],
@@ -834,7 +836,6 @@ describe("the tool surface", () => {
       "pipeline_docs",
       "pipeline_resolve",
       "pipeline_plan",
-      "pipeline_next_step",
     ]);
   });
 });
@@ -973,7 +974,8 @@ describe("over a real MCP connection", () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name)).toEqual(TOOLS.map((t) => t.name));
     const next = tools.find((t) => t.name === "pipeline_next_step");
-    expect(next?.annotations).toMatchObject({ readOnlyHint: true });
+    // It restarts orphaned engine work and records what was served: a write since 5M9D.
+    expect(next?.annotations).toMatchObject({ readOnlyHint: false });
     expect(next?.description).toContain("end your turn");
     expect(next?.inputSchema.required).toEqual(["run_id"]);
     await close();

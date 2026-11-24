@@ -6,6 +6,7 @@
  */
 export * from "./decision-tools";
 export * from "./history-tools";
+export * from "./manager-tools";
 export * from "./register";
 export * from "./task-tools";
 export * from "./tools";

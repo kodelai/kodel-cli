@@ -1,7 +1,7 @@
 /**
  * A background agent started the way the TUI's `s` starts it (TASK-9PNS), with the real `claude`: the
  * launcher's exact argv, lists, environment and `--mcp-config`, a real session record, and the real
- * `kodel mcp --no-decisions --no-wait-hint` behind it. One claim per test where it can be split, so a
+ * `kodel mcp --role worker --no-decisions --no-wait-hint` behind it. One claim per test where it can be split, so a
  * failure names it. Runs outside the sandbox only (`KODEL_AGENT_TESTS=1`): it needs `claude`, the
  * process table and the API.
  *
@@ -26,6 +26,7 @@ import { loadSessions } from "../../packages/cli/src/tui/load";
 import { openTasksForTui } from "../../packages/cli/src/tui/tasks-open";
 import { resumeOffer } from "../../packages/cli/src/tui/worker-resume";
 import { createWorkerOptions } from "../../packages/cli/src/tui/worker-start";
+import { workerServedTools } from "../../packages/cli/src/worker-factory";
 import { WORKER_TIMEOUT_MS, workerNameOf } from "../../packages/cli/src/worker-launcher";
 import {
   createSessionWorkerLauncher,
@@ -37,7 +38,6 @@ import {
   claudeConfigDir,
   projectFolderName,
 } from "../../packages/local/src/history/claude-code/locate";
-import { buildTaskTools, HISTORY_TOOLS, toolsFor } from "../../packages/pipeline-core/src/mcp";
 import {
   agentEnv,
   ENABLED,
@@ -128,17 +128,8 @@ async function setup(prompt?: string) {
     holder: { exec: process.execPath, args: [entry, "holder"] },
     intermediate: { exec: process.execPath, args: [entry] },
   });
-  const servedTools = [
-    ...toolsFor({ taskLink: true, attachments: true }).map((t) => t.name),
-    ...HISTORY_TOOLS.map((t) => t.name),
-    ...buildTaskTools({
-      comment: "append",
-      runs: "attach",
-      priorities: ["high", "normal", "low"],
-      statuses: [],
-      fields: [],
-    } as never).map((t) => t.name),
-  ];
+  // The set the worker's own server (`kodel mcp --role worker`) serves in this sandbox, as the CLI's launcher works it out.
+  const servedTools = await workerServedTools(join(sandbox.dir, ".kodel"));
   const uuid = randomUUID();
   const launcher = createSessionWorkerLauncher({
     adapter,

@@ -17,6 +17,7 @@ import {
   DEFAULT_WORKTREE_DIR,
   HISTORY_SECTION_KEYS,
   loadConfig,
+  loadMcpRoles,
 } from "../src";
 
 let dir: string;
@@ -65,6 +66,7 @@ describe("the project config", () => {
       storage: "project",
       engines: {},
       serve: { enabled: false, max_workers: 1, max_runs: 1, stalled_after_s: 1800, start: [] },
+      mcp: { roles: {} },
     });
   });
 
@@ -502,5 +504,125 @@ describe("the usage section", () => {
     }
     const tooMany = await failure(`history:\n  usage:\n    prices:\n${many}\n`);
     expect(tooMany.code).toBe("CONFIG_INVALID");
+  });
+});
+
+describe("5m9d the mcp block of the config", () => {
+  const rolesFailure = async (text: string) => {
+    await write(text);
+    const error = await loadMcpRoles(dir).catch((e: unknown) => e);
+    expect(error, text).toBeInstanceOf(KodelError);
+    expect((error as KodelError).code).toBe("CONFIG_INVALID");
+    return (error as KodelError).message;
+  };
+
+  test("5m9d_config_reads_the_overrides_of_both_roles", async () => {
+    expect((await loadConfig(dir)).mcp).toEqual({ roles: {} });
+    expect(await loadMcpRoles(dir)).toEqual({});
+    await write(
+      [
+        "mcp:",
+        "  roles:",
+        "    worker:",
+        "      remove: [pipeline_plan]",
+        "    manager:",
+        "      add: [pipeline_start, pipeline_next_step]",
+        "      remove: [history_stats]",
+        "",
+      ].join("\n"),
+    );
+    const roles = {
+      worker: { remove: ["pipeline_plan"] },
+      manager: { add: ["pipeline_start", "pipeline_next_step"], remove: ["history_stats"] },
+    };
+    expect((await loadConfig(dir)).mcp).toEqual({ roles });
+    expect(await loadMcpRoles(dir)).toEqual(roles);
+    // An empty block and an empty file are no block at all.
+    for (const text of ["mcp: {}\n", "mcp:\n  roles: {}\n", "", "version: 1\n"]) {
+      await write(text);
+      expect(await loadMcpRoles(dir), JSON.stringify(text)).toEqual({});
+      expect((await loadConfig(dir)).mcp).toEqual({ roles: {} });
+    }
+  });
+
+  test("5m9d_config_names_an_unknown_tool", async () => {
+    const error = await failure("mcp:\n  roles:\n    manager:\n      add: [pipeline_strat]\n");
+    expect(error.code).toBe("CONFIG_INVALID");
+    expect(error.message).toContain('"pipeline_strat"');
+    expect(await rolesFailure("mcp:\n  roles:\n    worker:\n      remove: [nope]\n")).toContain(
+      '"nope"',
+    );
+  });
+
+  test("5m9d_config_refuses_decision_tools_for_the_worker", async () => {
+    for (const name of ["pipeline_decide_gate", "pipeline_accept_change"]) {
+      const text = `mcp:\n  roles:\n    worker:\n      add: [${name}]\n`;
+      expect((await failure(text)).message).toContain(`"${name}"`);
+      expect(await rolesFailure(text)).toContain(`"${name}"`);
+    }
+  });
+
+  test("5m9d_config_refuses_removing_the_core_of_a_run", async () => {
+    for (const name of [
+      "pipeline_start",
+      "pipeline_next_step",
+      "pipeline_take_step",
+      "pipeline_complete_step",
+    ]) {
+      const text = `mcp:\n  roles:\n    worker:\n      remove: [${name}]\n`;
+      expect((await failure(text)).message).toContain(`"${name}"`);
+      expect(await rolesFailure(text)).toContain("a run cannot be worked without it");
+    }
+  });
+
+  test("5m9d_config_refuses_a_name_in_add_and_remove", async () => {
+    const text =
+      "mcp:\n  roles:\n    manager:\n      add: [pipeline_plan]\n      remove: [pipeline_plan]\n";
+    expect((await failure(text)).message).toContain('"pipeline_plan"');
+    expect(await rolesFailure(text)).toContain("both add and remove");
+  });
+
+  test("5m9d_the_mcp_block_is_strict_at_every_level", async () => {
+    for (const text of [
+      "mcp: null\n",
+      "mcp: []\n",
+      "mcp: yes\n",
+      "mcp:\n  role: {}\n",
+      "mcp:\n  roles: [worker]\n",
+      "mcp:\n  roles:\n    admin: {}\n",
+      "mcp:\n  roles:\n    worker:\n      adds: [pipeline_plan]\n",
+      "mcp:\n  roles:\n    worker:\n      add: pipeline_plan\n",
+      "mcp:\n  roles:\n    worker:\n      add: [1]\n",
+    ]) {
+      expect((await failure(text)).code).toBe("CONFIG_INVALID");
+      expect(await rolesFailure(text)).toContain("mcp");
+    }
+  });
+
+  test("5m9d_a_bad_block_elsewhere_is_not_the_mcp_readers", async () => {
+    // The whole config is refused, and the block that narrows the server is still read on its own.
+    const text =
+      "tasks:\n  enabled: maybe\nmcp:\n  roles:\n    manager:\n      remove: [history_stats]\n";
+    expect((await failure(text)).message).toContain("tasks");
+    expect(await loadMcpRoles(dir)).toEqual({ manager: { remove: ["history_stats"] } });
+    // With no mcp block a broken config narrows nothing, as before.
+    await write("tasks:\n  enabled: maybe\n");
+    expect(await loadMcpRoles(dir)).toEqual({});
+  });
+
+  test("5m9d_unparseable_config_stops_only_with_an_mcp_line", async () => {
+    // Not YAML at all, and no top-level `mcp:` line: nothing was narrowed, the reader gives no overrides.
+    await write("worktree: [unclosed\n");
+    expect(await loadMcpRoles(dir)).toEqual({});
+    await write("worktree: [unclosed\n  mcp: indented, so not the block\n");
+    expect(await loadMcpRoles(dir)).toEqual({});
+    // With the line the person narrowed the set and it cannot be read: the reader refuses.
+    for (const text of [
+      "worktree: [unclosed\nmcp:\n  roles: {}\n",
+      "mcp:\n  roles:\n    worker: {remove: [pipeline_plan\n",
+      "mcp : {roles: [\n",
+    ]) {
+      expect(await rolesFailure(text)).toContain("not valid YAML");
+    }
   });
 });

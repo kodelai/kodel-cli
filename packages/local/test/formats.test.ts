@@ -80,6 +80,24 @@ const V2_WORKER_RUNS = [V2_WORKER_LOST, V2_WORKER_OPEN];
  */
 const V2_MODEL_RUN = "r_0mwplbn3u_f9l6";
 /**
+ * The format-2 runs whose records carry the role of the server (5M9D, `scripts/take-v2-roles-fixture.mjs`,
+ * real `kodel mcp` servers): one started by a server with no role and worked by a worker's, one started
+ * by the worker's and left open at its first step.
+ */
+const V2_ROLES_FINISHED = "r_0mwsbvbls_qkaa";
+const V2_ROLES_OPEN = "r_0mwsbvf52_q1cs";
+const V2_ROLES_RUNS = [V2_ROLES_FINISHED, V2_ROLES_OPEN];
+/**
+ * The format-2 runs with a decision an agent made for the person (5M9D,
+ * `scripts/take-v2-manager-fixture.mjs`, real `kodel mcp` servers with `decisions.agent` on), all left
+ * open: a gate and a pipeline change decided through a manager's server (`decided_via: manager`), and a
+ * gate decided by an agent where the run is worked (no `decided_via`).
+ */
+const V2_MANAGER_GATE = "r_0mwtbx5bv_kyns";
+const V2_MANAGER_CHANGE = "r_0mwtbx7v2_cye8";
+const V2_MANAGER_OWN = "r_0mwtbx9p5_lbl7";
+const V2_MANAGER_RUNS = [V2_MANAGER_GATE, V2_MANAGER_CHANGE, V2_MANAGER_OWN];
+/**
  * The format-2 run with attachments (T-45, `scripts/take-v2-attachment-fixture.mjs`): two versions of a plan (the
  * first too short for the step's `attachment` check), a PNG, the gate and a later step.
  */
@@ -184,7 +202,9 @@ describe("the golden runs of the stored formats", () => {
       "v2",
       "v2-attachment",
       "v2-engine",
+      "v2-manager",
       "v2-model",
+      "v2-roles",
       "v2-worker",
     ]);
     expect(await runIds("v2-attachment")).toEqual([V2_ATTACHMENT_RUN]);
@@ -194,6 +214,8 @@ describe("the golden runs of the stored formats", () => {
     expect(await runIds("v2-engine")).toEqual([...V2_ENGINE_RUNS].sort());
     expect(await runIds("v2-worker")).toEqual([...V2_WORKER_RUNS].sort());
     expect(await runIds("v2-model")).toEqual([V2_MODEL_RUN]);
+    expect(await runIds("v2-roles")).toEqual([...V2_ROLES_RUNS].sort());
+    expect(await runIds("v2-manager")).toEqual([...V2_MANAGER_RUNS].sort());
   });
 
   test("formats_a_fixture_file_that_was_edited_fails_the_hash_list", async () => {
@@ -258,7 +280,11 @@ async function checkFormats(from: string): Promise<{ opened: number }> {
       expect(run).toBeDefined();
       const status = (await run?.state())?.status;
       expect(
-        format === "v1-open" || id === V2_ENGINE_OPEN || id === V2_WORKER_OPEN
+        format === "v1-open" ||
+          id === V2_ENGINE_OPEN ||
+          id === V2_WORKER_OPEN ||
+          id === V2_ROLES_OPEN ||
+          V2_MANAGER_RUNS.includes(id)
           ? ["running", "paused"]
           : ["completed"],
       ).toContain(String(status));
@@ -284,6 +310,8 @@ describe("every stored format against the current engine", () => {
         V2_RUNS.length +
         V2_ENGINE_RUNS.length +
         V2_WORKER_RUNS.length +
+        V2_ROLES_RUNS.length +
+        V2_MANAGER_RUNS.length +
         2,
     );
   });
@@ -297,7 +325,141 @@ describe("every stored format against the current engine", () => {
     await mkdir(join(copy, "v2"), { recursive: true });
     expect(await checkFormats(copy)).toEqual({
       opened:
-        V1_RUNS.length + V1_OPEN_RUNS.length + V2_ENGINE_RUNS.length + V2_WORKER_RUNS.length + 2,
+        V1_RUNS.length +
+        V1_OPEN_RUNS.length +
+        V2_ENGINE_RUNS.length +
+        V2_WORKER_RUNS.length +
+        V2_ROLES_RUNS.length +
+        V2_MANAGER_RUNS.length +
+        2,
+    });
+  });
+
+  test("5m9d_role_fixture_opens_and_its_open_run_goes_on", async () => {
+    await copyRuns("v2-roles");
+    const before = await hashTree(runsDir());
+    const reader = hostFor();
+    const finished = await reader.open(V2_ROLES_FINISHED);
+    expect((await finished?.state())?.status).toBe("completed");
+    // `status` and `report` read the role the records carry.
+    expect((await finished?.report())?.server_roles).toEqual({
+      started_by: "all",
+      steps: ["all", "worker"],
+    });
+    const opened = await reader.open(V2_ROLES_OPEN);
+    expect((await opened?.state())?.status).toBe("running");
+    expect((await opened?.report())?.server_roles).toEqual({
+      started_by: "worker",
+      steps: ["worker"],
+    });
+    expect(await hashTree(runsDir())).toEqual(before);
+
+    // The open run goes on in format 2; its workdir, a placeholder in the fixture, is made real.
+    await mkdir(root, { recursive: true });
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
+    git("init", "-q");
+    git("config", "user.email", "t@example.com");
+    git("config", "user.name", "T");
+    git("commit", "-q", "--allow-empty", "-m", "initial");
+    await writeState(V2_ROLES_OPEN, { ...(await readState(V2_ROLES_OPEN)), workdir: root });
+    const metaPath = join(runsDir(), V2_ROLES_OPEN, "meta.json");
+    const meta = JSON.parse(await readFile(metaPath, "utf8")) as Record<string, unknown>;
+    await writeFile(metaPath, `${JSON.stringify({ ...meta, workdir: root }, null, 2)}\n`);
+    const run = await hostFor().open(V2_ROLES_OPEN);
+    if (!run) throw new Error("the open run does not open");
+    // A hand-in through a server of another role: the record carries that role, the run decides as ever.
+    const done = await run.completeStep("write", 1, "done", undefined, {
+      name: "agent",
+      version: "1",
+      role: "manager",
+    });
+    expect(done.ok).toBe(true);
+    const state = await readState(V2_ROLES_OPEN);
+    expect(state.v).toBe(2);
+    expect((state.active as { node: string }[]).map((v) => v.node)).toEqual(["ship"]);
+    const journal = (await readFile(join(runsDir(), V2_ROLES_OPEN, "journal.jsonl"), "utf8"))
+      .split("\n")
+      .filter((line) => line.trim())
+      .map(
+        (line) => JSON.parse(line) as { event: string; v: number; executor?: { role?: string } },
+      );
+    expect(journal.every((record) => record.v === 2)).toBe(true);
+    expect(journal.findLast((r) => r.event === "agent_completed")?.executor?.role).toBe("manager");
+  });
+
+  test("5m9d_manager_decision_fixture_opens_and_its_open_run_goes_on", async () => {
+    await copyRuns("v2-manager");
+    const before = await hashTree(runsDir());
+    const reader = hostFor();
+    const journalOf = async (id: string) =>
+      (await readFile(join(runsDir(), id, "journal.jsonl"), "utf8"))
+        .split("\n")
+        .filter((line) => line.trim())
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+    // `status` and `report` read the runs; the report says what the agent decided for the person.
+    const gate = await reader.open(V2_MANAGER_GATE);
+    expect((await gate?.state())?.status).toBe("running");
+    expect((await gate?.report())?.agent_decisions).toEqual([
+      {
+        at: expect.any(Number),
+        what: "gate",
+        node: "approve",
+        decision: "approved",
+        instruction: "approve it",
+      },
+    ]);
+    expect((await gate?.report())?.server_roles).toEqual({
+      started_by: "worker",
+      steps: ["worker"],
+    });
+    const change = await reader.open(V2_MANAGER_CHANGE);
+    expect((await change?.state())?.status).toBe("running");
+    expect((await change?.report())?.agent_decisions).toEqual([
+      { at: expect.any(Number), what: "pipeline_change", instruction: "accept the change" },
+    ]);
+    const own = await reader.open(V2_MANAGER_OWN);
+    expect((await own?.state())?.status).toBe("running");
+    expect((await own?.report())?.agent_decisions).toHaveLength(1);
+    // The stored key itself: on the decisions made through the manager's server, and only there.
+    const via = async (id: string) =>
+      (await journalOf(id)).filter((r) => r.decided_by === "agent").map((r) => r.decided_via);
+    expect(await via(V2_MANAGER_GATE)).toEqual(["manager"]);
+    expect(await via(V2_MANAGER_CHANGE)).toEqual(["manager"]);
+    expect(await via(V2_MANAGER_OWN)).toEqual([undefined]);
+    // reading changed nothing on disk
+    expect(await hashTree(runsDir())).toEqual(before);
+
+    // The run a manager decided goes on in format 2; its workdir, a placeholder in the fixture, is made
+    // real. The journal is only appended to: the decision keeps its key.
+    await mkdir(root, { recursive: true });
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
+    git("init", "-q");
+    git("config", "user.email", "t@example.com");
+    git("config", "user.name", "T");
+    git("commit", "-q", "--allow-empty", "-m", "initial");
+    await writeState(V2_MANAGER_GATE, { ...(await readState(V2_MANAGER_GATE)), workdir: root });
+    const metaPath = join(runsDir(), V2_MANAGER_GATE, "meta.json");
+    const meta = JSON.parse(await readFile(metaPath, "utf8")) as Record<string, unknown>;
+    await writeFile(metaPath, `${JSON.stringify({ ...meta, workdir: root }, null, 2)}\n`);
+    const journalBefore = await readFile(join(runsDir(), V2_MANAGER_GATE, "journal.jsonl"), "utf8");
+    const run = await hostFor().open(V2_MANAGER_GATE);
+    if (!run) throw new Error("the open run does not open");
+    const done = await run.completeStep("ship", 1, "done", undefined, {
+      name: "agent",
+      version: "1",
+      role: "worker",
+    });
+    expect(done.ok).toBe(true);
+    const state = await readState(V2_MANAGER_GATE);
+    expect(state.v).toBe(2);
+    expect(state.status).toBe("completed");
+    const journalAfter = await readFile(join(runsDir(), V2_MANAGER_GATE, "journal.jsonl"), "utf8");
+    expect(journalAfter.startsWith(journalBefore)).toBe(true);
+    const journal = await journalOf(V2_MANAGER_GATE);
+    expect(journal.every((record) => record.v === 2)).toBe(true);
+    expect(journal.find((r) => r.event === "gate_decided")).toMatchObject({
+      decided_by: "agent",
+      decided_via: "manager",
     });
   });
 
