@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { redactText } from "@kodel-ai/pipeline-core";
-import { DEFAULT_MAX_TAIL_BYTES, runCommand } from "../src";
+import { DEFAULT_MAX_TAIL_BYTES, killTree, runCommand, type TreeLeader } from "../src";
 
 let dir: string;
 beforeEach(async () => {
@@ -260,4 +262,121 @@ describe("cnz6 the output kept from a command", () => {
     expect(result.tail.endsWith("z")).toBe(true);
     expect(result.tail).toContain("\r\n");
   });
+});
+
+describe("killTree signals a process group only while its leader lives", () => {
+  class FakeLeader extends EventEmitter implements TreeLeader {
+    exitCode: number | null = null;
+    signalCode: NodeJS.Signals | null = null;
+    constructor(readonly pid: number) {
+      super();
+    }
+    end(signal: NodeJS.Signals) {
+      this.signalCode = signal;
+      this.emit("exit");
+    }
+  }
+  const world = (pid = 4242) => {
+    const sent: [number, string][] = [];
+    const state = { alive: true };
+    const leader = new FakeLeader(pid);
+    const parts = {
+      kill: (target: number, signal: NodeJS.Signals) => void sent.push([target, signal]),
+      alive: () => state.alive,
+      graceMs: 30,
+      platform: "linux" as const,
+    };
+    return { sent, state, leader, parts };
+  };
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  test("ekav_kill_tree_leader_gone_before_the_grace_gets_no_group_sigkill", async () => {
+    const w = world();
+    killTree(w.leader, w.parts);
+    expect(w.sent).toEqual([[-4242, "SIGTERM"]]);
+    w.leader.end("SIGTERM");
+    await pause(80);
+    expect(w.sent).toEqual([[-4242, "SIGTERM"]]);
+  });
+
+  test("ekav_kill_tree_leader_that_ignores_sigterm_gets_sigkill", async () => {
+    const w = world();
+    killTree(w.leader, w.parts);
+    killTree(w.leader, w.parts); // asked again (the holder's watcher): one escalation, not two
+    await pause(80);
+    expect(w.sent).toEqual([
+      [-4242, "SIGTERM"],
+      [-4242, "SIGTERM"],
+      [-4242, "SIGKILL"],
+    ]);
+  });
+
+  test("ekav_kill_tree_looks_at_the_leader_again_before_the_sigkill", async () => {
+    // The exit was not reported yet (no event), but the process is gone: its group number may be another's.
+    const gone = world();
+    killTree(gone.leader, gone.parts);
+    gone.state.alive = false;
+    await pause(80);
+    expect(gone.sent).toEqual([[-4242, "SIGTERM"]]);
+
+    // reaped without the listener having run
+    const reaped = world();
+    killTree(reaped.leader, reaped.parts);
+    reaped.leader.exitCode = 0;
+    await pause(80);
+    expect(reaped.sent).toEqual([[-4242, "SIGTERM"]]);
+  });
+
+  test("ekav_kill_tree_signals_nothing_of_a_leader_that_has_ended", async () => {
+    const ended = world();
+    ended.leader.exitCode = 0;
+    killTree(ended.leader, ended.parts);
+    const dead = world();
+    dead.state.alive = false;
+    killTree(dead.leader, dead.parts);
+    await pause(80);
+    expect(ended.sent).toEqual([]);
+    expect(dead.sent).toEqual([]);
+  });
+
+  test("ekav_kill_tree_cancel_drops_the_pending_sigkill", async () => {
+    const w = world();
+    killTree(w.leader, w.parts)();
+    await pause(80);
+    expect(w.sent).toEqual([[-4242, "SIGTERM"]]);
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "ekav_kill_tree_real_leader_that_ends_on_sigterm_is_not_signalled_again",
+    async () => {
+      const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
+        stdio: "ignore",
+        detached: true,
+      });
+      await new Promise((resolve) => child.once("spawn", resolve));
+      const sent: [number, string][] = [];
+      const exited = new Promise((resolve) => child.once("exit", resolve));
+      killTree(child, {
+        graceMs: 300,
+        kill: (target, signal) => {
+          sent.push([target, signal]);
+          process.kill(target, signal);
+        },
+      });
+      await exited;
+      await pause(500);
+      expect(sent).toEqual([[-(child.pid as number), "SIGTERM"]]);
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "ekav_run_command_timeout_kills_a_command_that_ignores_sigterm",
+    async () => {
+      const code = "process.on('SIGTERM', () => {}); setTimeout(() => {}, 60000)";
+      const result = await run(`exec node -e "${code}"`, { timeoutMs: 500 });
+      expect(result.timedOut).toBe(true);
+      expect(result.exit).toBe(137);
+    },
+    15_000,
+  );
 });

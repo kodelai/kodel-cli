@@ -26,7 +26,7 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { AttachServer, type AttachTimers, realAttachTimers } from "./attach-server";
 import { KILL_GRACE_MS } from "./command";
-import { processIdentity } from "./process-table";
+import { processIdentity, sameProcess } from "./process-table";
 import type { HolderInput } from "./session-holder";
 import {
   readStatus,
@@ -251,6 +251,21 @@ export const descriptorWriter = (
 const duplicateWhereItIsADuplicate = (fd: number): number | undefined =>
   process.platform === "darwin" ? duplicateDescriptor(fd) : undefined;
 
+/** How the child's process group is signalled; tests replace it. */
+export interface PtyGroupSignals {
+  /** Called once at the start; the answer says, when asked later, whether the pid is still that live process. */
+  leader(pid: number): () => boolean;
+  kill(target: number, signal: NodeJS.Signals): void;
+}
+
+const systemGroupSignals: PtyGroupSignals = {
+  leader(pid) {
+    const identity = processIdentity(pid);
+    return () => sameProcess(pid, identity);
+  },
+  kill: (target, signal) => void process.kill(target, signal),
+};
+
 /**
  * The trait over a loaded module. `ownWrites` says the module's stream cannot be trusted with a program that
  * does not read (see `descriptorWriter`): it is so on macOS and on Linux alike, because libuv writes to a terminal
@@ -260,6 +275,7 @@ export const ptyFromModule = (
   module: RawPtyModule,
   ownWrites = true,
   duplicate: (fd: number) => number | undefined = duplicateWhereItIsADuplicate,
+  group: PtyGroupSignals = systemGroupSignals,
 ): Pty => ({
   spawn(request) {
     const raw = module.spawn(request.file, request.args, {
@@ -269,6 +285,7 @@ export const ptyFromModule = (
       cwd: request.cwd,
       env: request.env,
     });
+    const leads = group.leader(raw.pid);
     const socket = terminalWritable(raw);
     const throughStream: TerminalWrite = (bytes, done) => {
       if (!socket) {
@@ -314,8 +331,10 @@ export const ptyFromModule = (
       },
       kill(signal) {
         // The child leads a session of its own, so its pid is its process group; the module signals the pid alone.
+        // The group is signalled only while that leader lives: after its end the number may be another program's.
+        if (!leads()) return;
         try {
-          process.kill(-raw.pid, signal);
+          group.kill(-raw.pid, signal);
         } catch {
           // the group is gone
         }
@@ -399,6 +418,8 @@ export interface PtyHolderParts {
   onSignal?: (signal: HolderSignal, listener: () => void) => () => void;
   /** How long a child that was told to end has before it is killed. */
   killGraceMs?: number;
+  /** How the child's process group is signalled (the system's way by default). */
+  group?: PtyGroupSignals;
 }
 
 /**
@@ -454,7 +475,7 @@ export async function runPtyHolder(context: PtyHolderContext): Promise<number> {
   try {
     const loaded = await parts.load();
     if (!loaded.ok) return failBoot("holder_error", loaded.reason);
-    pty = ptyFromModule(loaded.pty);
+    pty = ptyFromModule(loaded.pty, true, undefined, parts.group);
   } catch (error) {
     return failBoot("holder_error", (error as Error).message);
   }
@@ -617,7 +638,10 @@ async function holdTerminal(
   const stopChild = (): void => {
     if (live.exited) return;
     child.kill("SIGTERM");
-    escalate ??= setTimeout(() => child.kill("SIGKILL"), parts.killGraceMs ?? KILL_GRACE_MS);
+    // Dropped at the child's exit (above), and asked again when it fires: nothing is signalled after the exit.
+    escalate ??= setTimeout(() => {
+      if (!live.exited) child.kill("SIGKILL");
+    }, parts.killGraceMs ?? KILL_GRACE_MS);
   };
   live.cleanups.push(() => {
     if (timer) clearTimeout(timer);

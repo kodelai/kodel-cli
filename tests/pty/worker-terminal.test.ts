@@ -488,13 +488,12 @@ async function workerScene(agentOptions: Partial<FakeTerminalAgentOptions> = {})
   };
   scenes.push({
     async dispose() {
+      // By pid, never by group: a stray's group may have lost its leader and be another program's by now.
       for (const pid of strays) {
-        for (const target of [-pid, pid]) {
-          try {
-            process.kill(target, "SIGKILL");
-          } catch {
-            // gone
-          }
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // gone
         }
       }
       for (const entry of await adapter.list().catch(() => [])) {

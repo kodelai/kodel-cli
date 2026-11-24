@@ -293,8 +293,8 @@ for a worker that ended while its run waited for the person; a new refutation li
 started for a run whose first agent's process still runs". The daemon gains one act on a session (`finish`).
 
 Other risks: the trust dialog of claude in a new worktree (unattended starts are blocked where the probe says
-one will come); the 7-day timeout signals only the child (`session-pty.ts:605-609`), so the wait command gets
-`--timeout 604800`; the daemon asks `run.inspect()` every cycle for each run with a live terminal worker (at
+one will come); a session's own timeout signals its child's process group, and only while its leader lives
+(`session-pty.ts`), not what the agent left in another group, so the wait command gets `--timeout 604800`; the daemon asks `run.inspect()` every cycle for each run with a live terminal worker (at
 most `max_runs`); the probes read a file of another product (`~/.claude.json`): an unknown shape is
 "unknown"; a terminal worker's `kodel mcp` lives as long as its session (up to 7 days), so a fix of the
 server reaches a live worker only when it is stopped and resumed (said in `docs/serve.md`; neither `doctor`
@@ -1307,8 +1307,9 @@ Steps 12 and 13 (the docs, the follow-up):
    nothing from it until `kodel task approve`.
 3. **An automatic wake-up** of a live worker that has not gone on after a decision (today: one log line and
    the card's line; nothing is typed).
-4. **A group kill on a session's own timeout**: the holder's timeout signals the child only
-   (`session-pty.ts`), so a `kodel wait` of a session killed by its 7-day timeout lives on to its own end.
+4. **A kill beyond the group on a session's own timeout**: a session's own timeout signals its child's
+   process group, and only while its leader lives (`session-pty.ts`), so a `kodel wait` in a group of its own
+   of a session killed by its 7-day timeout lives on to its own end.
 5. **Before a release, by hand** (`tests/README.md`, "Terminal workers: what the tests cannot show"): the
    real-PTY rows and the real-agent scenario that were written and not run, on the built file; Linux for
    spike criterion 10; a long conversation with compactions for criterion 8.
@@ -1510,3 +1511,28 @@ Review of the group rule (after step 12):
 - **Tests replaced:** `tA_stop_ends_a_group_only_orphan_*`, `tA_rm_after_the_group_is_stopped`,
   `tA_real_group_orphan_is_seen_and_stopped` and `t47_real_stop_ends_an_agent_behind_a_dead_wrapper` expected
   signals to a leaderless group; the tests named in the acceptance table expect none and the instruction.
+
+### `killTree` and the terminal holder's escalation follow the rule too (review of the stop rule)
+
+The review found that `killTree` (`command.ts`), used by the pipes holder's timeout, its "folder removed" path
+and `runCommand`'s timeout and abort, still sent `SIGKILL` to the group 2 s after `SIGTERM` by a timer nothing
+cleared, whether or not the leader had ended in between.
+
+- **`killTree` takes the child, not a pid.** It signals the group only while the child is not reaped by this
+  process (`exitCode` and `signalCode` are both unset, so the pid is still the child's own) and is a live
+  process; the pending `SIGKILL` is dropped at the child's `exit` and the same check is made again right
+  before it is sent. A second call for the same child sends `SIGTERM` again and keeps the one pending timer.
+  It returns what drops the pending signal. The first `SIGTERM` is under the same check: `runCommand`'s
+  timeout can fire after the shell's exit while its pipes are still read.
+- **The terminal holder** (`session-pty.ts`): the escalation timer was already cleared at the exit; it now
+  also looks at the exit when it fires, and the trait over the module signals the group (and the pid) only
+  while the pid is still the live process it started (identity read at the start).
+- **Stated limit:** a group member that ignores `SIGTERM` and outlives its leader is not killed by a timeout
+  or an abort; for a session the status names it (`leftover`), for a pipeline command nothing does.
+- **Docs:** the limit in `docs/session-formats.md` and the two places above that said "the timeout signals
+  only the child" now say what the code does: the child's process group, and only while its leader lives.
+- **Tests:** `ekav_kill_tree_*` and `ekav_run_command_timeout_kills_a_command_that_ignores_sigterm`
+  (`command.test.ts`), `ekav_pty_group_is_signalled_only_while_its_leader_lives`,
+  `ekav_pty_timeout_escalation_is_dropped_when_the_child_ends`,
+  `ekav_pty_timeout_kills_a_child_that_ignores_sigterm` (`session-pty.test.ts`). The cleanup of
+  `tests/pty/worker-terminal.test.ts` kills its strays by pid, never by group.

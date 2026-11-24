@@ -283,10 +283,14 @@ remove no socket and it cannot attach; nothing else differs.
   background agent of a run is a terminal session by default (`docs/serve.md`), this limit holds for every
   such worker; there is no retention rule beyond the tail's size. What the TUI's card shows of a tail is
   stripped and redacted again.
-- **A session's own timeout signals its child only.** A worker's terminal session lives 7 days at most; when
-  the holder ends it by that timeout, a process the agent left in another process group (a background `kodel
-  wait`, say) lives on to its own end (the wait command is given the same 7 days). `agent stop`, and the stop
-  at the end of a run, reach the child's descendants and its group.
+- **A session's own timeout signals its child's process group, and only while its leader lives.** The holder
+  sends `SIGTERM` to the group the child leads and, 2 seconds later, `SIGKILL` for what ignored it; that
+  second signal is dropped when the child ends and the child is looked at again right before it is sent, so
+  a group whose leader is gone is never signalled (a member that ignored `SIGTERM` is then left, and the
+  status names it as `leftover`). A worker's terminal session lives 7 days at most; when the holder ends it
+  by that timeout, a process the agent left in another process group (a background `kodel wait`, say) lives
+  on to its own end (the wait command is given the same 7 days). `agent stop`, and the stop at the end of a
+  run, reach the child's descendants as well.
 - **After more than 1 MiB of output** the replay starts in the middle. The client is first given the modes the
   program had switched on by then (mouse, focus events, bracketed paste, the kitty keyboard, application keys, the
   alternate screen, the hidden cursor), not colours, the cursor's place, the scroll region or the screen's content:

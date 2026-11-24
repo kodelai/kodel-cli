@@ -210,6 +210,8 @@ const start = (
       watchMs: 10,
       drainMs: 1,
       roots: { tmpDir: undefined, systemTmp: join(base, "none") },
+      // The fake terminal's pid is no process: its exit is the fake's to report, so until then it lives.
+      group: { leader: () => () => true, kill: () => {} },
       ...parts.extra,
     },
   });
@@ -1006,6 +1008,46 @@ describe("pty holder, fake terminal", () => {
     expect(world.lines.length).toBe(1);
     expect(world.lines[0]).toStartWith("HOLDER_BOOT_FAILED:");
     expect(removed).toBe(HOLDER_SIGNALS.length);
+  });
+
+  test("ekav_pty_group_is_signalled_only_while_its_leader_lives", () => {
+    const request = { file: "/bin/sh", args: [], cwd: "/", env: {}, cols: 80, rows: 24 };
+    const sent: [number, string][] = [];
+    const state = { lives: true };
+    const raw = new FakeRawPty();
+    const child = ptyFromModule({ spawn: () => raw }, false, undefined, {
+      leader: () => () => state.lives,
+      kill: (target, signal) => void sent.push([target, signal]),
+    }).spawn(request);
+    child.kill("SIGTERM");
+    expect(sent).toEqual([[-raw.pid, "SIGTERM"]]);
+    expect(raw.kills).toEqual(["SIGTERM"]);
+    // the leader is gone before the exit was reported: neither its group nor its pid is signalled
+    state.lives = false;
+    child.kill("SIGKILL");
+    expect(sent).toEqual([[-raw.pid, "SIGTERM"]]);
+    expect(raw.kills).toEqual(["SIGTERM"]);
+  });
+
+  test("ekav_pty_timeout_escalation_is_dropped_when_the_child_ends: no SIGKILL after the exit", async () => {
+    const world = start({ timeoutMs: 20 }, { extra: { killGraceMs: 40 } });
+    const spawn = await world.spawned();
+    await eventually(() => spawn.process.kills.includes("SIGTERM"));
+    spawn.process.exit(0, 15);
+    expect(await world.done).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(spawn.process.kills).toEqual(["SIGTERM"]);
+    expect(status()).toMatchObject({ state: "killed", reason: "timeout" });
+  });
+
+  test("ekav_pty_timeout_kills_a_child_that_ignores_sigterm", async () => {
+    const world = start({ timeoutMs: 20 }, { extra: { killGraceMs: 30 } });
+    const spawn = await world.spawned();
+    await eventually(() => spawn.process.kills.includes("SIGKILL"));
+    expect(spawn.process.kills).toEqual(["SIGTERM", "SIGKILL"]);
+    spawn.process.exit(0, 9);
+    expect(await world.done).toBe(0);
+    expect(status()).toMatchObject({ state: "killed", reason: "timeout" });
   });
 
   test("tA_pty_holder_signal_after_exit_changes_nothing: the child that ended by itself is not signalled", async () => {
