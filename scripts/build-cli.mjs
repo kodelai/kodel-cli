@@ -1,6 +1,7 @@
 // Builds the CLI bundles and stamps the commit into them, so a run can say which build served it.
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -21,9 +22,37 @@ const commit = (() => {
   }
 })();
 
-for (const [entry, out] of [
-  ["src/main.ts", "dist/kodel.js"],
-  ["src/hook-bin.ts", "dist/kodel-hook.js"],
+// The web UI's page script and styles go inside the CLI, so the package stays one file to run.
+const web = (() => {
+  const app = join(cli, "src", "web", "app");
+  const out = mkdtempSync(join(tmpdir(), "kodel-web-"));
+  try {
+    const built = spawnSync(
+      "bun",
+      [
+        "build",
+        join(app, "main.tsx"),
+        "--target",
+        "browser",
+        "--minify",
+        "--outfile",
+        join(out, "app.js"),
+      ],
+      { cwd: cli, stdio: "inherit" },
+    );
+    if (built.status !== 0) process.exit(built.status ?? 1);
+    return JSON.stringify({
+      js: readFileSync(join(out, "app.js"), "utf8"),
+      css: readFileSync(join(app, "app.css"), "utf8"),
+    });
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
+})();
+
+for (const [entry, out, extra] of [
+  ["src/main.ts", "dist/kodel.js", ["--define", `__KODEL_WEB_APP__=${web}`]],
+  ["src/hook-bin.ts", "dist/kodel-hook.js", []],
 ]) {
   const built = spawnSync(
     "bun",
@@ -41,6 +70,7 @@ for (const [entry, out] of [
       "#!/usr/bin/env node",
       "--define",
       `__KODEL_COMMIT__=${JSON.stringify(commit)}`,
+      ...extra,
     ],
     { cwd: cli, stdio: "inherit" },
   );

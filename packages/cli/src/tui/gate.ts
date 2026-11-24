@@ -114,6 +114,25 @@ export async function loadRunDetail(
 
 export const loadGateDetail = loadRunDetail;
 
+/**
+ * The card of any run that can be read: a gate or a run that is going on as `loadRunDetail` reads it,
+ * and otherwise (a pause, a finished run) the same facts without a question: its steps, its changes,
+ * its logs and the last words a step left.
+ */
+export async function loadRunCard(
+  source: GateSource,
+  runId: string,
+  now: number = Date.now(),
+  pick?: DecisionRef,
+): Promise<GateDetail | undefined> {
+  const card = await loadRunDetail(source, runId, now, pick);
+  if (card) return card;
+  const run = await source.open(runId);
+  if (!run) return undefined;
+  const [state, journal] = await Promise.all([run.state(), run.journal()]);
+  return build(run, state, journal, now, undefined);
+}
+
 /** What a card needs of what the engine said the run waits for. */
 type Waiting = { node_slug: string; prompt: string; instructions?: string };
 
@@ -161,7 +180,7 @@ async function build(
     position: positionOf(visits, node, waiting !== undefined),
     prompt: waiting?.prompt ?? "",
     ...(waiting?.instructions ? { instructions: waiting.instructions } : {}),
-    ...(waiting ? wordsOf(said, visits) : {}),
+    ...(waiting || state.status !== "running" ? wordsOf(said, visits) : {}),
     visits,
     checks: latestChecks(visits),
     changes: summarize(changed),

@@ -9,7 +9,7 @@
     "node": ">=22.19"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p packages/cli/src/web/app",
     "lint": "biome check .",
     "format": "biome format --write .",
     "test": "node scripts/test.mjs",

@@ -58,6 +58,12 @@ the attachments as they are now in `details`, and on a manager that refusal serv
 **No role** is the union of the two after the overrides. `pipeline_next_step` is listed with
 `readOnlyHint: false`: it restarts engine work whose owner is gone and records what the agent was shown.
 
+## Over HTTP
+
+`kodel web --mcp` serves the manager role at `/mcp` to a client on another machine that carries a token
+(`kodel web token add`; `--read-only` for a token that is served only the tools that write nothing). The role,
+the `mcp` block and `--read-only` apply as above; a client there is never a worker (`docs/web.md`).
+
 ## The `mcp` block
 
 ```yaml

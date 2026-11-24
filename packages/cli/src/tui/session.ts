@@ -215,6 +215,8 @@ export interface LogEntry {
   text: string;
   tool?: string;
   result?: { ok: boolean; ms?: number; size?: number; text?: string };
+  /** For a subagent: what it said and called in its own log, when that log can be read. */
+  children?: LogEntry[];
 }
 
 /** One entry of a run into a step, in the order it happened: the call list of the run. */

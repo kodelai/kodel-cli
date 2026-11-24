@@ -35,6 +35,10 @@ const ARGS: Record<string, string[]> = {
   "pipeline proposals apply": ["pipeline", "proposals", "apply", "none"],
   "pipeline proposals discard": ["pipeline", "proposals", "discard", "none"],
   "task approve": ["task", "approve", "KDL-NONE"],
+  "web pair": ["web", "pair"],
+  "web revoke": ["web", "revoke", "none"],
+  "web token add": ["web", "token", "add", "--name", "laptop"],
+  "web token revoke": ["web", "token", "revoke", "none"],
   "agent stop": ["agent", "stop", SESSION],
   "agent rm": ["agent", "rm", SESSION],
   // A name that is not valid: outside a session the command stops there, before it starts anything.
