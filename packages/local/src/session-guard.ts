@@ -79,7 +79,8 @@ export const parseGuardRows = (table: string): GuardRow[] => {
     const fields = nextFields(line, 4);
     if (fields === undefined) continue;
     const [pid, ppid, state, tty] = fields.words;
-    if (pid === undefined || ppid === undefined || state === undefined || tty === undefined) continue;
+    if (pid === undefined || ppid === undefined || state === undefined || tty === undefined)
+      continue;
     if (!/^\d+$/.test(pid) || !/^\d+$/.test(ppid)) continue;
     const args = fields.rest.trim();
     rows.push({
