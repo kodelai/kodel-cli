@@ -217,6 +217,8 @@ const start = (
 };
 
 const status = () => readStatus(dir) as Exclude<ReturnType<typeof readStatus>, string>;
+/** The record `kodel agent stop` leaves before it signals anything. */
+const STOP_RECORD = JSON.stringify({ v: 1, by: "stop", at: 1 });
 
 /**
  * Opens files until one of them gets the number `wanted`: a new file takes the lowest free number, which is the one
@@ -852,7 +854,7 @@ describe("pty holder, fake terminal", () => {
       [
         "stop",
         (_w, s) => {
-          writeFileSync(join(dir, "stop.json"), "{}");
+          writeFileSync(join(dir, "stop.json"), STOP_RECORD);
           s.process.exit(0, 15);
         },
         { state: "killed", reason: "stopped" },
@@ -882,7 +884,7 @@ describe("pty holder, fake terminal", () => {
     expect("sock" in status()).toBe(false);
   });
 
-  test("tA_pty_holder_signal_ends_as_stop: SIGTERM and SIGHUP stop the child, and the session ends with a record", async () => {
+  test("tA_pty_holder_signal_stops_the_child_and_names_the_signal: SIGTERM and SIGHUP stop the child, and the session ends with a record", async () => {
     expect([...HOLDER_SIGNALS]).toEqual(["SIGTERM", "SIGHUP"]);
     for (const signal of HOLDER_SIGNALS) {
       const listeners = new Map<string, () => void>();
@@ -925,6 +927,49 @@ describe("pty holder, fake terminal", () => {
       expect(removed, signal).toBe(HOLDER_SIGNALS.length);
       rmSync(join(dir, "status.json"));
     }
+  });
+
+  test("tA_pty_holder_signal_with_a_stop_record_is_a_stop: with a child, and before one", async () => {
+    // A stop that reaches the holder as a signal (the stop record is written first) is recorded as a stop.
+    const listeners = new Map<string, () => void>();
+    const world = start(
+      {},
+      {
+        extra: {
+          killGraceMs: 20,
+          onSignal: (name, listener) => {
+            listeners.set(name, listener);
+            return () => listeners.delete(name);
+          },
+        },
+      },
+    );
+    const spawn = await world.spawned();
+    writeFileSync(join(dir, "stop.json"), STOP_RECORD);
+    listeners.get("SIGTERM")?.();
+    spawn.process.exit(0, 15);
+    expect(await world.done).toBe(0);
+    expect(status()).toMatchObject({ state: "killed", reason: "stopped" });
+    expect("signal" in status()).toBe(false);
+    rmSync(join(dir, "status.json"));
+
+    // the signal is there before the child: none is started, and the record still names the stop
+    const early = start(
+      {},
+      {
+        extra: {
+          onSignal: (name, listener) => {
+            if (name === "SIGTERM") listener();
+            return () => {};
+          },
+        },
+      },
+    );
+    expect(await early.done).toBe(1);
+    expect(early.spawns.length).toBe(0);
+    expect(status()).toMatchObject({ state: "killed", reason: "stopped" });
+    expect("signal" in status()).toBe(false);
+    rmSync(join(dir, "stop.json"));
   });
 
   test("tA_pty_holder_signal_before_spawn_starts_no_child: the socket goes and the record ends", async () => {
@@ -1043,6 +1088,18 @@ describe("pty holder, fake terminal", () => {
     expect(HOLDER_SIGNALS.map((signal) => process.listenerCount(signal))).toEqual(
       signals.map((count) => count - 1),
     );
+    rmSync(join(dir, "status.json"));
+
+    // The same way out after a stop was asked for: the record names the stop, as every other end does.
+    const stopped = start();
+    const last = await stopped.spawned();
+    stopped.binder.state.flush = () => Promise.reject(new Error("boom at the end"));
+    writeFileSync(join(dir, "stop.json"), STOP_RECORD);
+    last.process.exit(0, 15);
+    expect(await stopped.done).toBe(1);
+    expect(status()).toMatchObject({ state: "killed", reason: "stopped" });
+    expect("sock" in status()).toBe(false);
+    rmSync(join(dir, "stop.json"));
   });
 
   test("tA_pty_final_record_write_failure_is_not_a_crash: a folder that cannot be written at the end", async () => {

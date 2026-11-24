@@ -190,11 +190,26 @@ export const isTerminalState = (state: SessionState): boolean => TERMINAL_STATES
 
 export type KilledReason = "stopped" | "timeout" | "start_late" | "rules_unknown" | "holder_error";
 
+/**
+ * Who asked for a stop: a person (`kodel agent stop`), or kodel itself when the run of the session was over
+ * (`finish`). A stop record that does not say is a person's: nobody else may be taken for the person's word.
+ */
+export type StopAsker = "person" | "finish";
+/** The `by` of a stop record, per asker. `stop` is what every record said before the askers were told apart. */
+export const STOP_BY: Readonly<Record<StopAsker, string>> = { person: "stop", finish: "finish" };
+export const stopAskerOf = (by: string): StopAsker => (by === STOP_BY.finish ? "finish" : "person");
+
 export interface SessionStatus {
   state: SessionState;
   exitCode?: number;
   signal?: string;
   reason?: KilledReason | "no_status" | "holder_gone";
+  /**
+   * Somebody asked for the session to be stopped, and who (the stop record). It is read beside whatever the
+   * record says of the end: a stop that ended only what a holder left behind (a record that was final already)
+   * changes no `reason`, and is a stop all the same. Never set while the session is live.
+   */
+  stoppedBy?: StopAsker;
   /** True when the child still runs although the session is over (a consumer treats it as unfinished). */
   childAlive?: boolean;
   lastOutputAt?: number;
@@ -218,8 +233,17 @@ export interface SessionSnapshot {
     | { state: SessionState; exitCode?: number; signal?: string; reason?: SessionStatus["reason"] };
   holderAlive: boolean;
   childAlive: boolean;
-  stop: "missing" | "unreadable" | "present";
+  /** The stop record: who asked, when it is there and can be read. */
+  stop: "missing" | "unreadable" | StopAsker;
 }
+
+/**
+ * Whether a person stopped the session. The stop record says so for any end the status record names (a holder
+ * that had recorded its own end before the person stopped what was left is stopped by the person too). A status
+ * that says `stopped` and names no asker (an adapter that keeps no stop record) is the person's.
+ */
+export const stoppedByPerson = (status: SessionStatus): boolean =>
+  status.stoppedBy === "person" || (status.reason === "stopped" && status.stoppedBy === undefined);
 
 export type DerivedStatus =
   | { ok: true; status: SessionStatus }
@@ -230,7 +254,9 @@ export const DEFAULT_START_GRACE_MS = 30_000;
 
 /**
  * The one decision table. Order matters: it is the order of the plan's design (no directory,
- * unreadable record, newer format, no status yet, terminal, running).
+ * unreadable record, newer format, no status yet, terminal, running). Every answer for a session that is
+ * over goes through `over`: the stop record is read for each of them, whatever the status record says, so
+ * no end hides who asked for a stop; one that cannot be read is `CANNOT_READ`, never "nobody asked".
  */
 export const deriveStatus = (
   snap: SessionSnapshot,
@@ -243,12 +269,14 @@ export const deriveStatus = (
   }
   if (snap.session.v > SESSION_FORMAT_VERSION) return { ok: false, code: "NEWER_FORMAT" };
   if (snap.status === "unreadable") return { ok: false, code: "CANNOT_READ" };
+  const over = (status: SessionStatus): DerivedStatus => {
+    if (snap.stop === "unreadable") return { ok: false, code: "CANNOT_READ" };
+    if (snap.stop !== "missing") status.stoppedBy = snap.stop;
+    return { ok: true, status };
+  };
   if (snap.status === "missing") {
     if (now - snap.session.started < graceMs) return { ok: true, status: { state: "starting" } };
-    return {
-      ok: true,
-      status: { state: "lost", reason: "no_status", childAlive: snap.childAlive },
-    };
+    return over({ state: "lost", reason: "no_status", childAlive: snap.childAlive });
   }
   const recorded = snap.status;
   if (isTerminalState(recorded.state)) {
@@ -257,28 +285,14 @@ export const deriveStatus = (
     if (recorded.signal !== undefined) status.signal = recorded.signal;
     if (recorded.reason !== undefined) status.reason = recorded.reason;
     if (snap.childAlive) status.childAlive = true;
-    return { ok: true, status };
+    return over(status);
   }
-  if (recorded.state === "starting") {
-    if (snap.holderAlive) return { ok: true, status: { state: "starting" } };
-    return {
-      ok: true,
-      status: { state: "lost", reason: "holder_gone", childAlive: snap.childAlive },
-    };
+  if (snap.holderAlive) return { ok: true, status: { state: recorded.state } };
+  // The holder went away without recording the end: a stop record says it was stopped, else it is lost.
+  if (recorded.state === "running" && snap.stop !== "missing") {
+    return over({ state: "killed", reason: "stopped", childAlive: snap.childAlive });
   }
-  // running
-  if (snap.holderAlive) return { ok: true, status: { state: "running" } };
-  if (snap.stop === "unreadable") return { ok: false, code: "CANNOT_READ" };
-  if (snap.stop === "present") {
-    return {
-      ok: true,
-      status: { state: "killed", reason: "stopped", childAlive: snap.childAlive },
-    };
-  }
-  return {
-    ok: true,
-    status: { state: "lost", reason: "holder_gone", childAlive: snap.childAlive },
-  };
+  return over({ state: "lost", reason: "holder_gone", childAlive: snap.childAlive });
 };
 
 /**
@@ -414,7 +428,11 @@ export interface SessionAdapter {
     opts?: { timeoutMs?: number; signal?: AbortSignal },
   ): Promise<SessionStatus & { timedOut?: boolean }>;
   tail(id: string, bytes?: number, stream?: TailStream): Promise<TailResult>;
-  stop(id: string): Promise<SessionStatus>;
+  /**
+   * `by` says who asks (a person, when absent). A person's stop is never replaced by a `finish`, and it
+   * replaces one: the stop record keeps the person's word.
+   */
+  stop(id: string, opts?: { by?: StopAsker }): Promise<SessionStatus>;
   remove(id: string): Promise<void>;
   list(filter?: { name?: string }): Promise<SessionListEntry[]>;
   /** Only with `capabilities().send`. Returns the bytes written; promises nothing about a program that does not read. */

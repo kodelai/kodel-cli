@@ -774,7 +774,7 @@ describe("t47 kodel agent start --resume", () => {
       [
         "the worker of a run",
         stopped({ name: "kw-r_0mw53d7fj_o2lc" }),
-        "is the agent of a run that you stopped: after your decision only s in kodel tui resumes it; kodel serve leaves it to you",
+        "is the agent of a run that you stopped: kodel serve leaves it to you; if it was at a wait and the run still goes, s in kodel tui resumes it after your decision",
       ],
       [
         "the resumed worker of a run",
@@ -813,10 +813,48 @@ describe("t47 kodel agent start --resume", () => {
     const kw = (over: Partial<SessionListEntry>) =>
       resumeProblem(stopped({ name: "kw-r_0mw53d7fj_o2lc", ...over }));
     const BOTH =
-      "when it ended at a wait, kodel serve or s in kodel tui resumes it after your decision";
+      "if it ended at a wait and the run still goes, kodel serve or s in kodel tui resumes it after your decision";
     const NOBODY = "did not end at a wait: nothing resumes it";
+    const YOURS = "that you stopped: kodel serve leaves it to you; if it was at a wait";
     const ends: [string, Partial<SessionListEntry>, string, string?][] = [
-      ["stopped by the person", {}, "only s in kodel tui resumes it", "kodel serve or s"],
+      ["stopped by the person", {}, YOURS, "kodel serve or s"],
+      [
+        "stopped by the person, as the stop record says",
+        { status: { state: "killed", reason: "stopped", stoppedBy: "person" } },
+        YOURS,
+        "kodel serve or s",
+      ],
+      // The holder had recorded its own end, and the person stopped what it left: theirs all the same.
+      [
+        "a timeout, then the person's stop",
+        { status: { state: "killed", reason: "timeout", stoppedBy: "person" } },
+        YOURS,
+        "kodel serve or s",
+      ],
+      [
+        "the holder gone, then the person's stop",
+        { status: { state: "lost", reason: "holder_gone", stoppedBy: "person" } },
+        YOURS,
+        "kodel serve or s",
+      ],
+      [
+        "a start that never came, then the person's stop",
+        { status: { state: "killed", reason: "start_late", stoppedBy: "person" } },
+        NOBODY,
+      ],
+      // Kodel ended it when its run was over: not the person's stop, and nothing to resume.
+      [
+        "ended by kodel with its run",
+        { status: { state: "killed", reason: "stopped", stoppedBy: "finish" } },
+        "that kodel ended when the run was over: nothing resumes it",
+        "you stopped",
+      ],
+      [
+        "a print worker ended by kodel with its run",
+        { mode: "pipes", status: { state: "killed", reason: "stopped", stoppedBy: "finish" } },
+        "that kodel ended when the run was over: nothing resumes it",
+        "you stopped",
+      ],
       ["quit", { status: { state: "exited", exitCode: 0 } }, BOTH],
       ["the holder told to end", { status: { state: "killed", signal: "SIGTERM" } }, BOTH],
       ["a timeout", { status: { state: "killed", reason: "timeout" } }, BOTH],

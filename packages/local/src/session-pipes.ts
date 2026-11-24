@@ -37,6 +37,7 @@ import {
   type SessionSpec,
   type SessionStatus,
   type StartResult,
+  type StopAsker,
   type TailResult,
   type TailStream,
   validateSpec,
@@ -83,9 +84,9 @@ import {
   replaceRecord,
   type SessionRecord,
   STATUS_FILE,
-  STOP_FILE,
   type StatusRecord,
   snapshotOf,
+  writeStop,
 } from "./session-records";
 import {
   connectSocket,
@@ -673,15 +674,15 @@ export class PipesSessionAdapter implements SessionAdapter {
     };
   }
 
-  async stop(id: string): Promise<SessionStatus> {
+  async stop(id: string, opts: { by?: StopAsker } = {}): Promise<SessionStatus> {
     const stored = this.storedSock(id);
-    const status = await this.stopNow(id);
+    const status = await this.stopNow(id, opts.by ?? "person");
     // The holder removes its socket on its way out; one that was killed could not.
     if (isTerminalState(status.state)) await this.sweep(id, stored);
     return status;
   }
 
-  private async stopNow(id: string): Promise<SessionStatus> {
+  private async stopNow(id: string, by: StopAsker): Promise<SessionStatus> {
     const dir = sessionDirOf(this.place, id);
     let before = this.settle(id);
     if (this.isForeign(dir)) {
@@ -701,7 +702,7 @@ export class PipesSessionAdapter implements SessionAdapter {
     const child = recorded.child;
     if (before.state !== "running" && !(before.childAlive && child)) return before;
     if (!child) return before;
-    if (!liveProcess(child.pid)) return this.stopGroup(id, child);
+    if (!liveProcess(child.pid)) return this.stopGroup(id, child, by);
 
     // The recorded identity must be the live process. Without a recorded identity, or when it cannot be read or
     // compared now, nothing is signalled: a pid may have been taken by a stranger.
@@ -719,18 +720,8 @@ export class PipesSessionAdapter implements SessionAdapter {
       throw new SessionError("IDENTITY_UNKNOWN", `cannot compare the identity of ${child.pid}`);
     }
     // Another process has the pid now: the session's child is gone (the group rule then finds a stranger).
-    if (!same) return this.stopGroup(id, child);
-    if (!existsSync(join(dir, STOP_FILE))) {
-      replaceRecord(
-        join(dir, STOP_FILE),
-        encodeRecord("stop", {
-          v: SESSION_FORMAT_VERSION,
-          by: "stop",
-          at: this.now(),
-          identity: now,
-        }),
-      );
-    }
+    if (!same) return this.stopGroup(id, child, by);
+    writeStop(dir, by, this.now(), now);
     const descendants = descendantsOf(child.pid).map((pid) => ({
       pid,
       identity: processIdentity(pid),
@@ -781,6 +772,7 @@ export class PipesSessionAdapter implements SessionAdapter {
   private async stopGroup(
     id: string,
     child: NonNullable<StatusRecord["child"]>,
+    by: StopAsker,
   ): Promise<SessionStatus> {
     const dir = sessionDirOf(this.place, id);
     const status = this.settle(id);
@@ -790,12 +782,7 @@ export class PipesSessionAdapter implements SessionAdapter {
     const answer = groupMembers(child.pid, record.started, child.identity, this.processes);
     if (!answer.known || answer.stranger || answer.members.length === 0) return this.settle(id);
     const members = answer.members;
-    if (!existsSync(join(dir, STOP_FILE))) {
-      replaceRecord(
-        join(dir, STOP_FILE),
-        encodeRecord("stop", { v: SESSION_FORMAT_VERSION, by: "stop", at: this.now() }),
-      );
-    }
+    writeStop(dir, by, this.now());
     /** The members that are still the processes of the listing: the same pid, group and start time. */
     const left = () => {
       const rows = this.processes.rows();

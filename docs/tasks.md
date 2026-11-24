@@ -385,7 +385,7 @@ is cut from `HEAD` at that moment, whether or not the dependency's branch has be
   again; a decision an agent made for you (`decisions.agent`: it goes on itself); a record of that decision that
   already exists, even one that died at boot (`kw-<run>-d<seq> ended`); no known session id; the TUI's own
   decision work still running its step. `kodel agent rm` of a resume record frees its name, so the same decision
-  is offered once more and `s`+`y` makes the record again; `kodel agent stop` of a print agent ends the offer (a terminal agent you stopped keeps it). A failed
+  is offered once more and `s`+`y` makes the record again; `kodel agent stop` of a print agent ends the offer (a terminal agent you stopped at the wait keeps it; one you stopped at work is over). A failed
   resume is one notice; the offer stays and `s`+`y` is the retry. A resume re-sends the conversation: on a
   subscription it counts against the plan's usage, with an API key it is the cache-miss tokens of the whole
   context; three gates of `dev.yaml` are three `s`+`y`.

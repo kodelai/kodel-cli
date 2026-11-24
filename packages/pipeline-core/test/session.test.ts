@@ -9,6 +9,10 @@ import {
   SESSION_ERROR_CODES,
   type SessionSnapshot,
   type SessionSpec,
+  type SessionStatus,
+  STOP_BY,
+  stopAskerOf,
+  stoppedByPerson,
   trackBracketedPaste,
   trackBracketedPasteChunk,
   validateSpec,
@@ -237,9 +241,9 @@ describe("deriveStatus", () => {
       ok: true,
       status: { state: "running" },
     });
-    expect(at(snap({ status: running, stop: "present", childAlive: true }))).toEqual({
+    expect(at(snap({ status: running, stop: "person", childAlive: true }))).toEqual({
       ok: true,
-      status: { state: "killed", reason: "stopped", childAlive: true },
+      status: { state: "killed", reason: "stopped", stoppedBy: "person", childAlive: true },
     });
     expect(at(snap({ status: running, stop: "unreadable" }))).toEqual({
       ok: false,
@@ -249,6 +253,129 @@ describe("deriveStatus", () => {
       ok: true,
       status: { state: "lost", reason: "holder_gone", childAlive: false },
     });
+  });
+
+  // Every end a status record can name, and every end a reader works out for a holder that is gone.
+  const ENDS: [string, Partial<SessionSnapshot>, SessionStatus][] = [
+    ["exited", { status: { state: "exited", exitCode: 0 } }, { state: "exited", exitCode: 0 }],
+    [
+      "killed by a stop",
+      { status: { state: "killed", reason: "stopped" } },
+      { state: "killed", reason: "stopped" },
+    ],
+    [
+      "killed by its timeout",
+      { status: { state: "killed", reason: "timeout" } },
+      { state: "killed", reason: "timeout" },
+    ],
+    [
+      "killed by a holder error",
+      { status: { state: "killed", reason: "holder_error" } },
+      { state: "killed", reason: "holder_error" },
+    ],
+    [
+      "killed by a signal",
+      { status: { state: "killed", signal: "SIGTERM" } },
+      { state: "killed", signal: "SIGTERM" },
+    ],
+    [
+      "killed: a start that came late",
+      { status: { state: "killed", reason: "start_late" } },
+      { state: "killed", reason: "start_late" },
+    ],
+    [
+      "killed: rules unknown",
+      { status: { state: "killed", reason: "rules_unknown" } },
+      { state: "killed", reason: "rules_unknown" },
+    ],
+    [
+      "lost, as a reader recorded it",
+      { status: { state: "lost", reason: "no_status" } },
+      { state: "lost", reason: "no_status" },
+    ],
+    [
+      "no status after the grace",
+      { status: "missing" },
+      { state: "lost", reason: "no_status", childAlive: false },
+    ],
+    [
+      "starting, holder gone",
+      { status: { state: "starting" } },
+      { state: "lost", reason: "holder_gone", childAlive: false },
+    ],
+  ];
+  const late = started + 30_000;
+
+  test("tA_derive_status_a_persons_stop_shows_whatever_the_record_says", () => {
+    for (const [label, over, status] of ENDS) {
+      // Nobody asked for a stop: no asker, and only the reason `stopped` alone reads as the person's.
+      const plain = at(snap(over), late);
+      expect(plain, label).toEqual({ ok: true, status });
+      expect(stoppedByPerson(status), label).toBe(status.reason === "stopped");
+      // The person's stop record is there (their stop ended what the holder had left): the end stays as it
+      // was recorded, and the status says a person stopped it.
+      for (const childAlive of [false, true]) {
+        const stopped = at(snap({ ...over, stop: "person", childAlive }), late);
+        expect(stopped.ok, label).toBe(true);
+        if (!stopped.ok) continue;
+        const { childAlive: _recorded, ...end } = status;
+        expect(stopped.status, label).toMatchObject({ ...end, stoppedBy: "person" });
+        expect(stopped.status.childAlive === true, label).toBe(childAlive);
+        expect(stoppedByPerson(stopped.status), label).toBe(true);
+      }
+    }
+    // A holder that went away while it ran, with the person's stop record.
+    const running = at(snap({ status: { state: "running" }, stop: "person" }), late);
+    expect(running).toEqual({
+      ok: true,
+      status: { state: "killed", reason: "stopped", stoppedBy: "person", childAlive: false },
+    });
+  });
+
+  test("tA_derive_status_a_finish_stop_is_not_the_persons", () => {
+    for (const [label, over, status] of ENDS) {
+      const finished = at(snap({ ...over, stop: "finish" }), late);
+      expect(finished, label).toEqual({ ok: true, status: { ...status, stoppedBy: "finish" } });
+      if (!finished.ok) continue;
+      // Also for a record whose reason is `stopped`: the stop record says kodel asked.
+      expect(stoppedByPerson(finished.status), label).toBe(false);
+    }
+    const running = at(snap({ status: { state: "running" }, stop: "finish" }), late);
+    expect(running).toEqual({
+      ok: true,
+      status: { state: "killed", reason: "stopped", stoppedBy: "finish", childAlive: false },
+    });
+    expect(running.ok && stoppedByPerson(running.status)).toBe(false);
+  });
+
+  test("tA_derive_status_an_unreadable_stop_record_is_never_nobody_asked", () => {
+    for (const [label, over] of ENDS) {
+      expect(at(snap({ ...over, stop: "unreadable" }), late), label).toEqual({
+        ok: false,
+        code: "CANNOT_READ",
+      });
+    }
+  });
+
+  test("tA_derive_status_a_live_session_names_no_stop", () => {
+    for (const stop of ["person", "finish", "unreadable"] as const) {
+      for (const state of ["starting", "running"] as const) {
+        expect(at(snap({ status: { state }, holderAlive: true, stop }))).toEqual({
+          ok: true,
+          status: { state },
+        });
+      }
+      expect(at(snap({ stop }), started + 1)).toEqual({ ok: true, status: { state: "starting" } });
+    }
+  });
+
+  test("tA_stop_record_by_names_the_asker", () => {
+    expect(STOP_BY).toEqual({ person: "stop", finish: "finish" });
+    expect(stopAskerOf("finish")).toBe("finish");
+    // `stop` is the person's, and so is anything this build does not know: nobody else is taken for the person.
+    for (const by of ["stop", "", "person", "daemon", "FINISH"]) {
+      expect(stopAskerOf(by), by).toBe("person");
+    }
   });
 });
 

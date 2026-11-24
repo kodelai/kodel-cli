@@ -603,7 +603,10 @@ describe("a worker in a terminal of its own, started through the launcher", () =
       expect(await s.adapter.status(worker.id)).toMatchObject({
         state: "killed",
         reason: "stopped",
+        // kodel ended it because its run was over: the stop record does not name the person
+        stoppedBy: "finish",
       });
+      expect((await launcher.statuses([run.runId])).get(run.runId)?.stopped).toBeUndefined();
       await until(
         () => !alive(worker.agent.pid) && !alive(background),
         "the agent and its background child to end",
@@ -834,6 +837,76 @@ describe("a worker in a terminal of its own, started through the launcher", () =
       const resumed = await until(() => s.agent.starts()[1], "the resumed agent to start");
       s.strays.push(resumed.pid);
       expect(resumed).toMatchObject({ session: worker.agent.session, resumed: true, tty: true });
+    },
+    240_000,
+  );
+
+  ptyTest(
+    "t47_real_persons_stop_of_what_a_final_record_left_is_left_to_the_person",
+    async () => {
+      const s = await workerScene({ ignoreHangup: true });
+      const run = await s.run("be stopped after the holder's own end", true);
+      const worker = await startWorker(s, run, "be stopped after the holder's own end");
+      // The holder is gone and its agent lives on (it ignores the hangup of its terminal). The record is the
+      // one a holder leaves that had written its own end before it went: a timeout, with the child still there.
+      process.kill(worker.holder, "SIGKILL");
+      await until(() => !alive(worker.holder), "the holder to end");
+      const statusFile = join(sessionDirOf(s.adapter.place, worker.id), "status.json");
+      const { sock: _sock, ...recorded } = JSON.parse(readFileSync(statusFile, "utf8"));
+      writeFileSync(
+        statusFile,
+        JSON.stringify({ ...recorded, state: "killed", reason: "timeout", since: Date.now() }),
+      );
+      await sleep(1_500);
+      expect(alive(worker.agent.pid)).toBe(true);
+      const left = await s.adapter.status(worker.id);
+      expect(left).toMatchObject({ state: "killed", reason: "timeout", childAlive: true });
+      expect(left.stoppedBy).toBeUndefined();
+      // The person's command ends what is left of it.
+      const shell = await s.shell();
+      const from = shell.begin(`${KODEL} agent stop ${worker.id}`);
+      await shell.sees("[y/N]", 60_000, from);
+      shell.type("y\r");
+      const done = await shell.finished(from, 120_000);
+      expect(done.code, done.shown).toBe(0);
+      expect(done.shown).toContain(`${worker.id}: stopped`);
+      await until(() => !alive(worker.agent.pid), "the agent to end");
+      // The record keeps the end its holder wrote; the status says a person stopped it, and so does every
+      // layer up to the view the daemon's rule reads.
+      const after = await s.adapter.status(worker.id);
+      expect(after).toMatchObject({ state: "killed", reason: "timeout", stoppedBy: "person" });
+      expect(after.childAlive).not.toBe(true);
+      const seen = (await s.launcher().statuses([run.runId])).get(run.runId) as WorkerStatus;
+      expect(seen).toMatchObject({
+        state: "killed",
+        stopped: true,
+        terminal: true,
+        endedBy: "timeout",
+        label: "stopped (after timeout)",
+      });
+      expect(seen.childAlive).toBeUndefined();
+      const verdict = async (opts: { refuseMoved: boolean; resumeStopped?: boolean }) =>
+        resumeVerdict(
+          {
+            runId: run.runId,
+            status: "running",
+            waitsForPerson: "waiting" in (await run.inspect()),
+            marks: decisionOf(await run.journal()),
+          },
+          // As in the scene above: the run was at its gate before its worker started.
+          serveWorkerOf({ ...seen, started: 0 }),
+          opts,
+        );
+      expect(await verdict({ refuseMoved: true })).toEqual({ kind: "no", why: "waiting_person" });
+      // The person decides: the daemon leaves the worker to them, and the TUI offers the resume.
+      await approve(shell, run.runId);
+      const decision = await decisionIn(run);
+      expect(await verdict({ refuseMoved: true })).toEqual({ kind: "no", why: "stopped" });
+      expect(await verdict({ refuseMoved: false, resumeStopped: true })).toMatchObject({
+        kind: "resume",
+        seq: decision.seq,
+      });
+      expect(s.agent.starts().length).toBe(1);
     },
     240_000,
   );

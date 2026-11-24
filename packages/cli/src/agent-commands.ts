@@ -23,6 +23,7 @@ import {
   type SessionListEntry,
   type SessionSpec,
   type StartResult,
+  stoppedByPerson,
   type TerminalSize,
 } from "@kodel-ai/pipeline-core";
 import { type Command, Option } from "commander";
@@ -151,7 +152,8 @@ const reasonWords = (reason: string): string => REASON_WORDS[reason] ?? reason.r
 
 /**
  * What a person reads as the state, with the detail in brackets: how it ended, or why it is not known. A session
- * that `stop` ended is "stopped", not "killed". A process that is still alive after the session is over is said so
+ * that `stop` ended is "stopped", not "killed"; so is one a person stopped after its holder had recorded another
+ * end (the person ended what was left of it), with that end after it: `stopped (after timeout)`. A process that is still alive after the session is over is said so
  * in whatever state it is, because the person (or a step) must not take that session for finished.
  */
 export const stateLabel = (entry: SessionListEntry): string => {
@@ -161,6 +163,10 @@ export const stateLabel = (entry: SessionListEntry): string => {
   const s = entry.status;
   const detail: string[] = [];
   let word: string = s.state;
+  const stoppedAfter =
+    s.stoppedBy === "person" &&
+    s.reason !== "stopped" &&
+    (s.state === "killed" || s.state === "lost");
   switch (s.state) {
     case "exited":
       if (s.exitCode !== undefined) detail.push(String(s.exitCode));
@@ -168,6 +174,11 @@ export const stateLabel = (entry: SessionListEntry): string => {
     case "killed":
       if (s.reason === "stopped") {
         word = "stopped";
+      } else if (stoppedAfter) {
+        word = "stopped";
+        if (s.reason !== undefined || s.signal !== undefined) {
+          detail.push(`after ${reasonWords(s.reason ?? (s.signal as string))}`);
+        }
       } else if (
         s.reason === "holder_error" ||
         s.reason === "rules_unknown" ||
@@ -180,7 +191,10 @@ export const stateLabel = (entry: SessionListEntry): string => {
       }
       break;
     case "lost":
-      if (s.reason !== undefined) detail.push(reasonWords(s.reason));
+      if (stoppedAfter) word = "stopped";
+      if (s.reason !== undefined) {
+        detail.push(`${stoppedAfter ? "after " : ""}${reasonWords(s.reason)}`);
+      }
       break;
     default:
       break;
@@ -235,13 +249,15 @@ const NEVER_AT_A_WAIT: readonly string[] = ["start_late", "rules_unknown"];
 
 /**
  * Who goes on with the agent of a run (`kw-<run>`), by the rule of `resumeVerdict`: one that still runs
- * needs nobody; one the person stopped is resumed only by `s` in the TUI; one that ended in another way
- * where it may have waited is resumed by the daemon too; any other end is a death, and nothing resumes it.
- * Whether it did end at a wait is the run's to say, so the text says "when".
+ * needs nobody; one the person stopped is never resumed by the daemon, and by `s` in the TUI only when the
+ * stop found it at a wait; one kodel ended because its run was over is resumed by nobody; one that ended in
+ * another way where it may have waited is resumed by the daemon too; any other end is a death, and nothing
+ * resumes it. Whether it did end at a wait, and whether the run still goes, is the run's to say and is not
+ * read here, so the text says "if".
  */
 function runAgentProblem(entry: SessionListEntry, ref: string): string {
   const head = `${ref} is the agent of a run`;
-  const { state, reason, childAlive } = entry.status;
+  const { state, reason, childAlive, stoppedBy } = entry.status;
   const terminal = entry.mode === "pty";
   if (state === "starting" || state === "running") {
     return terminal
@@ -251,16 +267,20 @@ function runAgentProblem(entry: SessionListEntry, ref: string): string {
   if (childAlive === true) {
     return `${head}, and its process still runs without a holder; stop it: kodel agent stop ${entry.id}`;
   }
-  // A print worker never waits alive: a stop of one found it at work, like any other kill.
-  if (terminal && state === "killed" && reason === "stopped") {
-    return `${head} that you stopped: after your decision only s in kodel tui resumes it; kodel serve leaves it to you`;
+  // Kodel ended it itself, and only ever when its run was over.
+  if (stoppedBy === "finish") {
+    return `${head} that kodel ended when the run was over: nothing resumes it`;
   }
   const mayHaveWaited = terminal
     ? !(state === "killed" && reason !== undefined && NEVER_AT_A_WAIT.includes(reason))
     : state === "exited";
+  // A print worker never waits alive: a stop of one found it at work, like any other kill.
+  if (mayHaveWaited && terminal && stoppedByPerson(entry.status)) {
+    return `${head} that you stopped: kodel serve leaves it to you; if it was at a wait and the run still goes, s in kodel tui resumes it after your decision`;
+  }
   return mayHaveWaited
-    ? `${head}: when it ended at a wait, kodel serve or s in kodel tui resumes it after your decision`
-    : `${head} that did not end at a wait: nothing resumes it; any agent continues the run`;
+    ? `${head}: if it ended at a wait and the run still goes, kodel serve or s in kodel tui resumes it after your decision`
+    : `${head} that did not end at a wait: nothing resumes it; any agent continues the run if it still goes`;
 }
 
 /**
@@ -538,8 +558,12 @@ export function registerAgentCommands(
       const id = target.id;
       await ctx.mustConfirm(`Stop agent ${plain(targetLabel(target))}?`);
       const status = await guard(() => all.stop(id));
+      // A session whose holder had recorded another end, and whose leftover this stop ended, is stopped too.
       const label =
-        status.state === "killed" && status.reason === "stopped"
+        (status.state === "killed" && status.reason === "stopped") ||
+        (status.stoppedBy === "person" &&
+          (status.state === "killed" || status.state === "lost") &&
+          status.childAlive !== true)
           ? "stopped"
           : `${status.state}${status.reason ? ` (${status.reason})` : ""}`;
       ctx.out(`${plain(id)}: ${label}\n`);

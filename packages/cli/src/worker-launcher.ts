@@ -60,7 +60,11 @@ export interface WorkerStatus {
   decisionSeq?: number;
   /** When the latest record's session last printed anything (milliseconds); absent when the record does not say. */
   lastOutputAt?: number;
-  /** A person stopped the latest record (`kodel agent stop`, the only writer of that reason): it is not a worker that died. */
+  /**
+   * A person stopped the latest record (`kodel agent stop`; the stop record says who asked, whatever end the
+   * status record names): it is not a worker that died. A session kodel ended because its run was over
+   * (`finish`) is stopped too, but not by the person, and does not carry this.
+   */
   stopped?: true;
   /**
    * The latest record's session is over (`lost` or `killed`) while its process still runs without a holder: the
@@ -130,10 +134,12 @@ export interface WorkerLauncher {
   statuses(runIds: readonly string[]): Promise<Map<string, WorkerStatus>>;
   progress(runId: string): Promise<WorkerProgress>;
   logs(runId: string, bytes?: number): Promise<string>;
+  /** Stops the latest record of a run for a person: it reads `stopped` from then on. */
   stop(runId: string): Promise<void>;
   /**
    * Ends the live session of a run that is over, with the processes it started. A session that is
-   * already stopped or gone is no error. It decides nothing about a run.
+   * already stopped or gone is no error. It decides nothing about a run, and it is not the person's
+   * stop: the record does not read as one the person stopped.
    */
   finish(runId: string): Promise<void>;
   /** Whether a person's terminal can be connected to the run's live record now, and which record that is. */

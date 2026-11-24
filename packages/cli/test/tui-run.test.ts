@@ -802,7 +802,7 @@ describe("t47 the screen hands its terminal to an agent and takes it back", () =
     launcher.exited("r_1", BASE + 5_000);
     exits.at(-1)?.({ code: 0, signal: null });
     expect(await gone.done).toBe(
-      "Back: agent kw-r_1 ended while you were in it (exited (0)). An agent that ended at a wait is resumed after your decision; one you stop with kodel agent stop is resumed only by s here.",
+      "Back: agent kw-r_1 ended while you were in it (exited (0)). An agent that ended at a wait is resumed after your decision; one you stop with kodel agent stop at a wait is resumed only by s here.",
     );
   });
 

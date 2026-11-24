@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { deriveStatus, encodeRecord, SessionError } from "@kodel-ai/pipeline-core";
+import { deriveStatus, encodeRecord, SessionError, stoppedByPerson } from "@kodel-ai/pipeline-core";
 import {
   groupMembers,
   liveProcess,
@@ -24,7 +24,13 @@ import {
 } from "../src/process-table";
 import { ensurePrivateDir } from "../src/session-paths";
 import { PipesSessionAdapter } from "../src/session-pipes";
-import { publishSession, replaceRecord, snapshotOf } from "../src/session-records";
+import {
+  publishSession,
+  readStop,
+  replaceRecord,
+  snapshotOf,
+  writeStop,
+} from "../src/session-records";
 
 const entry = join(import.meta.dir, "../src/session-holder-entry.ts");
 const tableAvailable = processIdentity(process.pid) !== undefined;
@@ -1126,6 +1132,128 @@ describe("a holder that went away: the child's process group", () => {
     },
     30_000,
   );
+});
+
+describe("who asked for a stop", () => {
+  const stopFile = (id: string) => join(adapter.place.dir, id, "stop.json");
+  const byOf = (id: string) => JSON.parse(readFileSync(stopFile(id), "utf8")).by as string;
+
+  test("tA_stop_record_keeps_the_persons_word", () => {
+    const dir = join(root, "session");
+    mkdirSync(dir);
+    expect(readStop(dir)).toBe("missing");
+    writeStop(dir, "finish", 1);
+    expect(readStop(dir)).toBe("finish");
+    // a second finish changes nothing, a person's stop replaces it, and nothing replaces the person's
+    writeStop(dir, "finish", 2);
+    expect(JSON.parse(readFileSync(join(dir, "stop.json"), "utf8"))).toEqual({
+      v: 1,
+      by: "finish",
+      at: 1,
+    });
+    writeStop(dir, "person", 3);
+    expect(readStop(dir)).toBe("person");
+    writeStop(dir, "finish", 4);
+    writeStop(dir, "person", 5);
+    expect(JSON.parse(readFileSync(join(dir, "stop.json"), "utf8"))).toEqual({
+      v: 1,
+      by: "stop",
+      at: 3,
+    });
+    // A record that cannot be read is not "nobody asked": a finish leaves it, a person's stop repairs it.
+    writeFileSync(join(dir, "stop.json"), "{}");
+    expect(readStop(dir)).toBe("unreadable");
+    writeStop(dir, "finish", 6);
+    expect(readStop(dir)).toBe("unreadable");
+    writeStop(dir, "person", 7);
+    expect(readStop(dir)).toBe("person");
+    // A record of a build from before the askers were told apart, or with a `by` this build does not know.
+    for (const by of ["stop", "somebody"]) {
+      writeFileSync(join(dir, "stop.json"), JSON.stringify({ v: 1, by, at: 1 }));
+      expect(readStop(dir), by).toBe("person");
+    }
+  });
+
+  tableTest("tA_stop_by_finish_is_stopped_but_not_by_the_person", async () => {
+    const { id } = await adapter.start(sh("sleep 60"));
+    expect((await adapter.wait(id, { timeoutMs: 300 })).state).toBe("running");
+    const stopped = await adapter.stop(id, { by: "finish" });
+    expect(stopped).toMatchObject({ state: "killed", reason: "stopped", stoppedBy: "finish" });
+    expect(stoppedByPerson(stopped)).toBe(false);
+    expect(byOf(id)).toBe("finish");
+    const [row] = await adapter.list();
+    expect(row?.status).toMatchObject({ state: "killed", reason: "stopped", stoppedBy: "finish" });
+    // The same stop without an asker is the person's.
+    const other = await adapter.start(sh("sleep 60"));
+    expect((await adapter.wait(other.id, { timeoutMs: 300 })).state).toBe("running");
+    const mine = await adapter.stop(other.id);
+    expect(mine).toMatchObject({ state: "killed", reason: "stopped", stoppedBy: "person" });
+    expect(stoppedByPerson(mine)).toBe(true);
+    expect(byOf(other.id)).toBe("stop");
+  });
+
+  /**
+   * A session whose holder recorded a final state and went away while the program still runs: a real holder
+   * is killed, and the record it would have left is written in its place.
+   */
+  const leftBehind = async (end: { reason?: "timeout" | "holder_error"; signal?: string }) => {
+    const { id } = await adapter.start(sh("sleep 60"));
+    expect((await adapter.wait(id, { timeoutMs: 300 })).state).toBe("running");
+    const statusFile = join(adapter.place.dir, id, "status.json");
+    const stored = JSON.parse(readFileSync(statusFile, "utf8"));
+    process.kill(stored.holder.pid, "SIGKILL");
+    await eventually(() => !liveProcess(stored.holder.pid));
+    expect(liveProcess(stored.child.pid)).toBe(true);
+    const { sock: _sock, ...rest } = stored;
+    replaceRecord(
+      statusFile,
+      encodeRecord("status", { ...rest, state: "killed", ...end, since: Date.now() }),
+    );
+    return { id, child: stored.child.pid as number };
+  };
+
+  for (const end of [
+    { reason: "timeout" },
+    { reason: "holder_error" },
+    { signal: "SIGTERM" },
+  ] as const) {
+    const label = "reason" in end ? end.reason : "signal";
+    tableTest(
+      `tA_a_persons_stop_of_what_a_final_record_left_reads_stopped_${label}`,
+      async () => {
+        const { id, child } = await leftBehind(end);
+        try {
+          const before = await adapter.status(id);
+          expect(before).toMatchObject({ state: "killed", ...end, childAlive: true });
+          expect(before.stoppedBy).toBeUndefined();
+          expect(stoppedByPerson(before)).toBe(false);
+          // Kodel's own end of a finished run comes first here; the person's stop still wins below.
+          writeStop(join(adapter.place.dir, id), "finish", 1);
+          expect((await adapter.status(id)).stoppedBy).toBe("finish");
+          const stopped = await adapter.stop(id);
+          await eventually(() => !liveProcess(child), 6_000);
+          // The record keeps the end its holder wrote, and the status says a person stopped it.
+          expect(stopped).toMatchObject({ state: "killed", ...end, stoppedBy: "person" });
+          expect(stopped.childAlive).toBeFalsy();
+          expect(stoppedByPerson(stopped)).toBe(true);
+          expect(byOf(id)).toBe("stop");
+          const [row] = await adapter.list();
+          expect(row?.status).toMatchObject({ state: "killed", ...end, stoppedBy: "person" });
+          expect(row?.status.childAlive).toBeFalsy();
+          // A finish that comes after it does not take the person's word away.
+          await adapter.stop(id, { by: "finish" }).catch(() => {});
+          expect((await adapter.status(id)).stoppedBy).toBe("person");
+        } finally {
+          try {
+            process.kill(child, "SIGKILL");
+          } catch {
+            // gone
+          }
+        }
+      },
+      30_000,
+    );
+  }
 });
 
 describe("a resumed session takes the name of the one it continues", () => {

@@ -364,6 +364,48 @@ describe("t44 a worker in a terminal that ended (T-47)", () => {
     ).toBe("dead");
   });
 
+  test("t44_a_persons_stop_is_never_resumed_by_the_daemon_whatever_the_record_says", () => {
+    // The holder had recorded its own end (or was gone) and the person stopped what it left: the record
+    // keeps that end, the worker is the person's all the same. Every end at which the agent may have waited.
+    for (const [what, end] of ENDS) {
+      const stopped = terminal({ ...end, stopped: true });
+      // Every time the worker may have ended at: at the wait, and after the decision without going on.
+      for (const since of [4_500, 5_000, 5_001, 12_000]) {
+        const w = { ...stopped, since, lastOutputAt: 4_200 };
+        expect(resumeVerdict(run(), w, { refuseMoved: true }), `${what} at ${since}`).toEqual({
+          kind: "no",
+          why: "stopped",
+        });
+        // The same worker without the person's stop is the one the daemon resumes.
+        expect(verdict(run(), { ...w, stopped: undefined }), `${what} at ${since}`).toBe("resume");
+        // The TUI offers it.
+        expect(
+          resumeVerdict(run(), w, { refuseMoved: false, resumeStopped: true }),
+          `${what} at ${since}`,
+        ).toMatchObject({ kind: "resume", seq: 4 });
+      }
+      // Until the decision it waits like any other, and keeps its run.
+      expect(verdict(run({ waitsForPerson: true }, WAITING), stopped), what).toBe("waiting_person");
+      expect(verdict(run({}, WAITING), stopped), what).toBe("undecided");
+      // Stopped at work, before any wait: a session that is over.
+      expect(verdict(run(), { ...stopped, since: 3_000 }), what).toBe("dead");
+      // A run that is over is over.
+      expect(verdict(run({ status: "completed" }), stopped), what).toBe("over");
+    }
+    // No option but the TUI's own returns `resume` for a worker the person stopped.
+    for (const refuseMoved of [true, false]) {
+      for (const [what, end] of ENDS) {
+        const v = resumeVerdict(run(), terminal({ ...end, stopped: true }), { refuseMoved });
+        expect(v.kind, what).toBe("no");
+      }
+    }
+    // A session kodel ended because its run was over is stopped, but not by the person: the rule reads its
+    // end alone (an open run with such a worker is one whose worker ended, and it is resumed at a decision).
+    const finished = terminal({ state: "killed", label: "stopped", endedBy: "stopped" });
+    expect(verdict(run({ status: "completed" }), finished)).toBe("over");
+    expect(verdict(run(), finished)).toBe("resume");
+  });
+
   test("t44_ended_before_the_decision_and_moved_is_not_a_death", () => {
     // It ended at W1 before D1; then another agent worked the run (an agent's line after D1).
     for (const [what, end] of ENDS) {

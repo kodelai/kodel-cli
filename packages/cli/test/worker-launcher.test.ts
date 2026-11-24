@@ -31,10 +31,12 @@ import {
   type UnattendedEngines,
 } from "@kodel-ai/local";
 import {
+  deriveStatus,
   type JournalRecord,
   KodelError,
   SessionError,
   type SessionListEntry,
+  type SessionSnapshot,
   validateSpec,
 } from "@kodel-ai/pipeline-core";
 import { decisionTools, HISTORY_TOOLS, TOOLS } from "@kodel-ai/pipeline-core/mcp";
@@ -1558,12 +1560,36 @@ describe("t44 the launcher for kodel serve", () => {
         childAlive: true,
       });
     }
-    // after the person's stop the process is gone, and so is the mark
-    adapter.finish(first.id, { state: "killed", reason: "stopped" });
-    const stopped = (await launcher.statuses([RUN])).get(RUN);
-    expect(stopped?.stopped).toBe(true);
-    expect("childAlive" in (stopped ?? {})).toBe(false);
-    expect("childAlive" in ((await viewOf()) ?? {})).toBe(false);
+    // After the person's stop the process is gone, and so is the mark. The status is the one the decision
+    // table derives from the records the stop leaves, for each record the holder may have written before it:
+    // none of its end (it went away while it ran), or a final one that the stop does not rewrite.
+    for (const recorded of [
+      { state: "running" },
+      { state: "killed", reason: "stopped" },
+      { state: "killed", reason: "timeout" },
+      { state: "killed", reason: "holder_error" },
+      { state: "killed", signal: "SIGTERM" },
+    ] as const) {
+      const label = JSON.stringify(recorded);
+      const derived = deriveStatus(
+        {
+          exists: true,
+          session: { v: 1, started: 1 },
+          status: recorded,
+          holderAlive: false,
+          childAlive: false,
+          stop: "person",
+        },
+        60_000,
+      );
+      if (!derived.ok) throw new Error(`${label}: ${derived.code}`);
+      adapter.finish(first.id, derived.status);
+      const stopped = (await launcher.statuses([RUN])).get(RUN);
+      expect(stopped?.stopped, label).toBe(true);
+      expect("childAlive" in (stopped ?? {}), label).toBe(false);
+      expect("childAlive" in ((await viewOf()) ?? {}), label).toBe(false);
+      expect((await viewOf())?.stopped, label).toBe(true);
+    }
     // `childAlive: false`, as a record whose holder is gone spells it, is not the mark either
     adapter.finish(first.id, { state: "lost", reason: "holder_gone", childAlive: false });
     expect("childAlive" in ((await viewOf()) ?? {})).toBe(false);
@@ -2484,6 +2510,145 @@ describe("t47 the id of a worker's conversation", () => {
     expect(serveWorkerOf(signalled as WorkerStatus).endedBy).toBe("signal");
     // An exit names neither.
     expect(workerStatusOf([entry({ state: "exited", exitCode: 0 })])?.endedBy).toBeUndefined();
+    // Kodel's own end of a finished run's session is a stop, but not the person's: no `stopped` mark.
+    const finished = workerStatusOf([
+      entry({ state: "killed", reason: "stopped", stoppedBy: "finish" }),
+    ]);
+    expect(finished).toMatchObject({ endedBy: "stopped", label: "stopped", terminal: true });
+    expect(finished?.stopped).toBeUndefined();
+    expect(serveWorkerOf(finished as WorkerStatus).stopped).toBeUndefined();
+    // The person's stop of what a holder left after its own end: the end stays, the mark is the person's.
+    const after = workerStatusOf([
+      entry({ state: "killed", reason: "timeout", stoppedBy: "person" }),
+    ]);
+    expect(after).toMatchObject({
+      stopped: true,
+      endedBy: "timeout",
+      label: "stopped (after timeout)",
+    });
+  });
+
+  test("t47_a_persons_stop_of_what_a_final_record_left_is_never_resumed_by_the_daemon", () => {
+    // From the records to the daemon's rule, through every layer between: the decision table of the session
+    // records, `kodel agent ls --json` and its reader, the worker status and the view the daemon reads.
+    const journal = [
+      { v: 2, seq: 1, ts: 1_000, event: "run_started" },
+      { v: 2, seq: 2, ts: 4_000, event: "gate_waiting", node: "g" },
+      { v: 2, seq: 3, ts: 5_000, event: "gate_decided", node: "g", decision: "approved" },
+    ] as Parameters<typeof decisionOf>[0];
+    const waiting = journal.slice(0, 2);
+    const run = (records: typeof journal, waitsForPerson = false) => ({
+      runId: RUN,
+      status: "running" as const,
+      waitsForPerson,
+      marks: decisionOf(records),
+    });
+    const through = (snap: Partial<SessionSnapshot>, mode: "pty" | "pipes" = "pty") => {
+      const derived = deriveStatus(
+        {
+          exists: true,
+          session: { v: 1, started: 1_000 },
+          status: "missing",
+          holderAlive: false,
+          childAlive: false,
+          stop: "missing",
+          ...snap,
+        },
+        60_000,
+      );
+      if (!derived.ok) throw new Error(derived.code);
+      const listed: SessionListEntry = {
+        id: "a_000000001_fake",
+        name: `kw-${RUN}`,
+        command: "claude",
+        mode,
+        agent: { engine: "claude", session: UUID, source: "chosen" },
+        // the holder's own time of the end is not the snapshot's to say
+        status: { ...derived.status, since: 4_500 },
+      };
+      const parsed = parseEntry(JSON.parse(JSON.stringify(listed)));
+      if (parsed === undefined) throw new Error("the entry was dropped");
+      const status = workerStatusOf([parsed]);
+      if (status === undefined) throw new Error("no worker");
+      return serveWorkerOf({ ...status, started: 1_000 });
+    };
+    const daemon = (worker: ReturnType<typeof through>, records = journal, waits = false) => {
+      const v = resumeVerdict(run(records, waits), worker, { refuseMoved: true });
+      return v.kind === "resume" ? "resume" : v.why;
+    };
+    const tui = (worker: ReturnType<typeof through>) =>
+      resumeVerdict(run(journal), worker, { refuseMoved: false, resumeStopped: true }).kind;
+    // Every record a holder may have left before the person stopped what was left of the session.
+    const records: Exclude<SessionSnapshot["status"], "unreadable">[] = [
+      { state: "running" },
+      { state: "starting" },
+      "missing",
+      { state: "killed", reason: "stopped" },
+      { state: "killed", reason: "timeout" },
+      { state: "killed", reason: "holder_error" },
+      { state: "killed", signal: "SIGTERM" },
+      { state: "killed", signal: "SIGHUP" },
+      { state: "lost", reason: "holder_gone" },
+      { state: "lost", reason: "no_status" },
+      { state: "exited", exitCode: 0 },
+    ];
+    for (const status of records) {
+      const label = JSON.stringify(status);
+      // While its process still runs it is alive for every rule, whoever asked for whatever.
+      if (status !== "missing" && status.state !== "exited") {
+        for (const stop of ["missing", "person", "finish"] as const) {
+          expect(daemon(through({ status, stop, childAlive: true })), label).toBe("child_alive");
+        }
+      }
+      // The person's stop: never resumed by the daemon, before or after the decision; the TUI offers it.
+      const stopped = through({ status, stop: "person" });
+      expect(stopped.stopped, label).toBe(true);
+      expect(daemon(stopped), label).toBe("stopped");
+      expect(daemon(stopped, waiting, true), label).toBe("waiting_person");
+      expect(tui(stopped), label).toBe("resume");
+      // Its run place: kept until the decision, free from then on. Its worker place: free.
+      const place = (records: typeof journal, waits: boolean) =>
+        servePlaces([{ ...run(records, waits), canNote: true, noted: [], worker: stopped }]);
+      expect(place(waiting, true), label).toEqual({ workers: 0, runs: [RUN] });
+      expect(place(journal, false), label).toEqual({ workers: 0, runs: [] });
+      // A print worker the person stopped is a session that is over (one that exited is not `gone`:
+      // the person's stop still keeps it from the daemon).
+      const print = through({ status, stop: "person" }, "pipes");
+      expect(daemon(print), label).toBe(
+        status !== "missing" && status.state === "exited" ? "stopped" : "dead",
+      );
+      // The same records without the person's stop, and with kodel's own stop of a finished run: not the
+      // person's. What the rule answers then is the end's own business, never `stopped`.
+      for (const stop of ["missing", "finish"] as const) {
+        const other = through({ status, stop });
+        const recordedStop =
+          stop === "missing" && status !== "missing" && status.reason === "stopped";
+        expect(other.stopped === true, `${label} ${stop}`).toBe(recordedStop);
+        if (!recordedStop) expect(daemon(other), `${label} ${stop}`).toBe("resume");
+      }
+    }
+    // A stop record that cannot be read is never "nobody asked": the worker is unknown, and nothing resumes it.
+    const unreadable = deriveStatus(
+      {
+        exists: true,
+        session: { v: 1, started: 1_000 },
+        status: { state: "killed", reason: "timeout" },
+        holderAlive: false,
+        childAlive: false,
+        stop: "unreadable",
+      },
+      60_000,
+    );
+    expect(unreadable).toEqual({ ok: false, code: "CANNOT_READ" });
+    const problem = workerStatusOf([
+      {
+        id: "a_000000001_fake",
+        name: `kw-${RUN}`,
+        status: { state: "lost" },
+        problem: "CANNOT_READ",
+      },
+    ]);
+    expect(daemon(serveWorkerOf(problem as WorkerStatus))).toBe("unknown");
   });
 
   test("t47_session_id_never_from_the_screen", async () => {
@@ -2805,7 +2970,16 @@ describe("t47 one live worker a run", () => {
     await launcher.start({ runId: RUN, workdir: WORKTREE, title: "t" });
     const session = adapter.only();
     await launcher.finish(RUN);
-    expect(session.status).toMatchObject({ state: "killed", reason: "stopped" });
+    // Stopped, and the stop names kodel, not the person: the worker does not read as one the person stopped.
+    expect(session.status).toEqual({ state: "killed", reason: "stopped", stoppedBy: "finish" });
+    expect((await launcher.statuses([RUN])).get(RUN)?.stopped).toBeUndefined();
+    // The launcher's own `stop` is the person's.
+    const own = new ScriptedSessionAdapter();
+    const mine = createSessionWorkerLauncher(terminalDeps(own));
+    await mine.start({ runId: RUN, workdir: WORKTREE, title: "t" });
+    await mine.stop(RUN);
+    expect(own.only().status).toEqual({ state: "killed", reason: "stopped", stoppedBy: "person" });
+    expect((await mine.statuses([RUN])).get(RUN)?.stopped).toBe(true);
     // Again, on a session that is stopped already, and on one that exited by itself.
     await launcher.finish(RUN);
     adapter.finish(session.id, { state: "exited", exitCode: 0 });

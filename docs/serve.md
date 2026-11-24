@@ -178,7 +178,12 @@ or ends`. When the count falls, the waiting resumes and starts follow.
 runs", `docs/session-formats.md`) holds both places and is never resumed, finished or noted as gone: a
 second agent must not be started beside the first. The daemon says once `kw-…: its process still runs
 without a holder; stop it: kodel agent stop <id>`, and the card says the same. After your stop the worker
-reads `stopped`: both places are free, and the daemon leaves it alone (`s` in the TUI resumes it). Where the
+reads `stopped` (`stopped (after timeout)`, say, when its holder had recorded another end before you stopped
+what it left) and holds no `max_workers` place. Its `max_runs` place goes by where your stop found it. At work:
+it is a session that is over, the place is free at once and nothing resumes it. At a wait you have not decided:
+the run keeps its place, like any run whose worker ended there, until you decide; from your decision on the
+place is free and the daemon leaves the worker to you (`s` in the TUI resumes it), unless an agent moved the
+run on since your decision, which keeps the place until the run ends, as for any worker. Where the
 process table cannot be read (a sandbox), only the process the holder started is looked at, and the daemon
 says once `cannot read the process table: an agent left behind a dead wrapper would not be seen`.
 
@@ -186,8 +191,9 @@ A start needs room in both; a resume needs room in `max_workers` only. When `max
 wait, oldest decision first, and every waiting resume goes before any new start. A start you make by key in
 the TUI (`s` on a task) ignores both limits; the daemon then starts nothing new until the counts are under
 them. With an active daemon the TUI leaves resumes to it (the card says `kodel serve resumes it`), so they keep
-`max_workers`; the one exception is a run an agent moved on since your decision, which the daemon does not
-resume: the TUI still offers `s resumes` for it, and that resume ignores both limits.
+`max_workers`. There are two exceptions, both runs the daemon does not resume: a run an agent moved on since
+your decision, and a run whose terminal worker you stopped at the wait (`kodel agent stop`). The TUI still
+offers `s resumes` for each, and that resume ignores both limits.
 
 ## Resuming after your decision
 
@@ -201,7 +207,12 @@ tells it from one that waits, because kodel does not see what an agent runs.
 **A worker that ended at the wait** is resumed in a new session. That is a print worker (it always exits at a
 wait), and a terminal worker that ended while its run waited for you (it quit, a reboot, its 7-day timeout,
 a lost holder), or after your decision without any agent having called the engine since. One you stopped
-(`kodel agent stop`) is not resumed by the daemon; the TUI offers `s resumes`. An agent you quit from inside
+(`kodel agent stop`) is never resumed by the daemon, however its record says it ended (a stop of what a
+holder left behind after its own timeout, error or signal is your stop too). If it was a terminal worker and
+your stop found it at the wait, the TUI offers `s resumes` after your decision, also while the daemon runs; a
+terminal worker stopped at work, and a print worker you stopped, are sessions that are over and get no offer.
+The session `kodel serve` or the TUI ends itself because its run is over is stopped by kodel, not by you: its
+record says so, and it is never taken for one you stopped. An agent you quit from inside
 (`/exit`, `Ctrl+D` while attached) is `exited`, not `stopped`: kodel does not read what is typed, so it is
 resumed like any worker that ended at a wait; `kodel agent stop` is the way to end one for the daemon. A
 holder that a signal ended (`SIGTERM` or `SIGHUP`: a shutdown, a closed login) is not a stop of yours either:
@@ -246,7 +257,7 @@ worker record:
 | reason | what happened |
 | --- | --- |
 | `lost` | the worker's holder is gone (a reboot, a kill), outside a wait |
-| `killed` | killed (by its timeout, or by the launcher when it could not be kept) |
+| `killed` | killed outside a wait (by its timeout, by a signal, or by the launcher when it could not be kept) |
 | `exited` | exited outside a wait (with its exit code) |
 | `not_started` | the launch failed and no record was made |
 
@@ -422,7 +433,8 @@ are ignored, a newer `v` is refused with "upgrade kodel") and a fixture in `fixt
 
 With no daemon, or an idle one, the TUI works as before. With an active daemon the header shows `serve on (pid
 N)`, and a run the TUI would offer `s resumes` for reads `agent exited at your decision · kodel serve resumes
-it`. A daemon whose process is gone is seen at the next refresh; one that finished no cycle for 2 minutes is
+it`, except the two the daemon does not resume (a run an agent moved on since your decision, and a run whose
+terminal worker you stopped at the wait): those keep `s resumes`. A daemon whose process is gone is seen at the next refresh; one that finished no cycle for 2 minutes is
 named in the header and `s resumes` is offered again. A daemon record the TUI cannot read counts as no daemon:
 `s resumes` is offered, and the name of the resume's record (`kw-<run>-d<seq>`) keeps the resume to one,
 whoever starts it first. `s` on a task takes the same start lock as the daemon, so the two never start one task

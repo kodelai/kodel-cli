@@ -2209,7 +2209,9 @@ describe("kodel serve with workers that stay alive at a wait (T-47)", () => {
     expect(w.lines).toContain(
       `finished: run ${runId}: agent kw-${runId} stopped (the run is over)`,
     );
-    expect(launcher.of(runId)[0]).toMatchObject({ state: "killed", stopped: true });
+    expect(launcher.of(runId)[0]).toMatchObject({ state: "killed", endedBy: "stopped" });
+    // Kodel's own stop of a finished run is not the person's.
+    expect(launcher.of(runId)[0]?.stopped).toBeUndefined();
     // Once: a session that is stopped is not finished again, and it was never resumed or noted.
     for (let i = 0; i < 3; i++) {
       tick();
@@ -2344,7 +2346,7 @@ describe("kodel serve with workers that stay alive at a wait (T-47)", () => {
     tick();
     await w.daemon.cycle();
     const second = await w.runOf(other);
-    await launcher.finish(second);
+    launcher.stop(second);
     await w.approve(second);
     for (let i = 0; i < 3; i++) {
       tick();

@@ -118,7 +118,16 @@ export class FakeLauncher implements WorkerLauncher {
   async stop(runId: string): Promise<void> {
     this.stopped.push(runId);
     const status = this.statusMap.get(runId);
-    if (status) this.statusMap.set(runId, { ...status, state: "killed", label: "stopped" });
+    // As the real launcher: a stop through it is the person's, and the record reads so.
+    if (status) {
+      this.statusMap.set(runId, {
+        ...status,
+        state: "killed",
+        label: "stopped",
+        stopped: true,
+        endedBy: "stopped",
+      });
+    }
   }
 
   readonly finished: string[] = [];
@@ -128,7 +137,13 @@ export class FakeLauncher implements WorkerLauncher {
     this.finished.push(runId);
     const status = this.statusMap.get(runId);
     if (status && (status.state === "running" || status.state === "starting")) {
-      this.statusMap.set(runId, { ...status, state: "killed", label: "stopped", stopped: true });
+      // Stopped, but not by the person: no `stopped` mark.
+      this.statusMap.set(runId, {
+        ...status,
+        state: "killed",
+        label: "stopped",
+        endedBy: "stopped",
+      });
     }
   }
 

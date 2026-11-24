@@ -441,9 +441,10 @@ another run's card, scroll, `o`, type, `Ctrl+\`, and see the same card at the sa
 watch it go on; detach while a dialog of the agent is open; let the agent end while you are attached; `kodel
 serve` with `max_workers: 1`, `max_runs: 2`: a second task starts while the first waits; stop a session of
 `agent start`, then `agent start --resume <name>`; `agent prune`; ask a worker to run `kodel gate` for you and see it refused;
-kill a worker's holder (`kill -9`), see `child still runs` and both places held, then `kodel agent stop`, see
-both places freed and the daemon leave it alone after your decision (a worker you stopped is yours: `s` in the
-TUI resumes it); `o` in `bun packages/cli/src/main.ts tui` on a worker a Node `serve`
+kill a worker's holder (`kill -9`) while its run waits at a gate, see `child still runs` and both places held,
+then `kodel agent stop`: the worker place is free at once, the run keeps its `max_runs` place until you decide
+the gate, and after your decision that place is free too and the daemon leaves the worker alone (a worker you
+stopped is yours: `s` in the TUI resumes it); `o` in `bun packages/cli/src/main.ts tui` on a worker a Node `serve`
 started gives the notice with the command; `bun packages/cli/src/main.ts tui` refuses
 `s` with the Bun reason, and starts a `-p` worker after `worker: print` is committed; `worker: terminal` on a
 profile named `codex` is refused with the follow-up message.
@@ -1434,3 +1435,52 @@ Review round: what "stopped" means.
   left without a holder, stopped by the person (only `s`), ended where it may have waited (the daemon or `s`),
   or an end that was no wait (nobody). The card's "kodel serve resumes it" line and the "TUI is running the
   step" line name the end as the offer does (`agent killed (SIGTERM) at your decision · …`).
+
+Review round: a person's stop is read from the stop record, for every end.
+
+- **`stopped` no longer hangs on the reason of the status record.** A holder that had recorded its own end
+  (its timeout, a `holder_error`, a signal) and left its program running was stopped by `kodel agent stop`
+  without the record ever saying so: the decision table returned the recorded end and never looked at
+  `stop.json`, and the daemon resumed the worker. `deriveStatus` now reads the stop record for every answer of
+  a session that is over (a final record of any kind, no status after the grace, a holder gone while starting
+  or running) and carries it as `SessionStatus.stoppedBy`; "a person stopped it" is `stoppedByPerson(status)`,
+  the one question the launcher (`WorkerStatus.stopped`), `agent ls`, `agent stop` and `agent start --resume`
+  ask. A stop record that cannot be read is `CANNOT_READ` for every such session (it was so only for a holder
+  gone while running): never "nobody asked". The rule (`resumeVerdict`) applies the person's stop to a record
+  in any ended state, an exit included.
+- **The stop record says who asked.** `launcher.finish` (the daemon's and the TUI's end of the session of a run
+  that is over) goes through the same `adapter.stop`, so its sessions read `stopped` like the person's. `stop`
+  takes `{ by: "person" | "finish" }` (a person when absent) and writes it into the `by` of `stop.json`: `stop`
+  for a person, as every record said before, `finish` for kodel. `by` was always a string, so format 1 is
+  unchanged and no fixture is added (`tA_stop_record_names_who_asked_without_a_new_field`); an unknown `by`
+  reads as a person's. A person's record is never replaced and replaces a `finish` (`writeStop`). A worker
+  ended by `finish` is `stopped` in `agent ls` and has no `stopped` mark for the rule; `agent start --resume`
+  says kodel ended it when the run was over.
+- **Differs from before:** `agent ls` reads `stopped (after timeout)` for a session a person stopped after its
+  holder's own end; the holder of a terminal session records `stopped` instead of `holder_error` on its
+  unexpected-error way out when a stop record is there; a worker `finish` ended counts as a worker that ended
+  fine (`endOf`), as a print worker that exits when its run is over always did; the fake launchers follow the
+  real one (`stop` marks `stopped`, `finish` does not).
+- **Texts:** `agent start --resume` no longer promises `s` for a worker stopped at work and words the rest with
+  "if ... the run still goes" (the run's state is not read there); the card never says "agent exited" for a
+  worker that did not exit (`over`, `undecided`, `not_at_wait`, `wait_before_start`, `went_on`,
+  `no_session_id` use its own words); `docs/serve.md` says which place a stop frees when (the `max_workers`
+  place at once; the `max_runs` place at once for a stop at work, at the decision for a stop at a wait), names
+  both runs that keep `s resumes` under an active daemon, and its `killed` row names a signal.
+- **Tests:** `tA_derive_status_a_persons_stop_shows_whatever_the_record_says`,
+  `tA_derive_status_a_finish_stop_is_not_the_persons`,
+  `tA_derive_status_an_unreadable_stop_record_is_never_nobody_asked`,
+  `tA_derive_status_a_live_session_names_no_stop`, `tA_stop_record_by_names_the_asker`,
+  `tA_stop_record_names_who_asked_without_a_new_field` (pipeline-core);
+  `t44_a_persons_stop_is_never_resumed_by_the_daemon_whatever_the_record_says` (the rule);
+  `tA_stop_record_keeps_the_persons_word`, `tA_stop_by_finish_is_stopped_but_not_by_the_person`,
+  `tA_a_persons_stop_of_what_a_final_record_left_reads_stopped_{timeout,holder_error,signal}` (real processes
+  of a pipes session), `tA_pty_holder_signal_with_a_stop_record_is_a_stop` and the stop case of
+  `tA_pty_socket_unlinked_on_unexpected_throw` (the holder);
+  `t47_a_persons_stop_of_what_a_final_record_left_is_never_resumed_by_the_daemon` (records to rule through
+  `agent ls --json`, with the places), `t47_child_alive_reaches_the_rule` (its stop now goes through the
+  decision table), `t47_only_a_persons_stop_is_stopped`, `t47_finish_of_a_stopped_session_is_harmless`,
+  `t47_resume_refusals`, `t47_a_worker_that_did_not_exit_is_never_said_to_have_exited` (cli);
+  `t47_real_persons_stop_of_what_a_final_record_left_is_left_to_the_person` (a real terminal session and the
+  built `kodel agent stop`). `tA_pty_holder_signal_ends_as_stop` is now
+  `tA_pty_holder_signal_stops_the_child_and_names_the_signal` (it never ended as a stop).

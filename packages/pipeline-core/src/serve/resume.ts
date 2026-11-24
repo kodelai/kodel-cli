@@ -203,7 +203,10 @@ export interface ServeWorkerView {
   decisionSeq?: number;
   /** The last time the session printed anything (milliseconds), when the record says. */
   lastOutputAt?: number;
-  /** A person stopped it (`kodel agent stop`): it is not a worker that died. */
+  /**
+   * A person stopped it (`kodel agent stop`): it is not a worker that died. The stop record says so, whatever
+   * end the status record names (`endedBy`); a session kodel ended because its run was over does not carry it.
+   */
   stopped?: boolean;
   /** The session is over while its process still runs without a holder (`kodel agent ls`: "child still runs"). */
   childAlive?: boolean;
@@ -341,8 +344,10 @@ const KEPT_WHEN_STOPPED: readonly ResumeNo[] = ["over", "waiting_person", "undec
  * came), the person decided after that wait, no record of that decision exists in any state and a
  * session id is known. A record whose process still runs without a holder is alive for every rule
  * (`child_alive`). With `refuseMoved` an agent that was served a step since the decision also stops
- * it; the TUI passes `false` and words that case itself. A worker a person stopped at the wait is
- * resumed only with `resumeStopped` (the TUI's offer); the daemon answers `stopped`.
+ * it; the TUI passes `false` and words that case itself. A worker a person stopped (`stopped`, which
+ * the stop record decides, whatever end the status record names) is resumed only with `resumeStopped`
+ * (the TUI's offer) and only when the stop found it at the wait; the daemon answers `stopped`, and no
+ * path of this rule returns `resume` for such a worker without that option.
  */
 export function resumeVerdict(
   run: ResumeRunView,
@@ -356,7 +361,8 @@ export function resumeVerdict(
   if (gone && worker.childAlive === true) return no("child_alive");
   if (gone && !mayHaveWaited(worker)) return no("dead");
   const verdict = settledVerdict(run, worker, opts);
-  if (gone && worker.stopped === true) {
+  // Whatever state the record ended in: the person's stop is theirs to undo.
+  if (worker.stopped === true) {
     if (verdict.kind === "resume") return opts.resumeStopped === true ? verdict : no("stopped");
     return KEPT_WHEN_STOPPED.includes(verdict.why) ? verdict : no("dead");
   }

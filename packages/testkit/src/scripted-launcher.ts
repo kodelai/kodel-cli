@@ -155,7 +155,7 @@ export class ScriptedLauncher implements ServeLauncherPort {
     if (latest === undefined || (latest.state !== "running" && latest.state !== "starting")) return;
     latest.state = "killed";
     latest.since = this.options.now();
-    latest.stopped = true;
+    // Stopped, but not by the person: the real launcher's stop record says `finish`.
     latest.endedBy = "stopped";
   }
 
@@ -172,13 +172,14 @@ export class ScriptedLauncher implements ServeLauncherPort {
     }
   }
 
-  /** `kodel agent stop`: the latest record of the run exits, stopped by a person. */
+  /** `kodel agent stop`: the latest record of the run is killed, stopped by a person. */
   stop(runId: string): void {
     const latest = this.of(runId).at(-1);
     if (latest === undefined) return;
-    latest.state = "exited";
+    latest.state = "killed";
     latest.since = this.options.now();
     latest.stopped = true;
+    latest.endedBy = "stopped";
   }
 
   /** The holder of the latest record of the run is gone. */

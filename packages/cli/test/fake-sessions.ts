@@ -15,6 +15,7 @@ import {
   type SessionSpec,
   type SessionStatus,
   type StartResult,
+  type StopAsker,
   type TailResult,
 } from "@kodel-ai/pipeline-core";
 import type { AgentSessions } from "../src/agent-commands";
@@ -103,10 +104,10 @@ export class FakeSessions implements AgentSessions {
     return { text: `output of ${id}\n`, complete: true };
   }
 
-  async stop(id: string): Promise<SessionStatus> {
+  async stop(id: string, opts: { by?: StopAsker } = {}): Promise<SessionStatus> {
     const row = this.get(id);
     this.stopped.push(id);
-    row.status = { state: "killed", reason: "stopped" };
+    row.status = { state: "killed", reason: "stopped", stoppedBy: opts.by ?? "person" };
     return { ...row.status };
   }
 

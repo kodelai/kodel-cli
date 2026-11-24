@@ -532,4 +532,50 @@ describe("t47 the card of a worker in a terminal", () => {
     );
     expect(print.line).toBe("agent exited (1), not at a gate");
   });
+
+  test("t47_a_worker_that_did_not_exit_is_never_said_to_have_exited", () => {
+    const info = decisionOf(GATE);
+    // A second wait after the decision, not decided.
+    const again = decisionOf([
+      ...GATE,
+      ...build([{ event: "gate_waiting", node: "final-approval", attempt: 1 }]).map((r) => ({
+        ...r,
+        seq: 5,
+        ts: 6_000,
+      })),
+    ]);
+    const ends: Partial<WorkerStatus>[] = [
+      { state: "killed", label: "killed (SIGTERM)", endedBy: "signal" },
+      { state: "killed", label: "killed (timeout)", endedBy: "timeout" },
+      { state: "lost", label: "lost (holder gone)", endedBy: "holder_gone" },
+      { state: "killed", label: "stopped", endedBy: "stopped", stopped: true },
+      { state: "killed", label: "stopped (after timeout)", endedBy: "timeout", stopped: true },
+    ];
+    for (const end of ends) {
+      const w = (over: Partial<WorkerStatus> = {}) =>
+        worker({ terminal: true, exitCode: undefined, since: 4_500, ...end, ...over });
+      const word = `agent ${end.label}`;
+      const label = String(end.label);
+      // The run is over.
+      const over = resumeOffer(session(info, "done"), w(), false);
+      expect(over, label).toEqual({ line: word, why: "the run is over" });
+      // A wait nothing was decided since (the person's stop keeps the wait a wait).
+      const undecided = resumeOffer(session(again), w({ since: 6_500 }), false);
+      expect(undecided.line, label).toBe(`${word} at a wait; nothing decided since`);
+      expect(undecided.offer, label).toBeUndefined();
+      if (end.stopped === true) continue;
+      // It ended at work, before the wait.
+      const atWork = resumeOffer(session(info), w({ since: 3_000 }), false);
+      expect(atWork.line, label).toBe(`${word}, not at a gate`);
+      expect(whyOf(atWork), label).toStartWith(`the agent ended (${end.label}), not at a gate;`);
+      // The wait is dated before it started.
+      const clock = resumeOffer(session(info), w({ started: 4_001 }), false);
+      expect(clock.line, label).toBe(`${word}, not at a gate`);
+    }
+    // One that did exit keeps its words, with its code.
+    const exited = resumeOffer(session(info), worker({ since: 3_000, exitCode: 1 }), false);
+    expect(exited.line).toBe("agent exited (1), not at a gate");
+    expect(whyOf(exited)).toStartWith("the agent exited, not at a gate;");
+    expect(resumeOffer(session(info, "done"), worker(), false).line).toBe("agent exited (0)");
+  });
 });

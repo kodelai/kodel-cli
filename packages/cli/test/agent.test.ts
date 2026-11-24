@@ -489,6 +489,33 @@ describe("kodel agent", () => {
     expect(stateLabel(row({ state: "killed", reason: "timeout", childAlive: true }))).toBe(
       "killed (timeout, child still runs)",
     );
+    // A person stopped what a holder left after its own end: stopped, with that end after it.
+    const mine = { stoppedBy: "person" };
+    expect(stateLabel(row({ state: "killed", reason: "stopped", ...mine }))).toBe("stopped");
+    expect(stateLabel(row({ state: "killed", reason: "timeout", ...mine }))).toBe(
+      "stopped (after timeout)",
+    );
+    expect(stateLabel(row({ state: "killed", reason: "holder_error", ...mine }))).toBe(
+      "stopped (after could not start)",
+    );
+    expect(stateLabel(row({ state: "killed", signal: "SIGTERM", ...mine }))).toBe(
+      "stopped (after SIGTERM)",
+    );
+    expect(stateLabel(row({ state: "killed", ...mine }))).toBe("stopped");
+    expect(stateLabel(row({ state: "lost", reason: "holder_gone", ...mine }))).toBe(
+      "stopped (after holder gone)",
+    );
+    // While the process still runs the stop has not ended it yet, and the label says so.
+    expect(stateLabel(row({ state: "killed", reason: "timeout", childAlive: true, ...mine }))).toBe(
+      "stopped (after timeout, child still runs)",
+    );
+    // An exit is an exit, and kodel's own stop of a finished run's session changes no word.
+    expect(stateLabel(row({ state: "exited", exitCode: 0, ...mine }))).toBe("exited (0)");
+    const kodel = { stoppedBy: "finish" };
+    expect(stateLabel(row({ state: "killed", reason: "stopped", ...kodel }))).toBe("stopped");
+    expect(stateLabel(row({ state: "killed", reason: "timeout", ...kodel }))).toBe(
+      "killed (timeout)",
+    );
     expect(stateLabel(row({ state: "exited", exitCode: 0, childAlive: true }))).toBe(
       "exited (0, child still runs)",
     );

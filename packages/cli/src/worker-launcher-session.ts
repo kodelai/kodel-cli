@@ -12,8 +12,19 @@ import { execFile } from "node:child_process";
 import { access, constants, readFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import type { UnattendedEngines, WorkerMechanism, WorkerSettings } from "@kodel-ai/local";
-import type { SessionAdapter, SessionListEntry, SessionState } from "@kodel-ai/pipeline-core";
-import { agentProblem, type RedactRule, redactText, SessionError } from "@kodel-ai/pipeline-core";
+import type {
+  SessionAdapter,
+  SessionListEntry,
+  SessionState,
+  StopAsker,
+} from "@kodel-ai/pipeline-core";
+import {
+  agentProblem,
+  type RedactRule,
+  redactText,
+  SessionError,
+  stoppedByPerson,
+} from "@kodel-ai/pipeline-core";
 import { ENDED_BY_SIGNAL } from "@kodel-ai/pipeline-core/serve";
 import { stateLabel } from "./agent-commands";
 import {
@@ -169,6 +180,9 @@ export function parseEntry(raw: unknown): SessionListEntry | undefined {
   if (typeof raw.status.reason === "string") {
     status.reason = raw.status.reason as SessionListEntry["status"]["reason"];
   }
+  if (raw.status.stoppedBy === "person" || raw.status.stoppedBy === "finish") {
+    status.stoppedBy = raw.status.stoppedBy;
+  }
   if (raw.status.childAlive === true) status.childAlive = true;
   if (typeof raw.status.since === "number") status.since = raw.status.since;
   if (typeof raw.status.lastOutputAt === "number") status.lastOutputAt = raw.status.lastOutputAt;
@@ -282,7 +296,7 @@ export function workerStatusOf(
     ...(unknown || entry.status.lastOutputAt === undefined
       ? {}
       : { lastOutputAt: entry.status.lastOutputAt }),
-    ...(!unknown && entry.status.reason === "stopped" ? { stopped: true as const } : {}),
+    ...(!unknown && stoppedByPerson(entry.status) ? { stopped: true as const } : {}),
     ...(!unknown && entry.status.childAlive === true ? { childAlive: true as const } : {}),
     ...(terminal ? { terminal: true as const } : {}),
     ...(unknown || endedByOf(entry.status) === undefined
@@ -619,9 +633,9 @@ export function createSessionWorkerLauncher(deps: SessionLauncherDeps): WorkerLa
     };
   };
 
-  const stopRecord = async (id: string) => {
+  const stopRecord = async (id: string, by: StopAsker) => {
     try {
-      await deps.adapter.stop(id);
+      await deps.adapter.stop(id, { by });
     } catch (error) {
       const gone =
         error instanceof SessionError &&
@@ -641,13 +655,14 @@ export function createSessionWorkerLauncher(deps: SessionLauncherDeps): WorkerLa
       return (await deps.adapter.tail(latest.id, bytes, "both")).text;
     },
     async stop(runId) {
-      await stopRecord((await latestOf(runId)).id);
+      await stopRecord((await latestOf(runId)).id, "person");
     },
     async finish(runId) {
       // Read again: the caller holds the start lock, and only a record that is live now is stopped.
       const latest = (await statuses([runId])).get(runId);
       if (latest === undefined || !isLive(latest)) return;
-      await stopRecord(latest.id);
+      // Not the person's stop: the stop record says kodel ended it because the run was over.
+      await stopRecord(latest.id, "finish");
     },
     async attachable(runId) {
       const latest = (await statuses([runId])).get(runId);

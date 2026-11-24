@@ -431,29 +431,32 @@ describe("a terminal session on a real PTY", () => {
   });
 
   for (const signal of ["SIGTERM", "SIGHUP"] as const) {
-    ptyTest(`tA_pty_holder_signal_ends_as_stop: ${signal} to the holder`, async () => {
-      const w = newWorld();
-      const { id } = await w.adapter().start(pty(w, ["cat"]));
-      const record = w.status(id) as {
-        holder: { pid: number };
-        child: { pid: number };
-        sock: string;
-      };
-      const client = await attach(w, id);
-      await until(() => client.welcome, "the welcome");
-      process.kill(record.holder.pid, signal);
-      // the holder does not just end: its client is told, the socket goes, and the record says what happened
-      await until(() => client.bye, "the client to be told");
-      expect(client.bye?.reason).toBe("killed");
-      await until(() => !alive(record.holder.pid), "the holder to end");
-      expect(alive(record.child.pid)).toBe(false);
-      expect(existsSync(record.sock)).toBe(false);
-      // It is not the person's stop: the record names the signal, and `stopped` is left to `kodel agent stop`.
-      expect(w.status(id)).toMatchObject({ state: "killed", signal });
-      expect("reason" in w.status(id)).toBe(false);
-      expect("sock" in w.status(id)).toBe(false);
-      expect((await w.adapter().status(id)).state).toBe("killed");
-    });
+    ptyTest(
+      `tA_pty_holder_signal_stops_the_child_and_names_the_signal: ${signal} to the holder`,
+      async () => {
+        const w = newWorld();
+        const { id } = await w.adapter().start(pty(w, ["cat"]));
+        const record = w.status(id) as {
+          holder: { pid: number };
+          child: { pid: number };
+          sock: string;
+        };
+        const client = await attach(w, id);
+        await until(() => client.welcome, "the welcome");
+        process.kill(record.holder.pid, signal);
+        // the holder does not just end: its client is told, the socket goes, and the record says what happened
+        await until(() => client.bye, "the client to be told");
+        expect(client.bye?.reason).toBe("killed");
+        await until(() => !alive(record.holder.pid), "the holder to end");
+        expect(alive(record.child.pid)).toBe(false);
+        expect(existsSync(record.sock)).toBe(false);
+        // Nobody asked for a stop (no stop record): the record names the signal, not `stopped`.
+        expect(w.status(id)).toMatchObject({ state: "killed", signal });
+        expect("reason" in w.status(id)).toBe(false);
+        expect("sock" in w.status(id)).toBe(false);
+        expect((await w.adapter().status(id)).state).toBe("killed");
+      },
+    );
   }
 
   ptyTest("tA_rm_unlinks_only_derived_sock", async () => {

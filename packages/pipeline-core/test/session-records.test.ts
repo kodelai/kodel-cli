@@ -11,8 +11,10 @@ import {
   type RecordKind,
   SESSION_FORMAT_VERSION,
   SESSION_RECORD_CAPABILITIES,
+  STOP_BY,
   sessionRecordSchema,
   statusRecordSchema,
+  stopAskerOf,
   stopRecordSchema,
 } from "../src";
 
@@ -123,6 +125,20 @@ describe("session record codec (format v1)", () => {
         seen.has(name) || notInAnyFixture.has(name),
         `${name} is in no fixture and not listed`,
       ).toBe(true);
+    }
+  });
+
+  test("tA_stop_record_names_who_asked_without_a_new_field", () => {
+    // `by` was always a string: a record of kodel's own stop of a finished run is format 1 as it stands.
+    const golden = load("stop.json");
+    expect(golden.by).toBe(STOP_BY.person);
+    for (const asker of ["person", "finish"] as const) {
+      const raw = { ...golden, by: STOP_BY[asker] };
+      const decoded = decodeRecord("stop", raw);
+      expect(decoded.ok, asker).toBe(true);
+      if (!decoded.ok) continue;
+      expect(stopAskerOf(decoded.record.by), asker).toBe(asker);
+      expect(JSON.parse(encodeRecord("stop", decoded.record)), asker).toEqual(raw);
     }
   });
 

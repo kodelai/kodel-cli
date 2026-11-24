@@ -510,7 +510,8 @@ export async function runPtyHolder(context: PtyHolderContext): Promise<number> {
           encodeRecord("status", {
             ...rest,
             state: "killed",
-            reason: "holder_error",
+            // A stop that was asked for is the end the record names, here as on every other way out.
+            reason: existsSync(join(input.dir, STOP_FILE)) ? "stopped" : "holder_error",
             since: now(),
           }),
         );
@@ -541,8 +542,8 @@ interface LiveSession {
 
 /**
  * The signals that end a holder as `stop` ends its session: the child is stopped, and the end is recorded. The
- * record names the signal, not `stopped`: that reason is a person's `stop` (it leaves `stop.json`), and a
- * shutdown of the machine sends these signals to every holder without anybody having asked for a stop.
+ * record names the signal, not `stopped`: that reason is a stop somebody asked for (it leaves `stop.json`, which
+ * says who), and a shutdown of the machine sends these signals to every holder without anybody having asked.
  */
 export const HOLDER_SIGNALS = ["SIGTERM", "SIGHUP"] as const;
 export type HolderSignal = (typeof HOLDER_SIGNALS)[number];

@@ -100,6 +100,14 @@ const sessionWord = (worker: WorkerStatus) =>
 const exitWord = (worker: WorkerStatus) =>
   worker.exitCode === undefined ? "agent exited" : `agent exited (${worker.exitCode})`;
 
+/**
+ * How a worker that is over reads where the exit code matters: a session that exited with its code, any
+ * other end in its own words (`killed (SIGTERM)`, `stopped`, `lost (holder gone)`): never "exited" for one
+ * that did not exit.
+ */
+const overWord = (worker: WorkerStatus) =>
+  worker.state === "exited" ? exitWord(worker) : `agent ${worker.label}`;
+
 const notAtGate = (session: Session, worker: WorkerStatus): ResumeOffer => {
   // A worker in a terminal that was alive at the decision, went on and then ended: it died at work.
   if (worker.terminal === true && session.decision !== undefined && session.moved === true) {
@@ -109,8 +117,8 @@ const notAtGate = (session: Session, worker: WorkerStatus): ResumeOffer => {
     };
   }
   return {
-    line: `${exitWord(worker)}, not at a gate`,
-    why: `the agent exited, not at a gate; any agent continues the run with pipeline_next_step ${session.id}`,
+    line: `${overWord(worker)}, not at a gate`,
+    why: `the agent ${worker.state === "exited" ? "exited" : `ended (${worker.label})`}, not at a gate; any agent continues the run with pipeline_next_step ${session.id}`,
   };
 };
 
@@ -200,24 +208,24 @@ export function resumeOffer(
       };
     }
     case "over":
-      return { line: `${exitWord(worker)}${sessionWord(worker)}`, why: "the run is over" };
+      return { line: `${overWord(worker)}${sessionWord(worker)}`, why: "the run is over" };
     case "wait_before_start":
       return {
-        line: `${exitWord(worker)}, not at a gate`,
+        line: `${overWord(worker)}, not at a gate`,
         why: `the wait is dated before the agent started; any agent continues the run with pipeline_next_step ${session.id}`,
       };
     case "not_at_wait":
       return notAtGate(session, worker);
     case "went_on":
       return {
-        line: `${exitWord(worker)} at a wait; another agent went on`,
+        line: `${overWord(worker)} at a wait; another agent went on`,
         why: `the agent stopped at an earlier wait and another agent took the run on; any agent continues the run with pipeline_next_step ${session.id}`,
       };
     case "waiting_person":
       return { line: "agent waiting for you", why: "the run waits for your decision" };
     case "undecided":
       return {
-        line: `${exitWord(worker)} at a wait; nothing decided since`,
+        line: `${overWord(worker)} at a wait; nothing decided since`,
         why: `nothing was decided since the agent's wait; any agent continues the run with pipeline_next_step ${session.id}`,
       };
     case "agent_decided":
@@ -235,7 +243,7 @@ export function resumeOffer(
     case "no_session_id": {
       const name = workerNameOf(session.id);
       return {
-        line: `${exitWord(worker)}; no session id`,
+        line: `${overWord(worker)}; no session id`,
         why: `no session id: kodel agent logs ${name}`,
       };
     }

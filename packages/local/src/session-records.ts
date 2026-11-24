@@ -18,7 +18,11 @@ import {
   SESSION_FORMAT_VERSION,
   type SessionRecord,
   type SessionSnapshot,
+  STOP_BY,
   type StatusRecord,
+  type StopAsker,
+  type StopRecord,
+  stopAskerOf,
 } from "@kodel-ai/pipeline-core";
 import { sameProcess } from "./process-table";
 
@@ -64,10 +68,34 @@ export const readSession = (dir: string): Read<SessionRecord> =>
 export const readStatus = (dir: string): Read<StatusRecord> =>
   readRecord("status", join(dir, STATUS_FILE));
 
-export const readStop = (dir: string): "missing" | "unreadable" | "newer" | "present" => {
+/** Who asked for the stop, when the record is there and can be read. */
+export const readStop = (dir: string): "missing" | "unreadable" | "newer" | StopAsker => {
   const value = readRecord("stop", join(dir, STOP_FILE));
-  if (value === "missing") return "missing";
-  return typeof value === "string" ? value : "present";
+  return typeof value === "string" ? value : stopAskerOf(value.by);
+};
+
+/**
+ * Leaves the stop record of who asks, before anything is signalled. A person's record is never replaced; a
+ * person's stop replaces any other, so what a `finish` left of a session does not hide that a person stopped
+ * the rest.
+ */
+export const writeStop = (
+  dir: string,
+  by: StopAsker,
+  at: number,
+  identity?: StopRecord["identity"],
+): void => {
+  const there = readStop(dir);
+  if (there === "person" || (there !== "missing" && by !== "person")) return;
+  replaceRecord(
+    join(dir, STOP_FILE),
+    encodeRecord("stop", {
+      v: SESSION_FORMAT_VERSION,
+      by: STOP_BY[by],
+      at,
+      ...(identity === undefined ? {} : { identity }),
+    }),
+  );
 };
 
 /** `missing` for a session from before the record existed, or one that runs no agent. */

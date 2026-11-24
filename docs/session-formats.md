@@ -9,7 +9,7 @@ The state base is `KODEL_STATE_DIR` or `~/.kodel`. A session folder holds:
 | `session.json` | the starter | once, in a temporary folder that is renamed into place |
 | `agent.json` | the starter | once, before `session.json` in the same temporary folder; only for a session that runs a coding agent (see "The agent record" below) |
 | `status.json` | the holder (or once, as a `lost` tombstone, by the first reader that finds no holder) | at start, when the child runs, at the end |
-| `stop.json` | `agent stop` | before the child is signalled |
+| `stop.json` | whoever asks for the stop: `agent stop` (a person, `by: "stop"`), or kodel ending the session of a run that is over (`by: "finish"`) | before the child is signalled; a person's record is never replaced, and it replaces a `finish` |
 | `tail.txt`, `stdout.txt`, `stderr.txt` | the holder | redacted output tails (interleaved, and each stream alone), replaced while output arrives; `kodel agent logs <id> [--stdout\|--stderr]` prints them. A terminal session (`mode: pty`) has `tail.txt` only: a terminal has one stream, and `--stdout` and `--stderr` answer `UNSUPPORTED` |
 | `boot.txt` | the holder | the boot report: `ready` or `HOLDER_BOOT_FAILED:<why>` |
 | `in.fifo` | the holder | only for a session started with `input` |
@@ -140,6 +140,28 @@ the listing is not signalled. It never signals the group as a whole for this cas
 unread or a stranger's (the command says which). After it the session is `stopped` with no process left, and
 `agent rm` removes it.
 
+## Who asked for a stop
+
+`stop.json` says who asked, in `by`: `stop` is a person (`kodel agent stop`), `finish` is kodel itself, which
+ends the terminal session of a run that is over (`kodel serve`, or an open TUI). Any other value, and a record
+from before the two were told apart (every one said `stop`), reads as a person's: nobody else is ever taken
+for the person. A person's record is never replaced, and a person's stop replaces a `finish` record, so the
+file keeps the person's word whichever came first.
+
+A status carries it as `stoppedBy` (`person` or `finish`; in `agent ls --json` too) for every session that is
+over, **whatever the status record says of the end**. The reason `stopped` in `status.json` only says that a
+stop record was there when the holder wrote its last record. A holder that had already recorded another end (its
+timeout, a `holder_error`, a signal) and left its program running is still stopped by the person who then runs
+`kodel agent stop`: the record keeps `killed (timeout)`, the status says `stoppedBy: person`, and `agent ls`
+reads `stopped (after timeout)`. "A person stopped it" is `stoppedBy: person` (or the reason `stopped` from an
+adapter that keeps no stop record); `kodel serve` leaves such an agent of a run to the person
+(`docs/serve.md`), and never one with `stoppedBy: finish`. A stop record that cannot be read makes the
+session `CANNOT_READ` once it is over: it is never read as "nobody asked". A live session names no stop.
+
+**Builds of different age.** `by` was always a string, so the format does not change: an older build reads a
+`finish` record as a stop (`stopped`, as it read every stop record), and this build reads an older record as a
+person's.
+
 **Limits.** A zombie is not a process that runs. A process that left the group (its own `setsid`, as the shell
 commands of Claude Code do) is not a member: it is neither seen nor ended this way; `stop` of a session whose
 recorded child lives reaches the child's descendants as before. On macOS the boot time moves with the wall
@@ -197,8 +219,9 @@ It is optional and added without a change of `v`: a reader that ignores it deriv
   writes `sock` with the `running` record and reports `ready`: an attach right after the start finds the socket.
 - The final record has no `sock`, and the holder removes the socket file on every way out it can take.
 - A holder that is told to end (`SIGTERM`, `SIGHUP`) stops the program as `stop` does and ends the same way: the
-  clients are told, the socket is removed, and the final record says `killed` with that `signal`. Only a stop a
-  person asked for (`kodel agent stop`, which leaves `stop.json`) is recorded with the reason `stopped`: a
+  clients are told, the socket is removed, and the final record says `killed` with that `signal`. Only a stop
+  somebody asked for (it leaves `stop.json`, which says who: see "Who asked for a stop") is recorded with the
+  reason `stopped`, on every way out of the holder, an unexpected error included: a
   shutdown of the machine sends the same signals, and the agent of a run it ended is resumed like any that ended
   at a wait (`docs/serve.md`).
 - A holder that was killed (`SIGKILL`) leaves the record with `sock` and the file. So `sock` never means "somebody
