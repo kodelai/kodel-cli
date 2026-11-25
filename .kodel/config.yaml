@@ -9,7 +9,6 @@ serve:
   enabled: true
   max_workers: 2
   max_runs: 3
-  start:
-    - pipeline: dev
-      match:
-        status: [todo]
+  # Nothing starts on its own: tasks are started by hand. The daemon still resumes
+  # agents after a decision, notes dead ones and finishes sessions of ended runs.
+  start: []
