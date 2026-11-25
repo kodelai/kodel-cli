@@ -1,5 +1,6 @@
 # The pipeline we use on this repository itself (dogfooding). Syntax: examples/pipelines/feature.yaml.
 # The plan is kept with the run, as its attachment `plan.md` (docs/attachments.md), not in the repository.
+# The full test suite runs in CI on the pull request, which is opened before the person's final look.
 name: dev
 description: Plan, implement and verify a change to Kodel, with a human gate on the plan and on the result.
 
@@ -288,19 +289,19 @@ nodes:
       Keep changes within the plan. Add or update tests for the changed behavior.
       Follow the conventions in AGENTS.md (English only, no `any`, Biome style).
 
-      After this step the engine itself runs the steps `verify` (typecheck and lint), then `review`
-      (an independent look at the change), then `test` (the full suite) and `build`. Do not run the
-      full test suite, lint or build yourself, and do not let a subagent do it: run only the tests of
-      the files you touched, and typecheck. If you hand work to a subagent, put this rule into its
-      brief. If `test` fails, the feedback names the failing tests: rerun only those files.
+      After this step the engine runs `verify` (typecheck and lint), then `review` (an independent
+      look at the change), then `build`; then `test-changed` runs the tests of what you changed, and
+      the full suite runs in CI on the pull request. Do not run the full test suite, lint or build
+      yourself, and do not let a subagent do it: run only the tests of the files you touched, and
+      typecheck. If you hand work to a subagent, put this rule into its brief. If you were sent back
+      by failing tests or by CI, the feedback names them: rerun only those files.
 
       If you were sent back because of conflicts with main (the feedback lists the conflicting files,
-      from the sync step or from the pull request): commit your work on the run's branch
-      (`git add -A && git commit -s`), then `git fetch origin main && git merge --signoff origin/main`
-      and resolve the conflicts so that both sides' changes stay (what main added is not yours to
-      remove). Where the plan and main disagree, follow main and note it in a new version of
-      `plan.md`, at its end. Then the checks run again. If the pull request already exists, publish
-      only pushes to it.
+      from the pull request): commit your work on the run's branch (`git add -A && git commit -s`),
+      then `git fetch origin main && git merge --signoff origin/main` and resolve the conflicts so
+      that both sides' changes stay (what main added is not yours to remove). Where the plan and main
+      disagree, follow main and note it in a new version of `plan.md`, at its end. Then the checks
+      run again. If the pull request already exists, the `pr` step only pushes to it.
     checks:
       # since: run, so that a return to impl with nothing left to change (a flaky test) can finish again.
       - { kind: diff, since: run, paths: ["packages/**", "scripts/**", "examples/**", "skills/**", "adapters/**", "tests/**"] }
@@ -311,8 +312,7 @@ nodes:
     expected_duration: 20
     timeout: 300
 
-  # Before the slow `test`: review sends the run back to impl in more than half of the attempts, and
-  # every such return would make the full suite run again for nothing.
+  # Before the slow steps: review sends the run back to impl in more than half of the attempts.
   - slug: review
     kind: agent
     fresh_context: true     # an independent look: not by the one who wrote the change
@@ -329,67 +329,54 @@ nodes:
         fail_when: { severity: [blocker, critical, major] }
         on_fail: blocking_findings
 
-  # The files run one after another and sum to about 18 minutes on a developer machine (no file
-  # hangs: the slowest takes about 90 s), so 900 s was too short.
-  - slug: test
-    kind: command
-    command: "bun test"
-    expected_duration: 1100
-    timeout: 1800
-
   - slug: build
     kind: command
     command: "bun run build && bun run check:artifact"
     expected_duration: 30
     timeout: 300
 
-  # Would this work merge into the latest main? Asked on a temporary commit of the working tree
-  # (tracked, new and changed files, not ignored ones), so nothing in the worktree is touched.
-  - slug: sync
-    kind: command
-    expected_duration: 10
-    timeout: 120
-    command: |
-      set -e
-      git fetch -q origin main
-      idx="$(mktemp -u)"
-      GIT_INDEX_FILE="$idx" git read-tree HEAD
-      GIT_INDEX_FILE="$idx" git add -A
-      tree="$(GIT_INDEX_FILE="$idx" git write-tree)"
-      rm -f "$idx"
-      commit="$(git commit-tree "$tree" -p HEAD -m 'kodel sync check')"
-      if out="$(git merge-tree --write-tree --name-only "$commit" origin/main 2>&1)"; then
-        echo "no conflicts with origin/main"
-      else
-        echo "$out"
-        echo "CONFLICTS with origin/main: merge it into the branch and resolve them (see the impl step)"
-        exit 1
-      fi
-
-  - slug: final-approval
-    kind: human
-    prompt: |
-      Look at the diff and try the change. Approve to finish, or reject with what is wrong.
-    instructions: |
-      The person tries the change by hand. The message to them at this gate must contain:
-      1. The full absolute path of the run's worktree and its branch, and the command to run the built
-         binary from there (the binary is not in PATH).
-      2. A numbered, step-by-step set of manual test scenarios, each with a command that can be pasted and
-         the result to expect. Only scenarios that need the person's own check: real prompts at a terminal,
-         the wording of questions and output, and a check on the real agent. Leave out what the automated
-         tests already cover.
-      3. A note to try the change in a fresh temporary directory, not in the repository or in the run's
-         worktree, so that the trial leaves nothing behind.
-    results:
-      columns:
-        severity:    { enum: [blocker, critical, major, minor, info] }
-        location:    location
-        description: text
-
-  - slug: publish
+  # The full suite takes about 18 minutes; it runs in CI on the pull request. Here only the tests of
+  # what the run changed: the agent picks them, and the engine itself runs every test file the run
+  # changed, so a step cannot pass on the agent's word alone.
+  - slug: test-changed
     kind: agent
     prompt: |
-      The person approved the change. Publish it, from the run's worktree.
+      Run the tests of what this run changed, not the full suite:
+      - every test file you wrote or changed in this run;
+      - the tests of the modules you changed: for each changed source file, the test files of its
+        package that import it or are named after it.
+      Leave out `tests/agents` (they start real agents). Do not change any file in this step: if a
+      test fails, report it and the run goes back to impl with your rows.
+
+      Report one row per test file you ran: its path, `passed` or `failed`, and for a failure the
+      failing test names and the first line of the error.
+    checks:
+      - kind: result
+        columns:
+          file:        location
+          outcome:     { enum: [passed, failed] }
+          description: text
+        fail_when: { outcome: [failed] }
+        on_fail: tests_failed
+      - kind: command
+        on_fail: tests_failed
+        timeout: 900
+        command: |
+          set -e
+          git fetch -q origin main
+          base="$(git merge-base HEAD origin/main)"
+          files="$( { git diff --name-only "$base"; git ls-files --others --exclude-standard; } \
+            | grep -E '\.test\.ts$' | grep -v '^tests/agents/' | sort -u \
+            | while read -r f; do [ -f "$f" ] && echo "$f"; done )"
+          if [ -z "$files" ]; then echo "no test file changed in this run"; exit 0; fi
+          echo "$files"
+          bun test $files
+
+  - slug: pr
+    kind: agent
+    prompt: |
+      Open the pull request of this run (or update it), from the run's worktree. The full test suite
+      runs in CI on it while the person tries the change.
       1. Run `git status` and look at what changed. Commit everything the run changed: the code, and
          the pipeline files in `.kodel/pipelines/` and `AGENTS.md` if they changed. The plan stays
          with the run and is not committed. A file that does not belong to the task (a stray file,
@@ -400,12 +387,14 @@ nodes:
       4. Open a draft pull request into main with `gh pr create --draft --base main`. Title and
          description are in English: what changed, how it was tested, what is left out. End the
          description with the attribution lines your instructions give. If a pull request for this
-         branch already exists (`gh pr view`), do not open another: the push above updated it.
-      5. In your final message to the person give the link to the pull request and, as commands to
-         copy, how to remove this worktree and its branch once the pull request is merged or closed:
-         `git worktree remove <the absolute path of the worktree>` and `git branch -D <the branch>`,
-         to run from the main checkout of the repository, with the real path and branch. Do not run
-         them yourself.
+         branch already exists (`gh pr view`), do not open another: the push above updated it. Do not
+         mark it ready: that is done after the person approves.
+      5. In your final message give the link to the pull request.
+      After this step `ci` (CI on the pull request) and `final-approval` (the person) are open at the
+      same time. While `ci` or `ci-fix` is open, do not start `kodel wait`, even when an answer offers
+      it: it wakes only on the person's decision, not when `ci-fix` opens. Keep calling
+      `pipeline_next_step` with `wait_s` (and do `ci-fix` when it comes) until CI is green; only when
+      nothing but the person's decisions is left, tell the person and wait as the answer says.
     checks:
       - { kind: command, command: "test \"$(git branch --show-current)\" != main" }
       - { kind: command, command: "test -z \"$(git status --porcelain)\"" }
@@ -425,6 +414,118 @@ nodes:
           echo "mergeable: $state"
           test "$state" != CONFLICTING
 
+  # Branch 1 of the fork: CI on the pull request. A red check is repaired by the agent and pushed,
+  # and CI is waited for again, without the person.
+  - slug: ci
+    kind: command
+    expected_duration: 720
+    timeout: 2700
+    command: |
+      set -e
+      sha="$(git rev-parse HEAD)"
+      # GitHub needs a moment after a push: wait until the pull request is on this commit and has
+      # checks, so that the checks of an older commit are never read as this one's.
+      for i in $(seq 1 60); do
+        head="$(gh pr view --json headRefOid -q .headRefOid)"
+        n="$(gh pr checks --json name -q 'length' 2>/dev/null || echo 0)"
+        [ "$head" = "$sha" ] && [ "$n" -gt 0 ] && break
+        sleep 10
+      done
+      [ "$head" = "$sha" ] || { echo "the pull request is not on $sha"; exit 1; }
+      gh pr checks --watch --fail-fast --interval 30
+
+  - slug: ci-fix
+    kind: agent
+    prompt: |
+      The CI checks of the pull request failed (the feedback holds the output). The person may be
+      trying the change in this worktree right now, so keep the fix small and to the point.
+      1. Find the cause: `gh pr checks`, then `gh run view <run id> --log-failed` for a failed job.
+      2. If the failure is not caused by the change (a flaky test, a runner or network problem),
+         change no code: rerun the failed jobs with `gh run rerun <run id> --failed` once the whole
+         run has finished, and say so.
+      3. Otherwise fix it in the run's worktree. Run the failing test files and typecheck; do not run
+         the full suite. Commit with `git commit -s` and a subject that starts with "Fix CI:", with the
+         attribution lines your instructions give, and push (`git push`). Never push to main.
+      4. In your final message say what failed, why, and what you changed, so that the person knows
+         what moved under their trial.
+    checks:
+      - { kind: command, command: "test -z \"$(git status --porcelain)\"" }
+      - { kind: command, command: "git fetch -q origin && test \"$(git rev-parse HEAD)\" = \"$(git rev-parse '@{upstream}')\"", timeout: 120 }
+      - { kind: command, command: "bun run typecheck && bun run lint", timeout: 300 }
+      - { kind: command, command: "bun run build && bun run check:artifact", timeout: 300 }
+
+  # Branch 2 of the fork: the person's own look, open as soon as the pull request is.
+  - slug: final-approval
+    kind: human
+    prompt: |
+      Try the change. CI runs on the pull request meanwhile and the agent repairs it if it fails.
+      Approve to finish, or reject with what is wrong.
+    instructions: |
+      The person tries the change by hand while CI runs. The message to them at this gate must contain:
+      1. The link to the pull request, and that CI runs on it now: if it fails, the agent repairs it in
+         the same worktree and rebuilds, so a trial may meet a newer build; the run finishes only when
+         CI is green.
+      2. The full absolute path of the run's worktree and its branch, and the command to run the built
+         binary from there (the binary is not in PATH).
+      3. A numbered, step-by-step set of manual test scenarios, each with a command that can be pasted and
+         the result to expect. Only scenarios that need the person's own check: real prompts at a terminal,
+         the wording of questions and output, and a check on the real agent. Leave out what the automated
+         tests already cover.
+      4. A note to try the change in a fresh temporary directory, not in the repository or in the run's
+         worktree, so that the trial leaves nothing behind.
+      After writing this message, do not end your turn while `ci` or `ci-fix` is open and do not start
+      `kodel wait` then: keep calling `pipeline_next_step` with `wait_s` and do `ci-fix` when it comes.
+      When CI is green, say so to the person in one line, and only then wait for their decision.
+    results:
+      columns:
+        severity:    { enum: [blocker, critical, major, minor, info] }
+        location:    location
+        description: text
+
+  # Where the two branches meet: CI is green, and the person has decided.
+  - slug: settle
+    kind: agent
+    join: all
+    outcomes: [rework, changed_after_approval]
+    prompt: |
+      CI on the pull request is green and the person decided at the final gate (the feedback says how
+      each branch ended, with the person's comments). Change no file in this step.
+      - The person rejected: finish with the outcome `rework`, and put their comments in your final
+        message; the run goes back to impl.
+      - The person approved, and there are "Fix CI:" commits after the last other commit of the branch
+        (`git log --format='%h %s' origin/main..HEAD`): the code changed under the person's trial.
+        Finish with the outcome `changed_after_approval` and list those commits.
+      - Otherwise finish as usual.
+    checks:
+      - { kind: command, command: "test -z \"$(git status --porcelain)\"" }
+
+  - slug: approve-ci-fixes
+    kind: human
+    prompt: |
+      CI was repaired after you approved: look at the "Fix CI:" commits. Approve to finish, or reject
+      with what is wrong.
+    instructions: |
+      The message to the person at this gate lists the "Fix CI:" commits (hash, subject, one line on
+      why), the link to the pull request, and the command to see them: `git log -p origin/main..HEAD`
+      in the run's worktree, with its full absolute path.
+    results:
+      columns:
+        severity:    { enum: [blocker, critical, major, minor, info] }
+        location:    location
+        description: text
+
+  - slug: finish
+    kind: agent
+    prompt: |
+      The person approved and CI is green. Mark the pull request ready for review with `gh pr ready`.
+      In your final message to the person give the link to the pull request and, as commands to copy,
+      how to remove this worktree and its branch once the pull request is merged or closed:
+      `git worktree remove <the absolute path of the worktree>` and `git branch -D <the branch>`, to
+      run from the main checkout of the repository, with the real path and branch. Do not run them
+      yourself.
+    checks:
+      - { kind: command, command: "gh pr view --json isDraft -q .isDraft | grep -qx false", timeout: 120 }
+
 edges:
   - { from: plan,           to: plan-critique }
   - { from: plan,           to: confirm-nothing-to-do, when: nothing_to_change }
@@ -440,14 +541,23 @@ edges:
   - { from: impl,           to: verify }
   - { from: verify,         to: review }
   - { from: verify,         to: impl,         when: failed }
-  - { from: review,         to: test }
+  - { from: review,         to: build }
   - { from: review,         to: impl,         when: blocking_findings }
-  - { from: test,           to: build }
-  - { from: test,           to: impl,         when: failed }
-  - { from: build,          to: sync }
+  - { from: build,          to: test-changed }
   - { from: build,          to: impl,         when: failed }
-  - { from: sync,           to: final-approval }
-  - { from: sync,           to: impl,         when: failed }
-  - { from: final-approval, to: publish,      when: approved }
-  - { from: final-approval, to: impl,         when: rejected }
-  - { from: publish,        to: impl,         when: conflicts }
+  - { from: test-changed,   to: pr }
+  - { from: test-changed,   to: impl,         when: tests_failed }
+  - { from: pr,             to: impl,         when: conflicts }
+  # The fork: CI and the person's look start together and meet at settle.
+  - { from: pr,             to: ci }
+  - { from: pr,             to: final-approval }
+  - { from: ci,             to: settle }
+  - { from: ci,             to: ci-fix,       when: failed }
+  - { from: ci-fix,         to: ci }
+  - { from: final-approval, to: settle,       when: approved }
+  - { from: final-approval, to: settle,       when: rejected }
+  - { from: settle,         to: finish }
+  - { from: settle,         to: impl,         when: rework }
+  - { from: settle,         to: approve-ci-fixes, when: changed_after_approval }
+  - { from: approve-ci-fixes, to: finish,     when: approved }
+  - { from: approve-ci-fixes, to: impl,       when: rejected }

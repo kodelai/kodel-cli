@@ -78,12 +78,20 @@ test("t36tw_real_dev_yaml_scripted_run_leaves_patches", async () => {
   await live.settle();
   await write("packages/thing/src/index.ts", "export const thing = 1;\n");
   await done("impl");
-  // verify, test and build ran (the stub passed them); the review reports nothing
+  // verify and build ran (the stub passed them); the review reports nothing
   await live.reportResult("review", 1, { rows: [], completeness: "complete" });
   await done("review");
+  await live.reportResult("test-changed", 1, {
+    rows: [{ file: "packages/thing/src/index.ts", outcome: "passed", description: "ok" }],
+    completeness: "complete",
+  });
+  await done("test-changed");
+  await done("pr");
+  // The fork: `ci` (a command, passed by the stub) and the person's final look meet at `settle`.
   await live.decideHuman("final-approval", "approved");
   await live.settle();
-  await done("publish");
+  await done("settle");
+  await done("finish");
   await live.waitForRest(30_000);
 
   const state = await live.state();
@@ -91,13 +99,16 @@ test("t36tw_real_dev_yaml_scripted_run_leaves_patches", async () => {
   const folder = join(host.store.runDir(live.runId), "changes");
   const files = (await readdir(folder)).sort();
   expect(files).toEqual([
+    "finish-1.patch",
     "impl-1.patch",
     "plan-1.patch",
     "plan-critique-1.patch",
     "plan-revise-1.patch",
-    "publish-1.patch",
+    "pr-1.patch",
     "review-1.patch",
     "run.patch",
+    "settle-1.patch",
+    "test-changed-1.patch",
   ]);
   expect(await readFile(join(folder, "impl-1.patch"), "utf8")).toContain(
     "packages/thing/src/index.ts",
@@ -107,7 +118,13 @@ test("t36tw_real_dev_yaml_scripted_run_leaves_patches", async () => {
   expect(whole).not.toContain("docs/plans/");
   // The patch of a step that changed nothing is a header and nothing else: the plan steps keep
   // their plan with the run, not in the project.
-  for (const quiet of ["plan-1.patch", "plan-revise-1.patch", "review-1.patch"]) {
+  for (const quiet of [
+    "plan-1.patch",
+    "plan-revise-1.patch",
+    "review-1.patch",
+    "test-changed-1.patch",
+    "settle-1.patch",
+  ]) {
     expect(await readFile(join(folder, quiet), "utf8")).toBe("# kodel-patch v1\n");
   }
 });
