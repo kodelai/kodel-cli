@@ -131,6 +131,6 @@ describe("the serve block of the config (T-44)", () => {
       "unknown key: serve_v2; is the file written for a newer kodel? upgrade kodel or remove the key",
     );
     // The readers that date a wait by the last sign of life leave the note out.
-    expect(NOT_A_SIGN_OF_LIFE).toEqual(["agent_session_named", "worker_note"]);
+    expect(NOT_A_SIGN_OF_LIFE).toEqual(["agent_session_named", "worker_note", "agent_stopped"]);
   });
 });
