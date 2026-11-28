@@ -710,6 +710,8 @@ describe("t42 the consumers of a failure's source, and the pins", () => {
       "HISTORY_SESSION_UNREADABLE",
       "INVALID_CURSOR",
       "HISTORY_UNAVAILABLE",
+      // NE3N: a cancel of a run that has completed or failed.
+      "RUN_FINISHED",
     ]);
   });
 });

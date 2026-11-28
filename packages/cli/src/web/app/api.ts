@@ -10,7 +10,7 @@ import type {
 } from "../../tui/session";
 import type { CardSlot, NewTaskInput, TasksLoad } from "../../tui/tasks-load";
 import type { AskRef, AskThread } from "../ask";
-import type { WebDiff } from "../handler";
+import type { WebCancelOutcome, WebDiff } from "../handler";
 
 export interface Me {
   device: { id: string; name: string };
@@ -22,9 +22,12 @@ export interface Me {
   canTasks: boolean;
   canCommentTask: boolean;
   canCreateTask: boolean;
+  canCancel: boolean;
   canStartTask: boolean;
   canStopAgent: boolean;
 }
+
+export type CancelAnswer = Extract<WebCancelOutcome, { ok: true }>;
 
 /** What the server says about a start or a stop that was asked for; the words are the engine's. */
 export interface WarningView {
@@ -114,6 +117,12 @@ export const api = {
     call<{ thread: AskThread }>("GET", `${run(id)}/ask`).then((r) => r.thread),
   ask: (id: string, question: string, refs: AskRef[] = []) =>
     call<{ thread: AskThread }>("POST", `${run(id)}/ask`, { question, refs }).then((r) => r.thread),
+  checkCancel: (id: string, reason: string) =>
+    call<{ flow: number; task: string | null }>("POST", `${run(id)}/cancel/check`, { reason }),
+  cancel: (id: string, flow: number) =>
+    call<{ answer: CancelAnswer }>("POST", `${run(id)}/cancel/decide`, { flow }).then(
+      (r) => r.answer,
+    ),
   startTask: (key: string, body: { pipeline?: string; flow?: number }) =>
     call<ActionAnswer<StartResultView>>(
       "POST",

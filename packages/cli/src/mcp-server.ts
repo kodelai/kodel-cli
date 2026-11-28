@@ -32,6 +32,7 @@ import {
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createAgentDecider } from "./agent-decisions";
+import type { CancelInput, CancelResult } from "./cancel-run";
 import { createElicitor, type HumanHost, newDialogState } from "./elicit";
 
 /** A host that can also stop the work it started (the local host does); it says how much it stopped. */
@@ -112,6 +113,10 @@ export function serverToolSet(input: {
       ...(input.agentDecisions?.pipelineChange === true
         ? [{ name: "pipeline_accept_change", readOnly: false }]
         : []),
+      // NE3N: a manager's only; a server with no role serves both roles and must not get it.
+      ...(input.agentDecisions?.cancelRun === true && input.role === "manager"
+        ? [{ name: "manager_cancel_run", readOnly: false }]
+        : []),
       // The manager's acting tools exist only under their own key, as the decision tools do.
       ...MANAGER_TOOLS.filter((tool) => servedUnderKeys(tool.name, input.agentDecisions)),
       ...HISTORY_TOOLS,
@@ -151,6 +156,8 @@ export interface ServerOptions {
   dialog?: boolean;
   /** What the config lets the agent decide on the person's instruction; needs `humans`. */
   agentDecisions?: AgentDecisionFlags;
+  /** Cancels a run (NE3N) for `manager_cancel_run`; without it the tool is not served. */
+  cancel?: (input: CancelInput) => Promise<CancelResult>;
   /** How long a dialog may stay open, in milliseconds; the default is long enough to read the changes. */
   dialogTimeoutMs?: number;
 }
@@ -181,7 +188,14 @@ export function createServer(
   // A manager works no step: its decisions answer with the run as it is, and nothing is served to it.
   const lookWith = role === "manager" ? "manager_inbox" : "pipeline_next_step";
   const decisions = humans
-    ? decisionTools(agentDecisions, createAgentDecider(humans, state, { lookWith }), { lookWith })
+    ? decisionTools(
+        agentDecisions,
+        createAgentDecider(humans, state, {
+          lookWith,
+          ...(options.cancel === undefined ? {} : { cancel: options.cancel }),
+        }),
+        { lookWith },
+      )
     : [];
   const pipelineTools = keepOnly(
     [

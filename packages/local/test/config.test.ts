@@ -28,7 +28,13 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-const OFF_AGENT = { gate: false, pipeline_change: false, start_task: false, stop_agent: false };
+const OFF_AGENT = {
+  gate: false,
+  pipeline_change: false,
+  cancel_run: false,
+  start_task: false,
+  stop_agent: false,
+};
 const write = (text: string) => writeFile(join(dir, CONFIG_FILE), text);
 const failure = async (text: string) => {
   await write(text);
@@ -159,6 +165,15 @@ describe("the project config", () => {
       ...OFF_AGENT,
       pipeline_change: true,
     });
+  });
+
+  test("tne3n_config_cancel_run_key_is_read_and_off_by_default", async () => {
+    expect((await loadConfig(dir)).decisions.agent.cancel_run).toBe(false);
+    await write("decisions:\n  agent:\n    cancel_run: true\n");
+    expect((await loadConfig(dir)).decisions.agent).toEqual({ ...OFF_AGENT, cancel_run: true });
+    expect((await failure("decisions:\n  agent:\n    cancel_run: yes please\n")).code).toBe(
+      "CONFIG_INVALID",
+    );
   });
 
   test("mstart_config_keys_default_off", async () => {

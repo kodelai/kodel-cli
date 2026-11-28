@@ -111,6 +111,15 @@ const V2_ORIGIN_RUNS = [V2_ORIGIN_OPEN, V2_ORIGIN_DONE];
  * first too short for the step's `attachment` check), a PNG, the gate and a later step.
  */
 const V2_ATTACHMENT_RUN = "r_0mwrset3s_actm";
+/**
+ * The canceled runs (NE3N, `scripts/take-cancel-fixtures.mjs`): a run of format 1 (a copy of the paused run of
+ * `v1-open`) and one of format 2 canceled through a real manager's server, and one of format 2 canceled by the
+ * person.
+ */
+const V1_CANCEL_AGENT = "r_0mvxulvel_5xgk";
+const V2_CANCEL_AGENT = "r_0mx08u614_ol5w";
+const V2_CANCEL_PERSON = "r_0mx08u6cx_t0j2";
+const V2_CANCEL_RUNS = [V2_CANCEL_AGENT, V2_CANCEL_PERSON];
 /** The format-2 run that stands in for "a finished run of this engine" in the tests of how a run that is read behaves. */
 const V2_RUN = DEV_RUNS[1] as string;
 
@@ -207,9 +216,11 @@ describe("the golden runs of the stored formats", () => {
   test("formats_fixtures_have_a_known_set_of_formats_and_runs", async () => {
     expect(await formatDirs()).toEqual([
       "v1",
+      "v1-cancel",
       "v1-open",
       "v2",
       "v2-attachment",
+      "v2-cancel",
       "v2-engine",
       "v2-manager",
       "v2-model",
@@ -226,6 +237,8 @@ describe("the golden runs of the stored formats", () => {
     expect(await runIds("v2-model")).toEqual([V2_MODEL_RUN]);
     expect(await runIds("v2-roles")).toEqual([...V2_ROLES_RUNS].sort());
     expect(await runIds("v2-manager")).toEqual([...V2_MANAGER_RUNS].sort());
+    expect(await runIds("v1-cancel")).toEqual([V1_CANCEL_AGENT]);
+    expect(await runIds("v2-cancel")).toEqual([...V2_CANCEL_RUNS].sort());
     expect(await runIds("v2-origin")).toEqual([...V2_ORIGIN_RUNS].sort());
   });
 
@@ -298,7 +311,9 @@ async function checkFormats(from: string): Promise<{ opened: number }> {
           id === V2_ORIGIN_OPEN ||
           V2_MANAGER_RUNS.includes(id)
           ? ["running", "paused"]
-          : ["completed"],
+          : format === "v1-cancel" || format === "v2-cancel"
+            ? ["canceled"]
+            : ["completed"],
       ).toContain(String(status));
       expect((await store.readJournal(id)).length).toBeGreaterThan(0);
       expect((await run?.report())?.runId).toBe(id);
@@ -324,6 +339,8 @@ describe("every stored format against the current engine", () => {
         V2_WORKER_RUNS.length +
         V2_ROLES_RUNS.length +
         V2_MANAGER_RUNS.length +
+        1 +
+        V2_CANCEL_RUNS.length +
         V2_ORIGIN_RUNS.length +
         2,
     );
@@ -344,6 +361,8 @@ describe("every stored format against the current engine", () => {
         V2_WORKER_RUNS.length +
         V2_ROLES_RUNS.length +
         V2_MANAGER_RUNS.length +
+        1 +
+        V2_CANCEL_RUNS.length +
         V2_ORIGIN_RUNS.length +
         2,
     });
@@ -475,6 +494,60 @@ describe("every stored format against the current engine", () => {
       decided_by: "agent",
       decided_via: "manager",
     });
+  });
+
+  test("tne3n_cancel_fixtures_open_and_report_who_canceled", async () => {
+    const journalOf = async (id: string) =>
+      (await readFile(join(runsDir(), id, "journal.jsonl"), "utf8"))
+        .split("\n")
+        .filter((line) => line.trim())
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+    for (const [format, id, v, byAgent] of [
+      ["v1-cancel", V1_CANCEL_AGENT, 1, true],
+      ["v2-cancel", V2_CANCEL_AGENT, 2, true],
+      ["v2-cancel", V2_CANCEL_PERSON, 2, false],
+    ] as const) {
+      await rm(join(root, ".kodel"), { recursive: true, force: true });
+      await copyRuns(format, id);
+      const before = await hashTree(runsDir());
+      // `status` and `report` read the run; the report lists the agent's cancel with its decisions.
+      const run = await hostFor().open(id);
+      const state = await run?.state();
+      expect(state?.v).toBe(v);
+      expect(state?.status).toBe("canceled");
+      const summary = (await hostFor().runSummaries()).find((r) => r.meta.runId === id);
+      expect(summary?.state?.status).toBe("canceled");
+      const report = await run?.report();
+      expect(report?.status).toBe("canceled");
+      expect(report?.agent_decisions ?? []).toEqual(
+        byAgent ? [{ at: expect.any(Number), what: "cancel", instruction: "cancel that run" }] : [],
+      );
+      const finished = (await journalOf(id)).find((r) => r.event === "run_finished");
+      expect(finished?.status).toBe("canceled");
+      expect(typeof finished?.reason).toBe("string");
+      expect(finished?.decided_by).toBe(byAgent ? "agent" : undefined);
+      expect(finished?.decided_via).toBe(byAgent && v === 2 ? "manager" : undefined);
+      // reading changed nothing on disk
+      expect(await hashTree(runsDir())).toEqual(before);
+
+      // An older engine that drops the new keys and writes the journal back leaves the run canceled.
+      const path = join(runsDir(), id, "journal.jsonl");
+      const stripped = (await journalOf(id)).map((record) => {
+        if (record.event !== "run_finished") return record;
+        const { reason: _r, decided_by: _b, instruction: _i, decided_via: _v, ...rest } = record;
+        return rest;
+      });
+      await writeFile(path, `${stripped.map((r) => JSON.stringify(r)).join("\n")}\n`);
+      const again = await hostFor().open(id);
+      expect((await again?.state())?.status).toBe("canceled");
+      const after = await again?.report();
+      expect(after?.status).toBe("canceled");
+      expect(after?.agent_decisions ?? []).toEqual([]);
+      // and a cancel of it is still a repeat, nothing written
+      const repeat = await again?.cancel({ reason: "again" });
+      expect(repeat?.ok).toBe(true);
+      expect(repeat?.ok === true ? repeat.noop : undefined).toBe(true);
+    }
   });
 
   test("mstart_origin_fixture_opens_and_its_open_run_goes_on", async () => {
@@ -979,13 +1052,17 @@ describe("every stored format against the current engine", () => {
 
   test("t41_cancel_of_a_finished_v1_run_says_it_is_over", async () => {
     // `run.cancel()` of the host API on a finished run of format 1 answers as for a finished run of
-    // format 2: it is over; it is not "format 1", and nothing on disk changes
+    // format 2: it is over; it is not "format 1", and nothing on disk changes. Since NE3N the answer
+    // names it (`RUN_FINISHED`) instead of a silent ok; what T-41 holds here is unchanged.
     await copyRuns("v1");
     const id = V1_RUNS[0] as string;
     const before = await hashTree(runsDir());
     const decision = await plainHost(root, tmp).open(id).cancel();
-    // a run that is over takes no cancel: it answers ok and writes nothing
-    expect(decision.ok).toBe(true);
+    expect(decision.ok).toBe(false);
+    if (!decision.ok) {
+      expect(decision.error.code).toBe("RUN_FINISHED");
+      expect(decision.error.message).not.toContain("format");
+    }
     expect(await hashTree(runsDir())).toEqual(before);
   });
 

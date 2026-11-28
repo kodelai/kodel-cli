@@ -41,6 +41,8 @@ import {
   redactText,
   runSlug,
   type ServerRole,
+  type SessionAdapter,
+  SessionError,
   type SubtaskRef,
   type Task,
   type TaskFilter,
@@ -51,8 +53,20 @@ import {
 } from "@kodel-ai/pipeline-core";
 import { Command, CommanderError, Option } from "commander";
 import pkg from "../package.json" with { type: "json" };
-import { type AgentContext, type AgentProject, registerAgentCommands } from "./agent-commands";
+import {
+  type AgentContext,
+  type AgentProject,
+  pipesAdapter,
+  registerAgentCommands,
+} from "./agent-commands";
 import { BUILD } from "./build-info";
+import {
+  type CancelInput,
+  type CancelPorts,
+  cancelLines,
+  cancelRun,
+  checkReason,
+} from "./cancel-run";
 import { attachmentLine, describePendingChange } from "./decide-text";
 import { engineHostOptions } from "./engine-steps";
 import {
@@ -180,6 +194,7 @@ export const WAIT_TIMEOUT_S = 28_800;
 const NO_AGENT_DECISIONS = {
   gate: false,
   pipelineChange: false,
+  cancelRun: false,
   startTask: false,
   stopAgent: false,
 };
@@ -398,6 +413,46 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     });
   };
 
+  /**
+   * What a cancel (NE3N) works with: the runs of this project, the start lock, and the stops of its
+   * background agents and engine sessions, all as kodel's own end of them (`finish`), not a person's.
+   */
+  const cancelPorts = async (given?: LocalPipelineHost): Promise<CancelPorts> => {
+    const h = given ?? (await host());
+    const { root } = await project();
+    const environment = env.environment ?? process.env;
+    const sessions = async (): Promise<SessionAdapter> =>
+      env.agent?.sessions
+        ? env.agent.sessions()
+        : pipesAdapter({
+            root,
+            environment,
+            launcher: env.sessionLauncher ?? {
+              exec: process.execPath,
+              args: [process.argv[1] ?? "kodel"],
+            },
+          });
+    return {
+      open: (runId) => h.open(runId),
+      withWorkerStartLock: (fn) => h.withWorkerStartLock(fn),
+      finishWorkers: async (runId) => {
+        const launcher = await (env.agent?.launcher ?? openWorkerLauncher)();
+        await launcher.finish(runId);
+      },
+      stopSession: async (id) => {
+        try {
+          await (await sessions()).stop(id, { by: "finish" });
+        } catch (error) {
+          // A session that has already ended is what a stop wants.
+          const gone =
+            error instanceof SessionError &&
+            (error.code === "NOT_RUNNING" || error.code === "NOT_FOUND");
+          if (!gone) throw error;
+        }
+      },
+    };
+  };
+
   /** The project as `agent start`, `prune` and `doctor` read it (`agent-commands.ts`). */
   const agentProject = async (): Promise<AgentProject> => {
     const { root, dataDir } = await project();
@@ -582,6 +637,8 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         agentDecisions: {
           gate: config.decisions.agent.gate,
           pipelineChange: config.decisions.agent.pipeline_change,
+          // NE3N: a cancel is a manager's only, never a server with no role.
+          cancelRun: config.decisions.agent.cancel_run && role === "manager",
           startTask: config.decisions.agent.start_task,
           stopAgent: config.decisions.agent.stop_agent,
         },
@@ -721,6 +778,12 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         ...(readOnly ? {} : { humans: local }),
         dialog: settings.dialog,
         agentDecisions: settings.agentDecisions,
+        ...(readOnly || settings.agentDecisions.cancelRun !== true
+          ? {}
+          : {
+              cancel: async (cancelInput: CancelInput) =>
+                cancelRun(await cancelPorts(local), cancelInput),
+            }),
         ...(dialogTimeoutMs === undefined ? {} : { dialogTimeoutMs }),
       } satisfies ServerOptions,
     };
@@ -1029,7 +1092,9 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         const what =
           made.what === "gate"
             ? `gate ${plain(made.node ?? "?")} ${plain(made.decision ?? "")}`
-            : "change of the pipeline accepted";
+            : made.what === "cancel"
+              ? "run canceled"
+              : "change of the pipeline accepted";
         env.out(`by agent:  ${what} (told: "${plain(made.instruction).slice(0, 120)}")\n`);
       }
       // A background worker that `kodel serve` saw gone (`worker_note`): the run waits for any agent.
@@ -1119,6 +1184,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       const { openTasksForTui, tuiTaskOptions } = await import("./tui/tasks-open");
       const { createWorkerOptions } = await import("./tui/worker-start");
       const { createOpenWorker } = await import("./tui/worker-open");
+      const { cancelOptions } = await import("./tui/cancel-flow");
       const h = await host();
       const { root, dataDir } = await project();
       const tasks = await openTasksForTui(dataDir);
@@ -1152,6 +1218,8 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           serve: async () => (await loadConfig(dataDir)).serve,
           ...(worktreesDir === undefined ? {} : { worktreesDir }),
         }),
+        // `x`: the very cancel of `kodel run cancel`.
+        ...cancelOptions(cancelPorts),
         serve: () => readServeStatus(place, Date.now()),
         // `o`: the terminal of a run's agent, through `kodel agent attach` of this very build.
         openWorker: createOpenWorker({
@@ -1312,7 +1380,7 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           }
           const { openTasksForTui, tuiTaskOptions } = await import("./tui/tasks-open");
           const taskReaders = tuiTaskOptions(await openTasksForTui(dataDir));
-          api = projectApi(h, root, tools, asker, taskReaders);
+          api = projectApi(h, root, tools, asker, taskReaders, cancelPorts);
           {
             // Start and Stop agent: through the same functions as the terminal's `s`; no key is read.
             const { webActing } = await import("./web/acting");
@@ -2050,6 +2118,41 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
       } else {
         env.out("an image is not printed; a person at a terminal is told where it is kept\n");
       }
+    });
+
+  // ── run cancel (NE3N) ───────────────────────────────────────────────────────
+
+  const runGroup = withPlural(program.command("run")).description(
+    "A run as a whole (cancel ends one that will not go on)",
+  );
+
+  runGroup
+    .command("cancel <run>")
+    .description(
+      "End a run that will not go on as canceled; its task, branch and worktree stay (a person's command)",
+    )
+    .requiredOption("--reason <text>", "why the run is canceled (kept in its history)")
+    .action(async (runId: string, opts: { reason: string }) => {
+      requireHuman();
+      const reasonError = checkReason(opts.reason);
+      if (reasonError) throw new UserError(`${reasonError.code}: ${reasonError.message}`);
+      // What the person is asked about, as far as it can be read; a run that cannot be read is
+      // refused by the cancel itself, with its reason.
+      const seen = await (await host())
+        .open(runId)
+        .then((run) => run?.state())
+        .catch(() => undefined);
+      const named = seen?.slug === undefined ? "" : ` (${plain(seen.slug)})`;
+      const keeps =
+        seen?.taskKey === undefined
+          ? "its task, branch and worktree stay as they are"
+          : `task ${plain(seen.taskKey)} stays open, and the branch and worktree stay`;
+      await mustConfirm(`Cancel run ${plain(runId)}${named}? It ends for good; ${keeps}.`);
+      const answer = await cancelRun(await cancelPorts(), { runId, reason: opts.reason });
+      if (!answer.ok) {
+        throw new UserError(`${answer.error.code}: ${plain(answer.error.message)}`);
+      }
+      env.out(`${cancelLines(answer).map(plain).join("\n")}\n`);
     });
 
   program

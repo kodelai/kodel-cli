@@ -1,6 +1,6 @@
 /**
  * The two tools with which the agent may decide for a person when the project's config allows it
- * (`decisions.agent`). Core only describes them and checks their arguments; what a decision does
+ * (`decisions.agent`), and the manager's cancel of a run (NE3N). Core only describes them and checks their arguments; what a decision does
  * is the host's (`AgentDecider`), and a host that passes none serves no such tool. There is no tool
  * for `ack`, `resume` or `seal`: those stay with a person whatever the config says.
  */
@@ -27,6 +27,11 @@ export interface AgentDecider {
   acceptChange(
     service: PipelineService,
     input: { run_id: string; change_hash: string; instruction: string; reason?: string },
+  ): Promise<ToolResult>;
+  /** Ends a run as canceled (NE3N); a host that cannot stop a run's agents serves no such tool. */
+  cancelRun?(
+    service: PipelineService,
+    input: { run_id: string; reason: string; instruction: string },
   ): Promise<ToolResult>;
 }
 
@@ -145,6 +150,36 @@ export function decisionTools(
       idempotent: false,
       run: (service, input) =>
         decider.acceptChange(service, input as Parameters<AgentDecider["acceptChange"]>[1]),
+    });
+  }
+  // A cancel ends a run for good: only a manager, which works no run, is given it (never a server
+  // with no role, which may be the very agent that works the run).
+  const cancelRun = decider.cancelRun;
+  if (flags.cancelRun && inbox && cancelRun !== undefined) {
+    tools.push({
+      name: "manager_cancel_run",
+      title: "Cancel a run for the person",
+      description:
+        "End a run that will not go on (started by mistake, a duplicate, one whose task was declined) as " +
+        `canceled, because the person told you to. ${ONLY_WHEN_TOLD} The run cannot be continued afterwards. ` +
+        "Its background agent is stopped; its task is not closed, and its branch and worktree stay: the answer " +
+        "names them with `remove_commands`, which are for the person to run if they want, never for you. The " +
+        "cancel is recorded in the run's history as made by the agent, with your `instruction` and `reason`. A run " +
+        "that has already completed or failed is refused (`RUN_FINISHED`); one already canceled answers `noop`.",
+      shape: {
+        run_id: runId,
+        reason: z
+          .string()
+          .trim()
+          .min(1)
+          .max(LIMITS.reason)
+          .describe("Why the run is canceled, as the person put it; kept in the run's history."),
+        instruction,
+      },
+      readOnly: false,
+      idempotent: true,
+      run: (service, input) =>
+        cancelRun(service, input as { run_id: string; reason: string; instruction: string }),
     });
   }
   return tools;

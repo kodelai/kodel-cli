@@ -277,6 +277,27 @@ read from the journal.
 Golden fixture: `fixtures/formats/v2-attachment/`, one run with two versions of a text, a PNG and the check
 (`fixtures/formats/README.md`).
 
+## Who canceled a run, and why (NE3N)
+
+A cancel ends a run with the `run_finished` record it always had, `status: canceled`. The record now
+also keeps who canceled it and why: `reason` (it existed already, and is now filled), and for a cancel an
+agent made on the person's instruction `decided_by: agent` and `instruction`, plus `decided_via: manager`
+in format 2. Nothing is new in the state, and no event is new.
+
+- A run of format 2 keeps the fields from now on, a run that was going when kodel was updated too. Format 2
+  is amended in place, with no new version (rule 5): the fields decide nothing, so an engine that does not
+  know them decides every step the same way, and one that drops them leaves the run `canceled`.
+- A run of format 1 keeps `reason`, `decided_by` and `instruction` as well (its journal holds the fields
+  of a record as given, as it already did for an agent's gate decision); `decided_via` has no place there.
+- A cancel of a run that has completed or failed now answers `RUN_FINISHED` instead of a quiet success; it
+  still writes nothing, for a run of either format.
+
+Tested on the golden runs `fixtures/formats/v1-cancel/` (a run of format 1 canceled through a manager's
+server: it stays format 1, with no `decided_via`) and `fixtures/formats/v2-cancel/` (a run of format 2
+canceled through a manager's server, and one canceled by the person), made by the real engine with
+`bun scripts/take-cancel-fixtures.mjs`: each opens, is written back as it was read, reports the agent's cancel
+in `agent_decisions`, and reads as `canceled` with the new fields taken out of its `run_finished`.
+
 ## How a run was started, and who stopped its agent (manager_start_task, manager_stop_agent)
 
 `run_started` may carry `origin: {by, via, agent_instruction?, forced?}`: `by` is `person` or `agent`, `via` is `tui`,

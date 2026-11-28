@@ -13,6 +13,7 @@ import {
   type ToolResult,
 } from "@kodel-ai/pipeline-core";
 import type { AgentDecider } from "@kodel-ai/pipeline-core/mcp";
+import type { CancelInput, CancelResult } from "./cancel-run";
 import { blockingChange, type DialogState, type HumanHost, type HumanRun } from "./elicit";
 import { plain } from "./plain";
 
@@ -88,11 +89,13 @@ async function after(
 export function createAgentDecider(
   humans: HumanHost,
   dialog: DialogState,
-  options: { lookWith?: LookWith } = {},
+  options: { lookWith?: LookWith; cancel?: (input: CancelInput) => Promise<CancelResult> } = {},
 ): AgentDecider {
   const lookWith = options.lookWith ?? "pipeline_next_step";
   // Journaled with the decision: a manager works no step, so `kodel serve` still resumes the worker.
   const via = lookWith === "manager_inbox" ? { viaManager: true as const } : {};
+  // Only a manager cancels a run (NE3N): it works none, so it never ends its own.
+  const cancel = lookWith === "manager_inbox" ? options.cancel : undefined;
   return {
     async decideGate(service, input) {
       if (dialog.open > 0) return dialogOpen();
@@ -232,5 +235,25 @@ export function createAgentDecider(
       if (!done.ok) return failure(done.error.code, done.error.message);
       return after(service, input.run_id, { accepted: found.hash }, lookWith);
     },
+
+    ...(cancel === undefined
+      ? {}
+      : {
+          async cancelRun(_service, input) {
+            const answer = await cancel({
+              runId: input.run_id,
+              reason: input.reason,
+              byAgent: { instruction: input.instruction, ...via },
+            });
+            if (!answer.ok) return failure(answer.error.code, answer.error.message);
+            const { ok: _ok, ...rest } = answer;
+            return {
+              ok: true,
+              decided_by: "agent",
+              ...rest,
+              note: "The run is over. Tell the person its task is still open, and show them remove_commands; do not run them yourself.",
+            };
+          },
+        }),
   };
 }

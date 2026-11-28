@@ -677,10 +677,33 @@ export function createSessionWorkerLauncher(deps: SessionLauncherDeps): WorkerLa
     },
     async finish(runId) {
       // Read again: the caller holds the start lock, and only a record that is live now is stopped.
-      const latest = (await statuses([runId])).get(runId);
-      if (latest === undefined || !isLive(latest)) return;
-      // Not the person's stop: the stop record says kodel ended it because the run was over.
-      await stopRecord(latest.id, "finish");
+      // Every record of the run, not only the latest (NE3N): a session of an earlier decision that
+      // is still alive, or one whose holder is gone while its child runs on, works for a run that is
+      // over all the same.
+      const records = (await listAll()).filter(
+        (entry) =>
+          entry.problem === undefined &&
+          entry.name !== undefined &&
+          workerRunOf(entry.name)?.runId === runId &&
+          (entry.status.state === "starting" ||
+            entry.status.state === "running" ||
+            entry.status.childAlive === true),
+      );
+      // Not the person's stop: the stop record says kodel ended it because the run was over. One stop
+      // that fails does not leave the others running; every one that failed is named at the end.
+      const failed: string[] = [];
+      for (const entry of records) {
+        try {
+          await stopRecord(entry.id, "finish");
+        } catch (error) {
+          failed.push(
+            `${entry.name ?? entry.id} (${entry.id}): ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      if (failed.length > 0) {
+        throw new Error(`could not stop ${failed.join("; ")}`);
+      }
     },
     async attachable(runId) {
       const latest = (await statuses([runId])).get(runId);

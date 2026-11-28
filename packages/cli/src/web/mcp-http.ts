@@ -86,15 +86,32 @@ function readJson(req: IncomingMessage): Promise<unknown> {
   });
 }
 
-/** The tools a body calls, for the audit log: the names only, never the arguments. */
+const RUN_ID = /^r_[0-9a-z]{9}_[0-9a-z]{4}$/;
+
+/**
+ * The tools a body calls, for the audit log: the names, never the arguments, but for the one call that
+ * ends a run: a cancel names its run, so the log says which run a token canceled (NE3N).
+ */
 function toolCalls(body: unknown): string[] {
   const messages = Array.isArray(body) ? body : [body];
   return messages.flatMap((m) => {
     if (typeof m !== "object" || m === null) return [];
     const r = m as Record<string, unknown>;
     if (r.method !== "tools/call" || typeof r.params !== "object" || r.params === null) return [];
-    const name = (r.params as Record<string, unknown>).name;
-    return typeof name === "string" ? [name.slice(0, 80)] : [];
+    const params = r.params as Record<string, unknown>;
+    if (typeof params.name !== "string") return [];
+    const name = params.name.slice(0, 80);
+    if (name !== "manager_cancel_run") return [name];
+    const args = params.arguments;
+    const run =
+      typeof args === "object" && args !== null
+        ? (args as Record<string, unknown>).run_id
+        : undefined;
+    return [
+      typeof run === "string" && RUN_ID.test(run)
+        ? `${name} (run ${run})`
+        : `${name} (no valid run id)`,
+    ];
   });
 }
 

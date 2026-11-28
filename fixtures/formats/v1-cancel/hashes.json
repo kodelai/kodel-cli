@@ -1,0 +1,14 @@
+{
+  "r_0mvxulvel_5xgk/artifacts/test-1-command.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "r_0mvxulvel_5xgk/artifacts/test-2-command.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "r_0mvxulvel_5xgk/changes/fix-1.patch": "3d72e799166d77bb7e80b9b212b03121e82a01781069ff74447bb1297103452d",
+  "r_0mvxulvel_5xgk/changes/impl-1.patch": "b223525f2545e6fd26aae37a6785524fc557d60f8412dc2b386e5bc5bc3bf0d5",
+  "r_0mvxulvel_5xgk/journal.jsonl": "dafde6d6fbed644575e456287b077b5ab7f0517e9094185f641d26ddff3a3f7a",
+  "r_0mvxulvel_5xgk/meta.json": "4ba937a38060da533434531da34f92ca0163ecf06f6592c7510918a3149a01c0",
+  "r_0mvxulvel_5xgk/served/fix-1-1.json": "a3fb9327280663961da9d6f29cbe769b9b681488e57683eff5df3d5f0de20f20",
+  "r_0mvxulvel_5xgk/served/impl-1-1.json": "93701003addc705a1180c5f7a99691aa896eceb943ea68d917b0967ac828e3f9",
+  "r_0mvxulvel_5xgk/snapshots.json": "169b322f356c3d987d014fc44cfb06ab97167ab23246adcaca0b4c7fe56cf621",
+  "r_0mvxulvel_5xgk/specs/120df0a3db1e320b.yaml": "120df0a3db1e320b11db0ad15893d343c418eb49d969de8530e2564ba081b9d1",
+  "r_0mvxulvel_5xgk/specs/da29f83267a1c020.yaml": "da29f83267a1c020f96d5892dd8ff64b317e38b280e078872e092da98d236da0",
+  "r_0mvxulvel_5xgk/state.json": "6c1586193b04fa57129a19ea1461608edb6ca5307fad26f53b41f61b055f3841"
+}

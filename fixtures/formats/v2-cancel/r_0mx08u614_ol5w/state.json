@@ -1,0 +1,96 @@
+{
+  "v": 2,
+  "runId": "r_0mx08u614_ol5w",
+  "task": "canceled through a manager",
+  "specHash": "ed10836e87c59e7a",
+  "status": "canceled",
+  "startedAt": 1795860271683,
+  "nodes": {
+    "write": {
+      "slug": "write",
+      "status": "passed",
+      "outcome": "passed",
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 1
+    },
+    "approve": {
+      "slug": "approve",
+      "status": "waiting",
+      "outcome": null,
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 2
+    },
+    "ship": {
+      "slug": "ship",
+      "status": "pending",
+      "outcome": null,
+      "attempt": 0,
+      "consecutiveFailures": 0,
+      "extraAttempts": 0,
+      "visitId": 0
+    }
+  },
+  "active": [],
+  "trail": [
+    "write",
+    "approve"
+  ],
+  "pauses": [],
+  "nextVisitId": 3,
+  "seq": 9,
+  "slug": "canceled-through-a-manager",
+  "workdir": "/kodel-fixture/workdir/r_0mx08u614_ol5w",
+  "pipelineFile": ".kodel/pipelines/gated.yaml",
+  "history": {
+    "changes": {
+      "enabled": true,
+      "exclude": [],
+      "max_kb": 512
+    },
+    "output": {
+      "enabled": true,
+      "max_kb": 64
+    },
+    "prompts": {
+      "enabled": true
+    },
+    "executor": {
+      "enabled": true
+    },
+    "tool_log": {
+      "enabled": true
+    },
+    "agent_log": {
+      "enabled": false,
+      "mode": "full",
+      "preview_chars": {
+        "user": 4000,
+        "agent": 4000,
+        "tool_input": 4000,
+        "tool_result": 8000
+      },
+      "max_kb": 20480,
+      "interval_s": 10
+    },
+    "usage": {
+      "enabled": false,
+      "prices": {}
+    },
+    "tool_calls": {
+      "enabled": false,
+      "preview_chars": 200
+    }
+  },
+  "engineVersion": "0.1.0",
+  "served": {
+    "write:1": [
+      "f587dfcf0e2960ad"
+    ]
+  },
+  "servedEvents": 1,
+  "finishedAt": 1795860272394
+}

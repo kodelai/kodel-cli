@@ -484,3 +484,32 @@ describe("5m9d the answers of a worker", () => {
     }
   }, 30_000);
 });
+
+describe("tne3n the inbox after a cancel", () => {
+  test("tne3n_inbox_does_not_list_a_canceled_run_as_waiting", async () => {
+    const host = states.reader({ runTaskLink: askLink });
+    const reads = createManagerReads({ host, tasks });
+    const ids = [states.runs.gate, states.runs.paused, states.runs.change, states.runs.v1];
+    const before = (await call(reads, "manager_inbox")).waiting as Loose[];
+    // Each of them waits for a person before the cancel.
+    for (const id of ids) expect(before.some((i) => i.run_id === id)).toBe(true);
+    for (const id of ids) {
+      const decision = await (await host.open(id))?.cancel({ reason: "not wanted" });
+      expect(decision?.ok).toBe(true);
+    }
+    const inbox = await call(reads, "manager_inbox");
+    expect(inbox.ok).toBe(true);
+    const after = inbox.waiting as Loose[];
+    for (const id of ids) {
+      expect(
+        after.filter(
+          (i) =>
+            i.run_id === id &&
+            ["gate", "paused", "pipeline_change", "worker_gone"].includes(i.kind),
+        ),
+      ).toEqual([]);
+    }
+    // What else waits is still there.
+    expect(after.some((i) => i.kind === "task_open" && i.run_id === states.runs.tasked)).toBe(true);
+  }, 30_000);
+});

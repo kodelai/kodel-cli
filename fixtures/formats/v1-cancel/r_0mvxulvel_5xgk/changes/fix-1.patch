@@ -1,0 +1,7 @@
+# kodel-patch v1
+diff --git a/src/farewell.js b/src/farewell.js
+--- a/src/farewell.js
++++ b/src/farewell.js
+@@ -1 +1 @@
+-export const farewell = (name) => `Goodbye, ${name}.`;
++export const farewell = (name) => `Goodbye, ${name}!`;

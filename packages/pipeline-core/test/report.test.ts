@@ -218,3 +218,28 @@ describe("jspb_report_per_check", () => {
     expect(checksOf(finished(undefined, false), finished(undefined, true))).toEqual([]);
   });
 });
+
+describe("tne3n the report of a canceled run", () => {
+  test("tne3n_report_of_run_canceled_in_agent_step_counts_the_open_step_once", () => {
+    const { state, journal } = play([
+      [0, START],
+      [10_000, { type: "agent_completed", node: "work", attempt: 1 }],
+      [20_000, { type: "human_decided", node: "approve", decision: "rejected", reason: "redo" }],
+      // canceled 30 s into the second attempt of `work`, which is open
+      [50_000, { type: "cancel", reason: "not needed" }],
+      // the patch of the run is noted long after the end
+      [400_000, { type: "changes_recorded", changesError: "no git" }],
+    ]);
+    const report = summarizeRun(state, journal);
+    expect(report.status).toBe("canceled");
+    const work = report.nodes.find((n) => n.node === "work");
+    expect(work?.attempts.map((a) => [a.attempt, a.seconds])).toEqual([
+      [1, 10],
+      [2, 30],
+    ]);
+    expect(work?.seconds).toBe(40);
+    expect(report.work_s).toBe(40);
+    expect(report.waiting_s).toBe(10);
+    expect(report.extra_attempts).toBe(1);
+  });
+});

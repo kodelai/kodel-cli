@@ -45,6 +45,7 @@ export const ERROR_CODES = [
   "HISTORY_SESSION_UNREADABLE",
   "INVALID_CURSOR",
   "HISTORY_UNAVAILABLE",
+  "RUN_FINISHED",
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];

@@ -83,12 +83,14 @@ describe("t41 the codecs read and write the golden runs unchanged", () => {
   for (const format of [
     "v1",
     "v1-open",
+    "v1-cancel",
     "v2",
     "v2-worker",
     "v2-roles",
     "v2-manager",
     "v2-origin",
     "v2-attachment",
+    "v2-cancel",
   ]) {
     test(`t41_${format.replace("-", "_")}_round_trip_on_real_fixtures`, () => {
       const runs = fixtureRuns(format);
@@ -1288,5 +1290,134 @@ describe("5m9d the role of the server on the records of a run", () => {
     }
     const plain = { ...base, executor: { client: { value: { name: "a", version: "1" } } } };
     expect(encodeJournalRecord(plain as unknown as JournalRecord)).toEqual(plain);
+  });
+});
+
+describe("ne3n the cancel of a run kept in the journal", () => {
+  // Made by `scripts/take-cancel-fixtures.mjs`: a run of format 1 (a copy of the paused run of
+  // `v1-open`) and one of format 2 canceled through a real manager's server, and one of format 2
+  // canceled by the person.
+  const V1_AGENT = "r_0mvxulvel_5xgk";
+  const V2_AGENT = "r_0mx08u614_ol5w";
+  const V2_PERSON = "r_0mx08u6cx_t0j2";
+  const CANCEL_KEYS = ["reason", "decided_by", "instruction", "decided_via"] as const;
+
+  const load = (format: string, id: string) => {
+    const run = fixtureRuns(format).find((r) => r.id === id);
+    if (run === undefined) throw new Error(`no fixture run ${id}`);
+    const state = readRunState(run.state, run.id);
+    const journal = run.journal.map((line) => decodeJournalRecord(JSON.parse(line)));
+    return { run, state, journal };
+  };
+  const finishedOf = (journal: readonly JournalRecord[]) => {
+    const record = journal.find((r) => r.event === "run_finished");
+    if (record === undefined) throw new Error("no run_finished");
+    return record;
+  };
+  const strip = (journal: readonly JournalRecord[]) =>
+    journal.map((record) => {
+      if (record.event !== "run_finished") return record;
+      const copy: Record<string, unknown> = { ...record };
+      for (const key of CANCEL_KEYS) delete copy[key];
+      return copy as JournalRecord;
+    });
+
+  test("tne3n_cancel_fixtures_are_the_known_runs", () => {
+    expect(fixtureRuns("v1-cancel").map((r) => r.id)).toEqual([V1_AGENT]);
+    expect(
+      fixtureRuns("v2-cancel")
+        .map((r) => r.id)
+        .sort(),
+    ).toEqual([V2_AGENT, V2_PERSON].sort());
+  });
+
+  test("tne3n_cancel_fixtures_round_trip_in_their_own_format", () => {
+    for (const [format, id, v] of [
+      ["v1-cancel", V1_AGENT, 1],
+      ["v2-cancel", V2_AGENT, 2],
+      ["v2-cancel", V2_PERSON, 2],
+    ] as const) {
+      const { run, state, journal } = load(format, id);
+      expect(state.v).toBe(v);
+      expect(state.status).toBe("canceled");
+      expect(canonical(encodeRunState(state))).toBe(canonical(JSON.parse(run.state)));
+      journal.forEach((record, i) => {
+        expect(record.v).toBe(v);
+        expect(canonical(encodeJournalRecord(record))).toBe(
+          canonical(JSON.parse(run.journal[i] as string)),
+        );
+      });
+      // who canceled lives in the journal only: the state has no key for it
+      expect(run.state).not.toContain("decided_");
+    }
+  });
+
+  test("tne3n_run_finished_carries_who_canceled_and_why", () => {
+    const v1 = finishedOf(load("v1-cancel", V1_AGENT).journal);
+    expect(v1).toMatchObject({
+      status: "canceled",
+      reason: "started by mistake, a duplicate of another run",
+      decided_by: "agent",
+      instruction: "cancel that run",
+    });
+    // format 1 has no `decided_via`
+    expect("decided_via" in v1).toBe(false);
+    expect(finishedOf(load("v2-cancel", V2_AGENT).journal)).toMatchObject({
+      status: "canceled",
+      reason: "started by mistake, a duplicate of another run",
+      decided_by: "agent",
+      instruction: "cancel that run",
+      decided_via: "manager",
+    });
+    const person = finishedOf(load("v2-cancel", V2_PERSON).journal);
+    expect(person).toMatchObject({ status: "canceled", reason: "the task was declined" });
+    for (const key of ["decided_by", "instruction", "decided_via"]) {
+      expect(key in person).toBe(false);
+    }
+  });
+
+  test("tne3n_report_lists_the_agents_cancel_with_its_decisions", () => {
+    for (const [format, id] of [
+      ["v1-cancel", V1_AGENT],
+      ["v2-cancel", V2_AGENT],
+    ] as const) {
+      const { state, journal } = load(format, id);
+      const report = summarizeRun(state, journal);
+      expect(report.status).toBe("canceled");
+      expect(report.agent_decisions).toEqual([
+        { at: expect.any(Number), what: "cancel", instruction: "cancel that run" },
+      ]);
+    }
+    const person = load("v2-cancel", V2_PERSON);
+    const report = summarizeRun(person.state, person.journal);
+    expect(report.status).toBe("canceled");
+    expect(report.agent_decisions ?? []).toEqual([]);
+  });
+
+  test("tne3n_without_the_cancel_keys_the_run_still_reads_canceled", () => {
+    // An engine that drops the keys and writes the journal back leaves the run canceled: the state
+    // decides it, and the stripped records still decode, encode and report the run as canceled.
+    for (const [format, id] of [
+      ["v1-cancel", V1_AGENT],
+      ["v2-cancel", V2_AGENT],
+      ["v2-cancel", V2_PERSON],
+    ] as const) {
+      const { run, state, journal } = load(format, id);
+      const stripped = strip(journal);
+      const finished = finishedOf(stripped);
+      for (const key of CANCEL_KEYS) expect(key in finished).toBe(false);
+      const reread = stripped.map((record) =>
+        decodeJournalRecord(JSON.parse(JSON.stringify(encodeJournalRecord(record)))),
+      );
+      expect(finishedOf(reread).status).toBe("canceled");
+      expect(readRunState(run.state, run.id).status).toBe("canceled");
+      const report = summarizeRun(state, reread);
+      expect(report.status).toBe("canceled");
+      expect(report.agent_decisions ?? []).toEqual([]);
+      // nothing else of the report changes
+      const { agent_decisions: _a, ...rest } = summarizeRun(state, journal);
+      const { agent_decisions: _b, ...after } = report;
+      expect(canonical(after)).toBe(canonical(rest));
+    }
   });
 });

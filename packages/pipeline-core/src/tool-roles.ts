@@ -23,8 +23,15 @@ export const RUN_CORE: readonly string[] = [
   "pipeline_complete_step",
 ];
 
-/** The tools that decide for a person; served only under `decisions.agent`, and never to the worker. */
-export const DECISION_TOOLS: readonly string[] = ["pipeline_decide_gate", "pipeline_accept_change"];
+/**
+ * The tools that decide for a person; served only under `decisions.agent`, and never to the worker.
+ * `manager_cancel_run` (NE3N) is served only on a manager's server, never on one with no role.
+ */
+export const DECISION_TOOLS: readonly string[] = [
+  "pipeline_decide_gate",
+  "pipeline_accept_change",
+  "manager_cancel_run",
+];
 
 /**
  * The manager's tools that act for the person (start a task, stop a run's agent): served only under the

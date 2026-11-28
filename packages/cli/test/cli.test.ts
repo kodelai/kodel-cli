@@ -4,18 +4,30 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { LocalPipelineHost } from "@kodel-ai/local";
+import { insideSessionOf, LocalPipelineHost, resolveBase } from "@kodel-ai/local";
 import { defaultRegistry, docTopics } from "@kodel-ai/pipeline-core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { plain, runCli } from "../src/cli";
+import { INSIDE_SESSION_REFUSAL } from "../src/human-only";
 import { SKILLS } from "../src/init/skills";
+import type { WorkerLauncher } from "../src/worker-launcher";
 
 let dir: string;
 
 // A run of this repository's own pipeline has KODEL_ENGINE=1, and under it `kodel mcp` is a worker (5M9D):
 // the servers these tests start are the person's, with every tool.
 const { KODEL_ENGINE: _engineMark, ...OUTSIDE_ENGINE } = process.env as Record<string, string>;
+
+/**
+ * What the real program says when a person's command runs with no terminal. A test that itself runs
+ * inside a kodel agent session (this repository's pipeline) is refused for that reason first, by the
+ * process table, which no environment changes.
+ */
+const noTerminalRefusal = (): string =>
+  insideSessionOf(resolveBase(process.env)) === "inside"
+    ? INSIDE_SESSION_REFUSAL
+    : "for a person at a terminal";
 
 const DEMO = [
   "name: demo",
@@ -181,7 +193,7 @@ describe("pipeline changes", () => {
         child.on("close", (code) => done({ code, err }));
       });
       expect(result.code, sub).toBe(1);
-      expect(result.err, sub).toContain("for a person at a terminal");
+      expect(result.err, sub).toContain(noTerminalRefusal());
     }
     expect((await journalOf(id)).some((r) => r.event === "pipeline_accepted")).toBe(false);
     expect((await cli("status", id)).out).toContain("pipeline_changed");
@@ -1163,7 +1175,7 @@ describe("pipeline proposals", () => {
         child.on("close", (code) => done({ code, err }));
       });
       expect(result.code, sub).toBe(1);
-      expect(result.err, sub).toContain("for a person at a terminal");
+      expect(result.err, sub).toContain(noTerminalRefusal());
     }
     expect(await hostOf().pipelineProposals()).toHaveLength(1);
   });
@@ -1707,5 +1719,141 @@ describe("the commands the design topic tells a person to type", () => {
     expect(bad).toBe("approvall");
     const help = await cli(bad ?? "", "--help");
     expect(help.out).not.toMatch(/^Usage: kodel approvall\b/m);
+  });
+});
+
+describe("tne3n run cancel", () => {
+  /** A person at a terminal; the background agents of the run are a fake launcher that records its stops. */
+  async function cancelAs(
+    person: { answer?: boolean; interactive?: boolean; environment?: Record<string, string> },
+    finished: string[],
+    ...args: string[]
+  ) {
+    let out = "";
+    let err = "";
+    const launcher = {
+      async finish(runId: string) {
+        finished.push(runId);
+      },
+    };
+    const code = await runCli(args, {
+      cwd: dir,
+      out: (t) => {
+        out += t;
+      },
+      err: (t) => {
+        err += t;
+      },
+      interactive: person.interactive ?? true,
+      environment: person.environment ?? {},
+      select: async () => [],
+      confirm: async () => person.answer ?? true,
+      agent: {
+        launcher: async () => launcher as unknown as WorkerLauncher,
+      },
+    });
+    return { code, out, err };
+  }
+
+  test("tne3n_cli_cancels_a_run_at_a_gate_and_stops_its_agents", async () => {
+    const id = await runAtGate();
+    const finished: string[] = [];
+    const wait = cliAs({ pollMs: 20 }, "wait", id);
+    const result = await cancelAs({}, finished, "run", "cancel", id, "--reason", "a duplicate");
+    expect(result.code).toBe(0);
+    expect(result.out).toContain(`canceled ${id}`);
+    expect(finished).toEqual([id]);
+    // `kodel wait` returns; status and report show it as canceled
+    expect((await wait).out).toContain("the run ended: canceled");
+    expect((await cli("status", id)).out).toContain("canceled");
+    expect((await cli("report", id)).code).toBe(0);
+    const journal = (await readFile(join(dir, ".kodel", "runs", id, "journal.jsonl"), "utf8"))
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const end = journal.find((r) => r.event === "run_finished");
+    expect(end).toMatchObject({ status: "canceled", reason: "a duplicate" });
+    expect(end).not.toHaveProperty("decided_by");
+    // the task's run is no longer the active one: a start is answered as for any run that ended,
+    // and with restart a new run starts beside it
+    const host = new LocalPipelineHost({ root: dir, heartbeatMs: 0 });
+    const ended = await host.start({ pipeline: "demo", task: "t", restart: false });
+    expect(ended.status).toBe("terminal");
+    const next = await host.start({ pipeline: "demo", task: "t", restart: true });
+    expect(next.status).toBe("started");
+    expect(next.run.runId).not.toBe(id);
+    // a second cancel writes nothing and tries the stop again
+    const again = await cancelAs({}, finished, "run", "cancel", id, "--reason", "again");
+    expect(again.out).toContain("was already canceled");
+    expect(finished).toEqual([id, id]);
+  });
+
+  test("tne3n_cli_human_only_refusals_change_nothing", async () => {
+    const id = await runAtGate();
+    const finished: string[] = [];
+    const statusBefore = (await cli("status", id)).out;
+    for (const [person, text] of [
+      [{ answer: false }, "not confirmed"],
+      [{ interactive: false }, "for a person"],
+      [{ environment: { KODEL_ENGINE: "1" } }, "for a person"],
+    ] as const) {
+      const result = await cancelAs(person, finished, "run", "cancel", id, "--reason", "x");
+      expect(result.code).toBe(1);
+      expect(result.err).toContain(text);
+    }
+    const empty = await cancelAs({}, finished, "run", "cancel", id, "--reason", "  ");
+    expect(empty.code).toBe(1);
+    expect(empty.err).toContain("a cancel needs a reason");
+    expect(finished).toEqual([]);
+    expect((await cli("status", id)).out).toBe(statusBefore);
+  });
+
+  test("tne3n_cli_refuses_a_completed_run", async () => {
+    const id = await runAtGate();
+    await cli("gate", "approve", id);
+    const result = await cancelAs({}, [], "run", "cancel", id, "--reason", "too late");
+    expect(result.code).toBe(1);
+    expect(result.err).toContain("RUN_FINISHED");
+  });
+
+  test("tne3n_cli_refuses_inside_an_agent_session", async () => {
+    const id = await runAtGate();
+    const statusBefore = (await cli("status", id)).out;
+    const finished: string[] = [];
+    let asked = 0;
+    let out = "";
+    let err = "";
+    const code = await runCli(["run", "cancel", id, "--reason", "from inside"], {
+      cwd: dir,
+      out: (t) => {
+        out += t;
+      },
+      err: (t) => {
+        err += t;
+      },
+      // A terminal on both ends and no engine mark: only the session stands in the way.
+      interactive: true,
+      environment: {},
+      select: async () => [],
+      confirm: async () => {
+        asked += 1;
+        return true;
+      },
+      insideSession: () => "inside",
+      agent: {
+        launcher: async () =>
+          ({
+            async finish(runId: string) {
+              finished.push(runId);
+            },
+          }) as unknown as WorkerLauncher,
+      },
+    });
+    expect(code).toBe(1);
+    expect(err).toContain("it will not run inside a kodel agent session");
+    expect(out).toBe("");
+    expect(asked).toBe(0);
+    expect(finished).toEqual([]);
+    expect((await cli("status", id)).out).toBe(statusBefore);
   });
 });

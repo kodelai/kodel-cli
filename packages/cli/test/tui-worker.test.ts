@@ -9,6 +9,7 @@ import { SessionError, type SessionListEntry } from "@kodel-ai/pipeline-core";
 import { ScriptedSessionAdapter } from "../../testkit/src/engine-fakes";
 import { DIGEST_LINES, digest } from "../src/claude-stream";
 import { bold, dim, RESET, stripAnsi, visibleLength } from "../src/tui/ansi";
+import { withCanceled } from "../src/tui/cancel-flow";
 import type { WorkHandle } from "../src/tui/decide";
 import { createInputReader } from "../src/tui/input";
 import { type Loaded, loadSessions } from "../src/tui/load";
@@ -3329,5 +3330,189 @@ describe("t47 the o key, the words of a terminal worker and the TUI's own finish
     const raw = render(m, WIDER).join("\n");
     expect(raw).not.toContain(SECRET);
     expect(raw.replace(OWN_STYLE, "")).not.toContain(ESC);
+  });
+});
+
+// ── cancelling a run (TASK-NE3N) ─────────────────────────────────────────────
+
+const cancelOf = (m: Model): Extract<Effect, { type: "cancel_run" }> | undefined =>
+  effects(m).find((e): e is Extract<Effect, { type: "cancel_run" }> => e.type === "cancel_run");
+
+describe("tne3n the x key cancels a run", () => {
+  test("tne3n_x_asks_a_reason_then_a_confirmation_then_cancels", () => {
+    const start = model([session("r_1", "running")]);
+    expect(footer(start)).toContain("x cancel run");
+    const asking = press(start, "x");
+    expect(footer(asking)).toContain("Reason for canceling «run-r_1»");
+    const typed = press(asking, ..."stale branch");
+    const confirm = press(typed, "enter");
+    expect(cancelOf(confirm)).toBeUndefined();
+    expect(screen(confirm)).toContain("Cancel run r_1? It ends for good; its task, branch and");
+    expect(screen(confirm)).toContain("Reason: stale branch");
+    // A `y` in the first moment after the question appeared is not an answer.
+    const early = update(confirm, "y", WIDE);
+    expect(cancelOf(early)).toBeUndefined();
+    expect(early.cancel?.phase).toBe("confirm");
+    const yes = press(confirm, "y");
+    expect(cancelOf(yes)).toEqual({
+      type: "cancel_run",
+      seq: yes.cancel?.seq ?? -1,
+      runId: "r_1",
+      reason: "stale branch",
+    });
+    expect(footer(yes)).toContain("Canceling the run…");
+    // A key while it is written changes nothing, not even `q`.
+    expect(press(clean(yes), "q").quit).toBe(false);
+    const done = withCanceled(clean(yes), yes.cancel?.seq ?? -1, {
+      ok: true,
+      message: "canceled r_1 · branch kodel/r_1",
+    });
+    expect(done.cancel).toBeNull();
+    expect(footer(done)).toContain("canceled r_1 · branch kodel/r_1");
+    // A run that waits for a person is going too: it can be canceled.
+    expect(footer(model([session("r_2", "waiting")]))).toContain("x cancel run");
+    expect(press(model([session("r_2", "waiting")]), "x").cancel?.phase).toBe("reason");
+  });
+
+  test("tne3n_escape_at_any_stage_changes_nothing", () => {
+    const start = model([session("r_1", "running")]);
+    const reasonEsc = press(start, "x", "a", "escape");
+    expect(reasonEsc.cancel).toBeNull();
+    expect(reasonEsc.notice).toBe("Cancelled.");
+    expect(effects(reasonEsc)).toEqual([]);
+    const confirmEsc = press(start, "x", "a", "enter", "escape");
+    expect(confirmEsc.cancel).toBeNull();
+    expect(confirmEsc.notice).toBe("Cancelled.");
+    expect(effects(confirmEsc)).toEqual([]);
+    // Any other key at the question keeps the run too, and the run itself was never touched.
+    const other = press(start, "x", "a", "enter", "n");
+    expect(other.cancel).toBeNull();
+    expect(effects(other)).toEqual([]);
+    expect(other.sessions).toEqual(start.sessions);
+    // A question about a run that has ended meanwhile is let go when the runs are read again.
+    const open = press(start, "x", "a", "enter");
+    const ended = withData(open, { sessions: [session("r_1", "done")], proposals: 0 }, NOW);
+    expect(ended.cancel).toBeNull();
+    expect(effects(ended)).toEqual([]);
+  });
+
+  test("tne3n_empty_reason_is_refused", () => {
+    const start = model([session("r_1", "running")]);
+    for (const keys of [
+      ["x", "enter"],
+      ["x", " ", " ", "enter"],
+    ]) {
+      const refused = press(start, ...keys);
+      expect(refused.cancel).toBeNull();
+      expect(refused.notice).toBe("A cancel needs a reason; nothing was written.");
+      expect(effects(refused)).toEqual([]);
+    }
+  });
+
+  test("tne3n_no_cancel_key_on_a_finished_run", () => {
+    for (const status of ["done", "failed", "canceled", "unreadable"] as const) {
+      const m = model([session("r_1", status)]);
+      expect(footer(m)).not.toContain("x cancel run");
+      const pressed = press(m, "x");
+      expect(pressed.cancel).toBeNull();
+      expect(pressed.notice.startsWith("Nothing to cancel: run r_1 has ")).toBe(true);
+      expect(effects(pressed)).toEqual([]);
+    }
+    // On sample data nothing is canceled.
+    const demo = initialModel({ sessions: [session("r_1", "running")], proposals: 0 }, "demo", NOW);
+    expect(footer(demo)).not.toContain("x cancel run");
+    expect(press(demo, "x").cancel).toBeNull();
+  });
+
+  test("tne3n_loop_hands_the_reason_to_the_cancel_function", async () => {
+    const launcher = new FakeLauncher();
+    const asked: [string, string][] = [];
+    const sessions = [session("r_1", "running")];
+    const { t, quit } = loop(sessions, launcher, {
+      cancelRun: async (runId, reason) => {
+        asked.push([runId, reason]);
+        sessions.splice(0, 1, session("r_1", "canceled"));
+        return { ok: true, message: `canceled ${runId} · branch kodel/${runId}` };
+      },
+    });
+    await wait(100);
+    t.type("x");
+    await wait(20);
+    t.type("no longer needed");
+    await wait(20);
+    t.type("\r");
+    await wait(20);
+    expect(t.last()).toContain("Cancel run r_1? It ends for good");
+    expect(asked).toEqual([]);
+    await wait(450);
+    t.type("y");
+    await wait(150);
+    expect(asked).toEqual([["r_1", "no longer needed"]]);
+    expect(t.since()).toContain("canceled r_1 · branch kodel/r_1");
+    await quit();
+  });
+});
+
+describe("tne3n a resume is not made for a run that has ended", () => {
+  test("tne3n_resume_refused_for_an_ended_run_inside_the_lock", async () => {
+    let status = "running";
+    let locked = 0;
+    let readUnderLock = 0;
+    let inLock = false;
+    const launcher = new FakeLauncher();
+    const run = {
+      runId: "r_1",
+      journal: async () => [],
+      state: async () => {
+        if (inLock) readUnderLock += 1;
+        return { status } as never;
+      },
+      location: async () => undefined,
+      inProject: async (path: string) => path,
+      inspect: async () => ({ kind: "done" }) as never,
+      integrityStatus: async () => "ok" as const,
+    };
+    const host: StartHost = {
+      list: async () => ({ pipelines: [] }),
+      taskLink: async () => undefined,
+      start: async () => {
+        throw new Error("not used");
+      },
+      open: async () => run,
+      runSummaries: async () => [],
+      withWorkerStartLock: async (fn) => {
+        locked += 1;
+        inLock = true;
+        try {
+          return await fn();
+        } finally {
+          inLock = false;
+        }
+      },
+    };
+    const { resumeWorker } = createWorkerOptions({
+      host,
+      tasks: undefined as never,
+      launcher,
+      dialog: false,
+      root: "/proj",
+      version: "0.0.0",
+    });
+    if (resumeWorker === undefined) throw new Error("no resumeWorker");
+    // A run that goes on gets past the look at its state (here it stops at the journal, which has no decision).
+    expect((await resumeWorker("r_1", 12, UUID)).message).toBe(
+      "run r_1 was not resumed: the run moved on.",
+    );
+    for (const ended of ["canceled", "completed", "failed"]) {
+      status = ended;
+      const answer = await resumeWorker("r_1", 12, UUID);
+      expect(answer.ok).toBe(false);
+      expect(answer.message).toBe(
+        `run r_1 was not resumed: the run has ${ended}; nothing to resume.`,
+      );
+    }
+    expect(locked).toBe(4);
+    expect(readUnderLock).toBe(4);
+    expect(launcher.resumes).toEqual([]);
   });
 });

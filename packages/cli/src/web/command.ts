@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { claudeConfigDir, findSessionLog, firstCwd } from "@kodel-ai/local/history";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { renderUnicodeCompact } from "uqr";
+import { type CancelPorts, cancelRun } from "../cancel-run";
 import { plain } from "../plain";
 import type { DecisionSource, DecisionTools, WorkHandle } from "../tui/decide";
 import { addComment, type GateSource, loadDiff, loadRunCard, removeComment } from "../tui/gate";
@@ -40,8 +41,19 @@ export function projectApi(
   tools: Pick<DecisionTools, "check" | "decide">,
   asker?: Asker,
   tasks?: TaskReaders,
+  cancelPorts?: () => Promise<CancelPorts>,
 ): WebApi {
   return {
+    ...(cancelPorts
+      ? {
+          cancel: async (runId: string, reason: string) => {
+            const answer = await cancelRun(await cancelPorts(), { runId, reason });
+            return answer.ok
+              ? answer
+              : { ok: false as const, code: answer.error.code, message: answer.error.message };
+          },
+        }
+      : {}),
     ...(tasks ? webTasks(tasks) : {}),
     ...(asker
       ? {

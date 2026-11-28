@@ -9,7 +9,7 @@ import type { Comment, DecisionRef, GateDetail, Session, StepLine, Visit } from 
 import { formatAge } from "../../tui/session";
 import type { AskRef } from "../ask";
 import type { WebDiff, WebDiffRow } from "../handler";
-import { ApiError, api, type Me } from "./api";
+import { ApiError, api, type CancelAnswer, type Me } from "./api";
 import { AskNoteSheet, AskPanel } from "./ask";
 import { Icon } from "./icons";
 import { BlockView, blocksOf, Markdown } from "./md";
@@ -638,6 +638,147 @@ function CommentSheet(props: {
   );
 }
 
+type Canceling =
+  | { step: "reason"; reason: string }
+  | { step: "confirm"; reason: string; flow: number; task: string | null }
+  | { step: "done"; answer: CancelAnswer };
+
+/**
+ * Cancelling a run, as a decision is made: the reason is checked first, and only a second tap on the
+ * checked cancel ends the run. What is left of it (the task, the branch, the worktree) is said after.
+ */
+function CancelSheet(props: {
+  runId: string;
+  onClose: () => void;
+  notify: Notify;
+  onDone: () => void;
+}) {
+  const [state, setState] = useState<Canceling>({ step: "reason", reason: "" });
+  const [busy, setBusy] = useState(false);
+  const check = async (reason: string) => {
+    setBusy(true);
+    try {
+      const { flow, task } = await api.checkCancel(props.runId, reason);
+      setState({ step: "confirm", reason, flow, task });
+    } catch (e) {
+      props.notify(e instanceof ApiError ? e.message : String(e), false);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const cancel = async (flow: number) => {
+    setBusy(true);
+    try {
+      const answer = await api.cancel(props.runId, flow);
+      setState({ step: "done", answer });
+      props.onDone();
+    } catch (e) {
+      props.notify(e instanceof ApiError ? e.message : String(e), false);
+      props.onClose();
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (state.step === "done") {
+    const a = state.answer;
+    return (
+      <Modal
+        title={a.noop ? "Already canceled" : "Run canceled"}
+        onClose={props.onClose}
+        actions={
+          <button type="button" class="btn primary" onClick={props.onClose}>
+            Close
+          </button>
+        }
+      >
+        <p>{a.noop ? `Run ${a.run_id} was already canceled.` : `Run ${a.run_id} is canceled.`}</p>
+        {a.task ? (
+          <p class="muted">
+            Task {a.task.key} is still open: move it on the Tasks tab or with{" "}
+            <code>kodel task set {a.task.key} --status &lt;status&gt;</code>.
+          </p>
+        ) : null}
+        {a.branch !== undefined ? (
+          <p class="muted">
+            Branch <code>{a.branch}</code>
+          </p>
+        ) : null}
+        {a.worktree !== undefined ? (
+          <p class="muted">
+            Worktree <code>{a.worktree}</code>
+          </p>
+        ) : null}
+        {a.remove_commands.length > 0 ? (
+          <>
+            <p class="muted">When you no longer want them, remove them with:</p>
+            {a.remove_commands.map((c) => (
+              <pre key={c} class="mono">
+                {c}
+              </pre>
+            ))}
+          </>
+        ) : null}
+        {a.agents_left.map((agent) => (
+          <p key={agent} class="t-bad">
+            Still running: {agent}. Stop it with <code>kodel agent stop</code>.
+          </p>
+        ))}
+        {a.notes.map((n) => (
+          <p key={n} class="muted">
+            {n}
+          </p>
+        ))}
+      </Modal>
+    );
+  }
+  const confirming = state.step === "confirm";
+  return (
+    <Modal
+      title="Cancel run"
+      onClose={props.onClose}
+      actions={
+        <>
+          <button type="button" class="btn" onClick={props.onClose}>
+            Keep it
+          </button>
+          {state.step === "confirm" ? (
+            <button
+              type="button"
+              class="btn danger"
+              disabled={busy}
+              onClick={() => cancel(state.flow)}
+            >
+              Tap again to cancel
+            </button>
+          ) : (
+            <button
+              type="button"
+              class="btn danger"
+              disabled={busy || state.reason.trim() === ""}
+              onClick={() => check(state.reason.trim())}
+            >
+              Cancel run
+            </button>
+          )}
+        </>
+      }
+    >
+      {confirming ? (
+        <>
+          <p>The run ends for good; its agents are stopped. The worktree and the branch stay.</p>
+          {state.task ? <p class="muted">Task {state.task} stays open.</p> : null}
+          <Prose text={state.reason} />
+        </>
+      ) : (
+        <>
+          <p class="muted">Why? The reason is kept with the run.</p>
+          <TextBox value={state.reason} onInput={(r) => setState({ step: "reason", reason: r })} />
+        </>
+      )}
+    </Modal>
+  );
+}
+
 type RunTab = "agent" | "review" | "history";
 /** What waits to be asked, per run: kept while the page is open, as the person moves around the run. */
 const draftsOf = new Map<string, AskRef[]>();
@@ -688,6 +829,7 @@ export function RunScreen(props: {
     setChosen(rows.size === 0 ? undefined : { path, rows });
   };
   const [instructions, setInstructions] = useState(false);
+  const [canceling, setCanceling] = useState(false);
   const [stopping, setStopping] = useState<number | undefined>();
   // The tabs stick right under the header, whatever height the header has on this screen.
   const root = useRef<HTMLDivElement>(null);
@@ -837,6 +979,7 @@ export function RunScreen(props: {
   };
 
   const waiting = session?.status === "waiting";
+  const cancelable = me.canCancel && (waiting || session?.status === "running");
   const decidable = waiting && picked !== undefined && me.canDecide;
   const changes = detail?.changes;
   const report = detail?.report;
@@ -861,6 +1004,11 @@ export function RunScreen(props: {
           </span>
         </div>
         <span class="bar-actions">
+          {cancelable ? (
+            <button type="button" class="link bad" onClick={() => setCanceling(true)}>
+              Cancel run
+            </button>
+          ) : null}
           {session?.taskKey ? (
             <a
               class="icon-btn"
@@ -1209,6 +1357,15 @@ export function RunScreen(props: {
           {...(commenting.text === undefined ? {} : { text: commenting.text })}
           onClose={() => setCommenting(undefined)}
           onSave={addComment}
+        />
+      ) : null}
+
+      {canceling ? (
+        <CancelSheet
+          runId={id}
+          notify={props.notify}
+          onClose={() => setCanceling(false)}
+          onDone={() => void load()}
         />
       ) : null}
 

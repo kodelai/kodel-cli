@@ -26,10 +26,11 @@ import { WORKER_TERMINAL_TIMEOUT_MS, type WorkerDecision } from "./worker-launch
 /** The tools the worker may use besides its kodel server. `Bash` whole: `dev.yaml` needs tests, git and gh. */
 export const WORKER_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Agent"] as const;
 
-/** The two decision tools: never served to the worker, and refused on the client's side as well. */
+/** The decision tools: never served to the worker, and refused on the client's side as well. */
 export const WORKER_DENIED = [
   "mcp__kodel__pipeline_decide_gate",
   "mcp__kodel__pipeline_accept_change",
+  "mcp__kodel__manager_cancel_run",
 ] as const;
 
 /**
@@ -45,6 +46,7 @@ export const WORKER_DENIED_COMMANDS: readonly string[] = [
   "seal*",
   "resume*",
   "migrate*",
+  "run cancel*",
   // Not a person's command: a `-p` worker's turn ends at a wait, so it has nothing to watch.
   WAIT_COMMAND_PATTERN,
   "pipeline changes apply*",

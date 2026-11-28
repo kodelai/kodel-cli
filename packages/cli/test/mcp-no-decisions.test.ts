@@ -428,7 +428,11 @@ describe("t47 the server of a worker", () => {
       try {
         const tools = (await c.client.listTools()).tools.map((t) => t.name);
         const decisions = WORKER_DENIED.map((tool) => tool.replace("mcp__kodel__", ""));
-        expect(decisions.sort()).toEqual(["pipeline_accept_change", "pipeline_decide_gate"]);
+        expect(decisions.sort()).toEqual([
+          "manager_cancel_run",
+          "pipeline_accept_change",
+          "pipeline_decide_gate",
+        ]);
         for (const tool of decisions) expect(tools, tool).not.toContain(tool);
         const runId = await atGate(dir, c.client);
         // Called all the same (a client that ignores the list): refused, and the gate stays undecided.

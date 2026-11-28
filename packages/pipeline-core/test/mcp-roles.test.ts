@@ -77,8 +77,12 @@ const PROFILES: TaskAdapterCapabilities[] = [
 const decider: AgentDecider = {
   decideGate: async () => ({ ok: true }),
   acceptChange: async () => ({ ok: true }),
+  cancelRun: async () => ({ ok: true }),
 };
 const BOTH = { gate: true, pipelineChange: true };
+/** `manager_cancel_run` (NE3N): a manager's server only, under its key; never one with no role. */
+const CANCEL = "manager_cancel_run";
+const withoutCancel = (names: readonly string[]) => names.filter((n) => n !== CANCEL);
 
 interface Setup {
   role?: ServerRole;
@@ -95,8 +99,9 @@ interface Setup {
 
 /** A server's surface, put together the way `createServer` of the CLI does it. */
 function surface(setup: Setup) {
-  const flags = setup.decisions === true ? BOTH : {};
   const lookWith = setup.role === "manager" ? "manager_inbox" : "pipeline_next_step";
+  // As the CLI does: the cancel's key is on with the others, and only a manager gets the tool.
+  const flags = setup.decisions === true ? { ...BOTH, cancelRun: setup.role === "manager" } : {};
   const taskLink = setup.tasks !== undefined && setup.taskLink !== undefined;
   const attachments = setup.attachments !== false;
   const keys = setup.keys === true ? { startTask: true, stopAgent: true } : undefined;
@@ -107,7 +112,7 @@ function surface(setup: Setup) {
     readOnly: setup.readOnly === true,
     available: [
       ...toolsFor({ taskLink, attachments }),
-      ...decisionTools(flags, decider),
+      ...decisionTools(flags, decider, { lookWith }),
       ...HISTORY_TOOLS,
       ...managerTools,
       ...(setup.tasks === undefined ? [] : buildTaskTools(setup.tasks)),
@@ -191,6 +196,7 @@ describe("5m9d the role tables", () => {
         "pipeline_attachment_list",
         "pipeline_decide_gate",
         "pipeline_accept_change",
+        "manager_cancel_run",
         "manager_start_task",
         "manager_stop_agent",
         "manager_inbox",
@@ -215,10 +221,12 @@ describe("5m9d the role tables", () => {
 
   test("5m9d_no_role_serves_the_union", () => {
     const all = surface({ decisions: true, keys: true, tasks: FULL });
-    expect(sorted(all.served)).toEqual(sorted(KNOWN_TOOL_NAMES));
+    // The union of both roles, but for the cancel: a server with no role may work the run itself.
+    expect(sorted(all.served)).toEqual(sorted(withoutCancel(KNOWN_TOOL_NAMES)));
     expect(sorted(all.served)).toEqual(
-      sorted([...new Set([...ROLE_TOOLS.worker, ...ROLE_TOOLS.manager])]),
+      sorted(withoutCancel([...new Set([...ROLE_TOOLS.worker, ...ROLE_TOOLS.manager])])),
     );
+    expect(all.served).not.toContain(CANCEL);
     // Without tasks and without decisions.agent the tools of both are absent, as before.
     const plain = surface({});
     expect(plain.served.filter((n) => n.startsWith("task_"))).toEqual([]);
@@ -294,7 +302,7 @@ describe("5m9d the role tables", () => {
 describe("5m9d the marks", () => {
   const everyTool = (): ToolSpec[] => [
     ...toolsFor({ taskLink: true, attachments: true }),
-    ...decisionTools(BOTH, decider),
+    ...decisionTools({ ...BOTH, cancelRun: true }, decider, { lookWith: "manager_inbox" }),
     ...HISTORY_TOOLS,
     ...MANAGER_TOOLS,
     ...buildTaskTools(FULL),
@@ -349,6 +357,7 @@ describe("5m9d the marks", () => {
         "pipeline_propose_change",
         "pipeline_decide_gate",
         "pipeline_accept_change",
+        "manager_cancel_run",
         "pipeline_attachment_write",
         "manager_start_task",
         "manager_stop_agent",
@@ -667,7 +676,10 @@ describe("5m9d the texts", () => {
 
   test("5m9d_manager_decides_from_the_inbox", () => {
     const manager = surface({ role: "manager", decisions: true });
-    for (const name of DECISION_TOOLS) {
+    // The cancel decides no waiting step; it is served beside them and named in the rule.
+    expect(manager.served).toContain(CANCEL);
+    expect(manager.instructions).toContain(CANCEL);
+    for (const name of withoutCancel(DECISION_TOOLS)) {
       const tool = manager.tools.find((t) => t.name === name);
       expect(tool?.description).toContain("manager_inbox");
       expect(tool?.description).toContain("no step is handed to you");

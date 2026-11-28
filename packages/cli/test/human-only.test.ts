@@ -29,6 +29,7 @@ const ARGS: Record<string, string[]> = {
   migrate: ["migrate", RUN],
   ack: ["ack", RUN],
   seal: ["seal", RUN],
+  "run cancel": ["run", "cancel", RUN, "--reason", "a duplicate"],
   "pipeline changes apply": ["pipeline", "changes", "apply", RUN],
   "pipeline changes discard": ["pipeline", "changes", "discard", RUN],
   "pipeline changes restore": ["pipeline", "changes", "restore", RUN],

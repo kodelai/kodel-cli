@@ -80,7 +80,7 @@ export interface PipelineChangeReport {
 /** A decision a person would make that the agent made on their instruction (the config allowed it). */
 export interface AgentDecisionReport {
   at: number;
-  what: "gate" | "pipeline_change";
+  what: "gate" | "pipeline_change" | "cancel";
   /** The gate's step, and what was decided there. */
   node?: string;
   decision?: string;
@@ -321,7 +321,9 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
   let feedback = 0;
   let taskRestarted = false;
   const first = journal[0]?.ts ?? state.startedAt;
-  const last = journal.at(-1)?.ts ?? first;
+  // A run that ended stops there: the records written after its end (the patch of the run, a note
+  // of a worker) do not keep a step that was open at the end (a cancel) going (NE3N).
+  const last = state.finishedAt ?? journal.at(-1)?.ts ?? first;
 
   const nodeOf = (name: string): NodeReport => {
     let found = nodes.get(name);
@@ -483,6 +485,16 @@ export function summarizeRun(state: RunState, journal: JournalRecord[]): RunRepo
         break;
       case "gate_waiting":
         if (name) gates.add(name);
+        break;
+      case "run_finished":
+        // NE3N: a run the agent canceled on the person's instruction is listed with its decisions.
+        if (record.status === "canceled" && record.decided_by === "agent") {
+          agentDecisions.push({
+            at: record.ts,
+            what: "cancel",
+            instruction: String(record.instruction ?? ""),
+          });
+        }
         break;
       case "gate_decided":
         if (name) {

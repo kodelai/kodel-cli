@@ -156,7 +156,11 @@ export class LocalScenarioEngine implements ScenarioEngine {
       case "resume":
       case "cancel": {
         const result = await (event.kind === "resume" ? this.run.resume() : this.run.cancel());
-        if (!result.ok) throw result.error;
+        // The core takes a cancel of a finished run as a no-op; the host says why it did nothing.
+        // A scenario reads both the same way, as the memory engine does.
+        if (!result.ok && !(event.kind === "cancel" && result.error.code === "RUN_FINISHED")) {
+          throw result.error;
+        }
         break;
       }
     }

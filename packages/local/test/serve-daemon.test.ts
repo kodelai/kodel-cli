@@ -2770,3 +2770,55 @@ describe("task links in the daemon (T-45)", () => {
     expect((await fresh.task(conflicting)).runs).toHaveLength(1);
   }, 30_000);
 });
+
+describe("t44 kodel serve and a canceled run (NE3N)", () => {
+  test("t44_tne3n_serve_does_not_resume_or_start_an_agent_for_a_canceled_run", async () => {
+    await project();
+    const host = newHost();
+    const launcher = new ScriptedLauncher({ host, now: () => t, terminal: true });
+    const w = await world({ host, launcher });
+    const key = await w.make("Task A");
+    await w.daemon.cycle();
+    const runId = await w.runOf(key);
+    expect(starts(launcher)).toHaveLength(1);
+    // The agent's holder went away at the gate and the person decided: a run serve would resume...
+    launcher.lose(runId);
+    tick();
+    await w.daemon.cycle();
+    await w.approve(runId);
+    // ...but it is canceled before serve looks again.
+    const run = await host.open(runId);
+    expect((await run?.cancel({ reason: "a duplicate" }))?.ok).toBe(true);
+    for (let i = 0; i < 3; i++) {
+      tick();
+      await w.daemon.cycle();
+    }
+    expect(resumes(launcher)).toEqual([]);
+    expect(starts(launcher)).toHaveLength(1);
+    expect((await w.task(key)).runs).toEqual([runId]);
+    expect(notesOf(await w.journal(runId))).toEqual([]);
+    expect((await w.state(runId)).status).toBe("canceled");
+  });
+
+  test("t44_tne3n_serve_stops_the_live_agent_of_a_canceled_run_once_and_resumes_nothing", async () => {
+    await project();
+    const host = newHost();
+    const launcher = new ScriptedLauncher({ host, now: () => t, terminal: true });
+    const w = await world({ host, launcher });
+    const key = await w.make("Task A");
+    await w.daemon.cycle();
+    const runId = await w.runOf(key);
+    expect(launcher.of(runId).map((r) => r.state)).toEqual(["running"]);
+    const run = await host.open(runId);
+    expect((await run?.cancel({ reason: "not needed" }))?.ok).toBe(true);
+    for (let i = 0; i < 3; i++) {
+      tick();
+      await w.daemon.cycle();
+    }
+    expect(finishes(launcher)).toHaveLength(1);
+    expect(launcher.of(runId)[0]).toMatchObject({ state: "killed", endedBy: "stopped" });
+    expect(resumes(launcher)).toEqual([]);
+    expect(starts(launcher)).toHaveLength(1);
+    expect((await w.task(key)).runs).toEqual([runId]);
+  });
+});
