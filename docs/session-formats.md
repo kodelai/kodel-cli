@@ -32,6 +32,18 @@ different thing and is not touched here.
 `timeoutMs` always set). The host never removes them, so `ke-` records accumulate until a person runs `kodel agent rm`
 (follow-up "Free finished `ke-` records"). The record format does not change.
 
+**Who started a session, and a note on a stop (manager_start_task, manager_stop_agent).** `session.json` may carry
+`startedBy: {by, via}` at the top level, beside `spec`: `by` is `person` or `agent`, `via` is `tui`, `web`, `cli` or
+`manager`. It names a kind and never holds a text, a name or a device, and the words an agent gave are only in the journal
+of the run (`run_started.origin`, `docs/run-formats.md`). It is not in `spec`, where `origin` already means `cli` or
+`host`; a session that the daemon started, or any older one, has none. `stop.json` may carry `via: "manager"` or
+`via: "web"` beside `by`: the stop is still a person's (`by: "stop"`), and `via` only says that a manager's server or the web
+page's Stop button asked for it (`kodel agent ls` says "by a manager" or "from the web page"). `v` stays 1
+and both keys are optional, so nothing is bumped: a build from before them drops the key on `decode`, reads the same
+status, and takes a manager's stop as a person's, so its daemon and its resume still leave the agent stopped.
+A record written by this build is read by an older one without any change; a dev build from before the field keeps
+working on a record that has it. Golden files: `session-started.json` and `stop-manager.json`.
+
 Golden fixtures: `fixtures/session-formats/v1/` (`scripts/take-session-fixtures.mjs`).
 
 ## The agent record (`agent.json`)

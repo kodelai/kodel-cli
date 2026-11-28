@@ -180,6 +180,12 @@ An agent edit after that makes the task wait again. The agent is told that a tas
 not started until you approve it, so it tells you; it never runs the command itself. A task without a mark
 (every task from before this change too) counts as yours.
 
+**The approval is about the daemon only.** `kodel task approve` limits what `kodel serve` starts on its own. A task is
+started by hand without it, and by hand changes nothing about it: `s` in the TUI, Start in the web UI, and a manager's
+`manager_start_task` (`decisions.agent.start_task`, `docs/decisions.md`) start a task that still waits for approval,
+leave the approval mark and `agent_edited_at` as they were, and count a dependency that is closed but waits for approval
+as done. A start by hand still obeys the limits and the links as a warning that you can confirm (`docs/serve.md`).
+
 The mark is set by the writer, so it holds against an agent that uses the task tools, not against one that
 edits `.kodel/tasks/*.yaml` with a shell, an MCP server of an older build, or task files that arrive by
 `git pull`: those make tasks without a mark. A tracker that cannot keep the mark (its capability
@@ -234,8 +240,10 @@ chain of tasks that did not wait for approval needs nothing from you.
 **`depends_on` orders starts, not code.** A task is `done` when its run completes; the dependent's worktree
 is cut from `HEAD` at that moment, whether or not the dependency's branch has been merged.
 
-**Links hold back `kodel serve` only.** A run started by hand (`s` in the TUI, after a one-line warning, or
-`pipeline_start` with a `task_key` in a session) is not checked against them.
+**Links hold back `kodel serve` only, and warn a start by hand.** A run started by hand (`s` in the TUI, Start in the
+web UI, `manager_start_task`) shows what the links say (a task it waits for that is not done, a task it conflicts with
+that has a run) as a warning and goes ahead when you confirm it (`force: true` for a manager). A dependency that waits for
+approval is not a warning there. `pipeline_start` with a `task_key` in a session is not checked against them.
 
 `kodel task doctor` names a dependency or conflict key that is no task, and every cycle of `depends_on`
 (two merged branches can make one). These hold back their own tasks; they do not stop the others.
