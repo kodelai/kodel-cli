@@ -339,6 +339,27 @@ default).
   back than the last 512 KB, and then there is no name. No log, no name. After `/clear` or `/resume` the server still
   names the session it started in (`observed-env`), so it is that session's name that is recorded.
 
+## How a run was started, and who stopped its agent (`origin`, `agent_stopped`)
+
+`run_started.origin` says **which path started the run**, as a kind: `{by, via}` with `by` one of `person` or `agent` and
+`via` one of `tui` (`s` in the terminal UI), `web` (Start in the web UI), `cli` (`kodel agent start --pipeline`) or
+`manager` (an agent's `manager_start_task`, `docs/mcp-roles.md`). An agent's start also keeps the words it says the person
+told it (`agent_instruction`, redacted, at most 2000 characters) and `forced`, the warnings the start went past
+(`full`, `blocked`, `conflict`), as the engine found them. A run started by `kodel serve` or by `pipeline_start` has no
+`origin`: no field means "not one of these paths".
+
+**`origin` is not `executor`.** `executor` says who acted (the client, the session, the model, the name of the agent's
+session) and `history.executor: false` removes it. `origin` names no client, session, model or device, only a kind of
+path, so it does not identify anyone and **`history.executor: false` does not turn it off**. It is set by the path that
+made the call, never by an argument of a tool: `pipeline_start` takes no such field. It is what `decisions.agent.start_task`
+leaves in the journal when an agent starts a task for the person (`docs/decisions.md`).
+
+When an agent stops a run's agent through a manager (`manager_stop_agent`), the journal gets one event,
+`agent_stopped`, with `by: agent`, `via: manager` and the agent's words (`agent_instruction`, redacted, at most 500
+characters). It is written for a run that has not ended, and a stop a person makes (`kodel agent stop`, the web UI's Stop
+agent) writes none: that stop is in the agent's record, which `kodel agent ls` shows as `stopped`. A record can be removed
+with `kodel agent rm`; the event stays. Format and compatibility: `docs/run-formats.md`.
+
 ## A worker that is gone (`worker_note`)
 
 `kodel serve` (`docs/serve.md`) journals `worker_note` when a background worker of a run is gone: `what` (`gone`),

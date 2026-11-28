@@ -6,8 +6,10 @@
  * health check and the pairing itself answer without one. A write must come from a page of this very
  * server (`Origin`), as JSON, so another site cannot make a browser send it.
  */
-import { redactText } from "@kodel-ai/pipeline-core";
+import { type ForcedWarning, KodelError, redactText } from "@kodel-ai/pipeline-core";
 import { z } from "zod";
+import type { ManualCheck, ManualStartResult } from "../manual-start";
+import type { ManualStopResult } from "../manual-stop";
 import type { DecisionRequest } from "../tui/decide";
 import { highlight, languageOf, parseDiff, placeOf } from "../tui/diffview";
 import type {
@@ -92,6 +94,21 @@ export interface WebApi {
   task?(key: string): Promise<CardSlot>;
   addTaskComment?(key: string, text: string): Promise<void>;
   createTask?(input: NewTaskInput): Promise<{ key: string }>;
+  /**
+   * Start a task by request, as the terminal's `s` does. Absent in the demo, on Windows and when tasks
+   * are off: that is all the page's button depends on (the keys of `decisions.agent` are for agents).
+   */
+  startTask?: {
+    check(key: string): Promise<ManualCheck>;
+    /** `force` is the warnings the person was shown, never more. */
+    start(input: {
+      key: string;
+      pipeline?: string;
+      force: ForcedWarning[];
+    }): Promise<ManualStartResult>;
+  };
+  /** Stop the agent of a run (the run stays open); absent in the demo and on Windows. */
+  stopAgent?(runId: string): Promise<ManualStopResult>;
 }
 
 export interface Assets {
@@ -204,6 +221,13 @@ const checkBody = z.object({
 
 const decideBody = z.object({ flow: z.number().int().min(1) });
 
+/** Without `flow` it asks; with the `flow` of that answer it does it. */
+const startBody = z.object({
+  pipeline: z.string().min(1).max(200).optional(),
+  flow: z.number().int().min(1).optional(),
+});
+const stopBody = z.object({ flow: z.number().int().min(1).optional() });
+
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 /** The page may load only what this server serves, and nothing may frame it. */
@@ -315,7 +339,30 @@ export function createHandler(options: HandlerOptions): Handler {
     number,
     { device: string; runId: string; request: DecisionRequest; at: number }
   >();
+  /** What a device was asked to confirm for a start or a stop: only that is done at its second call. */
+  type Action =
+    | { kind: "start"; device: string; key: string; warnings: ForcedWarning[]; at: number }
+    | { kind: "stop"; device: string; runId: string; at: number };
+  const actions = new Map<number, Action>();
   let nextFlow = 1;
+  const remember = (flow: number, action: Action) => {
+    actions.set(flow, action);
+    for (const [k, a] of actions) if (clock() - a.at > 30 * 60_000) actions.delete(k);
+  };
+  /** The words of an answer come from tasks and runs: they leave the machine redacted. */
+  const redactStart = (r: ManualStartResult): ManualStartResult =>
+    r.status === "started"
+      ? r
+      : {
+          ...r,
+          reason: redact(r.reason),
+          ...(r.hint === undefined ? {} : { hint: redact(r.hint) }),
+          ...(r.warnings === undefined
+            ? {}
+            : { warnings: r.warnings.map((w) => ({ ...w, reason: redact(w.reason) })) }),
+        };
+  const redactStop = (r: ManualStopResult): ManualStopResult =>
+    r.status === "stopped" ? { ...r, note: redact(r.note) } : { ...r, reason: redact(r.reason) };
 
   const authenticate = (headers: WebRequest["headers"]) =>
     devices.verify(cookieOf(headers.cookie)).catch(() => undefined);
@@ -435,6 +482,55 @@ export function createHandler(options: HandlerOptions): Handler {
       options.audit(`device ${device.id} commented on task ${key}`);
       return json(200, { ok: true });
     }
+    if (parts[2] === "start" && method === "POST") {
+      const start = api.startTask;
+      if (!start) return fail(403, "read_only", "Tasks cannot be started here.");
+      const body = parse(startBody, request.body);
+      if (!body) return fail(400, "bad_request", "The request is not understood.");
+      try {
+        if (body.flow === undefined) {
+          const checked = await start.check(key);
+          if (!checked.ok) {
+            return json(200, { ok: true, step: "done", result: redactStart(checked.result) });
+          }
+          const flow = nextFlow++;
+          const warnings = checked.warnings.map((w) => w.why);
+          remember(flow, { kind: "start", device: device.id, key, warnings, at: clock() });
+          return json(200, {
+            ok: true,
+            step: "confirm",
+            flow,
+            pipelines: checked.pipelines,
+            warnings: checked.warnings.map((w) => ({ ...w, reason: redact(w.reason) })),
+            ...(checked.note === undefined ? {} : { note: redact(checked.note) }),
+          });
+        }
+        const asked = actions.get(body.flow);
+        actions.delete(body.flow);
+        if (asked?.kind !== "start" || asked.device !== device.id || asked.key !== key) {
+          return fail(409, "not_checked", "Nothing was asked for this start; look again.");
+        }
+        const result = await start.start({
+          key,
+          ...(body.pipeline === undefined ? {} : { pipeline: body.pipeline }),
+          force: asked.warnings,
+        });
+        options.audit(
+          result.status === "started"
+            ? `device ${device.id} started ${key} (run ${result.run_id})`
+            : `device ${device.id} tried to start ${key}: refused (${result.why})`,
+        );
+        return json(200, { ok: true, step: "done", result: redactStart(result) });
+      } catch (error) {
+        if (error instanceof KodelError && error.code === "TASK_NOT_FOUND") {
+          return fail(404, "not_found", "There is no such task.");
+        }
+        if (error instanceof KodelError && error.code === "INVALID_ARGUMENTS") {
+          return fail(400, "bad_pipeline", redact(error.message));
+        }
+        throw error;
+      }
+    }
     return fail(404, "not_found", "No such thing.");
   };
 
@@ -456,6 +552,8 @@ export function createHandler(options: HandlerOptions): Handler {
         canTasks: api.tasks !== undefined,
         canCommentTask: api.addTaskComment !== undefined,
         canCreateTask: api.createTask !== undefined,
+        canStartTask: api.startTask !== undefined,
+        canStopAgent: api.stopAgent !== undefined,
       });
     }
     if (parts[0] === "logout" && method === "POST") {
@@ -556,6 +654,29 @@ export function createHandler(options: HandlerOptions): Handler {
         for (const [key, f] of flows) if (clock() - f.at > 30 * 60_000) flows.delete(key);
       }
       return json(200, { ok: true, flow, result });
+    }
+    if (what === "stop-agent" && method === "POST") {
+      const stop = api.stopAgent;
+      if (!stop) return fail(403, "read_only", "Agents cannot be stopped here.");
+      const body = parse(stopBody, request.body);
+      if (!body) return fail(400, "bad_request", "The request is not understood.");
+      if (body.flow === undefined) {
+        const flow = nextFlow++;
+        remember(flow, { kind: "stop", device: device.id, runId, at: clock() });
+        return json(200, { ok: true, step: "confirm", flow });
+      }
+      const asked = actions.get(body.flow);
+      actions.delete(body.flow);
+      if (asked?.kind !== "stop" || asked.device !== device.id || asked.runId !== runId) {
+        return fail(409, "not_checked", "Nothing was asked for this stop; look again.");
+      }
+      const result = await stop(runId);
+      options.audit(
+        result.status === "stopped"
+          ? `device ${device.id} stopped the agent of ${runId}`
+          : `device ${device.id} tried to stop the agent of ${runId}: refused (${result.why})`,
+      );
+      return json(200, { ok: true, step: "done", result: redactStop(result) });
     }
     if (what === "decide" && method === "POST") {
       if (!api.decide) return fail(403, "read_only", "Decisions cannot be made here.");

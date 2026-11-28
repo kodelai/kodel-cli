@@ -39,6 +39,7 @@ import {
   type SessionStatus,
   type StartResult,
   type StopAsker,
+  type StopVia,
   type TailResult,
   type TailStream,
   validateSpec,
@@ -422,7 +423,7 @@ export class PipesSessionAdapter implements SessionAdapter {
 
     // `env` holds secrets, and the size is the attached terminal's from the first resize on: neither is stored.
     // The agent goes into a record of its own, written before `session.json`.
-    const { env: _env, size, command, agent, ...safeSpec } = spec;
+    const { env: _env, size, command, agent, startedBy, ...safeSpec } = spec;
     const agentRecord: AgentRecord | undefined =
       agent === undefined
         ? undefined
@@ -448,6 +449,7 @@ export class PipesSessionAdapter implements SessionAdapter {
         envNames: Object.keys(spec.env ?? {}),
       },
       started,
+      ...(startedBy === undefined ? {} : { startedBy }),
       root: this.opts.root,
       ...(machineId() ? { machine: machineId() as string } : {}),
     };
@@ -685,15 +687,15 @@ export class PipesSessionAdapter implements SessionAdapter {
     };
   }
 
-  async stop(id: string, opts: { by?: StopAsker } = {}): Promise<SessionStatus> {
+  async stop(id: string, opts: { by?: StopAsker; via?: StopVia } = {}): Promise<SessionStatus> {
     const stored = this.storedSock(id);
-    const status = await this.stopNow(id, opts.by ?? "person");
+    const status = await this.stopNow(id, opts.by ?? "person", opts.via);
     // The holder removes its socket on its way out; one that was killed could not.
     if (isTerminalState(status.state)) await this.sweep(id, stored);
     return status;
   }
 
-  private async stopNow(id: string, by: StopAsker): Promise<SessionStatus> {
+  private async stopNow(id: string, by: StopAsker, via?: StopVia): Promise<SessionStatus> {
     const dir = sessionDirOf(this.place, id);
     let before = this.settle(id);
     if (this.isForeign(dir)) {
@@ -711,9 +713,17 @@ export class PipesSessionAdapter implements SessionAdapter {
     const recorded = readStatus(dir);
     if (typeof recorded === "string") return before;
     const child = recorded.child;
-    if (before.state !== "running" && !(before.childAlive && child)) return before;
+    if (before.state !== "running" && !(before.childAlive && child)) {
+      // A manager's stop of an agent that already ended at a wait (a print worker has exited by then) is still
+      // the person's word that nothing resumes it: the record is left, and `writeStop` keeps an earlier one.
+      if (via !== undefined && isTerminalState(before.state)) {
+        writeStop(dir, by, this.now(), undefined, via);
+        return this.settle(id);
+      }
+      return before;
+    }
     if (!child) return before;
-    if (!liveProcess(child.pid)) return this.stopGroup(id, child, by);
+    if (!liveProcess(child.pid)) return this.stopGroup(id, child, by, via);
 
     // The recorded identity must be the live process. Without a recorded identity, or when it cannot be read or
     // compared now, nothing is signalled: a pid may have been taken by a stranger.
@@ -731,8 +741,8 @@ export class PipesSessionAdapter implements SessionAdapter {
       throw new SessionError("IDENTITY_UNKNOWN", `cannot compare the identity of ${child.pid}`);
     }
     // Another process has the pid now: the session's child is gone (the group rule then finds a stranger).
-    if (!same) return this.stopGroup(id, child, by);
-    writeStop(dir, by, this.now(), now);
+    if (!same) return this.stopGroup(id, child, by, via);
+    writeStop(dir, by, this.now(), now, via);
     // The group as it is while its leader is known to live: its members are the session's.
     const group = (this.processes.rows() ?? []).filter(
       (row) => row.pgid === child.pid && row.pid !== child.pid && !row.state.startsWith("Z"),
@@ -824,6 +834,7 @@ export class PipesSessionAdapter implements SessionAdapter {
     id: string,
     child: NonNullable<StatusRecord["child"]>,
     by: StopAsker,
+    via?: StopVia,
   ): Promise<SessionStatus> {
     const dir = sessionDirOf(this.place, id);
     const status = this.settle(id);
@@ -832,7 +843,7 @@ export class PipesSessionAdapter implements SessionAdapter {
     if (typeof record === "string") return status;
     const answer = groupMembers(child.pid, record.started, child.identity, this.processes);
     if (!answer.known || answer.stranger || answer.members.length === 0) return this.settle(id);
-    writeStop(dir, by, this.now());
+    writeStop(dir, by, this.now(), undefined, via);
     const after = this.settle(id);
     if (after.leftover !== undefined) {
       after.leftover = after.leftover.map((left) => {

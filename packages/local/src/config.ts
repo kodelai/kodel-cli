@@ -81,6 +81,10 @@ export interface DecisionsConfig {
   agent: {
     gate: boolean;
     pipeline_change: boolean;
+    /** `manager_start_task`: start a task's run and its agent, without `task approve`. */
+    start_task: boolean;
+    /** `manager_stop_agent`: stop the agent of a run. */
+    stop_agent: boolean;
   };
 }
 
@@ -150,7 +154,7 @@ export const DEFAULT_PIPELINE: PipelineConfig = { uncommitted: "ask" };
 export const DEFAULT_AGENT_HINTS: AgentHintsConfig = { wait: true };
 export const DEFAULT_DECISIONS: DecisionsConfig = {
   dialog: false,
-  agent: { gate: false, pipeline_change: false },
+  agent: { gate: false, pipeline_change: false, start_task: false, stop_agent: false },
 };
 export const DEFAULT_TASKS: TasksConfig = {
   enabled: false,
@@ -352,6 +356,8 @@ const configSchema = z
           .object({
             gate: z.boolean().optional(),
             pipeline_change: z.boolean().optional(),
+            start_task: z.boolean().optional(),
+            stop_agent: z.boolean().optional(),
           })
           .strict()
           .optional(),
@@ -565,6 +571,8 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
         gate: parsed.data.decisions?.agent?.gate ?? DEFAULT_DECISIONS.agent.gate,
         pipeline_change:
           parsed.data.decisions?.agent?.pipeline_change ?? DEFAULT_DECISIONS.agent.pipeline_change,
+        start_task: parsed.data.decisions?.agent?.start_task ?? DEFAULT_DECISIONS.agent.start_task,
+        stop_agent: parsed.data.decisions?.agent?.stop_agent ?? DEFAULT_DECISIONS.agent.stop_agent,
       },
     },
     tasks: {

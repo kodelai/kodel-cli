@@ -6,6 +6,7 @@
  * Session errors have their own code set, outside the MCP `ERROR_CODES` (which stay pinned).
  */
 
+import { isStarted, type Started } from "./origin";
 import { ENGINE_PROFILE_NAME } from "./registry";
 import type { AttachStream } from "./session-frames";
 import { isTerminalSize } from "./session-frames";
@@ -117,6 +118,8 @@ export interface SessionSpec {
   parent?: string;
   /** Kept in a record of its own (`agent.json`), never in the stored spec. */
   agent?: SessionAgent;
+  /** Who started the session, as a kind; kept at the top level of `session.json` (`startedBy`), never in the stored spec. */
+  startedBy?: Started;
 }
 
 /** The longest timer a process can set (Node fires at once above it). */
@@ -154,6 +157,7 @@ export const validateSpec = (spec: SessionSpec): string | undefined => {
   if (spec.input !== undefined && typeof spec.input !== "boolean") return "input must be a boolean";
   if (spec.name !== undefined && !isSessionName(spec.name)) return "name is not valid";
   if (spec.parent !== undefined && !isSessionId(spec.parent)) return "parent is not a session id";
+  if (spec.startedBy !== undefined && !isStarted(spec.startedBy)) return "startedBy is not valid";
   if (spec.agent !== undefined) {
     const problem = agentProblem(spec.agent);
     if (problem !== undefined) return problem;
@@ -195,6 +199,12 @@ export type KilledReason = "stopped" | "timeout" | "start_late" | "rules_unknown
  * (`finish`). A stop record that does not say is a person's: nobody else may be taken for the person's word.
  */
 export type StopAsker = "person" | "finish";
+/**
+ * A note on a person's stop: it came through a manager's server (`manager`) or the web page (`web`). Decides
+ * nothing; a reader that does not know it reads the person's stop.
+ */
+export type StopVia = "manager" | "web";
+export const STOP_VIAS: readonly StopVia[] = ["manager", "web"];
 /** The `by` of a stop record, per asker. `stop` is what every record said before the askers were told apart. */
 export const STOP_BY: Readonly<Record<StopAsker, string>> = { person: "stop", finish: "finish" };
 export const stopAskerOf = (by: string): StopAsker => (by === STOP_BY.finish ? "finish" : "person");
@@ -210,6 +220,8 @@ export interface SessionStatus {
    * changes no `reason`, and is a stop all the same. Never set while the session is live.
    */
   stoppedBy?: StopAsker;
+  /** The note on the stop record (`manager`); it changes no reading of `stoppedBy`. */
+  stoppedVia?: StopVia;
   /** True when the child still runs although the session is over (a consumer treats it as unfinished). */
   childAlive?: boolean;
   lastOutputAt?: number;
@@ -263,6 +275,8 @@ export interface SessionSnapshot {
   childAlive: boolean;
   /** The stop record: who asked, when it is there and can be read. */
   stop: "missing" | "unreadable" | StopAsker;
+  /** The note on the stop record, when it is there and is one this build knows. */
+  stopVia?: StopVia;
 }
 
 /**
@@ -300,6 +314,7 @@ export const deriveStatus = (
   const over = (status: SessionStatus): DerivedStatus => {
     if (snap.stop === "unreadable") return { ok: false, code: "CANNOT_READ" };
     if (snap.stop !== "missing") status.stoppedBy = snap.stop;
+    if (snap.stop !== "missing" && snap.stopVia !== undefined) status.stoppedVia = snap.stopVia;
     return { ok: true, status };
   };
   if (snap.status === "missing") {
@@ -460,7 +475,7 @@ export interface SessionAdapter {
    * `by` says who asks (a person, when absent). A person's stop is never replaced by a `finish`, and it
    * replaces one: the stop record keeps the person's word.
    */
-  stop(id: string, opts?: { by?: StopAsker }): Promise<SessionStatus>;
+  stop(id: string, opts?: { by?: StopAsker; via?: StopVia }): Promise<SessionStatus>;
   remove(id: string): Promise<void>;
   list(filter?: { name?: string }): Promise<SessionListEntry[]>;
   /** Only with `capabilities().send`. Returns the bytes written; promises nothing about a program that does not read. */

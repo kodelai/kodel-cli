@@ -97,6 +97,15 @@ const V2_MANAGER_GATE = "r_0mwtbx5bv_kyns";
 const V2_MANAGER_CHANGE = "r_0mwtbx7v2_cye8";
 const V2_MANAGER_OWN = "r_0mwtbx9p5_lbl7";
 const V2_MANAGER_RUNS = [V2_MANAGER_GATE, V2_MANAGER_CHANGE, V2_MANAGER_OWN];
+
+/**
+ * The format-2 runs with `run_started.origin` and the event `agent_stopped` (`fixtures/formats/v2-origin/`,
+ * `scripts/take-v2-origin-fixture.mjs`, a real host): one started as an agent through a manager and left open at
+ * its first step, one started by a person at the TUI and finished.
+ */
+const V2_ORIGIN_OPEN = "r_0mwx8a4t9_l1xz";
+const V2_ORIGIN_DONE = "r_0mwx8a4z5_uhx1";
+const V2_ORIGIN_RUNS = [V2_ORIGIN_OPEN, V2_ORIGIN_DONE];
 /**
  * The format-2 run with attachments (T-45, `scripts/take-v2-attachment-fixture.mjs`): two versions of a plan (the
  * first too short for the step's `attachment` check), a PNG, the gate and a later step.
@@ -204,6 +213,7 @@ describe("the golden runs of the stored formats", () => {
       "v2-engine",
       "v2-manager",
       "v2-model",
+      "v2-origin",
       "v2-roles",
       "v2-worker",
     ]);
@@ -216,6 +226,7 @@ describe("the golden runs of the stored formats", () => {
     expect(await runIds("v2-model")).toEqual([V2_MODEL_RUN]);
     expect(await runIds("v2-roles")).toEqual([...V2_ROLES_RUNS].sort());
     expect(await runIds("v2-manager")).toEqual([...V2_MANAGER_RUNS].sort());
+    expect(await runIds("v2-origin")).toEqual([...V2_ORIGIN_RUNS].sort());
   });
 
   test("formats_a_fixture_file_that_was_edited_fails_the_hash_list", async () => {
@@ -284,6 +295,7 @@ async function checkFormats(from: string): Promise<{ opened: number }> {
           id === V2_ENGINE_OPEN ||
           id === V2_WORKER_OPEN ||
           id === V2_ROLES_OPEN ||
+          id === V2_ORIGIN_OPEN ||
           V2_MANAGER_RUNS.includes(id)
           ? ["running", "paused"]
           : ["completed"],
@@ -312,6 +324,7 @@ describe("every stored format against the current engine", () => {
         V2_WORKER_RUNS.length +
         V2_ROLES_RUNS.length +
         V2_MANAGER_RUNS.length +
+        V2_ORIGIN_RUNS.length +
         2,
     );
   });
@@ -331,6 +344,7 @@ describe("every stored format against the current engine", () => {
         V2_WORKER_RUNS.length +
         V2_ROLES_RUNS.length +
         V2_MANAGER_RUNS.length +
+        V2_ORIGIN_RUNS.length +
         2,
     });
   });
@@ -461,6 +475,62 @@ describe("every stored format against the current engine", () => {
       decided_by: "agent",
       decided_via: "manager",
     });
+  });
+
+  test("mstart_origin_fixture_opens_and_its_open_run_goes_on", async () => {
+    await copyRuns("v2-origin");
+    const before = await hashTree(runsDir());
+    const reader = hostFor();
+    const journalOf = async (id: string) =>
+      (await readFile(join(runsDir(), id, "journal.jsonl"), "utf8"))
+        .split("\n")
+        .filter((line) => line.trim())
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+    // `status` and `report` read both runs, with the field and the event.
+    const open = await reader.open(V2_ORIGIN_OPEN);
+    expect((await open?.state())?.status).toBe("running");
+    expect((await open?.report())?.runId).toBe(V2_ORIGIN_OPEN);
+    const done = await reader.open(V2_ORIGIN_DONE);
+    expect((await done?.state())?.status).toBe("completed");
+    expect((await done?.report())?.runId).toBe(V2_ORIGIN_DONE);
+    expect((await journalOf(V2_ORIGIN_OPEN))[0]?.origin).toMatchObject({
+      by: "agent",
+      via: "manager",
+      forced: ["full", "conflict"],
+    });
+    expect((await journalOf(V2_ORIGIN_DONE))[0]?.origin).toEqual({ by: "person", via: "tui" });
+    // reading changed nothing on disk
+    expect(await hashTree(runsDir())).toEqual(before);
+
+    // The open run goes on in format 2, journal appended to; its workdir, a placeholder in the fixture, is made real.
+    await mkdir(root, { recursive: true });
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
+    git("init", "-q");
+    git("config", "user.email", "t@example.com");
+    git("config", "user.name", "T");
+    git("commit", "-q", "--allow-empty", "-m", "initial");
+    await writeState(V2_ORIGIN_OPEN, { ...(await readState(V2_ORIGIN_OPEN)), workdir: root });
+    const metaPath = join(runsDir(), V2_ORIGIN_OPEN, "meta.json");
+    const meta = JSON.parse(await readFile(metaPath, "utf8")) as Record<string, unknown>;
+    await writeFile(metaPath, `${JSON.stringify({ ...meta, workdir: root }, null, 2)}\n`);
+    const journalBefore = await readFile(join(runsDir(), V2_ORIGIN_OPEN, "journal.jsonl"), "utf8");
+    const run = await hostFor().open(V2_ORIGIN_OPEN);
+    if (!run) throw new Error("the open run does not open");
+    const completed = await run.completeStep("write", 1, "done", undefined, {
+      name: "agent",
+      version: "1",
+    });
+    expect(completed.ok).toBe(true);
+    // a second stop of the agent is journaled too, and the run's own format is kept
+    expect((await run.noteAgentStopped({ instruction: "stop again" })).written).toBe(true);
+    const state = await readState(V2_ORIGIN_OPEN);
+    expect(state.v).toBe(2);
+    const journalAfter = await readFile(join(runsDir(), V2_ORIGIN_OPEN, "journal.jsonl"), "utf8");
+    expect(journalAfter.startsWith(journalBefore)).toBe(true);
+    const journal = await journalOf(V2_ORIGIN_OPEN);
+    expect(journal.every((record) => record.v === 2)).toBe(true);
+    expect(journal.filter((r) => r.event === "agent_stopped")).toHaveLength(2);
+    expect(journal[0]?.origin).toMatchObject({ by: "agent", via: "manager" });
   });
 
   test("t45_v2_attachment_fixture_opens_and_its_attachments_read", async () => {

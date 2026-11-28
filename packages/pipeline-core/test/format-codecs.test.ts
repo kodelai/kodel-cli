@@ -87,6 +87,7 @@ describe("t41 the codecs read and write the golden runs unchanged", () => {
     "v2-worker",
     "v2-roles",
     "v2-manager",
+    "v2-origin",
     "v2-attachment",
   ]) {
     test(`t41_${format.replace("-", "_")}_round_trip_on_real_fixtures`, () => {

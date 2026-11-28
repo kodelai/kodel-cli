@@ -688,6 +688,7 @@ export function RunScreen(props: {
     setChosen(rows.size === 0 ? undefined : { path, rows });
   };
   const [instructions, setInstructions] = useState(false);
+  const [stopping, setStopping] = useState<number | undefined>();
   // The tabs stick right under the header, whatever height the header has on this screen.
   const root = useRef<HTMLDivElement>(null);
   const head = useRef<HTMLElement>(null);
@@ -802,6 +803,39 @@ export function RunScreen(props: {
     }
   };
 
+  const stopAsk = async () => {
+    setBusy(true);
+    try {
+      const r = await api.stopAgent(id);
+      if (r.step === "confirm") setStopping(r.flow);
+      else props.notify(r.result.status === "stopped" ? "Agent stopped" : r.result.reason, false);
+    } catch (e) {
+      props.notify((e as Error).message, false);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const stopConfirmed = async () => {
+    if (stopping === undefined) return;
+    setBusy(true);
+    try {
+      const r = await api.stopAgent(id, stopping);
+      setStopping(undefined);
+      if (r.step === "done") {
+        const { result } = r;
+        props.notify(
+          result.status === "stopped" ? `${result.agent} stopped. ${result.note}` : result.reason,
+          result.status === "stopped",
+        );
+      }
+    } catch (e) {
+      setStopping(undefined);
+      props.notify((e as Error).message, false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const waiting = session?.status === "waiting";
   const decidable = waiting && picked !== undefined && me.canDecide;
   const changes = detail?.changes;
@@ -837,6 +871,11 @@ export function RunScreen(props: {
               <Icon name="tasks" />
             </a>
           ) : null}
+          {me.canStopAgent && (session?.status === "running" || session?.status === "waiting") ? (
+            <button type="button" class="text-btn" disabled={busy} onClick={stopAsk}>
+              Stop agent
+            </button>
+          ) : null}
           {me.canAsk ? (
             <button
               type="button"
@@ -852,6 +891,28 @@ export function RunScreen(props: {
           ) : null}
         </span>
       </header>
+
+      {stopping !== undefined ? (
+        <Modal
+          title="Stop the agent?"
+          onClose={() => setStopping(undefined)}
+          actions={
+            <>
+              <button type="button" class="btn" onClick={() => setStopping(undefined)}>
+                Cancel
+              </button>
+              <button type="button" class="btn primary" disabled={busy} onClick={stopConfirmed}>
+                Stop agent
+              </button>
+            </>
+          }
+        >
+          <p class="muted small">
+            The run stays open with its task; nothing is cancelled. A terminal attached to the agent
+            is closed with it. The daemon does not start the agent again.
+          </p>
+        </Modal>
+      ) : null}
 
       {refs.length > 1 ? (
         <div class="picks">

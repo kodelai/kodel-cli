@@ -749,7 +749,7 @@ describe("the tool surface", () => {
     // from 3 for UNSUPPORTED_FORMAT_FEATURE and details.how_to_upgrade (T-41); from 4 for the history tools;
     // from 5 for the attachment tools (T-45); from 6 for the roles of a server (5M9D): the manager tools,
     // and pipeline_next_step marked a write.
-    expect(CONTRACT_VERSION).toBe(7);
+    expect(CONTRACT_VERSION).toBe(8);
     expect(TOOLS.map((t) => t.name)).toEqual([
       "pipeline_list",
       "pipeline_docs",

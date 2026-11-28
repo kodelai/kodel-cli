@@ -176,6 +176,14 @@ export { plain };
  */
 export const WAIT_TIMEOUT_S = 28_800;
 
+/** What a server that decides and acts for nobody is given of `decisions.agent`. */
+const NO_AGENT_DECISIONS = {
+  gate: false,
+  pipelineChange: false,
+  startTask: false,
+  stopAgent: false,
+};
+
 /** How long `wait` looks for the journal record of a change it has seen in the state. */
 const JOURNAL_GRACE_MS = 3000;
 
@@ -574,23 +582,25 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
         agentDecisions: {
           gate: config.decisions.agent.gate,
           pipelineChange: config.decisions.agent.pipeline_change,
+          startTask: config.decisions.agent.start_task,
+          stopAgent: config.decisions.agent.stop_agent,
         },
       }))
       .catch(() => ({
         dialog: false,
-        agentDecisions: { gate: false, pipelineChange: false },
+        agentDecisions: NO_AGENT_DECISIONS,
       }));
     // `--no-decisions` serves a background agent: whatever the project lets an agent decide, this
     // server decides nothing and asks nobody; the one line says so where the person can read it.
     const settings = noDecisions
-      ? { waitHint, dialog: false, agentDecisions: { gate: false, pipelineChange: false } }
+      ? { waitHint, dialog: false, agentDecisions: NO_AGENT_DECISIONS }
       : role === "worker" || readOnly
         ? // The worker decides nothing for the person, whatever the project lets an agent decide;
           // a read-only server neither decides nor asks (an answer in a dialog is a write).
           {
             waitHint,
             dialog: readOnly ? false : fromConfig.dialog,
-            agentDecisions: { gate: false, pipelineChange: false },
+            agentDecisions: NO_AGENT_DECISIONS,
           }
         : { waitHint, ...fromConfig };
     if (noDecisions) {
@@ -659,11 +669,21 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
     });
     const { managerPorts } = await import("./manager-ports");
     const environment = env.environment ?? process.env;
+    let launcher: ReturnType<typeof openWorkerLauncher> | undefined;
     const manager = {
       ...createManagerReads({
         host: local,
         ...(tasks === undefined ? {} : { tasks: serveTasksOf(tasks) }),
       }),
+      // Read at each call, so that a key turned off takes the acting tools away without a restart. A
+      // key this server was not started with (`--no-decisions`, a worker, `--read-only`) stays off.
+      agentKeys: async () => {
+        const { decisions } = await loadConfig(resolved.dataDir);
+        return {
+          start_task: settings.agentDecisions.startTask && decisions.agent.start_task,
+          stop_agent: settings.agentDecisions.stopAgent && decisions.agent.stop_agent,
+        };
+      },
       ...managerPorts({
         root: resolved.root,
         environment,
@@ -672,6 +692,18 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           args: [process.argv[1] ?? "kodel"],
         },
         platform: env.platform ?? process.platform,
+        acting: {
+          host: local,
+          launcher: () => (launcher ??= openWorkerLauncher()),
+          ...(tasks === undefined ? {} : { tasks }),
+          // Read at each call: an edit of the limits applies to the next start.
+          serve: async () => (await loadConfig(resolved.dataDir)).serve,
+          dialog: async () => (await loadConfig(resolved.dataDir)).decisions.dialog,
+          worktreesDir: async () =>
+            resolve(resolved.root, (await loadConfig(resolved.dataDir)).worktree.dir),
+          root: resolved.root,
+          version: pkg.version,
+        },
       }),
     };
     return {
@@ -1116,6 +1148,8 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           dialog,
           root,
           version: pkg.version,
+          // Read at each start: an edit of the limits applies to the next one.
+          serve: async () => (await loadConfig(dataDir)).serve,
           ...(worktreesDir === undefined ? {} : { worktreesDir }),
         }),
         serve: () => readServeStatus(place, Date.now()),
@@ -1279,6 +1313,29 @@ export async function runCli(argv: string[], env: CliEnv): Promise<number> {
           const { openTasksForTui, tuiTaskOptions } = await import("./tui/tasks-open");
           const taskReaders = tuiTaskOptions(await openTasksForTui(dataDir));
           api = projectApi(h, root, tools, asker, taskReaders);
+          {
+            // Start and Stop agent: through the same functions as the terminal's `s`; no key is read.
+            const { webActing } = await import("./web/acting");
+            const { openTaskService } = await import("@kodel-ai/local");
+            const opened = await openTaskService({ storeRoot: dataDir }).catch(() => undefined);
+            let launcher: ReturnType<typeof openWorkerLauncher> | undefined;
+            api = {
+              ...api,
+              ...webActing({
+                platform: env.platform ?? process.platform,
+                acting: {
+                  host: h,
+                  launcher: () => (launcher ??= openWorkerLauncher()),
+                  ...(opened === undefined ? {} : { tasks: opened.service }),
+                  serve: async () => (await loadConfig(dataDir)).serve,
+                  dialog: async () => (await loadConfig(dataDir)).decisions.dialog,
+                  worktreesDir: async () => resolve(root, (await loadConfig(dataDir)).worktree.dir),
+                  root,
+                  version: pkg.version,
+                },
+              }),
+            };
+          }
           if (opts.mcp === true) {
             // The manager role, read-only for a read-only token: a client on another machine works
             // no run. Each kind is built once, at its first session; every session gets its own server.

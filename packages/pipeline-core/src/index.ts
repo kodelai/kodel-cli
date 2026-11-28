@@ -20,6 +20,7 @@ export * from "./manager-view";
 export * from "./model-match";
 export * from "./new-pipeline";
 export * from "./next-step";
+export * from "./origin";
 export * from "./pipeline";
 export * from "./pipeline-diff";
 export * from "./pipeline-stats";

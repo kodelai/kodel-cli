@@ -290,6 +290,8 @@ async function startForPipeline(
       task: prompt,
       title: titleOf(prompt),
       subject: `a run of ${pipeline}`,
+      // The person's own command line: a kind, never a name or a device.
+      started: { by: "person", via: "cli" },
     });
   let result: Awaited<ReturnType<typeof launchRun>>;
   try {

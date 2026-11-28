@@ -28,6 +28,7 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+const OFF_AGENT = { gate: false, pipeline_change: false, start_task: false, stop_agent: false };
 const write = (text: string) => writeFile(join(dir, CONFIG_FILE), text);
 const failure = async (text: string) => {
   await write(text);
@@ -48,7 +49,7 @@ describe("the project config", () => {
       worktree: expected,
       pipeline: { uncommitted: "ask" },
       agent_hints: { wait: true },
-      decisions: { dialog: false, agent: { gate: false, pipeline_change: false } },
+      decisions: { dialog: false, agent: OFF_AGENT },
       tasks: {
         enabled: false,
         adapter: "local",
@@ -134,7 +135,7 @@ describe("the project config", () => {
   });
 
   test("t_decisions_defaults_are_all_off", async () => {
-    const off = { dialog: false, agent: { gate: false, pipeline_change: false } };
+    const off = { dialog: false, agent: OFF_AGENT };
     expect((await loadConfig(dir)).decisions).toEqual(off);
     await write("decisions: {}\n");
     expect((await loadConfig(dir)).decisions).toEqual(off);
@@ -146,18 +147,34 @@ describe("the project config", () => {
     await write("decisions:\n  dialog: true\n");
     expect((await loadConfig(dir)).decisions).toEqual({
       dialog: true,
-      agent: { gate: false, pipeline_change: false },
+      agent: OFF_AGENT,
     });
     await write("decisions:\n  agent:\n    gate: true\n");
     expect((await loadConfig(dir)).decisions).toEqual({
       dialog: false,
-      agent: { gate: true, pipeline_change: false },
+      agent: { ...OFF_AGENT, gate: true },
     });
     await write("decisions:\n  agent:\n    pipeline_change: true\n");
     expect((await loadConfig(dir)).decisions.agent).toEqual({
-      gate: false,
+      ...OFF_AGENT,
       pipeline_change: true,
     });
+  });
+
+  test("mstart_config_keys_default_off", async () => {
+    // The two keys of the manager's actions: off by default, read on their own, strict like the rest.
+    expect((await loadConfig(dir)).decisions.agent.start_task).toBe(false);
+    expect((await loadConfig(dir)).decisions.agent.stop_agent).toBe(false);
+    await write("decisions:\n  agent:\n    start_task: true\n");
+    expect((await loadConfig(dir)).decisions.agent).toEqual({ ...OFF_AGENT, start_task: true });
+    await write("decisions:\n  agent:\n    stop_agent: true\n");
+    expect((await loadConfig(dir)).decisions.agent).toEqual({ ...OFF_AGENT, stop_agent: true });
+    expect((await failure("decisions:\n  agent:\n    start_tasks: true\n")).code).toBe(
+      "CONFIG_INVALID",
+    );
+    expect((await failure("decisions:\n  agent:\n    stop_agent: yes please\n")).code).toBe(
+      "CONFIG_INVALID",
+    );
   });
 
   test("t_decisions_unknown_key_is_refused_and_ack_has_no_key", async () => {

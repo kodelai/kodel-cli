@@ -277,6 +277,36 @@ read from the journal.
 Golden fixture: `fixtures/formats/v2-attachment/`, one run with two versions of a text, a PNG and the check
 (`fixtures/formats/README.md`).
 
+## How a run was started, and who stopped its agent (manager_start_task, manager_stop_agent)
+
+`run_started` may carry `origin: {by, via, agent_instruction?, forced?}`: `by` is `person` or `agent`, `via` is `tui`,
+`web`, `cli` or `manager` (a closed list: a new path, such as Kodel Server, adds a value in its own change), `forced`
+lists the warnings the start went ahead of (`full`, `blocked`, `conflict`) as the engine found them, and
+`agent_instruction` is what the agent says the person told it (at most 2000 characters, redacted like any text). The
+path that made the call sets `by` and `via`, never a tool's argument: `pipeline_start` takes no such field, and a run
+started by `kodel serve` or by `pipeline_start` has none ("not one of these paths"). `origin` names a kind and never a
+person or a device, so `history.executor: false` does not turn it off (`docs/history.md`). A second journal event,
+`agent_stopped` (`by: agent`, `via: manager`, `agent_instruction?` at most 500 characters, redacted), says that an agent
+stopped the run's agent through a manager's server; it is not written for a run that has ended.
+
+- Format 2 is amended in place, with no new version (rule 5). The state has no new key. Neither the field nor the event
+  is read by any decision of the run: an engine of format 2 that ignores them decides every step the same way, and an
+  older engine that goes on with the run only appends to the journal, so it cannot drop either. The capabilities are
+  `origin` and `agentStops`.
+- A run in flight is unaffected: its records already written are not rewritten, and a run that was going when kodel was
+  updated has no `origin` (it was started before there was one). It takes `agent_stopped` from then on.
+- A run of format 1 holds neither (`origin` and `agentStops` are false for it). The encoder of format 1 refuses a
+  `run_started` with `origin` and the event, with `UNSUPPORTED_FORMAT_FEATURE`; in practice a new run is always format 2,
+  so the host never writes one there, and the event is a quiet no-op, not a refusal: nothing offers `kodel migrate`.
+- A build from before this change reads such a run: the codec of format 2 keeps what it does not know, so it ignores the
+  field and the event and writes the journal back as it was. It does not know `agent_stopped` is not a sign of life
+  (it is left out for `worker_note`), so its TUI may date a wait by it.
+
+Golden fixture: `fixtures/formats/v2-origin/`, two runs made by a real `LocalPipelineHost` (`scripts/take-v2-origin-fixture.mjs`):
+one started as an agent through a manager (with `forced` and the agent's words, and an `agent_stopped`), left open, and one
+started by a person at the TUI and finished. The session record has its own note: `startedBy` and the `via` of a stop
+(`docs/session-formats.md`).
+
 ## When the formats change again
 
 A change of a stored format ships a codec for the previous one, a real fixture and the tests, and

@@ -18,6 +18,8 @@ export const V2_CAPABILITIES: FormatCapabilities = {
   sessionNames: true,
   workerNotes: true,
   executorRole: true,
+  origin: true,
+  agentStops: true,
   attachments: true,
   pipelineFeatures: ["join", "engine", "model", "attachment"],
 };

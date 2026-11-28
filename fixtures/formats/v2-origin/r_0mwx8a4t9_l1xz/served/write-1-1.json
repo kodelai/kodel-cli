@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "node": "write",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "70c7f8b5348353fb0b27d89b0555ec51d7c5b08eaf5ecae6cbb9b1cf035e0ef9",
+  "answer": {
+    "slug": "write",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "Do Add a flag to the status command."
+  }
+}

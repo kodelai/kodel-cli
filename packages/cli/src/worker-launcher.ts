@@ -4,7 +4,7 @@
  * worker, and the interface the loop sees. `claude-worker.ts` is the claude profile behind it, and
  * `worker-launcher-session.ts` the one that starts real sessions; tests give the TUI a fake.
  */
-import type { JournalRecord, SessionState } from "@kodel-ai/pipeline-core";
+import type { JournalRecord, SessionState, Started, StopVia } from "@kodel-ai/pipeline-core";
 import type { RunDecision } from "@kodel-ai/pipeline-core/serve";
 
 /** A session lives this long at most; the person's `kodel agent stop` ends it sooner. */
@@ -66,6 +66,8 @@ export interface WorkerStatus {
    * (`finish`) is stopped too, but not by the person, and does not carry this.
    */
   stopped?: true;
+  /** With `stopped`: the stop came through a manager's server (the note on the stop record); it changes no rule. */
+  stoppedVia?: StopVia;
   /**
    * The latest record's session is over (`lost` or `killed`) while its process still runs without a holder: the
    * worker is alive for every rule, and only the person's `kodel agent stop` ends it.
@@ -111,6 +113,8 @@ export interface StartInput {
   runId: string;
   workdir: string;
   title: string;
+  /** Who started the run, as a kind; kept in the session record (`startedBy`), never with any text. */
+  startedBy?: Started;
 }
 
 export interface ResumeInput {
@@ -134,8 +138,11 @@ export interface WorkerLauncher {
   statuses(runIds: readonly string[]): Promise<Map<string, WorkerStatus>>;
   progress(runId: string): Promise<WorkerProgress>;
   logs(runId: string, bytes?: number): Promise<string>;
-  /** Stops the latest record of a run for a person: it reads `stopped` from then on. */
-  stop(runId: string): Promise<void>;
+  /**
+   * Stops the latest record of a run for a person: it reads `stopped` from then on. `via` only notes that
+   * a manager's server asked; every reader takes the stop as the person's.
+   */
+  stop(runId: string, via?: StopVia): Promise<void>;
   /**
    * Ends the live session of a run that is over, with the processes it started. A session that is
    * already stopped or gone is no error. It decides nothing about a run, and it is not the person's

@@ -1,5 +1,5 @@
 /** A `WorkerLauncher` for the TUI tests: no processes, every answer set by the test. */
-import { SessionError } from "@kodel-ai/pipeline-core";
+import { SessionError, type StopVia } from "@kodel-ai/pipeline-core";
 import type {
   PreflightInput,
   PreflightResult,
@@ -13,6 +13,8 @@ import { workerNameOf } from "../src/worker-launcher";
 
 export class FakeLauncher implements WorkerLauncher {
   readonly starts: StartInput[] = [];
+  /** The `via` each stop came with, in order (`undefined` for none). */
+  readonly stopVias: (StopVia | undefined)[] = [];
   readonly resumes: ResumeInput[] = [];
   readonly preflights: PreflightInput[] = [];
   readonly calls: string[] = [];
@@ -115,8 +117,9 @@ export class FakeLauncher implements WorkerLauncher {
     return (this.progressMap.get(runId)?.lines ?? []).join("\n");
   }
 
-  async stop(runId: string): Promise<void> {
+  async stop(runId: string, via?: StopVia): Promise<void> {
     this.stopped.push(runId);
+    this.stopVias.push(via);
     const status = this.statusMap.get(runId);
     // As the real launcher: a stop through it is the person's, and the record reads so.
     if (status) {
@@ -125,6 +128,7 @@ export class FakeLauncher implements WorkerLauncher {
         state: "killed",
         label: "stopped",
         stopped: true,
+        ...(via === undefined ? {} : { stoppedVia: via }),
         endedBy: "stopped",
       });
     }

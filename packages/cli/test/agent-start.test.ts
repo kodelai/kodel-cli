@@ -6,7 +6,15 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -451,6 +459,22 @@ function sessionLauncher(
 }
 
 describe("t47 kodel agent start --pipeline", () => {
+  test("mstart_cli_start_records_via", async () => {
+    // The command has no task, so it reads no approval and writes no tracker.
+    const launcher = new FakeLauncher();
+    const r = await start({ launcher }, "--pipeline", "one", "Add a flag");
+    expect(r.code, r.err).toBe(0);
+    expect(launcher.starts[0]?.startedBy).toEqual({ by: "person", via: "cli" });
+    const runId = launcher.starts[0]?.runId ?? "";
+    const first = JSON.parse(
+      readFileSync(join(dir, ".kodel", "runs", runId, "journal.jsonl"), "utf8").split("\n")[0] ??
+        "",
+    ) as Record<string, unknown>;
+    expect(first.event).toBe("run_started");
+    expect(first.origin).toEqual({ by: "person", via: "cli" });
+    expect(existsSync(join(dir, ".kodel", "tasks"))).toBe(false);
+  }, 30_000);
+
   test("t47_agent_start_with_pipeline_uses_the_launcher", async () => {
     // A launcher that looks, at the start, whether the start lock is held.
     let lockHeld: boolean | undefined;
@@ -478,7 +502,12 @@ describe("t47 kodel agent start --pipeline", () => {
     expect(run?.state?.taskKey).toBeUndefined();
     expect(run?.state?.status).toBe("running");
     expect(launcher.starts).toEqual([
-      { runId: run?.meta.runId ?? "", workdir: dir, title: "Add a flag to status" },
+      {
+        runId: run?.meta.runId ?? "",
+        workdir: dir,
+        title: "Add a flag to status",
+        startedBy: { by: "person", via: "cli" },
+      },
     ]);
     expect(lockHeld).toBe(true);
     expect(
