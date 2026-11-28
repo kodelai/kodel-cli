@@ -382,6 +382,30 @@ describe("pipes adapter, real processes", () => {
     expect(text).not.toContain(secret);
   });
 
+  test("tA_mstart_session_record_started", async () => {
+    // `startedBy` is written at the top level of `session.json`, beside the spec and never inside it.
+    const { id } = await adapter.start({
+      ...sh("exit 0", { timeoutMs: 20_000 }),
+      startedBy: { by: "person", via: "tui" },
+    });
+    await adapter.wait(id, { timeoutMs: 15_000 });
+    const record = JSON.parse(readFileSync(join(adapter.place.dir, id, "session.json"), "utf8"));
+    expect(record.startedBy).toEqual({ by: "person", via: "tui" });
+    expect(record.spec.startedBy).toBeUndefined();
+    expect(record.spec.origin).toBeUndefined();
+    // a session started by no path that names one has none
+    const plain = await adapter.start(sh("exit 0", { timeoutMs: 20_000 }));
+    await adapter.wait(plain.id, { timeoutMs: 15_000 });
+    expect(
+      "startedBy" in
+        JSON.parse(readFileSync(join(adapter.place.dir, plain.id, "session.json"), "utf8")),
+    ).toBe(false);
+    // a note that is not one of the kinds is refused before anything is made
+    await expect(
+      adapter.start({ ...sh("exit 0"), startedBy: { by: "robot", via: "tui" } as never }),
+    ).rejects.toMatchObject({ code: "SPEC_INVALID" });
+  });
+
   test("tA_project_rule_with_a_function_ends_rules_unknown_and_runs_nothing", async () => {
     const ran = join(root, "ran-rules");
     const withRule = make({
@@ -1258,6 +1282,37 @@ describe("a holder that went away: the child's process group", () => {
 describe("who asked for a stop", () => {
   const stopFile = (id: string) => join(adapter.place.dir, id, "stop.json");
   const byOf = (id: string) => JSON.parse(readFileSync(stopFile(id), "utf8")).by as string;
+
+  test("tA_mstart_stop_record_via_is_a_note_on_the_persons_stop", () => {
+    const dir = join(root, "session-via");
+    mkdirSync(dir);
+    writeStop(dir, "person", 1, undefined, "manager");
+    expect(JSON.parse(readFileSync(join(dir, "stop.json"), "utf8"))).toEqual({
+      v: 1,
+      by: "stop",
+      at: 1,
+      via: "manager",
+    });
+    // every reader takes it as the person's
+    expect(readStop(dir)).toBe("person");
+    // and a plain stop has no key
+    const plain = join(root, "session-plain");
+    mkdirSync(plain);
+    writeStop(plain, "person", 2);
+    expect("via" in JSON.parse(readFileSync(join(plain, "stop.json"), "utf8"))).toBe(false);
+  });
+
+  test("tA_mstart_stop_of_an_exited_session_leaves_the_persons_record", async () => {
+    const { id } = await adapter.start(sh("exit 0"));
+    expect((await adapter.wait(id, { timeoutMs: 15_000 })).state).toBe("exited");
+    // a plain stop of an ended session writes nothing, as before
+    expect((await adapter.stop(id)).stoppedBy).toBeUndefined();
+    // a manager's stop leaves the person's record, with its note, and the end stays as it was
+    const stopped = await adapter.stop(id, { by: "person", via: "manager" });
+    expect(stopped).toMatchObject({ state: "exited", stoppedBy: "person", stoppedVia: "manager" });
+    expect(byOf(id)).toBe("stop");
+    expect((await adapter.status(id)).stoppedVia).toBe("manager");
+  });
 
   test("tA_stop_record_keeps_the_persons_word", () => {
     const dir = join(root, "session");

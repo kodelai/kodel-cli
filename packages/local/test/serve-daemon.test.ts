@@ -281,6 +281,20 @@ describe("kodel serve on the local host (T-44)", () => {
     expect(w.lines.some((l) => l.startsWith("resumed:"))).toBe(true);
   });
 
+  test("t44_mstart_daemon_start_writes_no_origin", async () => {
+    // The daemon's starts are "not one of the paths that name an origin": no field in the journal, and no
+    // `startedBy` for the session record.
+    await project();
+    const w = await world();
+    const key = await w.make("Task A");
+    await w.daemon.cycle();
+    const runId = await w.runOf(key);
+    const first = (await w.journal(runId)).find((r) => r.event === "run_started");
+    expect(first).toBeDefined();
+    expect(first !== undefined && "origin" in first).toBe(false);
+    expect(w.launcher.of(runId).every((r) => r.startedBy === undefined)).toBe(true);
+  });
+
   test("t44_limit_one_second_task_waits", async () => {
     await project();
     const w = await world();
@@ -2354,6 +2368,27 @@ describe("kodel serve with workers that stay alive at a wait (T-47)", () => {
     }
     expect(resumes(launcher).filter((c) => c.runId === second)).toEqual([]);
     expect(notesOf(await w.journal(second))).toEqual([]);
+  });
+
+  test("t44_mstart_stop_is_not_resumed_by_daemon", async () => {
+    await project();
+    const host = newHost();
+    const launcher = new ScriptedLauncher({ host, now: () => t, terminal: true });
+    const w = await world({ host, launcher });
+    const key = await w.make("Task A");
+    await w.daemon.cycle();
+    const runId = await w.runOf(key);
+    // A manager stopped the agent at the gate: the record is the person's, with a note.
+    launcher.stop(runId, "manager");
+    await w.approve(runId);
+    for (let i = 0; i < 3; i++) {
+      tick();
+      await w.daemon.cycle();
+      await w.newDaemon().cycle();
+    }
+    expect(resumes(launcher).filter((c) => c.runId === runId)).toEqual([]);
+    expect(notesOf(await w.journal(runId))).toEqual([]);
+    expect(launcher.of(runId).at(-1)).toMatchObject({ stopped: true, stoppedVia: "manager" });
   });
 
   test("t44_child_alive_is_logged_once_by_the_daemon", async () => {

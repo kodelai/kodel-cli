@@ -36,6 +36,7 @@ import {
   proposalNameProblem,
   type Registry,
   type ResultReport,
+  type RunOrigin,
   type RunReport,
   type RunState,
   type RunTaskLink,
@@ -119,7 +120,7 @@ const ENTRY_POINTS = [
   "seal",
 ] as const;
 
-interface StartInput {
+export interface StartInput {
   pipeline: string;
   task: string;
   restart: boolean;
@@ -130,6 +131,33 @@ interface StartInput {
   restart_task?: boolean;
   caller?: Caller;
   surface?: ServedSurface;
+  /**
+   * How the run is started, set by the path of the call (a TUI key, a web route, a manager's server) and
+   * never from a tool's argument: the service's `pipeline_start` does not pass it, and nor does the daemon.
+   * `forced` is what the start went ahead of, as the admission found it.
+   */
+  origin?: RunOrigin;
+  /**
+   * The run's pipeline must be the one in the last commit: a start nobody watches (the manager, the web UI)
+   * never runs a version the person has not committed. Refused with `PipelineNotCommitted` before anything is made.
+   */
+  committed_only?: boolean;
+}
+
+/** `committed_only` found a pipeline file that is not what the last commit has. */
+export class PipelineNotCommitted extends Error {
+  constructor(
+    readonly file: string,
+    /** `not_in_head`: the last commit has no such file; `working`: the config would run the working version. */
+    readonly why: "not_in_head" | "working",
+  ) {
+    super(
+      why === "not_in_head"
+        ? `the pipeline file ${file} is not in the last commit`
+        : `the pipeline file ${file} has changes that are not committed and pipeline.uncommitted is working`,
+    );
+    this.name = "PipelineNotCommitted";
+  }
 }
 
 interface Loaded {
@@ -706,10 +734,22 @@ export class LocalPipelineHost implements PipelineHost {
     let pipelineCopy: { path: string; text: string } | undefined;
     let tellCopy = false;
     const file = this.pipelineFileOf(found.file);
+    // Without a worktree the run works in the working copy, so a start nobody watches cannot get the
+    // committed version either: a pipeline that differs from the last commit is refused in any mode.
+    if (file !== undefined && input.committed_only === true && worktree.mode !== "auto") {
+      const dirt = await this.uncommitted(found, file);
+      if (dirt && !(await this.runExists(found.spec.name, { task: input.task, restart }))) {
+        throw new PipelineNotCommitted(
+          file,
+          dirt.committed === undefined ? "not_in_head" : "working",
+        );
+      }
+    }
     if (file !== undefined && worktree.mode === "auto" && this.options.workdirs === undefined) {
       const dirt = await this.uncommitted(found, file);
       if (dirt && !(await this.runExists(found.spec.name, { task: input.task, restart }))) {
         if (dirt.committed === undefined) {
+          if (input.committed_only === true) throw new PipelineNotCommitted(file, "not_in_head");
           // Only the working version exists: the worktree has none, so it gets this one.
           pipelineCopy = { path: file, text: found.source };
         } else {
@@ -718,6 +758,7 @@ export class LocalPipelineHost implements PipelineHost {
             throw new ChoiceNeeded(askWhich(found, file, dirt.committed, this.registry));
           }
           if (choice === "working") {
+            if (input.committed_only === true) throw new PipelineNotCommitted(file, "working");
             pipelineCopy = { path: file, text: found.source };
             // The run's branch will differ from the last commit in this file: the person is told.
             tellCopy = true;
@@ -745,6 +786,7 @@ export class LocalPipelineHost implements PipelineHost {
       ...(pipelineCopy === undefined ? {} : { pipelineCopy }),
       ...(input.caller === undefined ? {} : { caller: input.caller }),
       ...(input.surface === undefined ? {} : { surface: input.surface }),
+      ...(input.origin === undefined ? {} : { origin: input.origin }),
     });
     // An existing run goes on with the pipeline it started with, which may no longer be the file's.
     const known = reused || terminal ? await this.open(run.runId) : this.guard(run);
