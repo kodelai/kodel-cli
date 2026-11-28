@@ -524,6 +524,154 @@ describe("finishing", () => {
     expect(late.ok).toBe(false);
   });
 
+  describe("tne3n a cancel ends the run in every phase", () => {
+    const holdAgent = (effect: Effect): RunEvent | undefined =>
+      effect.type === "need_agent" ? undefined : defaultAnswer(effect);
+    const holdChecks = (effect: Effect): RunEvent | undefined =>
+      effect.type === "run_check" ? undefined : defaultAnswer(effect);
+    const failBuildAlways = (effect: Effect): RunEvent | undefined =>
+      effect.type === "run_command" && effect.node === "build"
+        ? {
+            type: "work_finished",
+            node: "build",
+            attempt: effect.attempt,
+            passed: false,
+            reason: "exit 1",
+          }
+        : defaultAnswer(effect);
+    const phases: [string, (effect: Effect) => RunEvent | undefined, RunEvent[]][] = [
+      ["agent", holdAgent, []],
+      ["checks", holdChecks, []],
+      ["gate", defaultAnswer, []],
+      ["pause", failBuildAlways, [approve("plan-approval")]],
+      ["claimed", holdAgent, [{ type: "step_claimed", node: "plan", token: "h1", ttlMs: 60_000 }]],
+    ];
+    for (const [phase, answer, before] of phases) {
+      test(`tne3n_cancel_ends_run_in_phase_${phase}`, () => {
+        const h = host(feature, answer);
+        h.send(START);
+        for (const event of before) h.send(event);
+        expect(["running", "paused"]).toContain(h.state.status);
+        must(h.send({ type: "cancel", reason: "a duplicate of another run" }));
+        expect(h.state.status).toBe("canceled");
+        expect(h.state.active).toEqual([]);
+        expect(h.state.pauses).toEqual([]);
+        expect(Object.values(h.state.nodes).some((n) => n.claim !== undefined)).toBe(false);
+        expect(h.journal.at(-1)).toMatchObject({
+          event: "run_finished",
+          status: "canceled",
+          reason: "a duplicate of another run",
+        });
+      });
+    }
+  });
+
+  test("tne3n_journal_records_who_and_why", () => {
+    const h = host(feature);
+    h.send(START);
+    h.send({
+      type: "cancel",
+      reason: "its task was declined",
+      byAgent: { instruction: "cancel that run", viaManager: true },
+    });
+    expect(h.journal.at(-1)).toMatchObject({
+      event: "run_finished",
+      status: "canceled",
+      reason: "its task was declined",
+      decided_by: "agent",
+      instruction: "cancel that run",
+      decided_via: "manager",
+    });
+    // A person's cancel carries no mark of the agent.
+    const person = host(feature);
+    person.send(START);
+    person.send({ type: "cancel", reason: "started by mistake" });
+    expect(person.journal.at(-1)).not.toHaveProperty("decided_by");
+  });
+
+  test("tne3n_second_cancel_keeps_the_first_reason", () => {
+    const h = host(feature);
+    h.send(START);
+    h.send({ type: "cancel", reason: "first" });
+    const again = h.send({ type: "cancel", reason: "second" });
+    expect(again.ok && again.noop).toBe(true);
+    expect(h.journal.filter((r) => r.event === "run_finished")).toHaveLength(1);
+    expect(h.journal.at(-1)).toMatchObject({ reason: "first" });
+  });
+
+  describe("tne3n a cancel ends the run in the phases a plain chain has not", () => {
+    /** Two agent branches after a plan, joined again. */
+    const FORKED = parsePipeline(
+      [
+        "name: forked",
+        "nodes:",
+        "  - { slug: plan, kind: agent, prompt: plan }",
+        "  - { slug: a, kind: agent, prompt: do a }",
+        "  - { slug: b, kind: agent, prompt: do b }",
+        "  - { slug: merge, kind: agent, prompt: merge, join: all }",
+        "edges:",
+        "  - { from: plan, to: a }",
+        "  - { from: plan, to: b }",
+        "  - { from: a, to: merge }",
+        "  - { from: b, to: merge }",
+        "",
+      ].join("\n"),
+    );
+    const holdAgent = (effect: Effect): RunEvent | undefined =>
+      effect.type === "need_agent" ? undefined : defaultAnswer(effect);
+    const ended = (state: RunState) => {
+      expect(state.status).toBe("canceled");
+      expect(state.active).toEqual([]);
+      expect(state.pauses).toEqual([]);
+      expect(Object.values(state.nodes).some((n) => n.claim !== undefined)).toBe(false);
+    };
+
+    test("tne3n_cancel_ends_run_in_phase_fork_with_a_claimed_branch", () => {
+      const h = host(FORKED, holdAgent);
+      h.send(START);
+      must(h.send({ type: "agent_completed", node: "plan", attempt: 1 }));
+      expect(h.state.active.length).toBe(2);
+      must(h.send({ type: "step_claimed", node: "a", token: "h1", ttlMs: 60_000 }));
+      expect(h.state.nodes.a?.claim).toBeDefined();
+      must(h.send({ type: "cancel", reason: "the plan was wrong" }));
+      ended(h.state);
+      expect(h.journal.at(-1)).toMatchObject({ event: "run_finished", status: "canceled" });
+    });
+
+    test("tne3n_cancel_ends_run_in_phase_pipeline_change_waiting", () => {
+      // The core keeps no pending change: a change that waits for a person is the host's, and the
+      // run under it is a run with its step open and the proposal journaled. The host test of the
+      // held run is in packages/local/test/cancel.test.ts.
+      const h = host(feature, holdAgent);
+      h.send(START);
+      must(h.send({ type: "change_proposed", hash: "f".repeat(64), summary: "another check" }));
+      expect(h.journal.at(-1)).toMatchObject({ event: "pipeline_change_proposed" });
+      must(h.send({ type: "cancel", reason: "the change is not wanted either" }));
+      ended(h.state);
+    });
+
+    test("tne3n_cancel_before_start_is_refused_there_is_no_such_run", () => {
+      // A run with no step started yet does not exist in the core: `start` enters the first node in
+      // the same decision, so the only state before it is none at all, and a cancel of none is refused.
+      const none = decide(feature, undefined, { type: "cancel", reason: "x" }, 0);
+      expect(none.ok).toBe(false);
+      const started = must(decide(feature, undefined, START, 0));
+      expect(started.state.active.length).toBe(1);
+    });
+
+    test("tne3n_late_complete_after_cancel_refused_by_the_core", () => {
+      const h = host(feature, holdAgent);
+      h.send(START);
+      must(h.send({ type: "step_claimed", node: "plan", token: "h1", ttlMs: 60_000 }));
+      must(h.send({ type: "cancel", reason: "stop" }));
+      const length = h.journal.length;
+      const late = h.send({ type: "agent_completed", node: "plan", attempt: 1, claimToken: "h1" });
+      expect(late.ok === false || late.noop === true).toBe(true);
+      expect(h.journal.length).toBe(length);
+      expect(h.state.status).toBe("canceled");
+    });
+  });
+
   test("journal records are numbered 1, 2, 3, ... and versioned", () => {
     const h = host(feature);
     h.send(START);

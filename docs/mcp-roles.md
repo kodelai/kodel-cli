@@ -28,8 +28,9 @@ it (`kodel task set`, or through a manager).
 `history_run_details`, `history_agent_log`, `history_stats`), every task tool, `pipeline_list`,
 `pipeline_resolve`, `pipeline_docs`, `pipeline_propose_change` (for the project only: a call with `run_id` is
 refused, not read as a project proposal), `pipeline_attachment_read` and `pipeline_attachment_list` (what a run
-keeps apart from the project; it has no tool that writes an attachment), the two decision tools when
-`decisions.agent` allows them, and seven read tools of its own:
+keeps apart from the project; it has no tool that writes an attachment), the decision tools when
+`decisions.agent` allows them (`manager_cancel_run`, which ends a run as canceled, only on a manager: a server
+with no role never serves it, `docs/decisions.md`), and seven read tools of its own:
 
 | Tool | What it reads |
 | --- | --- |

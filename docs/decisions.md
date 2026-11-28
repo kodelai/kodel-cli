@@ -11,6 +11,7 @@ decisions:
   agent:
     gate: false            # the agent may approve or reject a gate when the person tells it to
     pipeline_change: false # the agent may accept a change of a run's pipeline when told to
+    cancel_run: false      # a manager may cancel a run when told to (never a worker or a server with no role)
 ```
 
 The server reads the block when it starts, so a change applies the next time the agent connects. If the
@@ -18,6 +19,30 @@ config cannot be read (a typo in a key, for example), the server starts with eve
 dialog off, without an error; a command that reads the config names the problem. Only the person edits this block:
 a project should tell its agent not to (this repository does, in `AGENTS.md`), since a switch the agent
 can turn on for itself protects nothing.
+
+## Cancelling a run
+
+A run that will not go on (started by mistake, a duplicate, one whose task was declined) is ended by a
+person with `kodel run cancel <run> --reason <text>`, the "Cancel run" button of the web UI, or `x` on the
+run in `kodel tui`. Each asks for a reason and a confirmation. The run ends as `canceled` for good:
+`kodel wait` returns, `kodel serve` does not resume it, and every list shows it as canceled. Its open
+steps, gates, pauses and the holds of fork workers are closed, and a worker that reports a step after it
+is refused. The journal's `run_finished` keeps the `reason`; an agent's cancel adds `decided_by: agent`
+and its `instruction` (and `decided_via: manager` in format 2).
+
+The cancel is written first. Then the run's background agents (`kw-<run>` and every `kw-<run>-d<n>`
+still alive) and the engine session of its step are stopped, as kodel's own end of them, not as a
+person's stop. One that cannot be stopped is named in the answer, with `kodel agent stop`; cancelling
+the run again tries again and writes nothing. The task of the run is not closed: it gets the usual
+comment that its run was canceled, and moving it is the person's call. The branch and the worktree stay;
+the answer names them and the commands that remove them (`git branch -d`, which keeps a branch with
+unmerged commits).
+
+A run that has completed or failed is refused (`RUN_FINISHED`), one whose state was changed outside kodel
+needs `ack` first, and a run written before pipelines were kept in versions cannot be canceled by any
+kodel. With `decisions.agent.cancel_run` a manager's server (`--role manager`, never read-only) also
+serves `manager_cancel_run`; it cancels only the runs of its own checkout, and its answer tells the agent
+to show the remove commands to the person, never to run them.
 
 ## `decisions.dialog`
 
@@ -36,6 +61,7 @@ and in the `tell_the_person` of the matching `waiting` answer:
 | --- | --- | --- |
 | `gate` | `pipeline_decide_gate` | approves or rejects the step a run waits at |
 | `pipeline_change` | `pipeline_accept_change` | accepts the change of the run's pipeline that waits, named by its `change_hash` |
+| `cancel_run` | `manager_cancel_run` | ends a run that will not go on as canceled (only on `kodel mcp --role manager`) |
 
 The agent is told to call a tool only when the person has said so in the chat, and to pass their words
 as `instruction`. The engine cannot check that. These switches are protection against a mistake, not

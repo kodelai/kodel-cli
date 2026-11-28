@@ -23,8 +23,15 @@ export const RUN_CORE: readonly string[] = [
   "pipeline_complete_step",
 ];
 
-/** The tools that decide for a person; served only under `decisions.agent`, and never to the worker. */
-export const DECISION_TOOLS: readonly string[] = ["pipeline_decide_gate", "pipeline_accept_change"];
+/**
+ * The tools that decide for a person; served only under `decisions.agent`, and never to the worker.
+ * `manager_cancel_run` (NE3N) is served only on a manager's server, never on one with no role.
+ */
+export const DECISION_TOOLS: readonly string[] = [
+  "pipeline_decide_gate",
+  "pipeline_accept_change",
+  "manager_cancel_run",
+];
 
 /** The task tools (`mcp/task-tools.ts`); a test keeps the list equal to the registry for every adapter profile. */
 export const TASK_TOOL_NAMES: readonly string[] = [

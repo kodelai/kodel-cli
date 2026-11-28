@@ -3,6 +3,7 @@ import type { ServeStatus } from "@kodel-ai/local";
 import { plain } from "../plain";
 import { WORKER_REFRESH_MS, type WorkerLauncher, type WorkerStatus } from "../worker-launcher";
 import { neutralize } from "./ansi";
+import { type CancelOutcome, withCanceled } from "./cancel-flow";
 import type { DecisionRequest, WorkHandle } from "./decide";
 import {
   createInputReader,
@@ -171,6 +172,8 @@ export interface TuiOptions {
   startTask?: (key: string, pipeline: string) => Promise<StartResult>;
   /** The person confirmed a resume: the agent of the run goes on after their decision at journal line `seq`. */
   resumeWorker?: (runId: string, seq: number, sessionId?: string) => Promise<StartResult>;
+  /** The person typed a reason and confirmed: the run is canceled (`../cancel-run.ts`). A person's act, never an agent's. */
+  cancelRun?: (runId: string, reason: string) => Promise<CancelOutcome>;
   /** Reads the records and the digest of the background agents; on a timer of its own, never on Windows. */
   workers?: Pick<WorkerLauncher, "statuses" | "progress">;
   /** How often the records are read (milliseconds); tests make it short. */
@@ -218,7 +221,8 @@ export function applyEvents(
   now?: number,
 ): Model {
   let model = now === undefined ? start : { ...start, now };
-  const opened = (m: Model) => m.input !== null || m.taskInput !== null || m.taskForm !== null;
+  const opened = (m: Model) =>
+    m.input !== null || m.taskInput !== null || m.taskForm !== null || m.cancel !== null;
   const typing = opened(start);
   // Enter and `y` on a comment count only as the whole of their chunk: a line break that arrives with other
   // text is a paste or a burst, not a person pressing the key.
@@ -597,6 +601,33 @@ export async function runTui(
         )
         .then((outcome) => {
           model = withResumed(model, effect.runId, outcome);
+        })
+        .finally(() => {
+          workersRefresh?.openScreen(Date.now());
+          draw();
+        });
+      return;
+    }
+    if (effect.type === "cancel_run") {
+      const cancel = options.cancelRun;
+      if (!cancel) {
+        model = withCanceled(model, effect.seq, {
+          ok: false,
+          message: `Could not cancel ${effect.runId}: canceling is not available here.`,
+        });
+        return;
+      }
+      cancel(effect.runId, effect.reason)
+        .then(
+          (outcome) => outcome,
+          (error: unknown): CancelOutcome => ({
+            ok: false,
+            message: `Could not cancel ${effect.runId}: ${messageOf(error)}`,
+          }),
+        )
+        .then((outcome) => {
+          model = withCanceled(model, effect.seq, outcome);
+          return reload();
         })
         .finally(() => {
           workersRefresh?.openScreen(Date.now());

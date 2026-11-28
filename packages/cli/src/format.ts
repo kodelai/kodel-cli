@@ -464,7 +464,9 @@ export function formatReport(
       const what =
         decision.what === "gate"
           ? `gate ${plain(decision.node ?? "?")}: ${plain(decision.decision ?? "?")}`
-          : "accepted a change of the pipeline";
+          : decision.what === "cancel"
+            ? "canceled the run"
+            : "accepted a change of the pipeline";
       lines.push(`  ${when}  ${what}  "${plain(decision.instruction).slice(0, 200)}"`);
     }
   }

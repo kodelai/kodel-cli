@@ -388,6 +388,7 @@ describe("task_9pns the claude profile", () => {
         "seal",
         "resume",
         "migrate",
+        "run cancel",
         "pipeline changes apply",
         "pipeline changes discard",
         "pipeline changes restore",
@@ -3000,5 +3001,52 @@ describe("t47 one live worker a run", () => {
     await printing.start({ runId: RUN, workdir: WORKTREE, title: "t" });
     const answer = await printing.attachable(RUN);
     expect(answer.ok ? "" : answer.reason).toContain("runs without a terminal (worker: print)");
+  });
+});
+
+describe("tne3n the launcher ends every agent of a canceled run", () => {
+  /** Records made straight on the fake, as a holder would have left them. */
+  async function seed(adapter: ScriptedSessionAdapter, name: string) {
+    const { id } = await adapter.start({ name, argv: ["claude"], cwd: WORKTREE });
+    return id;
+  }
+
+  test("tne3n_finish_stops_every_live_record_and_names_the_ones_it_could_not", async () => {
+    const adapter = new ScriptedSessionAdapter();
+    const launcher = createSessionWorkerLauncher(terminalDeps(adapter));
+    const first = await seed(adapter, `kw-${RUN}`);
+    const decided = await seed(adapter, `kw-${RUN}-d17`);
+    const orphan = await seed(adapter, `kw-${RUN}-d23`);
+    // The holder is gone while its child runs on.
+    adapter.finish(orphan, { state: "lost", reason: "holder_gone", childAlive: true });
+    const ended = await seed(adapter, `kw-${RUN}-d5`);
+    adapter.finish(ended, { state: "exited", exitCode: 0 });
+    const other = await seed(adapter, "kw-r_0mw53d7fj_zzzz");
+    const stops: [string, string | undefined][] = [];
+    const realStop = adapter.stop.bind(adapter);
+    adapter.stop = async (id, opts = {}) => {
+      stops.push([id, opts.by]);
+      if (id === decided) throw new Error("operation not permitted");
+      return realStop(id, opts);
+    };
+    const error = await launcher.finish(RUN).then(
+      () => undefined,
+      (e: unknown) => e as Error,
+    );
+    // Every live record of the run was asked to stop, by kodel's finish, the failing one too;
+    // the one that had ended and another run's were not.
+    expect(stops.map(([id]) => id).sort()).toEqual([first, decided, orphan].sort());
+    expect(stops.every(([, by]) => by === "finish")).toBe(true);
+    expect(adapter.sessions.get(first)?.status).toEqual({
+      state: "killed",
+      reason: "stopped",
+      stoppedBy: "finish",
+    });
+    expect(adapter.sessions.get(other)?.status.state).toBe("running");
+    // One error names the record that is left, with why.
+    expect(error?.message).toContain(`kw-${RUN}-d17`);
+    expect(error?.message).toContain(decided);
+    expect(error?.message).toContain("operation not permitted");
+    expect(error?.message).not.toContain(first);
   });
 });

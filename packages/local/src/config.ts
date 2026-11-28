@@ -81,6 +81,8 @@ export interface DecisionsConfig {
   agent: {
     gate: boolean;
     pipeline_change: boolean;
+    /** A manager's server may cancel a run (`manager_cancel_run`, NE3N); never a worker or a server with no role. */
+    cancel_run: boolean;
   };
 }
 
@@ -150,7 +152,7 @@ export const DEFAULT_PIPELINE: PipelineConfig = { uncommitted: "ask" };
 export const DEFAULT_AGENT_HINTS: AgentHintsConfig = { wait: true };
 export const DEFAULT_DECISIONS: DecisionsConfig = {
   dialog: false,
-  agent: { gate: false, pipeline_change: false },
+  agent: { gate: false, pipeline_change: false, cancel_run: false },
 };
 export const DEFAULT_TASKS: TasksConfig = {
   enabled: false,
@@ -352,6 +354,7 @@ const configSchema = z
           .object({
             gate: z.boolean().optional(),
             pipeline_change: z.boolean().optional(),
+            cancel_run: z.boolean().optional(),
           })
           .strict()
           .optional(),
@@ -565,6 +568,7 @@ export async function loadConfig(storeRoot: string): Promise<ProjectConfig> {
         gate: parsed.data.decisions?.agent?.gate ?? DEFAULT_DECISIONS.agent.gate,
         pipeline_change:
           parsed.data.decisions?.agent?.pipeline_change ?? DEFAULT_DECISIONS.agent.pipeline_change,
+        cancel_run: parsed.data.decisions?.agent?.cancel_run ?? DEFAULT_DECISIONS.agent.cancel_run,
       },
     },
     tasks: {

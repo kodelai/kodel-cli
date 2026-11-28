@@ -488,3 +488,41 @@ describe("a run of format 1 goes on in format 1", () => {
     expect((await (await hostFor().open(PAUSED))?.keptVersions())?.length).toBe(2);
   });
 });
+
+describe("tne3n a run of format 1 is canceled in format 1", () => {
+  test("tne3n_v1_run_canceled_keeps_its_format_and_marks_the_agent", async () => {
+    await copyFixture(PAUSED);
+    const before = await readFile(join(runDir(PAUSED), "journal.jsonl"), "utf8");
+    const run = await hostFor().open(PAUSED);
+    const decision = await run?.cancel({
+      reason: "a duplicate of another run",
+      byAgent: { instruction: "cancel it", viaManager: true },
+    });
+    expect(decision?.ok).toBe(true);
+    const state = await readJson(join(runDir(PAUSED), "state.json"));
+    expect(state.v).toBe(1);
+    expect(state.status).toBe("canceled");
+    // the journal is only appended to, every line in format 1
+    const after = await readFile(join(runDir(PAUSED), "journal.jsonl"), "utf8");
+    expect(after.startsWith(before)).toBe(true);
+    const lines = (await journalLines(PAUSED)) as unknown as Record<string, unknown>[];
+    expect(lines.every((line) => line.v === 1)).toBe(true);
+    const finished = lines.find((line) => line.event === "run_finished");
+    // The agent's mark is kept in format 1 too; only the role of its server has no place there.
+    expect(finished).toMatchObject({
+      status: "canceled",
+      reason: "a duplicate of another run",
+      decided_by: "agent",
+      instruction: "cancel it",
+    });
+    expect(finished).not.toHaveProperty("decided_via");
+    // a second cancel writes nothing and answers as canceled; the run reads as it was left
+    const again = await (await hostFor().open(PAUSED))?.cancel({ reason: "again" });
+    expect(again?.ok && again.noop).toBe(true);
+    // (the patch of the run is recorded after the end, on its own: only the end is counted here)
+    const ends = (await journalLines(PAUSED)).filter((line) => line.event === "run_finished");
+    expect(ends).toHaveLength(1);
+    expect((await (await hostFor().open(PAUSED))?.state())?.status).toBe("canceled");
+    expect(await (await hostFor().open(PAUSED))?.report()).toBeDefined();
+  });
+});

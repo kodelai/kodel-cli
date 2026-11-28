@@ -336,3 +336,38 @@ sources without changing what they write. `scripts/check-artifact.mjs` is what r
 The tests read every version back against its record, check that the codec writes the records as it read them
 and that the report of the run is the same with the three records left out, and open the run with `status` and
 `report` without changing a byte.
+
+## `v1-cancel/` and `v2-cancel/`
+
+Canceled runs whose `run_finished` keeps who canceled them and why (NE3N, `docs/run-formats.md`, "Who canceled a
+run, and why"): `reason`, and for a cancel an agent made on the person's instruction `decided_by: agent` and
+`instruction`, plus `decided_via: manager` in format 2. Format 2 is amended in place for it and format 1 keeps
+the fields of the record as given (journal records only, nothing in the state). They were made by `bun scripts/take-cancel-fixtures.mjs`, which starts real
+`kodel mcp` servers from the sources over stdio in a scratch git repository whose config has
+`decisions: { agent: { cancel_run: true } }` (one with `--role worker`, one with `--role manager`) and drives them
+with the MCP client; the person's cancel goes through `cancelRun` of `packages/cli/src/cancel-run.ts` (what
+`kodel run cancel` calls; the command itself asks for a terminal) with `LocalPipelineHost`. No `CLAUDE*` variable
+and no `KODEL_ENGINE` reached the servers, and `history.agent_log`, `usage` and `tool_calls` are off in the
+scratch project. The script played the agents; the client the servers observed is the script
+(`take-cancel-fixtures`). The runs were taken with `node scripts/take-format-fixture.mjs v2-cancel <run> <run>`
+and `... v1-cancel <run>`; the workdir is the placeholder `/kodel-fixture/workdir/<run id>` and there is no
+`seal.json`. On macOS the script was run with a `git` that is not the `xcrun` shim first on `PATH`, so that no
+note of the shim (a cache file it could not write) reached a `changes_recorded` record.
+
+- `v2-cancel/r_0mx08u614_ol5w` (canceled): `write` handed in through the worker's server, then, waiting at the
+  gate `approve`, canceled through the manager's server (`manager_cancel_run`): `run_finished` with `reason`,
+  `decided_by: agent`, `instruction` and `decided_via: manager`, then the patch of the run (`changes_recorded`).
+- `v2-cancel/r_0mx08u6cx_t0j2` (canceled): started through the worker's server, `write` served and never handed
+  in, canceled by the person: `run_finished` with `reason` only.
+- `v1-cancel/r_0mvxulvel_5xgk` (canceled, format 1): a copy of the paused run of `v1-open/` (same run id) made
+  real in the scratch project as `packages/local/test/v1-continue.test.ts` does (its workdir set to the project),
+  then canceled through the manager's server by the current engine. It stays format 1: `run_finished` (`v: 1`)
+  with `reason`, `decided_by: agent` and `instruction`, and no `decided_via`. The run's commits are not in the
+  scratch repository, so `run_finished.head` and `commits` name the scratch repository's commit and
+  `changes_recorded` holds `changes_error` (`bad object` of the run's last snapshot): what the engine writes
+  for a run moved away from its repository.
+
+The tests (`tne3n_` in `packages/pipeline-core/test/format-codecs.test.ts` and `packages/local/test/formats.test.ts`)
+open each run (`status`, `report`, whose `agent_decisions` lists the agent's cancel as `what: cancel`), write it
+back as it was read, check the fields of `run_finished`, and read the run as `canceled` with `reason`,
+`decided_by`, `instruction` and `decided_via` taken out of it.

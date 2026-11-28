@@ -13,6 +13,7 @@ export const HUMAN_ONLY_COMMANDS: readonly string[] = [
   "migrate",
   "ack",
   "seal",
+  "run cancel",
   "pipeline changes apply",
   "pipeline changes discard",
   "pipeline changes restore",

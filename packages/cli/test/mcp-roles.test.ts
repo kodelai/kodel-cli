@@ -9,7 +9,12 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { KNOWN_TOOL_NAMES, ROLE_TOOLS, summarizeRun } from "@kodel-ai/pipeline-core";
+import {
+  DECISION_TOOLS,
+  KNOWN_TOOL_NAMES,
+  ROLE_TOOLS,
+  summarizeRun,
+} from "@kodel-ai/pipeline-core";
 import { decisionOf, resumeVerdict } from "@kodel-ai/pipeline-core/serve";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -173,7 +178,9 @@ const withoutTasks = (names: readonly string[]) => names.filter((n) => !n.starts
 const withoutAttachments = (names: readonly string[]) =>
   names.filter((n) => !n.startsWith("pipeline_attachment_"));
 const withoutDecisions = (names: readonly string[]) =>
-  names.filter((n) => n !== "pipeline_decide_gate" && n !== "pipeline_accept_change");
+  names.filter((n) => !DECISION_TOOLS.includes(n));
+/** `manager_cancel_run` (NE3N) needs `decisions.agent.cancel_run`, which DECISIONS leaves off, and a manager. */
+const withoutCancel = (names: readonly string[]) => names.filter((n) => n !== "manager_cancel_run");
 
 /** Every name outside the set is refused, whether the client listed it or not. */
 async function expectOnly(server: Connected, expected: readonly string[]) {
@@ -214,7 +221,7 @@ describe("5m9d a server serves exactly its set", () => {
   test("5m9d_manager_cannot_call_a_tool_outside_its_set", async () => {
     for (const config of CONFIGS) {
       const dir = makeRepo(config.text);
-      let expected: readonly string[] = ROLE_TOOLS.manager;
+      let expected: readonly string[] = withoutCancel(ROLE_TOOLS.manager);
       if (!config.tasks) expected = withoutTasks(expected);
       if (!config.decides) expected = withoutDecisions(expected);
       const manager = await connect(dir, ["--role", "manager"]);
@@ -294,7 +301,7 @@ describe("5m9d a server serves exactly its set", () => {
 
       // 5m9d_the_person_can_give_the_manager_run_tools: `pipeline_start` is taken.
       const manager = await connect(dir, ["--role", "manager"]);
-      let managerSet = [...ROLE_TOOLS.manager, "pipeline_start"].filter(
+      let managerSet = withoutCancel([...ROLE_TOOLS.manager, "pipeline_start"]).filter(
         (name) => name !== "history_stats",
       );
       if (!config.tasks) managerSet = withoutTasks(managerSet);
@@ -309,7 +316,7 @@ describe("5m9d a server serves exactly its set", () => {
 
       // With no role: the union after the overrides. Each removed tool was in one role only, so it is gone.
       const all = await connect(dir, []);
-      let union = KNOWN_TOOL_NAMES.filter(
+      let union = withoutCancel(KNOWN_TOOL_NAMES).filter(
         (name) => name !== "pipeline_plan" && name !== "history_stats",
       );
       if (!config.tasks) union = withoutTasks(union);
@@ -322,13 +329,31 @@ describe("5m9d a server serves exactly its set", () => {
   test("5m9d_no_role_serves_every_tool_as_before", async () => {
     const dir = makeRepo(OFF + DECISIONS + TASKS);
     const all = await connect(dir, []);
-    await expectOnly(all, KNOWN_TOOL_NAMES);
+    await expectOnly(all, withoutCancel(KNOWN_TOOL_NAMES));
     expect(all.tools.find((t) => t.name === "pipeline_next_step")?.annotations?.readOnlyHint).toBe(
       false,
     );
     expect(all.stderr()).toContain("no role: every tool");
     await all.close();
   }, 60_000);
+
+  test("tne3n_manager_cancel_run_only_on_a_manager_with_the_key", async () => {
+    const withKey = makeRepo(`${OFF}decisions:\n  agent:\n    cancel_run: true\n`);
+    // The manager with the key: served, and the instructions name it.
+    const manager = await connect(withKey, ["--role", "manager"]);
+    expect(manager.names).toContain("manager_cancel_run");
+    await manager.close();
+    // Never a read-only manager, a worker or a server with no role (it may be the run's own agent).
+    for (const args of [["--role", "manager", "--read-only"], ["--role", "worker"], []]) {
+      const server = await connect(withKey, args);
+      expect(server.names, args.join(" ")).not.toContain("manager_cancel_run");
+      await server.close();
+    }
+    // Without the key not even the manager has it.
+    const without = await connect(makeRepo(OFF + DECISIONS), ["--role", "manager"]);
+    expect(without.names).not.toContain("manager_cancel_run");
+    await without.close();
+  }, 120_000);
 });
 
 describe("5m9d the start command", () => {

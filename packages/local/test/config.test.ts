@@ -48,7 +48,10 @@ describe("the project config", () => {
       worktree: expected,
       pipeline: { uncommitted: "ask" },
       agent_hints: { wait: true },
-      decisions: { dialog: false, agent: { gate: false, pipeline_change: false } },
+      decisions: {
+        dialog: false,
+        agent: { gate: false, pipeline_change: false, cancel_run: false },
+      },
       tasks: {
         enabled: false,
         adapter: "local",
@@ -134,7 +137,10 @@ describe("the project config", () => {
   });
 
   test("t_decisions_defaults_are_all_off", async () => {
-    const off = { dialog: false, agent: { gate: false, pipeline_change: false } };
+    const off = {
+      dialog: false,
+      agent: { gate: false, pipeline_change: false, cancel_run: false },
+    };
     expect((await loadConfig(dir)).decisions).toEqual(off);
     await write("decisions: {}\n");
     expect((await loadConfig(dir)).decisions).toEqual(off);
@@ -146,18 +152,32 @@ describe("the project config", () => {
     await write("decisions:\n  dialog: true\n");
     expect((await loadConfig(dir)).decisions).toEqual({
       dialog: true,
-      agent: { gate: false, pipeline_change: false },
+      agent: { gate: false, pipeline_change: false, cancel_run: false },
     });
     await write("decisions:\n  agent:\n    gate: true\n");
     expect((await loadConfig(dir)).decisions).toEqual({
       dialog: false,
-      agent: { gate: true, pipeline_change: false },
+      agent: { gate: true, pipeline_change: false, cancel_run: false },
     });
     await write("decisions:\n  agent:\n    pipeline_change: true\n");
     expect((await loadConfig(dir)).decisions.agent).toEqual({
       gate: false,
       pipeline_change: true,
+      cancel_run: false,
     });
+  });
+
+  test("tne3n_config_cancel_run_key_is_read_and_off_by_default", async () => {
+    expect((await loadConfig(dir)).decisions.agent.cancel_run).toBe(false);
+    await write("decisions:\n  agent:\n    cancel_run: true\n");
+    expect((await loadConfig(dir)).decisions.agent).toEqual({
+      gate: false,
+      pipeline_change: false,
+      cancel_run: true,
+    });
+    expect((await failure("decisions:\n  agent:\n    cancel_run: yes please\n")).code).toBe(
+      "CONFIG_INVALID",
+    );
   });
 
   test("t_decisions_unknown_key_is_refused_and_ack_has_no_key", async () => {

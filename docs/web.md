@@ -91,6 +91,17 @@ kodel web --url https://kodel.example.com
 A certificate needs a domain name. Without one, a name like `203-0-113-7.sslip.io` resolves to the
 IP `203.0.113.7` and works for Let's Encrypt.
 
+## Cancelling a run
+
+A run that is going (running, at a gate or paused) has a **Cancel run** button in its header, except with
+`--demo`. It asks why, checks the reason (needed, at most 2000 characters) and that the run is still going,
+and then asks for a second tap ("Tap again to cancel"): only that second request, from the same device,
+cancels. It is the same cancel as `kodel run cancel`: the run ends as `canceled` with your reason, its
+background agents and the engine session of its step are stopped, and its worktree and branch stay. The
+answer says what is left: a task that stays open (its key), the branch, the worktree, the commands that
+remove them, and any agent that could not be stopped. A finished run cannot be canceled. Each cancel is a
+line of the server's audit log with the device and the reason, redacted.
+
 ## Asking the agent about a run
 
 Off by default. Started with
@@ -156,7 +167,10 @@ What protects the endpoint:
   a revoked token is refused at its next call, and its open sessions are closed within a minute;
 - a request from a page of another site (an `Origin` that is not this server's) is refused;
 - at most 32 sessions are open at once, and one left alone for 30 minutes is closed;
-- every session opened and every tool called (its name, never its arguments) goes to the audit log.
+- every session opened and every tool called (its name, never its arguments) goes to the audit log, with the
+  token that called it; a call of `manager_cancel_run` also names its run (`... called manager_cancel_run (run
+  <id>)`). A read-only token is never served that tool, and a full one only with `decisions.agent.cancel_run`
+  (`docs/decisions.md`).
 
 `--mcp` is refused under `KODEL_ENGINE` and with `--demo`.
 

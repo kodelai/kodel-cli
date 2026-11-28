@@ -549,6 +549,9 @@ const HEX64 = /^[0-9a-f]{64}$/;
 /** A worker's record name or id in a `worker_note`: bounded and opaque. */
 const WORKER_NAME = /^[A-Za-z0-9._-]{1,64}$/;
 
+/** The longest reason a cancel keeps in the journal; the commands and the tool refuse a longer one. */
+export const MAX_CANCEL_REASON = 2_000;
+
 /** The mark of a claim's holder: a prefix of the hash, which gives nothing of the token away. */
 const markOf = (tokenHash: string) => `w-${tokenHash.slice(0, 8)}`;
 
@@ -911,7 +914,12 @@ export type RunEvent =
    * written and the journal line was not).
    */
   | { type: "run_migrated"; from?: RecordVersion }
-  | { type: "cancel" }
+  /**
+   * Ends a running or paused run as `canceled` (NE3N). `reason` is why, in the words of whoever
+   * canceled; `byAgent` marks a cancel the agent made on the person's instruction (a manager with
+   * `decisions.agent.cancel_run`). A run that is over takes no cancel (`Repeat`): the host says why.
+   */
+  | { type: "cancel"; reason?: string; byAgent?: AgentDecision }
   /**
    * The patch of the whole run, or why there is none. Applied once the run has finished, like
    * `task_note`; only journaled.
@@ -1938,7 +1946,11 @@ class Machine {
     this.s.status = movable ? "running" : "paused";
   }
 
-  private end(status: "completed" | "failed" | "canceled", reason?: string) {
+  private end(
+    status: "completed" | "failed" | "canceled",
+    reason?: string,
+    byAgent?: AgentDecision,
+  ) {
     this.s.status = status;
     this.s.finishedAt = this.now;
     if (this.s.agentLog !== undefined) {
@@ -1948,9 +1960,15 @@ class Machine {
     }
     this.s.active = [];
     this.s.pauses = [];
+    // A worker's hold means nothing once the run is over; a cancel drops it so that no worker reads
+    // its step as still held.
+    if (status === "canceled") {
+      for (const run of Object.values(this.s.nodes)) delete run.claim;
+    }
     this.log("run_finished", {
       status,
       ...(reason === undefined ? {} : { reason }),
+      ...decidedBy(byAgent, this.caps.executorRole),
       ...(this.facts.head === undefined ? {} : { head: this.facts.head }),
       ...(this.facts.commits === undefined ? {} : { commits: this.facts.commits }),
       ...(this.facts.commitsTruncated === true ? { commits_truncated: true } : {}),
@@ -2053,8 +2071,10 @@ class Machine {
     if (event.type === "tool_calls_recorded") return this.toolCallsRecorded(event);
     if (event.type === "tool_calls_failed") return this.toolCallsFailed(event);
     if (event.type === "cancel") {
-      if (this.s.status === "running" || this.s.status === "paused") this.end("canceled");
-      else throw new Repeat();
+      if (this.s.status === "running" || this.s.status === "paused") {
+        const reason = event.reason?.trim() ? event.reason.slice(0, MAX_CANCEL_REASON) : undefined;
+        this.end("canceled", reason, event.byAgent);
+      } else throw new Repeat();
       return;
     }
     if (event.type === "resume") return this.resume(event.node, event.engineSession === "cleared");

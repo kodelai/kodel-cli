@@ -24,6 +24,16 @@ import {
   versionAt,
 } from "./attachments";
 import {
+  beginCancel,
+  type CancelQuestion,
+  cancelable,
+  cancelBar,
+  cancelKept,
+  cancelKey,
+  cancelModalOf,
+  cancelPaste,
+} from "./cancel-flow";
+import {
   beginFlow,
   type Flow,
   flowBar,
@@ -185,6 +195,9 @@ export interface Model {
   /** A decision at a gate or a pause being made for real (project mode); see `decision-flow.ts`. */
   flow: Flow | null;
   flowSeq: number;
+  /** A cancel of a run being asked (`x`, project mode); see `cancel-flow.ts`. */
+  cancel: CancelQuestion | null;
+  cancelSeq: number;
   /** Which decision of a run is picked, by run id; a run that has none picked uses its first. */
   picked: Record<string, string>;
   notice: string;
@@ -368,6 +381,8 @@ export type Effect =
   | { type: "start_task"; key: string; pipeline: string; seq: number }
   /** The person confirmed: the agent of the run goes on after their decision at journal line `seq`. */
   | { type: "resume_worker"; runId: string; seq: number }
+  /** The person typed a reason and confirmed: the run ends for good. A person's act, never an agent's. */
+  | { type: "cancel_run"; seq: number; runId: string; reason: string }
   /**
    * `o` on a run: the loop leaves the screen and connects the terminal to the agent's (record `id`, the
    * run's latest), then comes back to the same place. Nothing is typed into the session by kodel.
@@ -483,6 +498,8 @@ export function initialModel(
     confirm: null,
     flow: null,
     flowSeq: 0,
+    cancel: null,
+    cancelSeq: 0,
     picked: {},
     notice: "",
     quit: false,
@@ -585,7 +602,7 @@ export function withData(m: Model, loaded: Loaded, now: number): Model {
       ),
     ),
   );
-  const dropped = flowGone(next, sessions);
+  const dropped = cancelKept(flowGone(next, sessions), sessions);
   // A comment being typed, or a deletion being asked, is about the card that was on the screen: when
   // that card is another one now (its decision went, a new wait began), it is cancelled, not moved
   // to a card the person did not mean.
@@ -880,6 +897,19 @@ function openKey(m: Model): Model {
     effects: [...m.effects, { type: "attach_worker", runId: s.id, id: w.id }],
   };
 }
+
+/** The `x` key on a run: the cancel is asked for; nothing on sample data. */
+function cancelKeyOn(m: Model): Model {
+  if (m.section !== 0 || m.pick.kind !== "run") return m;
+  const s = selectedSession(m);
+  if (s === undefined) return m;
+  if (m.source === "demo") return { ...m, notice: "canceling a run is not available in --demo" };
+  return beginCancel(m, s);
+}
+
+/** Whether `x` cancels the run: a run of the project that is going. */
+const cancelOffered = (m: Model, s: Session | undefined): boolean =>
+  m.source === "project" && s !== undefined && cancelable(s);
 
 const MAKE_TALLER = "make the terminal taller";
 
@@ -1504,6 +1534,7 @@ function questionModal(m: Model, cols: number, height: number): Modal | undefine
   if (m.start !== null) return startModalOf(m, m.start, cols, height);
   if (m.resume !== null) return resumeModalOf(m, m.resume, cols, height);
   if (m.taskForm !== null) return formModalOf(m.taskForm, cols, height);
+  if (m.cancel?.phase === "confirm") return cancelModalOf(m.cancel, cols, height);
   return undefined;
 }
 
@@ -1525,6 +1556,7 @@ function settled(m: Model): Model {
 export function pasteText(m: Model, text: string, givenUp = false): Model {
   const line = stripLoneSurrogates(text.replace(PASTE_CONTROLS, " "));
   const told = (): Model => (givenUp ? { ...m, notice: PASTE_GIVEN_UP } : m);
+  if (m.cancel) return cancelPaste(told(), line);
   if (m.taskForm) {
     const f = m.taskForm;
     // While the question "create it?" is up, or the task is being made, the text is not touched.
@@ -1698,6 +1730,11 @@ function updateKey(input: Model, key: string, size: Size, alone: boolean): Model
     }
     return clampFlowScroll(flowKey(m, key), size);
   }
+  if (m.cancel) {
+    // The yes is for a window that can be seen.
+    if (key === "y" && m.cancel.phase === "confirm" && tooSmall(size)) return m;
+    return cancelKey(m, key, alone);
+  }
   if (m.legend !== null) return legendKey(m, key, size);
   if (m.input) return typing(m, key, alone);
   if (m.taskInput) return typingTask(m, key, alone);
@@ -1795,6 +1832,8 @@ function updateKey(input: Model, key: string, size: Size, alone: boolean): Model
       return startKey(m);
     case "o":
       return openKey(m);
+    case "x":
+      return cancelKeyOn(m);
     case "n":
       // A new task, from the Backlog (a task picked, or nothing at all to pick yet). Never from a run.
       return m.section === 0 && (m.pick.kind === "task" || m.sessions.length === 0)
@@ -3164,7 +3203,7 @@ interface BarButton {
 /** The buttons in front of the hints, while nothing else holds the bottom line. */
 function barButtons(m: Model): BarButton[] {
   if (m.section !== 0 || m.pick.kind !== "run") return [];
-  if (m.flow || m.input || m.legend !== null || m.confirm !== null) return [];
+  if (m.flow || m.cancel || m.input || m.legend !== null || m.confirm !== null) return [];
   if (m.start !== null || m.resume !== null || m.taskForm !== null) return [];
   if (m.notice !== "") return [];
   const keys = keysOf(m, selectedSession(m));
@@ -3232,7 +3271,8 @@ function hints(m: Model): string {
   const open = openable(current === undefined ? undefined : m.workers[current.id])
     ? `   ${bold("o")} agent`
     : "";
-  const decide = `${barButtons(m).length > 0 ? pick : `${pick}${decisionKeys(keys)}`}${open}`;
+  const cancel = cancelOffered(m, current) ? `   ${bold("x")} cancel run` : "";
+  const decide = `${barButtons(m).length > 0 ? pick : `${pick}${decisionKeys(keys)}`}${open}${cancel}`;
   const zoom = `   ${bold("z")} ${m.zoom ? "show list" : "zoom"}`;
   if (m.focus === "card" && m.section === 0) {
     const found = detailOf(m);
@@ -3277,7 +3317,8 @@ function runHints(m: Model, current: Session | undefined): string {
   const open = openable(current === undefined ? undefined : m.workers[current.id])
     ? `   ${bold("o")} agent`
     : "";
-  const decide = `${barButtons(m).length > 0 ? pick : `${pick}${decisionKeys(keysOf(m, current))}`}${resume}${open}`;
+  const cancel = cancelOffered(m, current) ? `   ${bold("x")} cancel run` : "";
+  const decide = `${barButtons(m).length > 0 ? pick : `${pick}${decisionKeys(keysOf(m, current))}`}${resume}${open}${cancel}`;
   const proposals =
     m.proposals > 0
       ? dim(`   ${m.proposals} pipeline proposal${m.proposals === 1 ? "" : "s"} wait on 2`)
@@ -3359,7 +3400,7 @@ function emptyState(): string[] {
 
 /** The notices that tell a refusal or a failure: the loop words them with these openings. */
 const isFailure = (notice: string): boolean =>
-  /^(Could not|Cannot|Comments cannot|Tasks cannot|Nothing to save|Nothing to resume|Nothing to open|Could not open|run r_|starting is not available|creating a task is not available|A task needs a title)|( is (already|being) started| cannot be started|nothing to start|was not resumed|was made but no agent)/.test(
+  /^(Could not|Cannot|Comments cannot|Tasks cannot|Nothing to save|Nothing to resume|Nothing to open|Could not open|Nothing to cancel|A cancel needs a reason|run r_|starting is not available|creating a task is not available|A task needs a title)|( is (already|being) started| cannot be started|nothing to start|was not resumed|was made but no agent)/.test(
     notice,
   );
 
@@ -3407,19 +3448,21 @@ export function render(model: Model, { cols, rows }: Size): string[] {
 
   const status = m.flow
     ? flowBar(m.flow)
-    : m.input
-      ? inputLine(m.input, m.notice)
-      : m.taskInput
-        ? taskInputLine(m.taskInput, cols, m.notice)
-        : m.taskForm !== null
-          ? formLine(m.taskForm, m.notice)
-          : m.start !== null
-            ? startLine(m, m.start, cols, bodyHeight, m.notice)
-            : m.resume !== null
-              ? resumeLine(m.notice)
-              : m.notice !== ""
-                ? (isFailure(m.notice) ? red : green)(m.notice)
-                : barText(m);
+    : m.cancel
+      ? cancelBar(m.cancel, m.notice)
+      : m.input
+        ? inputLine(m.input, m.notice)
+        : m.taskInput
+          ? taskInputLine(m.taskInput, cols, m.notice)
+          : m.taskForm !== null
+            ? formLine(m.taskForm, m.notice)
+            : m.start !== null
+              ? startLine(m, m.start, cols, bodyHeight, m.notice)
+              : m.resume !== null
+                ? resumeLine(m.notice)
+                : m.notice !== ""
+                  ? (isFailure(m.notice) ? red : green)(m.notice)
+                  : barText(m);
   out.push(fit(` ${status}`, cols));
   return out;
 }
@@ -3512,6 +3555,8 @@ function mouseEvent(
   const m = normalized(input);
   if (!m.mouse) return m;
   if (m.flow) return modalClick(m, size, event);
+  // The reason is typed on the bottom line: a click must not move the screen under it.
+  if (m.cancel && m.cancel.phase !== "confirm") return m;
   // A start, a resume or the form in its window: only the buttons of the window answer, under the keys' own guards.
   const question = questionModal(m, size.cols, size.rows - 3);
   if (question) {

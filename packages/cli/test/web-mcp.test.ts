@@ -189,6 +189,35 @@ describe("the /mcp endpoint", () => {
     }
   });
 
+  test("tne3n_web_mcp_cancel_is_audited_with_token_and_run", async () => {
+    const audit: string[] = [];
+    const e = await endpoint(audit);
+    try {
+      const { info, token } = await e.tokens.add({ name: "laptop", readOnly: false });
+      const id = info.id;
+      const client = await connect(e.url, token);
+      // The fake server does not serve the tool: the call is audited all the same, before it is answered.
+      await client
+        .callTool({
+          name: "manager_cancel_run",
+          arguments: { run_id: "r_0mwaaaaaa_aaaa", reason: "a duplicate", instruction: "x" },
+        })
+        .catch(() => undefined);
+      await client
+        .callTool({ name: "manager_cancel_run", arguments: { run_id: "$(rm -rf ~)" } })
+        .catch(() => undefined);
+      expect(audit).toContain(
+        `token ${id} "laptop" called manager_cancel_run (run r_0mwaaaaaa_aaaa)`,
+      );
+      expect(audit).toContain(`token ${id} "laptop" called manager_cancel_run (no valid run id)`);
+      // the reason and the instruction are never written
+      expect(audit.join("\n")).not.toContain("a duplicate");
+      await client.close();
+    } finally {
+      await e.close();
+    }
+  });
+
   test("t44_mcp_session_belongs_to_the_token_that_opened_it", async () => {
     const e = await endpoint();
     try {
@@ -291,5 +320,65 @@ describe("kodel web --mcp", () => {
     const readOnly = await names(reader.token);
     expect(readOnly).toContain("manager_inbox");
     expect(readOnly).not.toContain("pipeline_propose_change");
+    // without decisions.agent.cancel_run no token gets the cancel
+    expect(manager).not.toContain("manager_cancel_run");
+  }, 60_000);
+
+  test("tne3n_web_mcp_cancel_only_for_a_full_token_with_the_key", async () => {
+    const root = join(dir, "project");
+    await mkdir(join(root, ".kodel", "pipelines"), { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    await writeFile(
+      join(root, ".kodel", "config.yaml"),
+      "version: 1\ndecisions:\n  agent:\n    cancel_run: true\n",
+    );
+    const state = join(dir, "state");
+    const tokens = new TokenStore(join(state, "web"));
+    const full = await tokens.add({ name: "laptop", readOnly: false });
+    const reader = await tokens.add({ name: "phone", readOnly: true });
+    const main = join(import.meta.dir, "..", "src", "main.ts");
+    child = spawn(
+      "bun",
+      [main, "--root", root, "web", "--mcp", "--port", "0", "--host", "127.0.0.1"],
+      { env: { ...withoutEngine(process.env), KODEL_STATE_DIR: state }, stdio: "pipe" },
+    );
+    let out = "";
+    child.stdout?.on("data", (d: Buffer) => {
+      out += d.toString();
+    });
+    child.stderr?.on("data", (d: Buffer) => {
+      out += d.toString();
+    });
+    const url = await new Promise<URL>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`no address: ${out}`)), 20_000);
+      const look = setInterval(() => {
+        const m = /MCP \(manager tools\): (\S+)/.exec(out);
+        if (m?.[1]) {
+          clearTimeout(timer);
+          clearInterval(look);
+          resolve(new URL(m[1]));
+        }
+      }, 50);
+    });
+    const readerClient = await connect(url, reader.token);
+    const readOnly = (await readerClient.listTools()).tools.map((t) => t.name);
+    await readerClient.close();
+    expect(readOnly).toContain("manager_inbox");
+    expect(readOnly).not.toContain("manager_cancel_run");
+
+    const client = await connect(url, full.token);
+    const served = (await client.listTools()).tools.map((t) => t.name);
+    expect(served).toContain("manager_cancel_run");
+    // a run that does not exist is refused; the call is audited with the token and the run
+    const answer = await client.callTool({
+      name: "manager_cancel_run",
+      arguments: { run_id: "r_0mwaaaaaa_aaaa", reason: "a duplicate", instruction: "cancel it" },
+    });
+    expect(JSON.stringify(answer.content)).toContain("UNKNOWN_RUN");
+    await client.close();
+    expect(out).toContain(
+      `token ${full.info.id} "laptop" called manager_cancel_run (run r_0mwaaaaaa_aaaa)`,
+    );
+    expect(out).not.toContain("a duplicate");
   }, 60_000);
 });

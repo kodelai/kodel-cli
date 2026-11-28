@@ -275,6 +275,12 @@ export function createWorkerOptions(
     const notResumed = (why: string) => `run ${runId} was not resumed: ${why}`;
     const run = await host.open(runId);
     if (!run) return { ok: false, message: notResumed("the run is gone.") };
+    // A cancel takes this lock to stop the run's agents: a question that stood on the screen across
+    // it must not start one again.
+    const status = (await run.state()).status;
+    if (status === "canceled" || status === "completed" || status === "failed") {
+      return { ok: false, message: notResumed(`the run has ${status}; nothing to resume.`) };
+    }
     // The decision is read again from the journal: the question is about this one and no other.
     const { decision } = decisionOf(await run.journal());
     if (decision === undefined || decision.seq !== seq) {

@@ -8,6 +8,7 @@
  */
 import { redactText } from "@kodel-ai/pipeline-core";
 import { z } from "zod";
+import { type CancelAnswer, checkReason } from "../cancel-run";
 import type { DecisionRequest } from "../tui/decide";
 import { highlight, languageOf, parseDiff, placeOf } from "../tui/diffview";
 import type {
@@ -92,7 +93,12 @@ export interface WebApi {
   task?(key: string): Promise<CardSlot>;
   addTaskComment?(key: string, text: string): Promise<void>;
   createTask?(input: NewTaskInput): Promise<{ key: string }>;
+  /** Cancels a run (NE3N) with the person's reason; absent where nothing can be written. */
+  cancel?(runId: string, reason: string): Promise<WebCancelOutcome>;
 }
+
+/** What a cancel answers: the command's answer, or why it was refused, with its error code. */
+export type WebCancelOutcome = CancelAnswer | { ok: false; code: string; message: string };
 
 export interface Assets {
   html: string;
@@ -204,6 +210,12 @@ const checkBody = z.object({
 
 const decideBody = z.object({ flow: z.number().int().min(1) });
 
+/** Longer than a cancel takes, so that the length is refused with `checkReason`'s own words. */
+const cancelCheckBody = z.object({ reason: z.string().max(20_000) });
+
+/** How long a checked cancel may wait for its second tap. */
+const CANCEL_FLOW_MS = 10 * 60_000;
+
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 /** The page may load only what this server serves, and nothing may frame it. */
@@ -314,6 +326,11 @@ export function createHandler(options: HandlerOptions): Handler {
   const flows = new Map<
     number,
     { device: string; runId: string; request: DecisionRequest; at: number }
+  >();
+  /** The cancels a device asked for, by flow: only the second request of the same device cancels. */
+  const cancelFlows = new Map<
+    number,
+    { device: string; runId: string; reason: string; at: number }
   >();
   let nextFlow = 1;
 
@@ -456,6 +473,7 @@ export function createHandler(options: HandlerOptions): Handler {
         canTasks: api.tasks !== undefined,
         canCommentTask: api.addTaskComment !== undefined,
         canCreateTask: api.createTask !== undefined,
+        canCancel: api.cancel !== undefined,
       });
     }
     if (parts[0] === "logout" && method === "POST") {
@@ -569,9 +587,65 @@ export function createHandler(options: HandlerOptions): Handler {
       const outcome = await api.decide(runId, checked.request);
       const { decision, ref } = checked.request;
       options.audit(
-        `device ${device.id} "${device.name}": ${decision} ${runId} ${ref.node}${ref.attempt === undefined ? "" : `#${ref.attempt}`}: ${outcome.ok ? "written" : `refused (${outcome.message})`}`,
+        `device ${device.id} "${device.name}": ${decision} ${runId} ${ref.node}${ref.attempt === undefined ? "" : `#${ref.attempt}`}: ${outcome.ok ? "written" : `refused (${cleanLine(redact(outcome.message))})`}`,
       );
       return json(200, { ok: true, outcome });
+    }
+    if (what === "cancel" && method === "POST" && parts[3] === "check") {
+      if (!api.cancel) return fail(403, "read_only", "Runs cannot be canceled here.");
+      const body = parse(cancelCheckBody, request.body);
+      if (!body) return fail(400, "bad_request", "The cancel is not understood.");
+      const reason = cleanText(body.reason).trim();
+      const bad = checkReason(reason);
+      if (bad) {
+        const text = bad.message;
+        return fail(400, "bad_reason", `${text.charAt(0).toUpperCase()}${text.slice(1)}.`);
+      }
+      const { sessions } = await api.sessions();
+      const run = sessions.find((s) => s.id === runId);
+      if (!run) return fail(404, "unknown_run", "There is no such run.");
+      if (run.status !== "running" && run.status !== "waiting") {
+        return fail(
+          409,
+          "run_finished",
+          run.status === "unreadable"
+            ? "This run cannot be read, so it cannot be canceled here."
+            : `This run has already ${run.status === "done" ? "completed" : run.status}; only a running or paused run can be canceled.`,
+        );
+      }
+      const now = clock();
+      for (const [key, f] of cancelFlows) if (now - f.at > CANCEL_FLOW_MS) cancelFlows.delete(key);
+      const flow = nextFlow++;
+      cancelFlows.set(flow, { device: device.id, runId, reason, at: now });
+      return json(200, { ok: true, flow, task: run.taskKey ?? null });
+    }
+    if (what === "cancel" && method === "POST" && parts[3] === "decide") {
+      if (!api.cancel) return fail(403, "read_only", "Runs cannot be canceled here.");
+      const body = parse(decideBody, request.body);
+      if (!body) return fail(400, "bad_request", "The cancel is not understood.");
+      const checked = cancelFlows.get(body.flow);
+      cancelFlows.delete(body.flow);
+      if (
+        !checked ||
+        checked.device !== device.id ||
+        checked.runId !== runId ||
+        clock() - checked.at > CANCEL_FLOW_MS
+      ) {
+        return fail(409, "not_checked", "Nothing was checked for this cancel; start again.");
+      }
+      const outcome = await api.cancel(runId, checked.reason);
+      options.audit(
+        `device ${device.id} "${device.name}": cancel ${runId} (reason: ${cleanLine(redact(checked.reason))}): ${outcome.ok ? (outcome.noop ? "already canceled" : "written") : `refused (${cleanLine(redact(outcome.message))})`}`,
+      );
+      if (!outcome.ok) return fail(409, outcome.code, outcome.message);
+      return json(200, {
+        ok: true,
+        answer: {
+          ...outcome,
+          agents_left: outcome.agents_left.map(redact),
+          notes: outcome.notes.map(redact),
+        },
+      });
     }
     return fail(404, "not_found", "No such thing.");
   };

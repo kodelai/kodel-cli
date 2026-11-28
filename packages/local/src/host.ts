@@ -4064,8 +4064,53 @@ export class LocalRun {
     return judge(mine.status);
   }
 
-  async cancel(): Promise<Decision & { warning?: string }> {
-    const decision = await this.apply({ type: "cancel" });
+  /**
+   * Ends the run as `canceled` (NE3N). A run that is already canceled answers as it is, with nothing
+   * written (`noop`); one that ended otherwise is refused with `RUN_FINISHED`, looked at under the
+   * run's lock so that a run that ends meanwhile is not reported as canceled. A run whose state or
+   * kept pipeline cannot be trusted is refused with that reason, not thrown at the caller.
+   */
+  async cancel(
+    options: { reason?: string; byAgent?: AgentDecision } = {},
+  ): Promise<Decision & { warning?: string }> {
+    const finishedOtherwise = async (): Promise<KodelError | undefined> => {
+      const state = await this.host.store.readState(this.runId).catch(() => undefined);
+      // A host made without the pipeline's text keeps no copy of it (tests, embedders): nothing to look at.
+      if (
+        (state?.status === "running" || state?.status === "paused") &&
+        this.host.options.source !== undefined
+      ) {
+        // The pipeline this object was opened with is held in memory: the kept copy is looked at
+        // again, as every open of the run does, so a copy changed or removed since is not ended over.
+        const kept = await this.host.store.readSpec(this.runId, state.specHash);
+        if (kept === undefined || hashSource(kept) !== state.specHash) {
+          return new KodelError(
+            "STATE_MODIFIED_EXTERNALLY",
+            `the pipeline of run ${this.runId} is not the one it is pinned to (its kept copy was changed or is missing); restore it before canceling the run`,
+          );
+        }
+        return undefined;
+      }
+      if (state?.status !== "completed" && state?.status !== "failed") return undefined;
+      return new KodelError(
+        "RUN_FINISHED",
+        `run ${this.runId} has already ${state.status === "completed" ? "completed" : "failed"}; a finished run cannot be canceled`,
+      );
+    };
+    let decision: Decision;
+    try {
+      decision = await this.apply(
+        {
+          type: "cancel",
+          ...(options.reason === undefined ? {} : { reason: options.reason }),
+          ...(options.byAgent === undefined ? {} : { byAgent: options.byAgent }),
+        },
+        { guard: finishedOtherwise },
+      );
+    } catch (error) {
+      if (error instanceof KodelError) return { ok: false, error };
+      throw error;
+    }
     // The run is over, so a command still going in this process has nothing left to report to.
     if (decision.ok) this.stop();
     // A cancel ends the run, not its engine session: the person is told which one runs on.
