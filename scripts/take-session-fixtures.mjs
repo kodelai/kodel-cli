@@ -113,6 +113,18 @@ async function pipesPart() {
   put("status-killed.json", mask(read(live.id, "status.json")));
   put("stop.json", mask(read(live.id, "stop.json")));
 
+  // Who started the session (`startedBy`, at the top level of `session.json`, beside the `spec` whose `origin` means
+  // cli or host) and the note on a stop that a manager's server asked for (`via` of the stop record).
+  const started = await adapter.start({
+    argv: ["sleep", "60"],
+    cwd: root,
+    timeoutMs: 120000,
+    startedBy: { by: "agent", via: "manager" },
+  });
+  put("session-started.json", mask(read(started.id, "session.json")));
+  await adapter.stop(started.id, { via: "manager" });
+  put("stop-manager.json", mask(read(started.id, "stop.json")));
+
   // The `agent` record: written by the starter before `session.json`, once. The conversation id is the starter's
   // choice (a fixed one here); a session that continues another's conversation names it in `resumes`.
   const conversation = "00000000-0000-4000-8000-000000000000";

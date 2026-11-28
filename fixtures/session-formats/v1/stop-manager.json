@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "by": "stop",
+  "at": 1700000000000,
+  "via": "manager",
+  "identity": {
+    "method": "ps-lstart",
+    "value": "MASKED"
+  }
+}

@@ -22,8 +22,8 @@ const dir = join(import.meta.dir, "../../../fixtures/session-formats/v1");
 const kindOf = (name: string): RecordKind => {
   // the goldens of a terminal session are the same records, taken from its holder
   const file = name.replace("-pty.json", ".json");
-  if (file === "session.json") return "session";
-  if (file === "stop.json") return "stop";
+  if (file === "session.json" || file === "session-started.json") return "session";
+  if (file === "stop.json" || file === "stop-manager.json") return "stop";
   if (file === "name.json") return "name";
   if (file.startsWith("agent-")) return "agent";
   if (file.startsWith("status-")) return "status";
@@ -40,6 +40,7 @@ describe("session record codec (format v1)", () => {
       "agent-resumed.json",
       "name.json",
       "session-pty.json",
+      "session-started.json",
       "session.json",
       "status-exited-pty.json",
       "status-exited.json",
@@ -49,6 +50,7 @@ describe("session record codec (format v1)", () => {
       "status-running-pty.json",
       "status-running.json",
       "status-stopped-pty.json",
+      "stop-manager.json",
       "stop.json",
     ]);
   });
@@ -58,11 +60,13 @@ describe("session record codec (format v1)", () => {
       "agent-chosen.json": "ef9050e23423fdb74573f925b45df875a298ec7623793d7253404c488ae605a2",
       "agent-resumed.json": "3ac2a95675ff10090885e674007b2be30d56989ec99304a26fbc80bbd5ffa1b9",
       "name.json": "2441458cc350458109119d2e638c0ac982fb64dbce0f7f6b5e4a4ac33f45b9b0",
+      "session-started.json": "9a47d8d1d9a10c8574d0d23b6e826f93703c740faf4484c2a55112caafa2a539",
       "session.json": "48b370024b29c1510b79a85cc17ba20976945a1f0f07d9692b97ebce5e69cf42",
       "status-exited.json": "cb53c8b844ac8ce1eeccc19884382a3f6175de94639dcb5908abe3e911fec106",
       "status-killed.json": "9ba58aa0c589e5aa5dbd378c6f58f500cafcdb3be4ce8bacc09a3ecdec0bd96a",
       "status-lost.json": "4bcac44e0092a2ecb79a625d9e6ac069f36dc0dd4f374446b243dbf849418052",
       "status-running.json": "dacd64e5591d13885eb991a54315aeb7ce4865880ccf3a0f5997a5a7d30adbe5",
+      "stop-manager.json": "2fb11ad2a3aa183c0b13a944cbd03e1d174de8f4c3e7ab10e5841e98af032257",
       "stop.json": "525d124846be46113236c65c25e0b79f602bea38ce225a580e9e0d916369cbd3",
     };
     expect(files.filter((f) => !f.includes("-pty")).sort()).toEqual(Object.keys(pinned).sort());
@@ -195,6 +199,65 @@ describe("session record codec (format v1)", () => {
     expect(() => encodeRecord("status", { ...decoded.record, extra: 1 } as never)).toThrow();
     const { since: _since, ...missing } = decoded.record;
     expect(() => encodeRecord("status", missing as never)).toThrow();
+  });
+
+  test("tA_mstart_session_record_started", () => {
+    // `startedBy` is at the top level, beside the `spec` whose `origin` means cli or host, and holds no text.
+    const golden = load("session-started.json") as { spec: Record<string, unknown> };
+    expect(golden).toMatchObject({ startedBy: { by: "agent", via: "manager" } });
+    expect(golden.spec.origin).toBeUndefined();
+    expect(JSON.stringify(golden.spec)).not.toContain("manager");
+    const decoded = decodeRecord("session", golden);
+    expect(decoded.ok).toBe(true);
+    if (!decoded.ok) return;
+    expect(decoded.record.startedBy).toEqual({ by: "agent", via: "manager" });
+    // the same record without the field is the format as it stood
+    const { startedBy: _drop, ...without } = golden as Record<string, unknown>;
+    expect(decodeRecord("session", without).ok).toBe(true);
+    // `spec` stays closed: a note in the spec is not read as `startedBy`
+    const inSpec = {
+      ...without,
+      spec: { ...golden.spec, startedBy: { by: "agent", via: "manager" } },
+    };
+    const tolerated = decodeRecord("session", inSpec);
+    expect(tolerated.ok && "startedBy" in tolerated.record.spec).toBe(false);
+    // strict on write: only the two kinds, no text
+    expect(() =>
+      encodeRecord("session", {
+        ...decoded.record,
+        startedBy: { by: "agent", via: "manager", text: "start it" },
+      } as never),
+    ).toThrow();
+    expect(SESSION_RECORD_CAPABILITIES[1].startedBy).toBe(true);
+  });
+
+  test("tA_mstart_old_build_reads_started_record", () => {
+    // A build from before the field drops it and reads the rest: `decode` removes a key the schema does
+    // not know. The old schema is the current one without the field.
+    const oldSchema = sessionRecordSchema.omit({ startedBy: true });
+    const raw = load("session-started.json");
+    const refused = oldSchema.safeParse(raw);
+    // the one thing it says is the key it does not know, which its `decode` removes before it reads again
+    expect(refused.success).toBe(false);
+    if (!refused.success) {
+      expect(refused.error.issues.map((i) => i.code)).toEqual(["unrecognized_keys"]);
+      expect(refused.error.issues[0]).toMatchObject({ keys: ["startedBy"] });
+    }
+    const { startedBy: _drop, ...rest } = raw;
+    expect(oldSchema.safeParse(rest).success).toBe(true);
+    const stop = load("stop-manager.json");
+    // the stop is read as the person's by a reader that does not know `via`, and by this one
+    expect(stopAskerOf(stop.by as string)).toBe("person");
+    const { via: _via, ...oldStop } = stop;
+    expect(stopAskerOf(oldStop.by as string)).toBe("person");
+    const decoded = decodeRecord("stop", stop);
+    expect(decoded.ok && decoded.record.via).toBe("manager");
+    expect(SESSION_RECORD_CAPABILITIES[1].stopVia).toBe(true);
+    // a newer path's value is read, not refused
+    expect(decodeRecord("stop", { ...stop, via: "server" }).ok).toBe(true);
+    expect(decodeRecord("session", { ...raw, startedBy: { by: "person", via: "server" } }).ok).toBe(
+      true,
+    );
   });
 
   test("tA_agent_record_round_trips", () => {

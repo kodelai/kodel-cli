@@ -72,6 +72,8 @@ export interface ServeRunView {
   canNote: boolean;
   taskKey?: string;
   waitsForPerson: boolean;
+  /** The run was made by another checkout of the project: it names its task, but is not this checkout's work. */
+  foreign?: true;
   marks?: DecisionInfo;
   worker?: ServeWorkerView;
   /** Record ids that have a `gone` note. */
@@ -342,20 +344,96 @@ export function openRunTasks(runs: readonly ServeRunView[]): Map<string, string>
   return out;
 }
 
-/** Whether the task may be started now: by the rules every starter keeps, and by the limits when given. */
-export function admitStart(input: {
+/** Why a start by hand is held back but may go on all the same (`force`, or a person's "start it anyway"). */
+export type StartWarning =
+  | {
+      why: "full";
+      /** The limit that is reached, and the places held against the limits. */
+      limit: "max_runs" | "max_workers";
+      counts: { runs: number; max_runs: number; workers: number; max_workers: number };
+    }
+  | { why: "blocked"; links: Extract<Readiness, { why: "blocked" }> }
+  | { why: "conflict"; links: Extract<Readiness, { why: "conflict" }> };
+
+/** What a start by hand cannot get past: the task is closed, or a run of it is open (or may be). */
+export type StartRefusal = {
+  ok: false;
+  why: "done" | "has_run";
+  /** With `has_run`: the open run, or a run that cannot be read and so may be the task's. */
+  run?: string;
+};
+
+export type ManualAdmission = { ok: true; warnings: StartWarning[] } | StartRefusal;
+
+interface AdmitInput {
   task: ServeTaskView;
   runs: ServeRunView[];
   /** Runs that cannot be read: their workers hold their places, as in `planServe`. */
   unreadable?: ServeUnreadableRun[];
   limits?: { max_workers: number; max_runs: number };
-  /** The approval setting of the rule that took the task; without one, approval is required (fail closed). */
-  approval?: ServeApproval;
   /** Unreadable runs with no worker record that are not known to have ended. */
   unreadable_open?: readonly string[];
   /** Tasks started earlier in this cycle. */
   started_now?: readonly string[];
-}): Admission {
+}
+
+/** The same rules for a start by hand, which only the person's or the manager's request starts (D-7). */
+function admitManual(input: AdmitInput): ManualAdmission {
+  const { task, runs, limits } = input;
+  if (task.state === "done") return { ok: false, why: "done" };
+  // Only an open run of this checkout holds the task: a finished or failed one is started again, and the
+  // tracker's run count (`started_runs`) is not asked. A run that cannot be read may be the task's own,
+  // so it closes the start, as everywhere else that reads runs.
+  const open = runs.find((r) => r.taskKey === task.key && r.foreign !== true && isOpen(r));
+  if (open !== undefined) return { ok: false, why: "has_run", run: open.runId };
+  const unreadable = input.unreadable?.[0]?.runId ?? input.unreadable_open?.[0];
+  if (unreadable !== undefined) return { ok: false, why: "has_run", run: unreadable };
+  const warnings: StartWarning[] = [];
+  // Approval is not read: a dependency that is closed and waits for `task approve` counts as done.
+  const links = ready({
+    task,
+    approval: "any",
+    openRunTasks: openRunTasks(runs),
+    unreadableRuns: [],
+    startedNow: input.started_now ?? [],
+  });
+  if (!links.ok) warnings.push({ why: links.why, links } as StartWarning);
+  if (limits !== undefined) {
+    const now = servePlaces(runs, input.unreadable);
+    const counts = {
+      runs: now.runs.length,
+      max_runs: limits.max_runs,
+      workers: now.workers,
+      max_workers: limits.max_workers,
+    };
+    if (now.runs.length >= limits.max_runs) {
+      warnings.push({ why: "full", limit: "max_runs", counts });
+    } else if (now.workers >= limits.max_workers) {
+      warnings.push({ why: "full", limit: "max_workers", counts });
+    }
+  }
+  return { ok: true, warnings };
+}
+
+/**
+ * Whether the task may be started now: by the rules every starter keeps, and by the limits when given.
+ * The daemon asks with no `mode`: one refusal, the first, as it always was. A start by hand asks with
+ * `mode: "manual"` (decision D-7): the task's approval is not read, a dependency that waits for approval
+ * counts as done, a task in progress may start again after a run that ended, and the answer keeps what
+ * only warns (limits, links) apart from what no one gets past (a closed task, an open run).
+ */
+export function admitStart(input: AdmitInput & { mode: "manual" }): ManualAdmission;
+export function admitStart(
+  input: AdmitInput & {
+    mode?: "daemon";
+    /** The approval setting of the rule that took the task; without one, approval is required (fail closed). */
+    approval?: ServeApproval;
+  },
+): Admission;
+export function admitStart(
+  input: AdmitInput & { mode?: "daemon" | "manual"; approval?: ServeApproval },
+): Admission | ManualAdmission {
+  if (input.mode === "manual") return admitManual(input);
   const { task, runs, limits } = input;
   if (task.state === "done") return { ok: false, why: "done" };
   if (task.state !== "todo") return { ok: false, why: "not_todo" };

@@ -16,10 +16,18 @@ import {
   type SessionStatus,
   type StartResult,
   type StopAsker,
+  type StopVia,
   type TailResult,
   type TailStream,
   validateSpec,
 } from "@kodel-ai/pipeline-core";
+
+/**
+ * What the real adapter's `writeStop` does with a record that is there: a person's is never replaced, and a
+ * person's stop replaces what a `finish` left. The fakes share it so they cannot drift from the adapter.
+ */
+export const stopRecordReplaced = (there: StopAsker | undefined, by: StopAsker): boolean =>
+  there === undefined || (there !== "person" && by === "person");
 
 interface Entry {
   spec: SessionSpec;
@@ -28,6 +36,8 @@ interface Entry {
   exitCode?: number;
   reason?: "stopped" | "timeout";
   stoppedBy?: StopAsker;
+  /** The note a stop came with (`manager`); it changes no status. */
+  stoppedVia?: StopVia;
   tail: string;
   started: number;
   timer?: ReturnType<typeof setTimeout>;
@@ -107,6 +117,7 @@ export class FakeSessionAdapter implements SessionAdapter {
         holderAlive: entry.state === "running",
         childAlive: false,
         stop: entry.stoppedBy ?? "missing",
+        ...(entry.stoppedVia === undefined ? {} : { stopVia: entry.stoppedVia }),
       },
       Date.now(),
     );
@@ -139,12 +150,22 @@ export class FakeSessionAdapter implements SessionAdapter {
     return { text: stream === "stderr" ? "" : entry.tail, complete: true };
   }
 
-  async stop(id: string, opts: { by?: StopAsker } = {}): Promise<SessionStatus> {
+  async stop(id: string, opts: { by?: StopAsker; via?: StopVia } = {}): Promise<SessionStatus> {
     const entry = this.entry(id);
+    const by = opts.by ?? "person";
     if (entry.state === "running") {
       entry.state = "killed";
       entry.reason = "stopped";
-      entry.stoppedBy = opts.by ?? "person";
+      if (stopRecordReplaced(entry.stoppedBy, by)) entry.stoppedBy = by;
+      if (opts.via !== undefined) entry.stoppedVia = opts.via;
+    } else if (
+      opts.via !== undefined &&
+      entry.state !== "starting" &&
+      stopRecordReplaced(entry.stoppedBy, by)
+    ) {
+      // As the real adapter: a stop with a note, of an ended session, leaves the record `writeStop` allows.
+      entry.stoppedBy = by;
+      entry.stoppedVia = opts.via;
     }
     return this.derive(entry);
   }
@@ -215,7 +236,7 @@ export class RemoteStyleSessionAdapter implements SessionAdapter {
     }
     return this.inner.tail(this.inside(id), bytes);
   }
-  async stop(id: string, opts?: { by?: StopAsker }): Promise<SessionStatus> {
+  async stop(id: string, opts?: { by?: StopAsker; via?: StopVia }): Promise<SessionStatus> {
     return this.inner.stop(this.inside(id), opts);
   }
   async remove(id: string): Promise<void> {

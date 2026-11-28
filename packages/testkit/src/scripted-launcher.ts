@@ -8,7 +8,13 @@
  * (`kodel agent rm`) and stopped.
  */
 import type { ServeLauncherPort } from "@kodel-ai/local";
-import { type NextStep, SessionError, type SessionState } from "@kodel-ai/pipeline-core";
+import {
+  type NextStep,
+  SessionError,
+  type SessionState,
+  type Started,
+  type StopVia,
+} from "@kodel-ai/pipeline-core";
 import type { RunDecision, ServeWorkerView } from "@kodel-ai/pipeline-core/serve";
 
 /** What a launch does. */
@@ -54,6 +60,10 @@ export interface ScriptedRecord {
   decisionSeq?: number;
   lastOutputAt?: number;
   stopped?: boolean;
+  /** The note the stop came with (`manager`). */
+  stoppedVia?: StopVia;
+  /** Who started the session, as the start gave it. */
+  startedBy?: Started;
   terminal?: boolean;
   endedBy?: string;
   /** The session is over while its process still runs without a holder. */
@@ -93,9 +103,14 @@ export class ScriptedLauncher implements ServeLauncherPort {
     return this.preflightResult;
   }
 
-  start(input: { runId: string; workdir: string; title: string }): Promise<{ name: string }> {
+  start(input: {
+    runId: string;
+    workdir: string;
+    title: string;
+    startedBy?: Started;
+  }): Promise<{ name: string }> {
     this.calls.push({ kind: "start", runId: input.runId, workdir: input.workdir });
-    return this.launch(input.runId, `kw-${input.runId}`, undefined);
+    return this.launch(input.runId, `kw-${input.runId}`, undefined, input.startedBy);
   }
 
   resume(input: {
@@ -138,6 +153,9 @@ export class ScriptedLauncher implements ServeLauncherPort {
         ...(latest.decisionSeq === undefined ? {} : { decisionSeq: latest.decisionSeq }),
         ...(latest.lastOutputAt === undefined ? {} : { lastOutputAt: latest.lastOutputAt }),
         ...(latest.stopped === true ? { stopped: true } : {}),
+        ...(latest.stopped === true && latest.stoppedVia !== undefined
+          ? { stoppedVia: latest.stoppedVia }
+          : {}),
         ...(latest.terminal === true ? { terminal: true } : {}),
         ...(latest.endedBy === undefined ? {} : { endedBy: latest.endedBy }),
         ...(latest.childAlive === true ? { childAlive: true } : {}),
@@ -173,13 +191,18 @@ export class ScriptedLauncher implements ServeLauncherPort {
   }
 
   /** `kodel agent stop`: the latest record of the run is killed, stopped by a person. */
-  stop(runId: string): void {
+  stop(runId: string, via?: StopVia): void {
     const latest = this.of(runId).at(-1);
     if (latest === undefined) return;
-    latest.state = "killed";
-    latest.since = this.options.now();
+    if (via !== undefined) latest.stoppedVia = via;
+    // As the real adapter: a manager's stop of a session that has ended leaves the record and no new end.
+    const ended = latest.state === "exited" && via !== undefined;
+    if (!ended) {
+      latest.state = "killed";
+      latest.since = this.options.now();
+      latest.endedBy = "stopped";
+    }
     latest.stopped = true;
-    latest.endedBy = "stopped";
   }
 
   /** The holder of the latest record of the run is gone. */
@@ -202,6 +225,7 @@ export class ScriptedLauncher implements ServeLauncherPort {
     runId: string,
     name: string,
     decisionSeq: number | undefined,
+    startedBy?: Started,
   ): Promise<{ name: string }> {
     const behaviour = this.next.shift() ?? this.behaviour;
     if (behaviour === "failing") throw new Error("the agent could not be started");
@@ -219,6 +243,7 @@ export class ScriptedLauncher implements ServeLauncherPort {
       lastOutputAt: now,
       sessionId: `session-${runId}`,
       ...(decisionSeq === undefined ? {} : { decisionSeq }),
+      ...(startedBy === undefined ? {} : { startedBy }),
       ...(this.options.terminal === true ? { terminal: true } : {}),
     };
     this.records.push(record);

@@ -119,7 +119,64 @@ export interface ManagerHost {
   watch?(cursor: string | undefined, waitMs: number, signal: AbortSignal): Promise<WatchData>;
   /** The redaction of the host, project rules included. */
   historyRedact?(text: string): string;
+  /**
+   * What `decisions.agent` allows the manager to do, read from the config at each call: a key turned
+   * off since the server started takes the tool away at once. A host without it allows nothing.
+   */
+  agentKeys?(): Promise<{ start_task: boolean; stop_agent: boolean }>;
+  /**
+   * Start a task by request (`decisions.agent.start_task`). The host sets who and from where (an agent,
+   * through the manager), never the caller; it throws `TASK_NOT_FOUND` and `INVALID_ARGUMENTS` (the
+   * pipelines in `details`) and answers every other refusal as data.
+   */
+  startTask?(input: StartTaskInput): Promise<StartTaskData>;
+  /** Stop the agent of a run by request (`decisions.agent.stop_agent`). Every refusal is data. */
+  stopAgent?(input: StopAgentInput): Promise<StopAgentData>;
 }
+
+export interface StartTaskInput {
+  key: string;
+  pipeline?: string;
+  /** What the agent says the person told it; the host keeps it in the journal only. */
+  instruction?: string;
+  force: boolean;
+}
+
+export interface StartWarningData {
+  why: string;
+  reason: string;
+  counts?: Obj;
+}
+
+export type StartTaskData =
+  | {
+      status: "started";
+      run_id: string;
+      agent: string;
+      pipeline: string;
+      task_key: string;
+      /** The warnings that were present and were gone past. */
+      forced?: string[];
+    }
+  | {
+      status: "refused";
+      why: string;
+      reason: string;
+      counts?: Obj;
+      warnings?: StartWarningData[];
+      hint?: string;
+      run_id?: string;
+      retry?: boolean;
+    };
+
+export interface StopAgentInput {
+  run_id: string;
+  instruction?: string;
+}
+
+export type StopAgentData =
+  | { status: "stopped"; agent: string; run_id: string; note: string; journaled?: boolean }
+  | { status: "refused"; why: string; reason: string; run_id: string; retry?: boolean };
 
 const redactOf = (host: ManagerHost): ((text: string) => string) =>
   host.historyRedact === undefined ? (t) => redactText(t) : (t) => host.historyRedact?.(t) ?? t;
@@ -160,7 +217,12 @@ export async function managerGuard(host: ManagerHost, work: () => Promise<Obj>):
     return await work();
   } catch (error) {
     if (error instanceof KodelError) {
-      throw new KodelError(error.code, historyScrub(error.message, redactOf(host)));
+      throw new KodelError(
+        error.code,
+        historyScrub(error.message, redactOf(host)),
+        error.issues,
+        error.details,
+      );
     }
     throw error;
   }
@@ -338,4 +400,26 @@ export async function watchAnswer(
     ...(found.cancelled === true ? { cancelled: true } : {}),
     note: MANAGER_NOTE,
   };
+}
+
+/** What `manager_start_task` answers: a start, or a refusal that says why and, for a warning, how to go on. */
+export async function startTaskAnswer(host: ManagerHost, input: StartTaskInput): Promise<Obj> {
+  if (host.startTask === undefined) throw unavailable();
+  const data = await host.startTask(input);
+  const redact = redactOf(host);
+  if (data.status === "started") {
+    const { status: _status, ...rest } = data;
+    return historyScrub({ started: true, ...rest }, redact);
+  }
+  const { status: _status, ...rest } = data;
+  return historyScrub({ started: false, ...rest }, redact);
+}
+
+/** What `manager_stop_agent` answers. */
+export async function stopAgentAnswer(host: ManagerHost, input: StopAgentInput): Promise<Obj> {
+  if (host.stopAgent === undefined) throw unavailable();
+  const data = await host.stopAgent(input);
+  const redact = redactOf(host);
+  const { status, ...rest } = data;
+  return historyScrub({ stopped: status === "stopped", ...rest }, redact);
 }

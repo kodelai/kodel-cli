@@ -55,7 +55,11 @@ export interface DecisionInfo {
  * Journal events that say nothing about the run's agent being alive: display data the host writes
  * on its own. A reader that dates a wait by the last sign of life leaves them out.
  */
-export const NOT_A_SIGN_OF_LIFE: readonly string[] = ["agent_session_named", "worker_note"];
+export const NOT_A_SIGN_OF_LIFE: readonly string[] = [
+  "agent_session_named",
+  "worker_note",
+  "agent_stopped",
+];
 
 const WAIT_EVENTS: Record<string, RunDecision["kind"]> = {
   gate_waiting: "gate",

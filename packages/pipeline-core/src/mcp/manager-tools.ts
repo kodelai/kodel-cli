@@ -1,7 +1,8 @@
 /**
  * The manager's read tools (decision 5M9D): what waits for the person, how a run went, what the daemon
- * and the background agents do, and a wait for the next event. All seven only read and take strict
- * arguments. They are bound to a `ManagerHost`, a set of optional reads; a host without one answers
+ * and the background agents do, and a wait for the next event. The seven reads only read; the two acting
+ * tools (`manager_start_task`, `manager_stop_agent`) are served only under their key of `decisions.agent`.
+ * All take strict arguments. They are bound to a `ManagerHost`, a set of optional reads; a host without one answers
  * `HISTORY_UNAVAILABLE`. No tool here decides anything: the commands an answer names are the person's.
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -17,11 +18,15 @@ import {
   managerGuard,
   runReportAnswer,
   serveStatusAnswer,
+  startTaskAnswer,
+  stopAgentAnswer,
   watchAnswer,
 } from "../manager-view";
 import { MAX_WAIT_S } from "../next-step";
 import { RUN_ID_PATTERN } from "../run-id";
 import { failure, type ToolResult } from "../service";
+import { TASK_LIMITS } from "../tasks";
+import { AGENT_ACTION_KEYS } from "../tool-roles";
 import { keepOnly, type ToolSpec } from "./tools";
 
 export interface ManagerToolDescriptor extends ToolSpec {
@@ -153,6 +158,73 @@ export const MANAGER_TOOLS: ManagerToolDescriptor[] = [
     run: (host, input, extra) =>
       watchAnswer(host, input as { cursor?: string; wait_s?: number }, extra.signal),
   },
+  {
+    name: "manager_start_task",
+    title: "Start a task",
+    description:
+      "Start the run of a task and a background agent for it, as the person does with `s` in the terminal UI. It does not need `kodel task approve` (that only holds back what `kodel serve` starts on its own). `started: true` names the run and the agent. `started: false` says `why`: `full` (the limits `serve.max_runs` or `serve.max_workers` are reached, with `counts`), `blocked` (a task it waits for is not done), `conflict` (a task it conflicts with has a run) — these are warnings, `warnings` lists every one and `hint` says how to go on; `has_run` (the task has a run already), `done` (the task is closed), `agent_failed` (the run was made and no agent started: `run_id` and `hint` say how to continue it), `not_ready` (this machine cannot start it now, with the reason; `retry` when another start holds the lock). `force: true` starts the task all the same past the warnings and nothing else: use it only when the person told you, in this chat, to start it anyway; the journal records what was overridden. A refusal is never a reason to force on your own. " +
+      "`instruction` is the person's words that asked for it, kept in the journal. " +
+      DATA,
+    shape: {
+      key: z
+        .string()
+        .min(1)
+        .max(TASK_LIMITS.key)
+        .describe("The key of the task, as task_list names it."),
+      pipeline: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe(
+          "The pipeline to run. Without it the rule of `serve.start` for this task, else the only pipeline; if there are several, the answer is INVALID_ARGUMENTS with the list.",
+        ),
+      instruction: z
+        .string()
+        .max(2_000)
+        .optional()
+        .describe("The person's words that asked for this, at most 2000 characters."),
+      force: z
+        .boolean()
+        .optional()
+        .describe(
+          "Start past the warnings (`full`, `blocked`, `conflict`); false by default. Only when the person said to, in this chat.",
+        ),
+    },
+    readOnly: false,
+    idempotent: false,
+    strict: true,
+    run: (host, input) =>
+      startTaskAnswer(host, {
+        key: input.key as string,
+        ...(input.pipeline === undefined ? {} : { pipeline: input.pipeline as string }),
+        ...(input.instruction === undefined ? {} : { instruction: input.instruction as string }),
+        force: input.force === true,
+      }),
+  },
+  {
+    name: "manager_stop_agent",
+    title: "Stop a run's agent",
+    description:
+      "Stop the background agent that works a run. The run stays open with its task and holds the tasks that conflict with it; nothing starts the agent again by itself (kodel serve and the terminal UI do not), and the run is not cancelled. `stopped: true` has a `note` that says how the run goes on; `stopped: false` says `why` (no agent, already stopped, the run is over, another checkout's run, the agent is still starting: `retry`). A terminal a person had attached to the agent is closed with it. `instruction` is the person's words that asked for it, kept in the journal. " +
+      DATA,
+    shape: {
+      run_id: runId,
+      instruction: z
+        .string()
+        .max(500)
+        .optional()
+        .describe("The person's words that asked for this, at most 500 characters."),
+    },
+    readOnly: false,
+    idempotent: false,
+    strict: true,
+    run: (host, input) =>
+      stopAgentAnswer(host, {
+        run_id: input.run_id as string,
+        ...(input.instruction === undefined ? {} : { instruction: input.instruction as string }),
+      }),
+  },
 ];
 
 /** Validate a call strictly (an unknown argument is refused) and run it. Never throws for bad input. */
@@ -165,6 +237,12 @@ export async function invokeManagerTool(
 ): Promise<ToolResult> {
   const tool = tools.find((t) => t.name === name);
   if (!tool) return failure("INVALID_ARGUMENTS", `there is no tool "${name}"`);
+  // The key is read again here, not only when the server was built: a tool that acts for the person is
+  // refused the way a tool that is not served is, as soon as the person turns its key off.
+  const key = AGENT_ACTION_KEYS[name];
+  if (key !== undefined && (await host.agentKeys?.().catch(() => undefined))?.[key] !== true) {
+    return failure("INVALID_ARGUMENTS", `there is no tool "${name}"`);
+  }
   const parsed = z
     .object(tool.shape)
     .strict()
@@ -184,7 +262,9 @@ export async function invokeManagerTool(
     const answer = await managerGuard(host, () => tool.run(host, parsed.data, { signal }));
     return { ...answer, ok: true };
   } catch (error) {
-    if (error instanceof KodelError) return failure(error.code, error.message);
+    if (error instanceof KodelError) {
+      return failure(error.code, error.message, error.issues, error.details);
+    }
     throw error;
   }
 }

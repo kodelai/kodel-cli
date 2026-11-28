@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  AGENT_ACTION_TOOLS,
   ATTACHMENT_TOOL_NAMES,
   DECISION_TOOLS,
   HISTORY_TOOL_NAMES,
@@ -22,6 +23,7 @@ import {
   resolveToolSet,
   roleOverridesProblem,
   type ServerRole,
+  servedUnderKeys,
   TASK_CONTRACT,
   TASK_TOOL_NAMES,
   type TaskAdapter,
@@ -41,6 +43,7 @@ import {
   invokeTool,
   keepOnly,
   MANAGER_TOOLS,
+  type ManagerToolDescriptor,
   serverInstructions,
   type ToolSpec,
   taskInstructions,
@@ -81,6 +84,8 @@ interface Setup {
   role?: ServerRole;
   readOnly?: boolean;
   decisions?: boolean;
+  /** `decisions.agent.start_task` and `stop_agent`: the manager's acting tools are served. */
+  keys?: boolean;
   tasks?: TaskAdapterCapabilities;
   taskLink?: "auto" | "ask";
   overrides?: RoleOverrides;
@@ -94,6 +99,8 @@ function surface(setup: Setup) {
   const lookWith = setup.role === "manager" ? "manager_inbox" : "pipeline_next_step";
   const taskLink = setup.tasks !== undefined && setup.taskLink !== undefined;
   const attachments = setup.attachments !== false;
+  const keys = setup.keys === true ? { startTask: true, stopAgent: true } : undefined;
+  const managerTools = MANAGER_TOOLS.filter((tool) => servedUnderKeys(tool.name, keys));
   const resolved = resolveToolSet({
     ...(setup.role === undefined ? {} : { role: setup.role }),
     ...(setup.overrides === undefined ? {} : { overrides: setup.overrides }),
@@ -102,7 +109,7 @@ function surface(setup: Setup) {
       ...toolsFor({ taskLink, attachments }),
       ...decisionTools(flags, decider),
       ...HISTORY_TOOLS,
-      ...MANAGER_TOOLS,
+      ...managerTools,
       ...(setup.tasks === undefined ? [] : buildTaskTools(setup.tasks)),
     ],
   });
@@ -122,7 +129,7 @@ function surface(setup: Setup) {
       only,
     ),
     ...keepOnly(HISTORY_TOOLS, only),
-    ...keepOnly(MANAGER_TOOLS, only),
+    ...keepOnly(managerTools, only),
     ...(setup.tasks === undefined ? [] : keepOnly(buildTaskTools(setup.tasks, only), only)),
   ];
   const served = tools.map((tool) => tool.name);
@@ -184,6 +191,8 @@ describe("5m9d the role tables", () => {
         "pipeline_attachment_list",
         "pipeline_decide_gate",
         "pipeline_accept_change",
+        "manager_start_task",
+        "manager_stop_agent",
         "manager_inbox",
         "manager_run_report",
         "manager_gate_changes",
@@ -195,7 +204,7 @@ describe("5m9d the role tables", () => {
     );
     const worker = surface({ role: "worker", decisions: true, tasks: FULL, taskLink: "ask" });
     expect(sorted(worker.served)).toEqual(sorted(ROLE_TOOLS.worker));
-    const manager = surface({ role: "manager", decisions: true, tasks: FULL });
+    const manager = surface({ role: "manager", decisions: true, keys: true, tasks: FULL });
     expect(sorted(manager.served)).toEqual(sorted(ROLE_TOOLS.manager));
     for (const name of ["pipeline_start", "pipeline_next_step", "pipeline_take_step"]) {
       expect(manager.served).not.toContain(name);
@@ -205,7 +214,7 @@ describe("5m9d the role tables", () => {
   });
 
   test("5m9d_no_role_serves_the_union", () => {
-    const all = surface({ decisions: true, tasks: FULL });
+    const all = surface({ decisions: true, keys: true, tasks: FULL });
     expect(sorted(all.served)).toEqual(sorted(KNOWN_TOOL_NAMES));
     expect(sorted(all.served)).toEqual(
       sorted([...new Set([...ROLE_TOOLS.worker, ...ROLE_TOOLS.manager])]),
@@ -303,7 +312,12 @@ describe("5m9d the marks", () => {
       expect(inARole, tool.name).toBe(true);
     }
     // The name lists kept without the SDK are the registries'.
-    expect(sorted(MANAGER_TOOL_NAMES)).toEqual(sorted(MANAGER_TOOLS.map((t) => t.name)));
+    expect(sorted(MANAGER_TOOL_NAMES)).toEqual(
+      sorted(MANAGER_TOOLS.map((t) => t.name).filter((n) => !AGENT_ACTION_TOOLS.includes(n))),
+    );
+    expect(sorted(AGENT_ACTION_TOOLS)).toEqual(
+      sorted(MANAGER_TOOLS.map((t) => t.name).filter((n) => AGENT_ACTION_TOOLS.includes(n))),
+    );
     expect(sorted([...PIPELINE_TOOL_NAMES, ...HISTORY_TOOL_NAMES])).toEqual(
       sorted(
         [...toolsFor({ attachments: true }), ...decisionTools(BOTH, decider), ...HISTORY_TOOLS].map(
@@ -336,6 +350,8 @@ describe("5m9d the marks", () => {
         "pipeline_decide_gate",
         "pipeline_accept_change",
         "pipeline_attachment_write",
+        "manager_start_task",
+        "manager_stop_agent",
         "task_create",
         "task_update",
       ]),
@@ -363,7 +379,7 @@ describe("5m9d the marks", () => {
   });
 
   test("5m9d_fingerprint_covers_the_role_and_the_final_set", () => {
-    expect(CONTRACT_VERSION).toBe(7);
+    expect(CONTRACT_VERSION).toBe(8);
     const hash = (setup: Setup, header: { role: ServerRole | "all"; readOnly: boolean }) =>
       createHash("sha256")
         .update(toolsFingerprint(surface(setup).tools, header))
@@ -728,5 +744,149 @@ describe("5m9d the texts", () => {
       const last = file.includes("no-attachments") ? "9c. " : "9d. ";
       expect(lines[at - 1]?.startsWith(last), file).toBe(true);
     }
+  });
+});
+
+describe("mstart the manager's acting tools", () => {
+  const resolved = (input: Parameters<typeof resolveToolSet>[0]) => {
+    const answer = resolveToolSet(input);
+    if (answer.refused !== undefined) throw new Error(answer.refused);
+    return answer;
+  };
+  const nonAction = [{ name: "manager_inbox", readOnly: true }];
+  const acting = [
+    { name: "manager_start_task", readOnly: false },
+    { name: "manager_stop_agent", readOnly: false },
+  ];
+
+  test("5m9d_new_tools_need_keys", () => {
+    // Without a key the tool is not available, whatever the role or an `add` says.
+    const off = resolved({
+      role: "manager",
+      overrides: { manager: { add: ["manager_start_task"] } },
+      available: nonAction,
+    });
+    expect(off.refused).toBeUndefined();
+    expect(off.names).toEqual(["manager_inbox"]);
+    expect(off.unapplied?.map((u) => u.name)).toEqual(["manager_start_task"]);
+    expect(off.unapplied?.[0]?.why).toContain("decisions.agent.start_task");
+    // With the keys both are served to the manager and to a server with no role.
+    for (const role of [undefined, "manager" as const]) {
+      const on = resolved({
+        ...(role === undefined ? {} : { role }),
+        available: [...nonAction, ...acting],
+      });
+      expect(on.names).toContain("manager_start_task");
+      expect(on.names).toContain("manager_stop_agent");
+    }
+    // One key serves one tool.
+    const one = resolved({
+      role: "manager",
+      available: [...nonAction, { name: "manager_stop_agent", readOnly: false }],
+    });
+    expect(sorted(one.names)).toEqual(["manager_inbox", "manager_stop_agent"]);
+    // They write, so `--read-only` drops them, and the worker never has them.
+    const readOnly = resolved({
+      role: "manager",
+      readOnly: true,
+      available: [...nonAction, ...acting],
+    });
+    expect(readOnly.names).toEqual(["manager_inbox"]);
+    const worker = resolved({ role: "worker", available: [...nonAction, ...acting] });
+    expect(worker.names).not.toContain("manager_start_task");
+    expect(worker.names).not.toContain("manager_stop_agent");
+    expect(sorted([...ROLE_TOOLS.worker].filter((n) => AGENT_ACTION_TOOLS.includes(n)))).toEqual(
+      [],
+    );
+    // Served as a table row: a key tool is known to the config check.
+    expect(KNOWN_TOOL_NAMES).toContain("manager_start_task");
+  });
+
+  test("5m9d_worker_add_is_refused", () => {
+    for (const name of AGENT_ACTION_TOOLS) {
+      expect(roleOverridesProblem({ worker: { add: [name] } })).toContain(
+        "never given a tool that decides",
+      );
+      // The manager block may name them (they stay behind the key).
+      expect(roleOverridesProblem({ manager: { add: [name] } })).toBeUndefined();
+      // A table that hands them to the worker does not make the worker serve them.
+      const roles = { ...ROLE_TOOLS, worker: [...ROLE_TOOLS.worker, name] };
+      const served = resolved({
+        role: "worker",
+        roles,
+        available: [{ name, readOnly: false }],
+      });
+      expect(served.names).not.toContain(name);
+    }
+  });
+
+  test("mstart_key_rechecked_per_call", async () => {
+    let on = true;
+    let ran = 0;
+    const tool: ManagerToolDescriptor = {
+      name: "manager_start_task",
+      title: "start",
+      description: "start",
+      shape: {},
+      readOnly: false,
+      idempotent: false,
+      strict: true,
+      run: async () => {
+        ran += 1;
+        return { started: true };
+      },
+    };
+    const host = { agentKeys: async () => ({ start_task: on, stop_agent: false }) };
+    expect((await invokeManagerTool(host, tool.name, {}, [tool])).ok).toBe(true);
+    // The person turns the key off: the very next call is refused as a tool that is not there.
+    on = false;
+    const refused = await invokeManagerTool(host, tool.name, {}, [tool]);
+    expect(refused).toMatchObject({ ok: false, code: "INVALID_ARGUMENTS" });
+    // A host that cannot say what the keys are allows nothing; so does one whose read fails.
+    expect((await invokeManagerTool({}, tool.name, {}, [tool])).ok).toBe(false);
+    const broken = { agentKeys: async () => Promise.reject(new Error("config unreadable")) };
+    expect((await invokeManagerTool(broken, tool.name, {}, [tool])).ok).toBe(false);
+    expect(ran).toBe(1);
+  });
+
+  test("mstart_doctor_and_instructions_know_keys", () => {
+    const served = [...HISTORY_TOOLS, ...MANAGER_TOOLS]
+      .map((t) => t.name)
+      .filter((name) => !AGENT_ACTION_TOOLS.includes(name));
+    const both = [...served, ...AGENT_ACTION_TOOLS];
+    const text = serverInstructions({
+      role: "manager",
+      decisions: { startTask: true, stopAgent: true },
+      served: both,
+    });
+    expect(text).toContain("manager_start_task starts the run of a task");
+    expect(text).toContain("manager_stop_agent stops the agent");
+    // `force` is for the person's word only.
+    expect(text).toContain("`force: true` only when the person has told you");
+    expect(text).toContain("Never use `force` to get past a refusal on your own");
+    // Without the key, or without the tool, no word of it.
+    for (const options of [
+      { role: "manager" as const, decisions: {}, served: both },
+      { role: "manager" as const, decisions: { startTask: true, stopAgent: true }, served },
+    ]) {
+      const quiet = serverInstructions(options);
+      expect(quiet).not.toContain("manager_start_task");
+      expect(quiet).not.toContain("manager_stop_agent");
+      expect(quiet).not.toContain("force");
+    }
+    // Only the stop key: the start tool is not named.
+    const stopOnly = serverInstructions({
+      role: "manager",
+      decisions: { stopAgent: true },
+      served: both,
+    });
+    expect(stopOnly).toContain("manager_stop_agent");
+    expect(stopOnly).not.toContain("manager_start_task");
+    // A server with no role says it too, after the rules it already has.
+    const noRole = serverInstructions({
+      decisions: { startTask: true },
+      served: [...PIPELINE_TOOL_NAMES, ...both],
+    });
+    expect(noRole).toContain("manager_start_task starts the run of a task");
   });
 });

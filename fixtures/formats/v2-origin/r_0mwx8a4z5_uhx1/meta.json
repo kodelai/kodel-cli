@@ -1,0 +1,11 @@
+{
+  "v": 2,
+  "runId": "r_0mwx8a4z5_uhx1",
+  "pipeline": "gated",
+  "task": "Fix the title of the report",
+  "slug": "person-started",
+  "specHash": "d84adc943c785c36",
+  "createdAt": 1795677938609,
+  "workdir": "/kodel-fixture/workdir/r_0mwx8a4z5_uhx1",
+  "branch": "kodel/r_0mwx8a4z5_uhx1"
+}
