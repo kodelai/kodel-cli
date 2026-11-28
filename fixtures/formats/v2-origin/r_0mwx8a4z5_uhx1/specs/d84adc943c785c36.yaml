@@ -1,0 +1,17 @@
+version: 1
+name: gated
+description: an agent step, a gate, an agent step
+nodes:
+  - slug: write
+    kind: agent
+    prompt: Do {{task}}.
+  - slug: review
+    kind: human
+    prompt: Look at it.
+  - slug: ship
+    kind: agent
+    prompt: Ship it.
+edges:
+  - { from: write, to: review }
+  - { from: review, to: ship }
+  - { from: review, to: write, when: rejected }

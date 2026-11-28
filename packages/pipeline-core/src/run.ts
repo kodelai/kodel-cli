@@ -32,6 +32,7 @@ import { cannotHoldError, withRunId } from "./formats/messages";
 import { capabilitiesOf, encodeJournalRecord, encodeRunState } from "./formats/registry";
 import type { FormatCapabilities } from "./formats/types";
 import type { HistoryConfig } from "./history-config";
+import { normalizeOrigin, type RunOrigin, STOP_INSTRUCTION_MAX } from "./origin";
 import type { NodeSpec, PipelineSpec } from "./pipeline";
 import { type AcceptEffect, diffPipelines, standingOf } from "./pipeline-diff";
 import {
@@ -609,6 +610,11 @@ export type RunEvent =
       engine?: EngineRecord;
       /** Who started the run; same rule as `engine`. */
       executor?: ExecutorRecord;
+      /**
+       * How the run was started, as a kind (a person at the TUI or the web, an agent through a manager): set
+       * by the path of the call. Kept only by a format that holds it; the daemon and `pipeline_start` give none.
+       */
+      origin?: RunOrigin;
       /** The commit the run's work began at; absent without a repository or a commit. */
       baseCommit?: string;
     }
@@ -948,7 +954,13 @@ export type RunEvent =
       exit_code?: number;
       /** When the worker was seen gone (milliseconds); not after the record's own time. */
       at?: number;
-    };
+    }
+  /**
+   * An agent stopped the run's background agent through a manager's server. A fact of the history that
+   * names who asked (the stop record of the session can be removed), so only journaled; the state keeps
+   * nothing. The words are the agent's, redacted by the host and bounded here.
+   */
+  | { type: "agent_stopped"; instruction?: string };
 
 /** Why a worker is gone: its holder vanished, its timeout killed it, it exited outside a wait, or it never started. */
 export type WorkerGoneReason = "lost" | "killed" | "exited" | "not_started";
@@ -2066,6 +2078,7 @@ class Machine {
     if (event.type === "agent_log_failed") return this.agentLogFailed(event);
     if (event.type === "agent_session_named") return this.agentSessionNamed(event);
     if (event.type === "worker_note") return this.workerNote(event);
+    if (event.type === "agent_stopped") return this.agentStopped(event);
     if (event.type === "usage_recorded") return this.usageRecorded(event);
     if (event.type === "usage_failed") return this.usageFailed(event);
     if (event.type === "tool_calls_recorded") return this.toolCallsRecorded(event);
@@ -2375,6 +2388,11 @@ class Machine {
   }
 
   private start(event: Extract<RunEvent, { type: "start" }>) {
+    // A caller's mistake is refused; a format that cannot hold the field leaves it out, as it does the role.
+    const origin = event.origin === undefined ? undefined : normalizeOrigin(event.origin);
+    if (event.origin !== undefined && origin === undefined) {
+      throw fail("INVALID_ARGUMENTS", "the origin of the run is not one this engine knows");
+    }
     for (const node of this.spec.nodes) {
       this.s.nodes[node.slug] = {
         slug: node.slug,
@@ -2412,6 +2430,7 @@ class Machine {
       ...(event.history === undefined ? {} : { history: event.history }),
       ...(event.engine === undefined ? {} : { engine: event.engine }),
       ...(event.executor === undefined ? {} : { executor: event.executor }),
+      ...(origin === undefined || !this.caps.origin ? {} : { origin }),
       ...(event.baseCommit === undefined ? {} : { base_commit: event.baseCommit }),
     });
     const needsRunBaseline = this.spec.nodes.some((n) =>
@@ -2706,6 +2725,23 @@ class Machine {
       reason: event.reason,
       ...(event.exit_code === undefined ? {} : { exit_code: event.exit_code }),
       ...(event.at === undefined ? {} : { at: event.at }),
+    });
+  }
+
+  /**
+   * Journal that an agent stopped the run's agent. Whatever does not hold is a quiet no-op (a run that
+   * ended, a format with no place for the event): the stop itself is not this event's to refuse.
+   */
+  private agentStopped(event: Extract<RunEvent, { type: "agent_stopped" }>) {
+    if (this.ended || !this.caps.agentStops) throw new Repeat();
+    if (event.instruction !== undefined && typeof event.instruction !== "string") {
+      throw new Repeat();
+    }
+    const words = event.instruction?.slice(0, STOP_INSTRUCTION_MAX);
+    this.log("agent_stopped", {
+      by: "agent",
+      via: "manager",
+      ...(words === undefined || words === "" ? {} : { agent_instruction: words }),
     });
   }
 

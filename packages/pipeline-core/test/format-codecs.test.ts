@@ -88,6 +88,7 @@ describe("t41 the codecs read and write the golden runs unchanged", () => {
     "v2-worker",
     "v2-roles",
     "v2-manager",
+    "v2-origin",
     "v2-attachment",
     "v2-cancel",
   ]) {

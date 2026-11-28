@@ -381,4 +381,73 @@ describe("kodel web --mcp", () => {
     );
     expect(out).not.toContain("a duplicate");
   }, 60_000);
+
+  test("mstart_web_mcp_token_tools", async () => {
+    const root = join(dir, "project");
+    await mkdir(join(root, ".kodel", "pipelines"), { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    // Tasks are on, so a call can name a task; the keys are what serves the two acting tools.
+    await writeFile(
+      join(root, ".kodel", "config.yaml"),
+      [
+        "version: 1",
+        "tasks:",
+        "  enabled: true",
+        "  adapters:",
+        "    local:",
+        "      prefix: KDL",
+        "decisions:",
+        "  agent:",
+        "    start_task: true",
+        "    stop_agent: true",
+        "",
+      ].join("\n"),
+    );
+    const state = join(dir, "state");
+    const tokens = new TokenStore(join(state, "web"));
+    const full = await tokens.add({ name: "laptop", readOnly: false });
+    const reader = await tokens.add({ name: "phone", readOnly: true });
+    const main = join(import.meta.dir, "..", "src", "main.ts");
+    child = spawn(
+      "bun",
+      [main, "--root", root, "web", "--mcp", "--port", "0", "--host", "127.0.0.1"],
+      { env: { ...withoutEngine(process.env), KODEL_STATE_DIR: state }, stdio: "pipe" },
+    );
+    const url = await new Promise<URL>((resolve, reject) => {
+      let out = "";
+      const timer = setTimeout(() => reject(new Error(`no address: ${out}`)), 20_000);
+      child?.stdout?.on("data", (d: Buffer) => {
+        out += d.toString();
+        const m = /MCP \(manager tools\): (\S+)/.exec(out);
+        if (m?.[1]) {
+          clearTimeout(timer);
+          resolve(new URL(m[1]));
+        }
+      });
+      child?.stderr?.on("data", (d: Buffer) => {
+        out += d.toString();
+      });
+    });
+    const names = async (token: string) => {
+      const client = await connect(url, token);
+      const { tools } = await client.listTools();
+      await client.close();
+      return tools;
+    };
+    const manager = await names(full.token);
+    const start = manager.find((t) => t.name === "manager_start_task");
+    expect(start?.annotations?.readOnlyHint).toBe(false);
+    expect(manager.map((t) => t.name)).toContain("manager_stop_agent");
+    // A token that only reads is given neither; a client that asks for one is told there is none.
+    expect((await names(reader.token)).map((t) => t.name)).not.toContain("manager_start_task");
+    expect((await names(reader.token)).map((t) => t.name)).not.toContain("manager_stop_agent");
+    const client = await connect(url, full.token);
+    const missing = await client.callTool({
+      name: "manager_start_task",
+      arguments: { key: "KDL-999" },
+    });
+    await client.close();
+    const text = (missing.content as { text: string }[])[0]?.text ?? "";
+    expect(JSON.parse(text)).toMatchObject({ ok: false, code: "TASK_NOT_FOUND" });
+  }, 60_000);
 });

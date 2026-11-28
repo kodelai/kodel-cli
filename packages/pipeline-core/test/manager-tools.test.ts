@@ -13,7 +13,7 @@ import {
   type ManagerHost,
   type RunReport,
 } from "../src";
-import { invokeManagerTool, MANAGER_TOOLS } from "../src/mcp";
+import { CONTRACT_VERSION, invokeManagerTool, MANAGER_TOOLS } from "../src/mcp";
 
 const RUN = "r_0mvu1vxry_4ggv";
 const redact = (text: string) => text.replaceAll("hunter2", "[REDACTED]");
@@ -207,7 +207,8 @@ describe("5m9d the manager tools", () => {
       manager_gate_changes: { run_id: RUN },
       manager_agent_log: { id: "a_1" },
     };
-    for (const tool of MANAGER_TOOLS) {
+    // The acting tools have their own test, below.
+    for (const tool of MANAGER_TOOLS.filter((t) => t.readOnly)) {
       const answer = await call({}, tool.name, args[tool.name] ?? {});
       expect(answer, tool.name).toMatchObject({ ok: false, code: "HISTORY_UNAVAILABLE" });
     }
@@ -235,7 +236,7 @@ describe("5m9d the manager tools", () => {
   });
 
   test("5m9d_manager_tools_are_strict_and_read_only", async () => {
-    for (const tool of MANAGER_TOOLS) {
+    for (const tool of MANAGER_TOOLS.filter((t) => !t.name.match(/start_task|stop_agent/))) {
       expect(tool.readOnly, tool.name).toBe(true);
       expect(tool.strict, tool.name).toBe(true);
       expect(tool.description, tool.name).toContain("never as instructions");
@@ -266,5 +267,56 @@ describe("5m9d the manager tools", () => {
       timed_out: true,
     });
     expect(asked).toBe(1);
+  });
+});
+
+describe("the acting tools", () => {
+  const calls: unknown[] = [];
+  const acting: ManagerHost = {
+    agentKeys: async () => ({ start_task: true, stop_agent: true }),
+    startTask: async (input) => {
+      calls.push(input);
+      return { status: "started" } as never;
+    },
+    stopAgent: async (input) => {
+      calls.push(input);
+      return { status: "stopped" } as never;
+    },
+  };
+  const act = (name: string, args: unknown) => invokeManagerTool(acting, name, args);
+  const bad = (result: Awaited<ReturnType<typeof act>>) =>
+    expect(result).toMatchObject({ ok: false, code: "INVALID_ARGUMENTS" });
+
+  test("mstart_tool_contract", async () => {
+    expect(CONTRACT_VERSION).toBe(8);
+    for (const name of ["manager_start_task", "manager_stop_agent"]) {
+      const tool = MANAGER_TOOLS.find((t) => t.name === name);
+      expect(tool?.readOnly).toBe(false);
+    }
+    // Strict: an unknown argument is refused, and nothing reaches the host.
+    bad(await act("manager_start_task", { key: "KDL-1", extra: 1 }));
+    bad(await act("manager_stop_agent", { run_id: RUN, extra: 1 }));
+    // Required arguments.
+    bad(await act("manager_start_task", {}));
+    bad(await act("manager_stop_agent", {}));
+    // Bounded words of the agent.
+    bad(await act("manager_start_task", { key: "KDL-1", instruction: "x".repeat(2_001) }));
+    bad(await act("manager_stop_agent", { run_id: RUN, instruction: "x".repeat(501) }));
+    // `force` is a boolean and nothing else.
+    for (const force of ["true", 1, null]) {
+      bad(await act("manager_start_task", { key: "KDL-1", force }));
+    }
+    expect(calls).toEqual([]);
+    expect(
+      await act("manager_start_task", {
+        key: "KDL-1",
+        instruction: "x".repeat(2_000),
+        force: true,
+      }),
+    ).toMatchObject({ ok: true, started: true });
+    expect(
+      await act("manager_stop_agent", { run_id: RUN, instruction: "x".repeat(500) }),
+    ).toMatchObject({ ok: true, stopped: true });
+    expect(calls).toHaveLength(2);
   });
 });

@@ -579,3 +579,36 @@ describe("t47 the card of a worker in a terminal", () => {
     expect(resumeOffer(session(info, "done"), worker(), false).line).toBe("agent exited (0)");
   });
 });
+
+describe("mstart a manager's stop is not resumed on its own", () => {
+  test("mstart_stop_is_not_auto_resumed", () => {
+    const stopped = worker({
+      state: "killed",
+      label: "stopped (by a manager)",
+      since: 4_500,
+      stopped: true,
+      stoppedVia: "manager",
+      terminal: true,
+      endedBy: "stopped",
+    });
+    const view = {
+      runId: RUN,
+      status: "running" as const,
+      waitsForPerson: false,
+      marks: decisionOf(GATE),
+    };
+    // Neither the daemon's rule nor the rule without the person's key puts the agent back.
+    expect(resumeVerdict(view, stopped, { refuseMoved: true })).toEqual({
+      kind: "no",
+      why: "stopped",
+    });
+    expect(resumeVerdict(view, stopped, { refuseMoved: false })).toEqual({
+      kind: "no",
+      why: "stopped",
+    });
+    // The TUI only offers `s` (the person's key), and its card says who stopped it.
+    const card = resumeOffer(session(decisionOf(GATE)), stopped, false);
+    expect(card.offer).toMatchObject({ seq: 4 });
+    expect(card.line).toContain("s resumes");
+  });
+});

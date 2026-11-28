@@ -12,6 +12,8 @@ decisions:
     gate: false            # the agent may approve or reject a gate when the person tells it to
     pipeline_change: false # the agent may accept a change of a run's pipeline when told to
     cancel_run: false      # a manager may cancel a run when told to (never a worker or a server with no role)
+    start_task: false      # a manager may start a task's run and agent when told to
+    stop_agent: false      # a manager may stop the agent of a run when told to
 ```
 
 The server reads the block when it starts, so a change applies the next time the agent connects. If the
@@ -93,18 +95,57 @@ session included, and the journal cannot tell such an answer from the person's: 
 `decided_by: agent`. Nothing in kodel stops or marks this. A project that needs the difference keeps `dialog` off
 for agents it runs in terminal sessions.
 
+### `start_task` and `stop_agent`: a manager that acts on the machine
+
+The two other switches do not decide a waiting step. They give a manager (`docs/mcp-roles.md`) a tool that acts for
+the person on this machine, and each exists only under its own key:
+
+| switch | tool | what it does |
+| --- | --- | --- |
+| `start_task` | `manager_start_task` | starts the run of a task and a background agent for it, as `s` does in the TUI |
+| `stop_agent` | `manager_stop_agent` | stops the background agent of a run; the run stays open |
+
+What `start_task` gives the agent: **a start without `kodel task approve`**. `task approve` only holds back what
+`kodel serve` starts on its own (`docs/tasks.md`); a task an agent wrote, and not yet approved, is started by the
+tool all the same, and a dependency that is closed but waits for approval counts as done. With `force: true` it also
+gives a start **past the limits (`serve.max_runs`, `serve.max_workers`) and against the links of the task** (a task
+it waits for that is not done, a task it conflicts with that has a run). `force` goes past those warnings only: a
+task that already has a run, a closed task, an environment that cannot start it and a run made without an agent are
+refused whatever `force` says. The tool's instructions tell the agent to pass `force` only when the person said so in
+the chat; the engine cannot check that. What a start does to the task is what `s` does (the run is attached, the task
+goes to `progress`, a comment is added); the approval mark is not changed.
+
+The journal marks both. `run_started.origin` says the run was started by an agent through a manager (`by: agent`,
+`via: manager`), keeps the agent's words (`agent_instruction`, redacted, at most 2000 characters) and lists in `forced`
+the warnings the start went past, as the engine found them (`docs/run-formats.md`). A stop by an agent writes the
+event `agent_stopped` with its words (at most 500 characters), and the record of the session says the stop came through
+a manager. A person's own start (`s`, the web UI's Start) is marked `by: person` and needs no key.
+
+`stop_agent` does not cancel the run: it stays open with its task, and `kodel serve` and the TUI do not start the
+agent again (the stop is a person's for them). The answer says how to go on.
+
+The web UI's Start and Stop agent buttons need none of these keys: a person at a paired page is not an agent
+(`docs/web.md`). The two keys are shared by every manager server of the project, the one an agent starts over
+stdio and the one `kodel web --mcp` gives a token without `--read-only`.
+
+**An older kodel refuses a config with these keys.** The block is strict, so a build from before `start_task` and
+`stop_agent` answers `CONFIG_INVALID` for the whole project config, not only for the new tools: with the keys in the
+file, every command of that build that reads the config fails, until the keys are taken out. Keep them out of a
+config that an older kodel also reads.
+
 There is no switch for `ack`, `resume` or `seal`: they stay with a person, and the config refuses a key
 for them. An agent that can propose a change of the pipeline and also accept it can weaken the checks
 that judge its own work; prefer to leave `pipeline_change` off.
 
 ## Roles of the server (5M9D)
 
-The two tools are served by a server with no role and by a manager (`kodel mcp --role manager`), never by a worker:
+The gate and change decision tools are served by a server with no role and by a manager (`kodel mcp --role manager`), never by a worker
+(`manager_cancel_run` by a manager only):
 a server started with `--role worker`, and any server under `KODEL_ENGINE` (a background worker, an agent started
 with `kodel agent exec` or `kodel agent start`), decides nothing for the person whatever this block says, and its texts have no word of the
 tools. On a manager the tools point to `manager_inbox`, their answer is a short state of the run and no step, and the
 journal marks the decision `decided_via: manager`; `kodel serve` then resumes the run's worker as after a person's
-decision. The `mcp.roles` block cannot give the worker a decision tool, and it can give a manager the tools that work
+decision. `manager_start_task` and `manager_stop_agent` follow the same rule under their own keys. The `mcp.roles` block cannot give the worker a decision tool or either of them, and it can give a manager the tools that work
 a run: such a manager, with `decisions.agent` on, approves the gates of its own work, which is what a server with no
 role already allows (`docs/mcp-roles.md`).
 

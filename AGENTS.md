@@ -50,7 +50,9 @@ This repository adds these rules:
   `agent ls`, `agent logs` and `agent doctor` (whether a background agent can start here) only read and are yours.
 - Do not run `kodel serve` (it refuses under `KODEL_ENGINE`, but not in your own shell): the person starts it. A
   task you create or change with the `task_*` tools is not started by it until the person runs
-  `kodel task approve <key>`: tell them so.
+  `kodel task approve <key>`: tell them so. That approval limits only what the daemon starts on its own: a person
+  starts a task by hand (`s` in the TUI, Start in the web UI) without it, and so can a manager whose config has
+  `decisions.agent.start_task` (`manager_start_task`, never past `force` unless the person said so).
 - `kodel wait <run>` is yours: it only watches and prints one line when the person has decided, so start it
   in the background (Claude Code: the Bash tool with `run_in_background`) when an answer offers it (a
   `waiting` answer, or a `node` or `running` answer whose text names it because a decision waits besides),
@@ -94,7 +96,10 @@ asked. Do not edit the files in `.kodel/tasks/` by hand: the tools keep their fo
 
 The server has roles (`docs/mcp-roles.md`): `kodel mcp --role worker` serves the tools a run is worked with,
 `--role manager` the tools for looking after the runs (the history, the tasks, `manager_inbox` and the other
-`manager_*` reads, and the decision tools when the config allows them), `--read-only` only the tools that write
+`manager_*` reads, the decision tools when the config allows them, and the two actions `manager_start_task` and
+`manager_stop_agent` when the keys `start_task` and `stop_agent` of `decisions.agent` are on; a manager with `start_task`
+starts a task without `task approve`, and with `force` past the limits and the task's links, so pass `force` only when the
+person said so in the chat), `--read-only` only the tools that write
 nothing, and no flag every tool. Under `KODEL_ENGINE` a server with no role is a worker. A worker has no history
 tool and no `task_update`: it does not change a task's status, and when a run ends for a task the engine does
 not close, it tells the person the task is still open. An agent is told only of the tools its server serves; do

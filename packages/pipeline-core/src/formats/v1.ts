@@ -29,6 +29,8 @@ export const V1_CAPABILITIES: FormatCapabilities = {
   sessionNames: false,
   workerNotes: false,
   executorRole: false,
+  origin: false,
+  agentStops: false,
   attachments: false,
   pipelineFeatures: [],
 };
@@ -203,6 +205,7 @@ export const V2_ONLY_EVENTS = [
   "agent_session_named",
   "engine_session_started",
   "worker_note",
+  "agent_stopped",
   "attachment_written",
 ];
 /**
@@ -440,6 +443,9 @@ function encodeV1Record(record: JournalRecord): unknown {
     if (isObject(nested) && nested.role !== undefined) {
       throw cannotHold(`the role of a server ("${field}.role")`);
     }
+  }
+  if (record.event === "run_started" && record.origin !== undefined) {
+    throw cannotHold('how the run was started ("origin")');
   }
   if (record.event !== "pipeline_accepted") return record;
   const { effects, ...rest } = record;

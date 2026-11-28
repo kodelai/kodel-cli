@@ -371,3 +371,19 @@ The tests (`tne3n_` in `packages/pipeline-core/test/format-codecs.test.ts` and `
 open each run (`status`, `report`, whose `agent_decisions` lists the agent's cancel as `what: cancel`), write it
 back as it was read, check the fields of `run_finished`, and read the run as `canceled` with `reason`,
 `decided_by`, `instruction` and `decided_via` taken out of it.
+
+## `v2-origin/`
+
+Two runs of run-state format 2 that carry `run_started.origin` and the journal event `agent_stopped` (manager_start_task,
+manager_stop_agent; see `docs/run-formats.md`). Format 2 is amended in place for them (capabilities `origin` and
+`agentStops`); the state has no new field. They were made by `bun scripts/take-v2-origin-fixture.mjs`, which drives
+`LocalPipelineHost` in a scratch git repository with the pipeline `gated` (`write`, a gate `review`, `ship`) and plays the
+path of the call (the `origin` a TUI key or a manager's tool gives), the agent and the person; no agent process ran and no
+`CLAUDE*` variable reached the host. They were taken with `node scripts/take-format-fixture.mjs v2-origin <run dir> <run dir>`.
+
+- `r_0mwx8a4t9_l1xz` (open): started as an agent through a manager (`by: agent`, `via: manager`, the agent's words,
+  `forced: [full, conflict]`), then the host journaled `agent_stopped` (`by: agent`, `via: manager`, the agent's words); left
+  served at `write` #1.
+- `r_0mwx8a4z5_uhx1` (finished): started by a person at the TUI (`by: person`, `via: tui`), worked to its end.
+
+The tests open both (`status`, `report`), write them back as they were read, and continue the open one in format 2.

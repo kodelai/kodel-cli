@@ -1,0 +1,17 @@
+{
+  "v": 1,
+  "id": "a_000000000_0000",
+  "mode": "pipes",
+  "spec": {
+    "argv": ["sleep", "60"],
+    "cwd": "/masked/project",
+    "timeoutMs": 120000,
+    "envNames": []
+  },
+  "started": 1700000000000,
+  "startedBy": {
+    "by": "agent",
+    "via": "manager"
+  },
+  "root": "/masked/project"
+}

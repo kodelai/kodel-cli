@@ -19,8 +19,10 @@ import {
   type SessionStatus,
   type StartResult,
   type StopAsker,
+  type StopVia,
   type TailResult,
 } from "@kodel-ai/pipeline-core";
+import { stopRecordReplaced } from "./session-fake";
 
 interface ScriptedSession {
   id: string;
@@ -53,6 +55,8 @@ export class Gate {
 export class ScriptedSessionAdapter implements SessionAdapter {
   readonly sessions = new Map<string, ScriptedSession>();
   readonly specs: SessionSpec[] = [];
+  /** The `via` each stop came with, in order (`undefined` for none). */
+  readonly stopVias: (StopVia | undefined)[] = [];
   starts = 0;
   removes = 0;
   failStart: { code: SessionErrorCode; listed?: boolean } | undefined;
@@ -152,10 +156,20 @@ export class ScriptedSessionAdapter implements SessionAdapter {
     };
   }
 
-  async stop(id: string, opts: { by?: StopAsker } = {}): Promise<SessionStatus> {
+  async stop(id: string, opts: { by?: StopAsker; via?: StopVia } = {}): Promise<SessionStatus> {
     const session = this.get(id);
+    this.stopVias.push(opts.via);
+    const by = opts.by ?? "person";
+    const replaced = stopRecordReplaced(session.status.stoppedBy, by);
     if (session.status.state === "running") {
-      this.finish(id, { state: "killed", reason: "stopped", stoppedBy: opts.by ?? "person" });
+      this.finish(id, {
+        state: "killed",
+        reason: "stopped",
+        stoppedBy: replaced ? by : (session.status.stoppedBy ?? by),
+        ...(opts.via === undefined ? {} : { stoppedVia: opts.via }),
+      });
+    } else if (opts.via !== undefined && replaced) {
+      session.status = { ...session.status, stoppedBy: by, stoppedVia: opts.via };
     }
     return { ...session.status };
   }

@@ -16,8 +16,10 @@ import {
   type SessionStatus,
   type StartResult,
   type StopAsker,
+  type StopVia,
   type TailResult,
 } from "@kodel-ai/pipeline-core";
+import { stopRecordReplaced } from "../../testkit/src/session-fake";
 import type { AgentSessions } from "../src/agent-commands";
 
 const stream = (): AttachStream => ({
@@ -37,6 +39,8 @@ export class FakeSessions implements AgentSessions {
   readonly removed: string[] = [];
   readonly attached: string[] = [];
   readonly stopped: string[] = [];
+  /** The `via` each stop came with, in order (`undefined` for none). */
+  readonly stopVias: (StopVia | undefined)[] = [];
   readonly tailed: string[] = [];
   /** Everything asked of the adapter, in order. */
   readonly calls: string[] = [];
@@ -104,10 +108,25 @@ export class FakeSessions implements AgentSessions {
     return { text: `output of ${id}\n`, complete: true };
   }
 
-  async stop(id: string, opts: { by?: StopAsker } = {}): Promise<SessionStatus> {
+  async stop(id: string, opts: { by?: StopAsker; via?: StopVia } = {}): Promise<SessionStatus> {
     const row = this.get(id);
     this.stopped.push(id);
-    row.status = { state: "killed", reason: "stopped", stoppedBy: opts.by ?? "person" };
+    this.stopVias.push(opts.via);
+    const live = row.status.state === "running" || row.status.state === "starting";
+    const by = opts.by ?? "person";
+    const replaced = stopRecordReplaced(row.status.stoppedBy, by);
+    // As the real adapter: a stop with a note, of an ended session, leaves the record `writeStop` allows, no new end.
+    row.status =
+      live || opts.via === undefined
+        ? {
+            state: "killed",
+            reason: "stopped",
+            stoppedBy: replaced ? by : (row.status.stoppedBy ?? by),
+          }
+        : replaced
+          ? { ...row.status, stoppedBy: by }
+          : row.status;
+    if (opts.via !== undefined && (live || replaced)) row.status.stoppedVia = opts.via;
     return { ...row.status };
   }
 

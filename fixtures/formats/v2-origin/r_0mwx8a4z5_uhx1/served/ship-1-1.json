@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "node": "ship",
+  "attempt": 1,
+  "n": 1,
+  "prompt_hash": "498230609fa5c2728cd528fd1c81958eea634972fa7fec5e31f181eca9ecfdb6",
+  "answer": {
+    "slug": "ship",
+    "kind": "agent",
+    "attempt": 1,
+    "prompt": "Ship it."
+  }
+}

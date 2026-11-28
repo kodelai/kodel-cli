@@ -281,6 +281,24 @@ describe("t47 kodel agent doctor: the seven checks", () => {
     expect(unknown.fix("worktrees folder trusted")).toContain("if claude asks");
   });
 
+  test("mstart_doctor_knows_the_manager_keys", async () => {
+    const keys = await doctor({
+      config: {
+        dialog: false,
+        agentDecides: ["start_task", "stop_agent"],
+        worktreesDir: WORKTREES,
+      },
+    });
+    expect(keys.answer("decisions.agent off")).toContain("no (start_task, stop_agent: ");
+    expect(keys.answer("decisions.agent off")).toContain("without `kodel task approve`");
+    expect(keys.answer("decisions.agent off")).toContain("a worker never gets them");
+    // Only the older keys: the line says nothing of the new tools.
+    const gate = await doctor({
+      config: { dialog: false, agentDecides: ["gate"], worktreesDir: WORKTREES },
+    });
+    expect(gate.answer("decisions.agent off")).not.toContain("task approve");
+  });
+
   test("t47_doctor_decisions_dialog_and_agent", async () => {
     const off = await doctor();
     expect(off.answer("decisions.dialog off")).toBe("yes");

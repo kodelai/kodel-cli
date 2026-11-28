@@ -9,10 +9,12 @@ import {
   type RunTaskLink,
   resolveToolSet,
   type ServerRole,
+  servedUnderKeys,
   type TaskService,
   toolsFingerprint,
 } from "@kodel-ai/pipeline-core";
 import {
+  type AgentDecisionFlags,
   buildTaskTools,
   CONTRACT_VERSION,
   decisionTools,
@@ -94,7 +96,7 @@ export function serverToolSet(input: {
   readOnly?: boolean;
   tasks?: TaskService;
   runLink?: RunTaskLink;
-  agentDecisions?: { gate?: boolean; pipelineChange?: boolean; cancelRun?: boolean };
+  agentDecisions?: AgentDecisionFlags;
   /** The host keeps attachments: only then can their tools be served. */
   attachments?: boolean;
 }): ResolvedToolSet {
@@ -115,8 +117,9 @@ export function serverToolSet(input: {
       ...(input.agentDecisions?.cancelRun === true && input.role === "manager"
         ? [{ name: "manager_cancel_run", readOnly: false }]
         : []),
+      // The manager's acting tools exist only under their own key, as the decision tools do.
+      ...MANAGER_TOOLS.filter((tool) => servedUnderKeys(tool.name, input.agentDecisions)),
       ...HISTORY_TOOLS,
-      ...MANAGER_TOOLS,
       ...(input.tasks === undefined ? [] : buildTaskTools(input.tasks.capabilities)),
     ],
   });
@@ -152,7 +155,7 @@ export interface ServerOptions {
   /** Whether `humans` is asked through the client (`decisions.dialog`); off unless the config says so. */
   dialog?: boolean;
   /** What the config lets the agent decide on the person's instruction; needs `humans`. */
-  agentDecisions?: { gate?: boolean; pipelineChange?: boolean; cancelRun?: boolean };
+  agentDecisions?: AgentDecisionFlags;
   /** Cancels a run (NE3N) for `manager_cancel_run`; without it the tool is not served. */
   cancel?: (input: CancelInput) => Promise<CancelResult>;
   /** How long a dialog may stay open, in milliseconds; the default is long enough to read the changes. */

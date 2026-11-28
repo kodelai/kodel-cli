@@ -3469,6 +3469,8 @@ describe("tne3n a resume is not made for a run that has ended", () => {
       },
       location: async () => undefined,
       inProject: async (path: string) => path,
+      inspect: async () => ({ kind: "done" }) as never,
+      integrityStatus: async () => "ok" as const,
     };
     const host: StartHost = {
       list: async () => ({ pipelines: [] }),

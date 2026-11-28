@@ -30,7 +30,8 @@ it (`kodel task set`, or through a manager).
 refused, not read as a project proposal), `pipeline_attachment_read` and `pipeline_attachment_list` (what a run
 keeps apart from the project; it has no tool that writes an attachment), the decision tools when
 `decisions.agent` allows them (`manager_cancel_run`, which ends a run as canceled, only on a manager: a server
-with no role never serves it, `docs/decisions.md`), and seven read tools of its own:
+with no role never serves it, `docs/decisions.md`), seven read tools of its own, and two tools that act for the
+person, served only under their keys of `decisions.agent` (below):
 
 | Tool | What it reads |
 | --- | --- |
@@ -41,6 +42,16 @@ with no role never serves it, `docs/decisions.md`), and seven read tools of its 
 | `manager_agents` | The background agents of the project (`kodel agent ls`). |
 | `manager_agent_log` | The last lines one of them wrote (`unverified`: the agent wrote them). |
 | `manager_watch` | Waits up to `wait_s` seconds for something to happen in any run and returns the events and a cursor. |
+
+**The two acting tools** (`decisions.agent.start_task`, `decisions.agent.stop_agent`, `docs/decisions.md`; both off by
+default) are not read-only, so `--read-only` never serves them, and the worker is never given them, whatever
+`mcp.roles.worker.add` says (that config is refused). A server with no role serves them as it serves the decision
+tools. The key is read again at every call: a tool whose key was turned off answers as a tool that is not served.
+
+| Tool | What it does |
+| --- | --- |
+| `manager_start_task` | Starts the run of a task and a background agent for it, as `s` does in the TUI (`key`, optional `pipeline`, `instruction`, `force`). It needs no `kodel task approve`, which only holds back what `kodel serve` starts on its own, and it needs no daemon or `serve.start` rule. Without `force` it answers `started: false` with `why` `full` (`serve.max_runs` or `serve.max_workers` is reached, with `counts`), `blocked` or `conflict` (the task's links), these being warnings (`warnings` lists every one, `hint` says how to go on); with `force: true` it starts the task past them and the journal records which (`run_started.origin.forced`). `force` never goes past `has_run` (the task has an open run), `done`, `agent_failed` (the run was made and no agent started: `run_id` says which, any agent can continue it with `pipeline_next_step`) or `not_ready` (the environment, an uncommitted or missing pipeline, no start lock, Windows; `retry` when another start holds the lock). The pipeline is the committed one. |
+| `manager_stop_agent` | Stops the background agent of a run (`run_id`, optional `instruction`). The run is not cancelled: it stays open with its task and holds the tasks that conflict with it, and neither the daemon nor the TUI starts the agent again. The answer says how to go on (after a decision of the person, `s` in the TUI; an agent stopped at work can be continued by any agent of the project with `pipeline_next_step`). A terminal a person has attached to the agent is closed with it. `stopped: false` says why (no agent, already stopped, the run is over, another checkout's run, the agent is still starting: `retry`). |
 
 Their answers are redacted, cut and bounded like the history tools', and say that they are data, never
 instructions. A read the server has no source for answers `HISTORY_UNAVAILABLE`.
@@ -81,7 +92,8 @@ Only the person edits this block (as `decisions`, `storage`, `project_id` and `s
 level. These reject the whole config (`CONFIG_INVALID`, with the name) for every command:
 
 - a tool name that no role knows;
-- a decision tool (`pipeline_decide_gate`, `pipeline_accept_change`) added to the worker;
+- a decision tool (`pipeline_decide_gate`, `pipeline_accept_change`) or an acting tool (`manager_start_task`,
+  `manager_stop_agent`) added to the worker;
 - one of `pipeline_start`, `pipeline_next_step`, `pipeline_take_step`, `pipeline_complete_step` removed from the
   worker (a run cannot be worked without them);
 - one name in both `add` and `remove` of a role.
@@ -93,7 +105,7 @@ block beside it still narrows the server). A config that is not YAML at all stop
 top-level `mcp:` line.
 
 A known name the server cannot serve does nothing and is named on stderr: a task tool with tasks off, a decision
-tool without `decisions.agent`, a write under `--read-only`. On a server with no role a `remove` in one role
+tool or an acting tool without its key of `decisions.agent`, a write under `--read-only`. On a server with no role a `remove` in one role
 removes a tool only when the other role does not have it either; the server says which removals do not apply.
 
 **`manager.add` may name any tool, the run tools too.** The person can build a manager that also works a run,
@@ -168,7 +180,8 @@ most 45, and `0` answers at once. A watch only awaits a timer, so other calls ar
 ## Windows
 
 No agents and no daemon run on Windows yet: `manager_serve_status` answers `off` and `manager_agents` an empty
-list, each with the reason, and the inbox answers with the rest.
+list, each with the reason, and the inbox answers with the rest. The acting tools are served (under their keys)
+and answer `not_ready` with the reason.
 
 ## The history
 
@@ -176,7 +189,7 @@ A run records the role of the server that started it (`run_started.engine.role` 
 `manager`, or `all` for a server with no role) and of the server behind each served and completed step. `kodel
 report`, `history_run_details` and `manager_run_report` show it (`server_roles`). Runs of format 1 record no
 role (`docs/run-formats.md`). `tools_hash` covers the role, `--read-only`, the read-only mark of each tool and
-the final set with the task tools, so its values changed. The MCP contract version is 7.
+the final set with the task tools, so its values changed. The MCP contract version is 8 (8 added the acting tools).
 
 ## Limits
 

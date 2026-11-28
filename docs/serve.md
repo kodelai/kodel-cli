@@ -190,12 +190,45 @@ process table cannot be read (a sandbox), only the process the holder started is
 says once `cannot read the process table: an agent left behind a dead wrapper would not be seen`.
 
 A start needs room in both; a resume needs room in `max_workers` only. When `max_workers` is full, resumes
-wait, oldest decision first, and every waiting resume goes before any new start. A start you make by key in
-the TUI (`s` on a task) ignores both limits; the daemon then starts nothing new until the counts are under
-them. With an active daemon the TUI leaves resumes to it (the card says `kodel serve resumes it`), so they keep
+wait, oldest decision first, and every waiting resume goes before any new start. A start you make by hand (`s` on a task in the TUI, Start in the web UI, a manager's
+`manager_start_task`) counts the same places, but is a warning, not a bar: it says `full` and which of `max_runs` and
+`max_workers` is reached (with the counts), and goes ahead only when you confirm it (a manager passes `force: true`, which an
+agent is told to do only when you said so). The count then goes over the limit and the daemon starts nothing new until
+the counts are under them (see "Starting by hand" below). With an active daemon the TUI leaves resumes to it (the card says `kodel serve resumes it`), so they keep
 `max_workers`. There are two exceptions, both runs the daemon does not resume: a run an agent moved on since
 your decision, and a run whose terminal worker you stopped at the wait (`kodel agent stop`). The TUI still
 offers `s resumes` for each, and that resume ignores both limits.
+
+## Starting by hand
+
+You do not need the daemon to start a task. `s` on a task in the TUI, Start in the web UI (`docs/web.md`) and, when
+`decisions.agent.start_task` is on, a manager's `manager_start_task` (`docs/mcp-roles.md`) start the task's run and
+one agent for it, with the same rule of admission as the daemon, and they work with `serve.enabled: false` and
+with `start: []`, a project that starts nothing on its own and only resumes (as this repository does).
+
+- **The limits are the same, 1 and 1 by default** (`max_workers` and `max_runs`, above). The places are counted as the
+  daemon counts them, so **a live agent that waits at a gate holds a `max_runs` place** and the next start by hand says
+  `full` until that run ends or its agent is gone. An agent that was **stopped while working** frees its place
+  (the session is over and nothing resumes it); one stopped at a wait you have not decided keeps its `max_runs` place
+  until you decide.
+- **The limits and the task's links are warnings.** `full`, `blocked` (a task it waits for is not done) and `conflict`
+  (a task it conflicts with has a run) are shown and can be confirmed (`start it anyway?` in the TUI, the confirmation of
+  the web UI, `force: true` of the tool); the journal records which were gone past (`run_started.origin.forced`). A
+  task that already has an open run, a closed task, an environment that cannot start it and a run made whose agent did
+  not start (the answer names the run) are refused whatever you confirm.
+- **`kodel task approve` is not read.** A task an agent wrote can be started by hand without it, and a dependency that
+  is closed but waits for approval counts as done. The approval holds back only what the daemon starts on its own
+  (`docs/tasks.md`).
+- The start runs under the same lock as the daemon's, so a hand start and a cycle cannot start two agents for one
+  task, and the pipeline is the committed one: a start from the manager or the web UI refuses a pipeline that is not
+  in `HEAD`.
+
+**Stopping an agent.** `manager_stop_agent` and the web UI's Stop agent end the run's agent as `kodel agent stop` does:
+the run stays open (nothing cancels it) with its task and holds the tasks that conflict with it. The daemon and the
+TUI treat the stop as yours and do not resume the agent. **The stop also ends a terminal you have attached**
+(`kodel agent attach`): the session is the agent's, and it goes. To go on, decide the gate and press `s` on the run in
+the TUI, or, for an agent stopped while working, have any agent of the project continue it with `pipeline_next_step` and
+the run id.
 
 ## Resuming after your decision
 

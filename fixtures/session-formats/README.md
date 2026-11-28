@@ -27,3 +27,9 @@ again and fails when one differs from its golden. The CI `pty` job runs it; wher
 `worker-print-before-t47/` is not written by the script: it is `session.json` and `status.json` of a print worker
 (`claude -p`, no `agent.json`) taken once from the launcher and the holder of the build before T-47 (commit
 d055fd6), with a shell script for `claude`, and masked the same way. It is never taken again.
+
+`session-started.json` and `stop-manager.json` show the two optional notes of manager_start_task and manager_stop_agent:
+`startedBy` at the top level of `session.json` (beside `spec`, never in it) and `via: "manager"` (or `"web"`, the same shape) on a stop record. The script
+takes them from a real holder (`bun scripts/take-session-fixtures.mjs`, with a readable process table); the two files in
+the repository were written by hand in the shape the holder writes, in a sandbox that could not read the process table, so
+run `bun scripts/take-session-fixtures.mjs --check` where it can.

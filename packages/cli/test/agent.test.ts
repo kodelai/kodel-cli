@@ -1097,3 +1097,17 @@ describe("kodel agent exec --pty --attach (TASK-K6MA)", () => {
     expect((JSON.parse(json.out) as unknown[]).length).toBe(3);
   });
 });
+
+describe("a stop from the web page", () => {
+  test("mstart_agent_ls_does_not_call_a_web_stop_a_manager", () => {
+    const web = {
+      state: "killed",
+      reason: "stopped",
+      stoppedBy: "person",
+      stoppedVia: "web",
+    } as const;
+    expect(stateLabel({ id: "a_000000001_abcd", status: web })).toBe("stopped (from the web page)");
+    expect(stopLabel(web)).toBe("stopped (from the web page)");
+    expect(stateLabel({ id: "a_000000001_abcd", status: web })).not.toContain("manager");
+  });
+});

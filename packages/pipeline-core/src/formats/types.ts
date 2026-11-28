@@ -37,6 +37,10 @@ export interface FormatCapabilities {
    * frozen as its published engine wrote it: a run of it goes on and records no role.
    */
   executorRole: boolean;
+  /** `run_started.origin`, how the run was started (a kind, no name). Format 1 never wrote it. */
+  origin: boolean;
+  /** The event that says an agent stopped the run's agent through a manager (`agent_stopped`). Format 1 never wrote it. */
+  agentStops: boolean;
   /** The event that says a version of an attachment was stored (`attachment_written`, T-45). */
   attachments: boolean;
   /** The pipeline features a snapshot of this format can use. */

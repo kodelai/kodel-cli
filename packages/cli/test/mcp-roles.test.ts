@@ -10,6 +10,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  AGENT_ACTION_TOOLS,
   DECISION_TOOLS,
   KNOWN_TOOL_NAMES,
   ROLE_TOOLS,
@@ -177,6 +178,9 @@ const withoutTasks = (names: readonly string[]) => names.filter((n) => !n.starts
 /** A server outside a project has a host that keeps no attachments. */
 const withoutAttachments = (names: readonly string[]) =>
   names.filter((n) => !n.startsWith("pipeline_attachment_"));
+/** None of these configs sets `decisions.agent.start_task` or `stop_agent`, so the acting tools are not served. */
+const withoutKeyed = (names: readonly string[]) =>
+  names.filter((n) => !AGENT_ACTION_TOOLS.includes(n));
 const withoutDecisions = (names: readonly string[]) =>
   names.filter((n) => !DECISION_TOOLS.includes(n));
 /** `manager_cancel_run` (NE3N) needs `decisions.agent.cancel_run`, which DECISIONS leaves off, and a manager. */
@@ -221,7 +225,7 @@ describe("5m9d a server serves exactly its set", () => {
   test("5m9d_manager_cannot_call_a_tool_outside_its_set", async () => {
     for (const config of CONFIGS) {
       const dir = makeRepo(config.text);
-      let expected: readonly string[] = withoutCancel(ROLE_TOOLS.manager);
+      let expected: readonly string[] = withoutCancel(withoutKeyed(ROLE_TOOLS.manager));
       if (!config.tasks) expected = withoutTasks(expected);
       if (!config.decides) expected = withoutDecisions(expected);
       const manager = await connect(dir, ["--role", "manager"]);
@@ -301,9 +305,10 @@ describe("5m9d a server serves exactly its set", () => {
 
       // 5m9d_the_person_can_give_the_manager_run_tools: `pipeline_start` is taken.
       const manager = await connect(dir, ["--role", "manager"]);
-      let managerSet = withoutCancel([...ROLE_TOOLS.manager, "pipeline_start"]).filter(
-        (name) => name !== "history_stats",
-      );
+      let managerSet = [
+        ...withoutCancel(withoutKeyed(ROLE_TOOLS.manager)),
+        "pipeline_start",
+      ].filter((name) => name !== "history_stats");
       if (!config.tasks) managerSet = withoutTasks(managerSet);
       if (!config.decides) managerSet = withoutDecisions(managerSet);
       await expectOnly(manager, managerSet);
@@ -316,7 +321,7 @@ describe("5m9d a server serves exactly its set", () => {
 
       // With no role: the union after the overrides. Each removed tool was in one role only, so it is gone.
       const all = await connect(dir, []);
-      let union = withoutCancel(KNOWN_TOOL_NAMES).filter(
+      let union = withoutCancel(withoutKeyed(KNOWN_TOOL_NAMES)).filter(
         (name) => name !== "pipeline_plan" && name !== "history_stats",
       );
       if (!config.tasks) union = withoutTasks(union);
@@ -329,7 +334,7 @@ describe("5m9d a server serves exactly its set", () => {
   test("5m9d_no_role_serves_every_tool_as_before", async () => {
     const dir = makeRepo(OFF + DECISIONS + TASKS);
     const all = await connect(dir, []);
-    await expectOnly(all, withoutCancel(KNOWN_TOOL_NAMES));
+    await expectOnly(all, withoutCancel(withoutKeyed(KNOWN_TOOL_NAMES)));
     expect(all.tools.find((t) => t.name === "pipeline_next_step")?.annotations?.readOnlyHint).toBe(
       false,
     );
@@ -404,7 +409,7 @@ describe("5m9d the start command", () => {
     const manager = await outside(["--role", "manager"]);
     await expectOnly(
       manager,
-      withoutAttachments(withoutDecisions(withoutTasks(ROLE_TOOLS.manager))),
+      withoutAttachments(withoutDecisions(withoutTasks(withoutKeyed(ROLE_TOOLS.manager)))),
     );
     // Every tool it does serve answers with the reason there is no project.
     expect(await manager.call("manager_inbox")).toMatchObject({ ok: false, code: "NO_PROJECT" });
@@ -557,6 +562,31 @@ describe("5m9d what the agent is told", () => {
     expect(all.client.getInstructions() ?? "").toContain("lets you decide");
     await all.close();
   }, 120_000);
+
+  test("mstart_keys_reset_in_every_settings_branch", async () => {
+    // The tools themselves come with their descriptors; the count the server reports is of the names
+    // it is allowed to serve, which is what the settings branches decide.
+    const KEYS = "decisions:\n  agent:\n    start_task: true\n    stop_agent: true\n";
+    const count = async (config: string, args: string[]): Promise<number> => {
+      const server = await connect(makeRepo(OFF + config), args);
+      const said = /serving (\d+) tools/.exec(server.stderr());
+      await server.close();
+      return Number(said?.[1]);
+    };
+    const manager = ["--role", "manager"];
+    const plain = await count("", manager);
+    expect(await count(KEYS, manager)).toBe(plain + 2);
+    // No role: the union has them too.
+    expect(await count(KEYS, [])).toBe((await count("", [])) + 2);
+    // Every other branch resets the keys, as it resets the decision tools.
+    expect(await count(KEYS, [...manager, "--read-only"])).toBe(
+      await count("", [...manager, "--read-only"]),
+    );
+    expect(await count(KEYS, [...manager, "--no-decisions"])).toBe(
+      await count("", [...manager, "--no-decisions"]),
+    );
+    expect(await count(KEYS, ["--role", "worker"])).toBe(await count("", ["--role", "worker"]));
+  }, 180_000);
 
   test("5m9d_worker_done_answer_names_no_task_update", async () => {
     const DONE = "name: one\nnodes:\n  - { slug: only, kind: agent, prompt: do it }\nedges: []\n";

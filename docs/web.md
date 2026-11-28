@@ -102,6 +102,28 @@ answer says what is left: a task that stays open (its key), the branch, the work
 remove them, and any agent that could not be stopped. A finished run cannot be canceled. Each cancel is a
 line of the server's audit log with the device and the reason, redacted.
 
+## Starting a task and stopping an agent
+
+Two buttons act on the machine the server runs on, through the same functions as `s` in `kodel tui` and the manager's
+tools (`docs/mcp-roles.md`):
+
+- **Start** on a task's card (with a choice of pipeline when there are several) starts the task's run and a background
+  agent, as `s` does. It needs no `kodel task approve`, which only holds back what `kodel serve` starts on its own
+  (`docs/tasks.md`). The page asks to confirm first; the confirmation is kept by the server, and only a second call that
+  names it starts anything. The confirmation lists the warnings that apply (the limits `serve.max_runs` and
+  `serve.max_workers`, a task it waits for, a task it conflicts with); a start you confirm goes ahead of exactly those
+  and the journal records them (`run_started.origin`, `docs/run-formats.md`). A task that already has a run, a closed
+  task and an environment that cannot start it are refused with the reason, with no second step.
+- **Stop agent** in the head of a run stops the run's background agent, after a confirmation, also kept by the server.
+  The run is not cancelled: it stays open with its task. The agent of a run you are attached to in a terminal
+  (`kodel agent attach`) is stopped with its terminal.
+
+Neither button needs a key of `decisions.agent`: those keys (`start_task`, `stop_agent`, `docs/decisions.md`) are for an
+agent, and a paired person is not one. The buttons work with the keys off, and the keys do not change them. They are
+absent on Windows, where no agents run, and in `--demo`. Every start and stop is printed and appended to the audit log
+with the device (`device <id> started <key> (run <run>)`, `device <id> stopped the agent of <run>`, and a line for a
+refusal), and the request obeys the rules below (`Origin`, JSON, a paired device).
+
 ## Asking the agent about a run
 
 Off by default. Started with
@@ -136,8 +158,13 @@ does not know.
 `kodel web --mcp` also serves MCP at `/mcp` (Streamable HTTP), so that an agent on another machine can look
 after the runs of this one: what waits for you, the history, a gate's changes, the tasks. It serves the
 **manager** role only (`docs/mcp-roles.md`): an agent elsewhere works no run, since the files of a run are
-here. The decision tools are served only as far as `decisions.agent` in the project config allows, as for any
-manager.
+here. The decision tools and the two acting tools (`manager_start_task`, `manager_stop_agent`) are served only as far as
+`decisions.agent` in the project config allows, as for any manager; a `--read-only` token gets none of them. The keys
+`start_task` and `stop_agent` are **the same keys** that gate a manager an agent starts on this machine over stdio: one
+setting covers both, so turning one on lets a token holder on another machine start a task without `task approve` (and,
+with `force`, past the limits) and stop an agent here. There are no separate keys for the two paths, and none for
+`force`. The tools answer `not_ready` where there is no start lock to hold, and on Windows. The audit log names the tool
+called, never its arguments.
 
 A client carries a token. A person makes one at a terminal; it is shown once and only its hash is kept:
 

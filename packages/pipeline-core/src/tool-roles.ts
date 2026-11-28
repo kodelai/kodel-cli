@@ -33,6 +33,33 @@ export const DECISION_TOOLS: readonly string[] = [
   "manager_cancel_run",
 ];
 
+/**
+ * The manager's tools that act for the person (start a task, stop a run's agent): served only under the
+ * key of `decisions.agent` named here, never to the worker, and read again at every call.
+ */
+export const AGENT_ACTION_KEYS: Readonly<Record<string, "start_task" | "stop_agent">> = {
+  manager_start_task: "start_task",
+  manager_stop_agent: "stop_agent",
+};
+
+export const AGENT_ACTION_TOOLS: readonly string[] = Object.keys(AGENT_ACTION_KEYS);
+
+/**
+ * Whether a tool may be served given the keys that are on: every tool that is not an acting tool,
+ * and an acting tool only under its own key.
+ */
+export function servedUnderKeys(
+  name: string,
+  keys: { startTask?: boolean; stopAgent?: boolean } | undefined,
+): boolean {
+  const key = AGENT_ACTION_KEYS[name];
+  if (key === undefined) return true;
+  return (key === "start_task" ? keys?.startTask : keys?.stopAgent) === true;
+}
+
+/** The tools a worker is never given: they decide or act for the person. */
+const NEVER_WORKER: readonly string[] = [...DECISION_TOOLS, ...AGENT_ACTION_TOOLS];
+
 /** The task tools (`mcp/task-tools.ts`); a test keeps the list equal to the registry for every adapter profile. */
 export const TASK_TOOL_NAMES: readonly string[] = [
   "task_schema",
@@ -96,6 +123,7 @@ export const ROLE_TOOLS: Readonly<Record<ServerRole, readonly string[]>> = {
     "pipeline_attachment_read",
     "pipeline_attachment_list",
     ...DECISION_TOOLS,
+    ...AGENT_ACTION_TOOLS,
     ...MANAGER_TOOL_NAMES,
   ],
 };
@@ -135,7 +163,7 @@ export function roleOverridesProblem(
       }
     }
     if (role === "worker") {
-      const decides = add.find((name) => DECISION_TOOLS.includes(name));
+      const decides = add.find((name) => NEVER_WORKER.includes(name));
       if (decides !== undefined) {
         return `mcp.roles.worker.add names "${decides}": the worker is never given a tool that decides for the person`;
       }
@@ -188,7 +216,7 @@ export function resolveToolSet(input: {
   const unapplied: Unapplied[] = [];
   const worker = afterOverride(roles.worker, overrides.worker).filter(
     // Whatever the table handed in says, the worker decides nothing for the person.
-    (name) => !DECISION_TOOLS.includes(name),
+    (name) => !NEVER_WORKER.includes(name),
   );
   const manager = afterOverride(roles.manager, overrides.manager);
   let wanted: string[];
@@ -222,9 +250,11 @@ export function resolveToolSet(input: {
           name,
           why: DECISION_TOOLS.includes(name)
             ? "added by mcp.roles, but this server serves a decision tool only under decisions.agent"
-            : ATTACHMENT_TOOL_NAMES.includes(name)
-              ? "added by mcp.roles, but this server keeps no attachments"
-              : "added by mcp.roles, but this server cannot serve it (a task tool needs tasks on)",
+            : AGENT_ACTION_TOOLS.includes(name)
+              ? `added by mcp.roles, but this server serves ${name} only under decisions.agent.${AGENT_ACTION_KEYS[name]}`
+              : ATTACHMENT_TOOL_NAMES.includes(name)
+                ? "added by mcp.roles, but this server keeps no attachments"
+                : "added by mcp.roles, but this server cannot serve it (a task tool needs tasks on)",
         });
       }
       continue;

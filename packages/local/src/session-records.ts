@@ -19,9 +19,11 @@ import {
   type SessionRecord,
   type SessionSnapshot,
   STOP_BY,
+  STOP_VIAS,
   type StatusRecord,
   type StopAsker,
   type StopRecord,
+  type StopVia,
   stopAskerOf,
 } from "@kodel-ai/pipeline-core";
 import { sameProcess } from "./process-table";
@@ -74,6 +76,15 @@ export const readStop = (dir: string): "missing" | "unreadable" | "newer" | Stop
   return typeof value === "string" ? value : stopAskerOf(value.by);
 };
 
+/** The note a readable stop record carries (`manager`); nothing for a record without one or one with a note this build does not know. */
+export const readStopVia = (dir: string): StopVia | undefined => {
+  const value = readRecord("stop", join(dir, STOP_FILE));
+  if (typeof value === "string") return undefined;
+  return (STOP_VIAS as readonly string[]).includes(value.via ?? "")
+    ? (value.via as StopVia)
+    : undefined;
+};
+
 /**
  * Leaves the stop record of who asks, before anything is signalled. A person's record is never replaced; a
  * person's stop replaces any other, so what a `finish` left of a session does not hide that a person stopped
@@ -84,6 +95,7 @@ export const writeStop = (
   by: StopAsker,
   at: number,
   identity?: StopRecord["identity"],
+  via?: StopVia,
 ): void => {
   const there = readStop(dir);
   if (there === "person" || (there !== "missing" && by !== "person")) return;
@@ -93,6 +105,7 @@ export const writeStop = (
       v: SESSION_FORMAT_VERSION,
       by: STOP_BY[by],
       at,
+      ...(via === undefined ? {} : { via }),
       ...(identity === undefined ? {} : { identity }),
     }),
   );
@@ -165,6 +178,8 @@ export const snapshotOf = (dir: string, orphans?: OrphanCheck): SessionSnapshot 
   const session = readSession(dir);
   const status = readStatus(dir);
   const stop = readStop(dir);
+  const stopVia =
+    stop === "missing" || stop === "unreadable" || stop === "newer" ? undefined : readStopVia(dir);
   const agent = readAgent(dir);
   const live =
     status !== "missing" && status !== "unreadable" && status !== "newer" ? status : undefined;
@@ -207,6 +222,7 @@ export const snapshotOf = (dir: string, orphans?: OrphanCheck): SessionSnapshot 
     holderAlive,
     childAlive,
     stop: stop === "newer" ? "unreadable" : stop,
+    ...(stopVia === undefined ? {} : { stopVia }),
   };
 };
 

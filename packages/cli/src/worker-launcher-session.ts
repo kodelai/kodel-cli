@@ -16,7 +16,9 @@ import type {
   SessionAdapter,
   SessionListEntry,
   SessionState,
+  Started,
   StopAsker,
+  StopVia,
 } from "@kodel-ai/pipeline-core";
 import {
   agentProblem,
@@ -183,6 +185,9 @@ export function parseEntry(raw: unknown): SessionListEntry | undefined {
   if (raw.status.stoppedBy === "person" || raw.status.stoppedBy === "finish") {
     status.stoppedBy = raw.status.stoppedBy;
   }
+  if (raw.status.stoppedVia === "manager" || raw.status.stoppedVia === "web") {
+    status.stoppedVia = raw.status.stoppedVia;
+  }
   if (raw.status.childAlive === true) status.childAlive = true;
   if (typeof raw.status.since === "number") status.since = raw.status.since;
   if (typeof raw.status.lastOutputAt === "number") status.lastOutputAt = raw.status.lastOutputAt;
@@ -301,6 +306,9 @@ export function workerStatusOf(
       ? {}
       : { lastOutputAt: entry.status.lastOutputAt }),
     ...(!unknown && stoppedByPerson(entry.status) ? { stopped: true as const } : {}),
+    ...(!unknown && stoppedByPerson(entry.status) && entry.status.stoppedVia !== undefined
+      ? { stoppedVia: entry.status.stoppedVia }
+      : {}),
     ...(!unknown && entry.status.childAlive === true ? { childAlive: true as const } : {}),
     ...(terminal ? { terminal: true as const } : {}),
     ...(unknown || endedByOf(entry.status) === undefined
@@ -435,6 +443,7 @@ export function createSessionWorkerLauncher(deps: SessionLauncherDeps): WorkerLa
     settings: WorkerSettings | undefined;
     allowed: readonly string[];
     conversation: { sessionId: string } | { resume: string; resumes: string };
+    startedBy?: Started;
   }) => {
     const { mechanism, settings, allowed, conversation } = input;
     const refused = cannotRun(mechanism);
@@ -463,6 +472,7 @@ export function createSessionWorkerLauncher(deps: SessionLauncherDeps): WorkerLa
       cwd: input.workdir,
       name: input.name,
       origin: "cli",
+      ...(input.startedBy === undefined ? {} : { startedBy: input.startedBy }),
       timeoutMs: terminal ? WORKER_TERMINAL_TIMEOUT_MS : WORKER_TIMEOUT_MS,
       inheritEnv: false,
       // The environment of the moment: a PATH or an auth changed since the start is the resume's.
@@ -493,6 +503,7 @@ export function createSessionWorkerLauncher(deps: SessionLauncherDeps): WorkerLa
       settings: found.settings,
       allowed,
       conversation: { sessionId: deps.uuid() },
+      ...(input.startedBy === undefined ? {} : { startedBy: input.startedBy }),
     });
   };
 
@@ -637,9 +648,9 @@ export function createSessionWorkerLauncher(deps: SessionLauncherDeps): WorkerLa
     };
   };
 
-  const stopRecord = async (id: string, by: StopAsker) => {
+  const stopRecord = async (id: string, by: StopAsker, via?: StopVia) => {
     try {
-      await deps.adapter.stop(id, { by });
+      await deps.adapter.stop(id, { by, ...(via === undefined ? {} : { via }) });
     } catch (error) {
       const gone =
         error instanceof SessionError &&
@@ -658,8 +669,11 @@ export function createSessionWorkerLauncher(deps: SessionLauncherDeps): WorkerLa
       const latest = await latestOf(runId);
       return (await deps.adapter.tail(latest.id, bytes, "both")).text;
     },
-    async stop(runId) {
-      await stopRecord((await latestOf(runId)).id, "person");
+    async stop(runId, via) {
+      // Read again, not from the cache: a resume by the daemon may have made a newer record since.
+      const latest = (await statuses([runId])).get(runId);
+      if (latest === undefined) throw new Error(`run ${runId} has no agent of the TUI`);
+      await stopRecord(latest.id, "person", via);
     },
     async finish(runId) {
       // Read again: the caller holds the start lock, and only a record that is live now is stopped.

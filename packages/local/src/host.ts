@@ -97,6 +97,7 @@ import {
   type ResultReport,
   type RunEvent,
   type RunFacts,
+  type RunOrigin,
   type RunReport,
   type RunState,
   type RunTaskLink,
@@ -228,7 +229,12 @@ export interface HostOptions {
    * config, as read when the server started). The texts of the waiting answers name a tool only
    * when it is here, so they never name one the server does not offer.
    */
-  agentDecisions?: { gate?: boolean; pipelineChange?: boolean };
+  agentDecisions?: {
+    gate?: boolean;
+    pipelineChange?: boolean;
+    startTask?: boolean;
+    stopAgent?: boolean;
+  };
   /**
    * The names of the tools the server serves (5M9D), so that an answer never names one it does not:
    * the note about a task the engine does not close says `task_update` only where it is served.
@@ -506,6 +512,8 @@ const FREE_TEXT_FIELDS = [
   "note",
   "changesError",
   "changesNote",
+  // The words an agent gave a stop (`agent_stopped`).
+  "instruction",
 ] as const;
 
 function redactEvent(event: RunEvent, rules: RedactRule[]): RunEvent {
@@ -520,6 +528,14 @@ function redactEvent(event: RunEvent, rules: RedactRule[]): RunEvent {
     const { instruction } = by as { instruction: unknown };
     if (typeof instruction === "string") {
       copy["byAgent"] = { ...by, instruction: redactText(instruction, rules) };
+    }
+  }
+  // The words the agent says the person gave it when it started the run through a manager.
+  const origin = copy["origin"];
+  if (typeof origin === "object" && origin !== null && "agent_instruction" in origin) {
+    const { agent_instruction } = origin as { agent_instruction: unknown };
+    if (typeof agent_instruction === "string") {
+      copy["origin"] = { ...origin, agent_instruction: redactText(agent_instruction, rules) };
     }
   }
   return copy as unknown as RunEvent;
@@ -833,6 +849,8 @@ export class LocalHost {
       caller?: Caller;
       /** What the agent was given when it connected, for the `engine` record. */
       surface?: ServedSurface;
+      /** How the run is started, as the path of the call sets it; written to `run_started` as it is, bounded and redacted. */
+      origin?: RunOrigin;
     } = {},
   ): Promise<{ run: LocalRun; reused: boolean; terminal: boolean; workdir?: Workdir }> {
     const registry = this.engine.registry ?? defaultRegistry();
@@ -967,6 +985,7 @@ export class LocalHost {
                 executor,
                 engine: engineRecord(this.options.build ?? UNKNOWN_BUILD, options.surface),
               }),
+          ...(options.origin === undefined ? {} : { origin: options.origin }),
           ...(baseCommit === undefined ? {} : { baseCommit }),
         });
         if (!result.ok) throw result.error;
@@ -1775,6 +1794,32 @@ export class LocalRun {
           );
           if (!decision.ok) throw decision.error;
           return decision.noop ? { written: false, dropped: true as const } : { written: true };
+        }),
+      );
+    this.queue = step;
+    return step;
+  }
+
+  /**
+   * Journal that an agent stopped the run's agent through a manager's server (Q-1 A of the plan). The
+   * words are the agent's and go through the redaction like any text. `written` is false when the run
+   * is over or its format has no place for the event: the stop is not this event's to refuse, so a caller
+   * says so in its answer instead.
+   */
+  noteAgentStopped(input: { instruction?: string } = {}): Promise<{ written: boolean }> {
+    const step = this.queue
+      .catch(() => undefined)
+      .then(() =>
+        this.locked(async () => {
+          const decision = await this.decideAndWrite(
+            {
+              type: "agent_stopped",
+              ...(input.instruction === undefined ? {} : { instruction: input.instruction }),
+            },
+            false,
+          );
+          if (!decision.ok) throw decision.error;
+          return { written: !decision.noop };
         }),
       );
     this.queue = step;

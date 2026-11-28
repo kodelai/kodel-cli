@@ -8,16 +8,28 @@ import type { LocalRun } from "@kodel-ai/local";
 import type { Caller } from "@kodel-ai/pipeline-core";
 import {
   ChoiceNeeded,
+  type ForcedWarning,
   type JournalRecord,
   KodelError,
+  type NextStep,
+  type RunOrigin,
   type RunState,
-  readinessWords,
-  ready,
   SessionError,
+  type Started,
 } from "@kodel-ai/pipeline-core";
+import {
+  checkManualStart,
+  type ManualCheck,
+  type ManualServe,
+  type ManualStartDeps,
+  type ManualStartHost,
+  type ManualStartResult,
+  type ManualTask,
+  startManual,
+} from "../manual-start";
 import type { WorkerLauncher } from "../worker-launcher";
 import type { StartCheck, StartResult, TuiOptions } from "./run";
-import { loadTask, messageOf, type TasksHandle } from "./tasks-load";
+import { type CardSlot, loadTask, messageOf, type TasksHandle } from "./tasks-load";
 import { decisionOf } from "./worker-resume";
 
 /** The part of a run the start and the resume read; `LocalRun` fits it. */
@@ -27,6 +39,8 @@ export interface StartRun {
   state(): Promise<RunState>;
   location(): Promise<{ path: string } | undefined>;
   inProject(worktree: string): Promise<string>;
+  inspect(): Promise<NextStep>;
+  integrityStatus(): Promise<"ok" | "modified" | "unknown">;
 }
 
 /** The part of the host the start uses; `LocalPipelineHost` fits it. */
@@ -38,7 +52,10 @@ export interface StartHost {
     task: string;
     restart: boolean;
     task_key?: string;
+    title?: string;
     caller: Caller;
+    origin?: RunOrigin;
+    committed_only?: boolean;
   }): Promise<{
     status: "started" | "reused" | "terminal";
     run: { runId: string };
@@ -69,12 +86,43 @@ export interface WorkerOptionsInput {
   version: string;
   /** The folder the worktrees of the runs are made in, for the launcher's trust probe. */
   worktreesDir?: string;
+  /** The `serve` block as it is now (the limits a start is warned about); absent: no limits. */
+  serve?: () => Promise<ManualServe>;
 }
 
 /** The task text a run gets: the title, a blank line, the body; the title alone without a body. */
 export function taskTextOf(card: { title: string; body?: string }): string {
   const body = card.body?.trim() ?? "";
   return body === "" ? card.title : `${card.title}\n\n${body}`;
+}
+
+/** The task a start by hand stands on, from the card the tracker gave; links are read, approval is not. */
+export function manualTaskOf(slot: CardSlot): ManualTask {
+  if (slot.status !== "ready") {
+    return {
+      status: "failed",
+      message: slot.status === "failed" ? slot.message : "the task cannot be read",
+    };
+  }
+  const { card } = slot;
+  return {
+    status: "ready",
+    title: card.title,
+    text: taskTextOf(card),
+    view: {
+      key: card.key,
+      title: card.title,
+      status: card.status,
+      state: card.state,
+      ...(card.priority === undefined ? {} : { priority: card.priority }),
+      ...(card.parent === undefined ? {} : { parent: card.parent }),
+      started_runs: card.runs.length,
+      ...(card.dependsOn === undefined ? {} : { depends_on: card.dependsOn }),
+      ...(card.dependencies === undefined ? {} : { dependencies: card.dependencies }),
+      ...(card.conflictsWith === undefined ? {} : { conflicts_with: card.conflictsWith }),
+      ...(card.blocks === undefined ? {} : { blocks: card.blocks }),
+    },
+  };
 }
 
 export interface LaunchRunInput {
@@ -92,6 +140,8 @@ export interface LaunchRunInput {
   subject: string;
   /** Absent for a run with no task (`kodel agent start --pipeline`): nothing is written to a tracker. */
   taskKey?: string;
+  /** Who started it, as a kind: kept in the journal (`origin`) and in the agent's session record. */
+  started?: Started;
 }
 
 /**
@@ -109,6 +159,7 @@ export async function launchRun(input: LaunchRunInput): Promise<StartResult & { 
       restart: true,
       ...(input.taskKey === undefined ? {} : { task_key: input.taskKey }),
       caller: input.caller,
+      ...(input.started === undefined ? {} : { origin: { ...input.started } }),
     });
   } catch (error) {
     if (error instanceof ChoiceNeeded) {
@@ -131,7 +182,12 @@ export async function launchRun(input: LaunchRunInput): Promise<StartResult & { 
   }
   const workdir = outcome.workdir?.path ?? input.root;
   try {
-    const { name } = await launcher.start({ runId, workdir, title: input.title });
+    const { name } = await launcher.start({
+      runId,
+      workdir,
+      title: input.title,
+      ...(input.started === undefined ? {} : { startedBy: input.started }),
+    });
     return {
       ok: true,
       runId,
@@ -155,116 +211,102 @@ export function createWorkerOptions(
   const { host, tasks, launcher } = input;
   const caller: Caller = { name: "kodel-tui", version: input.version };
 
-  /**
-   * A start by hand is not held back by the task's links (T-45): the person is told what `kodel serve`
-   * would wait for and decides. A task or runs that cannot be read give no warning; the start reads them again.
-   */
-  const linkWarning = async (key: string): Promise<string | undefined> => {
-    const slot = await loadTask(tasks, key);
-    if (slot.status !== "ready") return undefined;
-    const { card } = slot;
-    if (card.dependsOn === undefined && card.conflictsWith === undefined) return undefined;
-    const openRunTasks = new Map<string, string>();
-    const unreadableRuns: string[] = [];
-    if (card.conflictsWith !== undefined) {
-      try {
-        for (const s of await host.runSummaries()) {
-          if (s.state === undefined) {
-            // As the daemon does: an unreadable run of another checkout holds nothing back.
-            if (host.foreignRootOf?.(s.meta) === undefined) unreadableRuns.push(s.meta.runId);
-          } else if (
-            s.state.taskKey !== undefined &&
-            (s.state.status === "running" || s.state.status === "paused")
-          ) {
-            openRunTasks.set(s.state.taskKey, s.meta.runId);
-          }
-        }
-      } catch {
-        return undefined;
-      }
+  const readTask = async (key: string): Promise<ManualTask> =>
+    manualTaskOf(await loadTask(tasks, key));
+
+  // `StartHost` types the reads loosely (a run summary without its whole meta) so that a test can fake them;
+  // the real host is `LocalPipelineHost`, which has the full `ManualStartHost` shape. One narrowing, no `unknown`.
+  const manual: ManualStartDeps = {
+    host: host as ManualStartHost,
+    launcher,
+    readTask,
+    ...(input.serve === undefined ? {} : { serve: input.serve }),
+    caller,
+    dialog: input.dialog,
+    root: input.root,
+    ...(input.worktreesDir === undefined ? {} : { worktreesDir: input.worktreesDir }),
+  };
+
+  /** What the person was shown for each task before they said yes: only that is started past. */
+  const seen = new Map<string, ForcedWarning[]>();
+
+  const refusalWords = (key: string, r: Extract<ManualStartResult, { status: "refused" }>) => {
+    if (r.retry === true) return `Could not start ${key}: another start is in progress, try again.`;
+    if (r.why === "has_run") return `${r.reason}.`;
+    if (r.why === "agent_failed") {
+      return `${r.reason}. Any agent in the project continues it with pipeline_next_step and this run id.`;
     }
-    const task = {
-      key,
-      ...(card.dependsOn === undefined ? {} : { depends_on: card.dependsOn }),
-      ...(card.dependencies === undefined ? {} : { dependencies: card.dependencies }),
-      ...(card.conflictsWith === undefined ? {} : { conflicts_with: card.conflictsWith }),
-    };
-    const verdict = ready({ task, openRunTasks, unreadableRuns });
-    return verdict.ok ? undefined : `${readinessWords(task, verdict)}: start it anyway?`;
+    return `Could not start ${key}: ${r.reason}.`;
   };
 
   const prepareStart = async (key: string): Promise<StartCheck> => {
-    const [link, listed] = await Promise.all([host.taskLink(), host.list()]);
-    const pipelines = listed.pipelines.map((p) => p.name);
-    const check = await launcher.preflight({
-      dialog: input.dialog,
-      taskLink: link !== undefined,
-      pipelines: pipelines.length,
-      ...(input.worktreesDir === undefined ? {} : { worktreesDir: input.worktreesDir }),
-    });
+    seen.delete(key);
+    let check: ManualCheck;
+    try {
+      check = await checkManualStart(manual, { key, via: "tui" });
+    } catch (error) {
+      return { ok: false, message: `Could not start ${key}: ${messageOf(error)}.` };
+    }
     if (!check.ok) {
+      const r = check.result;
       return {
         ok: false,
-        message: `Could not start ${key}: ${check.reason}.`,
-        reason: check.reason,
+        message: refusalWords(key, r),
+        ...(r.why === "not_ready" ? { reason: r.reason } : {}),
       };
     }
-    const warning = await linkWarning(key);
-    // What a person's start is told once though it may go on (a folder whose trust is not known).
+    seen.set(
+      key,
+      check.warnings.map((w) => w.why),
+    );
+    // A start by hand is not held back by what holds `kodel serve` back (limits, links): the person is
+    // told and decides.
+    const warning =
+      check.warnings.length === 0
+        ? undefined
+        : `${check.warnings.map((w) => w.reason).join("; ")}: start it anyway?`;
     return {
       ok: true,
-      pipelines,
+      pipelines: check.pipelines,
       ...(warning === undefined ? {} : { warning }),
       ...(check.note === undefined ? {} : { note: check.note }),
     };
   };
 
-  const startLocked = async (key: string, pipeline: string): Promise<StartResult> => {
-    // Read again: the question may have stood on the screen for a while.
-    const slot = await loadTask(tasks, key);
-    if (slot.status !== "ready") {
-      const why = slot.status === "failed" ? slot.message : "the task cannot be read";
-      return { ok: false, message: `Could not start ${key}: ${why}.` };
-    }
-    const { card } = slot;
-    if (card.state === "done") {
-      return { ok: false, message: `Could not start ${key}: the task is ${card.status}.` };
-    }
-    const active = (await host.runSummaries()).find(
-      (s) =>
-        s.state?.taskKey === key && (s.state.status === "running" || s.state.status === "paused"),
-    );
-    if (active) {
-      return { ok: false, message: `${key} is already started: run ${active.meta.runId}.` };
-    }
-    const { agent: _agent, ...result } = await launchRun({
-      host,
-      launcher,
-      root: input.root,
-      caller,
-      pipeline,
-      task: taskTextOf(card),
-      title: card.title,
-      subject: key,
-      taskKey: key,
-    });
-    return result;
-  };
-
-  // From the check that the task is not started to the agent's launch, under the daemon's lock.
+  // Under the daemon's lock, everything read again; the warnings the person saw are the ones gone past.
   const startTask = async (key: string, pipeline: string): Promise<StartResult> => {
-    if (host.withWorkerStartLock === undefined) return startLocked(key, pipeline);
+    const shown = seen.get(key) ?? [];
+    seen.delete(key);
+    let result: ManualStartResult;
     try {
-      return await host.withWorkerStartLock(() => startLocked(key, pipeline));
+      result = await startManual(manual, {
+        key,
+        pipeline,
+        by: "person",
+        via: "tui",
+        force: shown,
+      });
     } catch (error) {
-      if (error instanceof KodelError && error.code === "STATE_LOCKED") {
-        return {
-          ok: false,
-          message: `Could not start ${key}: another start is in progress, try again.`,
-        };
-      }
-      throw error;
+      return { ok: false, message: `Could not start ${key}: ${messageOf(error)}.` };
     }
+    if (result.status === "started") {
+      return {
+        ok: true,
+        runId: result.run_id,
+        message: `Started ${key}: run ${result.run_id} (agent ${result.agent}).`,
+      };
+    }
+    if (result.why === "full" || result.why === "blocked" || result.why === "conflict") {
+      return {
+        ok: false,
+        message: `Not started: ${result.reason}, which you were not shown. Press s to see it and decide.`,
+      };
+    }
+    return {
+      ok: false,
+      ...(result.run_id === undefined ? {} : { runId: result.run_id }),
+      message: refusalWords(key, result),
+    };
   };
 
   const resumeLocked = async (

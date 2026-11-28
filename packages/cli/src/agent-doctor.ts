@@ -213,7 +213,11 @@ export async function runAgentDoctor(input: AgentDoctorInput): Promise<boolean> 
       ...(decides.length === 0
         ? {}
         : {
-            value: `${decides.join(", ")}: a worker's own server never decides, and inside a session of kodel agent start the project's server is a worker too`,
+            value: `${decides.join(", ")}: a worker's own server never decides, and inside a session of kodel agent start the project's server is a worker too${
+              decides.some((key) => key === "start_task" || key === "stop_agent")
+                ? "; start_task and stop_agent give a manager server tools that start a task without `kodel task approve` and stop a run's agent, and a worker never gets them"
+                : ""
+            }`,
           }),
       fix: `nothing stops a worker; the block lets an agent started outside kodel decide: to let no agent decide, take decisions.agent out of ${CONFIG}`,
     });

@@ -50,6 +50,15 @@ const specShape = z
   })
   .strict();
 
+/**
+ * Who started the session, as a kind (`by`, `via` of `run_started.origin`) and never a text: `origin` of the
+ * spec already means `cli` or `host`. Plain strings, so a later build's path does not make an older one
+ * unable to read the record.
+ */
+const startedShape = z
+  .object({ by: z.string().regex(/^[a-z]{1,16}$/), via: z.string().regex(/^[a-z]{1,16}$/) })
+  .strict();
+
 export const sessionRecordSchema = z
   .object({
     v: z.number().int(),
@@ -58,6 +67,8 @@ export const sessionRecordSchema = z
     mode: z.enum(["pipes", "pty"]),
     spec: specShape,
     started: z.number(),
+    /** Who started it, when a path that knows says so (a person at the TUI or the web, an agent through a manager). */
+    startedBy: startedShape.optional(),
     root: z.string(),
     machine: z.string().optional(),
   })
@@ -82,7 +93,17 @@ export const statusRecordSchema = z
   .strict();
 
 export const stopRecordSchema = z
-  .object({ v: z.number().int(), by: z.string(), at: z.number(), identity: identity.optional() })
+  .object({
+    v: z.number().int(),
+    by: z.string(),
+    at: z.number(),
+    /** A note on a stop that is a person's for every reader: it came through a manager (`manager`) or the web page (`web`). Never read to decide. */
+    via: z
+      .string()
+      .regex(/^[a-z]{1,16}$/)
+      .optional(),
+    identity: identity.optional(),
+  })
   .strict();
 
 export const nameMarkerSchema = z
@@ -144,6 +165,9 @@ export const SESSION_RECORD_CAPABILITIES = {
     pty: true,
     /** `status.sock`: an optional field a build that does not know it drops without changing any status. */
     sock: true,
+    /** `startedBy` of `session.json` and `via` of the stop record: optional notes a build that does not know them drops. */
+    startedBy: true,
+    stopVia: true,
     tombstone: true,
   },
 } as const;
