@@ -260,7 +260,11 @@ export function resumeOffer(
     }
     case "stopped":
       // not asked for: the TUI resumes a worker the person stopped
-      return { line: "agent stopped", why: "you stopped the agent" };
+      return {
+        line: "agent stopped",
+        why:
+          worker.stoppedVia === "manager" ? "a manager stopped the agent" : "you stopped the agent",
+      };
   }
 }
 

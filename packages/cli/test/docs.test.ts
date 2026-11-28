@@ -124,3 +124,29 @@ describe("t47 the docs and the registry of the person's commands", () => {
     expect(driver).toContain("start the wait command exactly as the answer spells it");
   });
 });
+
+describe("the docs name the keys of the manager's acting tools", () => {
+  // mstart_docs_name_keys: the keys, the tools and what `force` goes past are in docs/decisions.md.
+  test("mstart_docs_name_keys", () => {
+    const decisions = flat(read("docs/decisions.md"));
+    for (const word of [
+      "`start_task`",
+      "`stop_agent`",
+      "`manager_start_task`",
+      "`manager_stop_agent`",
+      "`decisions.agent`",
+    ]) {
+      expect(decisions, word).toContain(word);
+    }
+    expect(decisions).toContain("a start without `kodel task approve`");
+    expect(decisions).toContain("With `force: true` it also gives a start **past the limits");
+    expect(decisions).toContain("`force` goes past those warnings only");
+    expect(decisions).toContain("answers `CONFIG_INVALID` for the whole project config");
+    // The same tools are named where roles, the web UI and the agents' rules are documented.
+    for (const doc of ["docs/mcp-roles.md", "docs/web.md", "AGENTS.md"]) {
+      const text = read(doc);
+      expect(text, doc).toContain("manager_start_task");
+      expect(text, doc).toContain("manager_stop_agent");
+    }
+  });
+});

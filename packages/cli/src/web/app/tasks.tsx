@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import type { Session } from "../../tui/session";
 import { formatAge } from "../../tui/session";
 import type { CardSlot, TaskRow, TasksLoad } from "../../tui/tasks-load";
-import { api, type Me } from "./api";
+import { type ActionAnswer, api, type Me, type StartResultView } from "./api";
 import { Icon } from "./icons";
 import { Markdown } from "./md";
 import { Fold, Modal, TextBox } from "./ui";
@@ -256,6 +256,81 @@ export function TasksTab(props: { me: Me; onMore: () => void; notify: Notify }) 
   );
 }
 
+type StartAsk = Extract<ActionAnswer<StartResultView>, { step: "confirm" }>;
+
+/** The second question of a Start: what warns, which pipeline, and the person's yes. */
+function StartSheet(props: {
+  taskKey: string;
+  ask: StartAsk;
+  onClose: () => void;
+  onAnswer: (result: StartResultView) => void;
+  notify: Notify;
+}) {
+  const { ask } = props;
+  const pipelines = ask.pipelines ?? [];
+  const warnings = ask.warnings ?? [];
+  const [pipeline, setPipeline] = useState<string | undefined>(pipelines[0]);
+  const [busy, setBusy] = useState(false);
+  const go = async () => {
+    setBusy(true);
+    try {
+      const r = await api.startTask(props.taskKey, {
+        flow: ask.flow,
+        ...(pipeline === undefined ? {} : { pipeline }),
+      });
+      if (r.step === "done") props.onAnswer(r.result);
+    } catch (e) {
+      props.notify((e as Error).message, false);
+      props.onClose();
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal
+      title={`Start ${props.taskKey}?`}
+      onClose={props.onClose}
+      actions={
+        <>
+          <button type="button" class="btn" onClick={props.onClose}>
+            Cancel
+          </button>
+          <button type="button" class="btn primary" disabled={busy} onClick={go}>
+            {warnings.length > 0 ? "Start anyway" : "Start"}
+          </button>
+        </>
+      }
+    >
+      <p class="muted small">
+        A background agent works the task in a run of its own. You decide at its gates.
+      </p>
+      {warnings.map((w) => (
+        <p key={`${w.why}:${w.reason}`} class="warn-line">
+          {w.reason}
+        </p>
+      ))}
+      {warnings.length > 0 ? (
+        <p class="muted small">Starting anyway goes past what is shown above, and nothing else.</p>
+      ) : null}
+      {pipelines.length > 1 ? (
+        <select
+          class="field"
+          aria-label="Pipeline"
+          value={pipeline}
+          onChange={(e) => setPipeline((e.target as HTMLSelectElement).value)}
+        >
+          {pipelines.map((p) => (
+            <option key={p} value={p}>
+              {p}
+            </option>
+          ))}
+        </select>
+      ) : null}
+      {ask.note ? <p class="muted small">{ask.note}</p> : null}
+    </Modal>
+  );
+}
+
 /** Back where the person came from: a run's card or the list. */
 function goBack() {
   if (history.length > 1) history.back();
@@ -274,6 +349,7 @@ export function TaskScreen(props: {
   const [slot, setSlot] = useState<CardSlot>({ status: "loading" });
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState(false);
+  const [starting, setStarting] = useState<StartAsk | undefined>();
   const read = () =>
     api
       .task(taskKey)
@@ -301,6 +377,29 @@ export function TaskScreen(props: {
 
   const card = slot.status === "ready" ? slot.card : undefined;
   const runs = card?.runs ?? [];
+
+  const answered = (r: StartResultView) => {
+    setStarting(undefined);
+    if (r.status === "started") {
+      props.notify(`Started: run ${r.run_id}`, true);
+      location.hash = `#/run/${encodeURIComponent(r.run_id)}`;
+    } else {
+      props.notify(r.hint === undefined ? r.reason : `${r.reason}. ${r.hint}`, false);
+      void read();
+    }
+  };
+  const start = async () => {
+    setBusy(true);
+    try {
+      const r = await api.startTask(taskKey, {});
+      if (r.step === "confirm") setStarting(r);
+      else answered(r.result);
+    } catch (e) {
+      props.notify((e as Error).message, false);
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <div class="screen run">
       <header class="bar">
@@ -313,7 +412,21 @@ export function TaskScreen(props: {
             {card ? [card.status, card.priority].filter(Boolean).join(" · ") : ""}
           </span>
         </div>
+        {props.me.canStartTask && card && card.state !== "done" ? (
+          <button type="button" class="btn primary" disabled={busy} onClick={start}>
+            Start
+          </button>
+        ) : null}
       </header>
+      {starting ? (
+        <StartSheet
+          taskKey={taskKey}
+          ask={starting}
+          onClose={() => setStarting(undefined)}
+          onAnswer={answered}
+          notify={props.notify}
+        />
+      ) : null}
       {slot.status === "loading" ? <p class="empty">Loading…</p> : null}
       {slot.status === "failed" ? <p class="empty t-bad">{slot.message}</p> : null}
       {card ? (

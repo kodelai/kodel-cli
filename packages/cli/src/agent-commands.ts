@@ -18,6 +18,7 @@ import {
   isTerminalState,
   leftoverInstruction,
   type RedactRule,
+  type RunOrigin,
   type RunState,
   type SessionAdapter,
   SessionError,
@@ -79,6 +80,7 @@ export interface AgentHost {
     restart: boolean;
     task_key?: string;
     caller: Caller;
+    origin?: RunOrigin;
   }): Promise<{
     status: "started" | "reused" | "terminal";
     run: { runId: string };
@@ -149,6 +151,8 @@ const REASON_WORDS: Record<string, string> = {
   holder_gone: "holder gone",
   no_status: "no answer",
 };
+/** How a stop that came through a manager's server or the web page reads beside the state. */
+const VIA_WORDS = { manager: "by a manager", web: "from the web page" } as const;
 const reasonWords = (reason: string): string => REASON_WORDS[reason] ?? reason.replace(/_/g, " ");
 
 /**
@@ -202,6 +206,11 @@ export const stateLabel = (entry: SessionListEntry): string => {
   }
   if (s.childAlive && s.state !== "running" && s.state !== "starting")
     detail.push("child still runs");
+  if (s.stoppedVia !== undefined && s.stoppedBy === "person") {
+    detail.unshift(
+      word === "stopped" ? VIA_WORDS[s.stoppedVia] : `stopped ${VIA_WORDS[s.stoppedVia]}`,
+    );
+  }
   return detail.length > 0 ? `${word} (${detail.join(", ")})` : word;
 };
 
@@ -251,7 +260,9 @@ export const stopLabel = (status: SessionListEntry["status"]): string =>
         (status.stoppedBy === "person" &&
           (status.state === "killed" || status.state === "lost") &&
           status.childAlive !== true)
-      ? "stopped"
+      ? status.stoppedVia === undefined
+        ? "stopped"
+        : `stopped (${VIA_WORDS[status.stoppedVia]})`
       : `${status.state}${status.reason ? ` (${status.reason})` : ""}`;
 
 /** The flags of `kodel agent start`. */
@@ -299,6 +310,9 @@ function runAgentProblem(entry: SessionListEntry, ref: string): string {
     ? !(state === "killed" && reason !== undefined && NEVER_AT_A_WAIT.includes(reason))
     : state === "exited";
   // A print worker never waits alive: a stop of one found it at work, like any other kill.
+  if (mayHaveWaited && entry.status.stoppedVia === "manager" && stoppedByPerson(entry.status)) {
+    return `${head} that a manager stopped: kodel serve leaves it to you; if it was at a wait and the run still goes, s in kodel tui resumes it after your decision. kodel agent start --resume does not continue it`;
+  }
   if (mayHaveWaited && terminal && stoppedByPerson(entry.status)) {
     return `${head} that you stopped: kodel serve leaves it to you; if it was at a wait and the run still goes, s in kodel tui resumes it after your decision`;
   }

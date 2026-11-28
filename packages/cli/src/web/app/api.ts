@@ -22,7 +22,24 @@ export interface Me {
   canTasks: boolean;
   canCommentTask: boolean;
   canCreateTask: boolean;
+  canStartTask: boolean;
+  canStopAgent: boolean;
 }
+
+/** What the server says about a start or a stop that was asked for; the words are the engine's. */
+export interface WarningView {
+  why: "full" | "blocked" | "conflict";
+  reason: string;
+}
+export type ActionAnswer<R> =
+  | { step: "confirm"; flow: number; pipelines?: string[]; warnings?: WarningView[]; note?: string }
+  | { step: "done"; result: R };
+export type StartResultView =
+  | { status: "started"; run_id: string; agent: string; pipeline: string; forced?: string[] }
+  | { status: "refused"; why: string; reason: string; hint?: string; retry?: true };
+export type StopResultView =
+  | { status: "stopped"; agent: string; run_id: string; note: string }
+  | { status: "refused"; why: string; reason: string; retry?: true };
 
 export class ApiError extends Error {
   constructor(
@@ -97,6 +114,18 @@ export const api = {
     call<{ thread: AskThread }>("GET", `${run(id)}/ask`).then((r) => r.thread),
   ask: (id: string, question: string, refs: AskRef[] = []) =>
     call<{ thread: AskThread }>("POST", `${run(id)}/ask`, { question, refs }).then((r) => r.thread),
+  startTask: (key: string, body: { pipeline?: string; flow?: number }) =>
+    call<ActionAnswer<StartResultView>>(
+      "POST",
+      `${TASKS_API}/${encodeURIComponent(key)}/start`,
+      body,
+    ),
+  stopAgent: (id: string, flow?: number) =>
+    call<ActionAnswer<StopResultView>>(
+      "POST",
+      `${run(id)}/stop-agent`,
+      flow === undefined ? {} : { flow },
+    ),
   decide: (id: string, flow: number) =>
     call<{ outcome: DecisionOutcome }>("POST", `${run(id)}/decide`, { flow }).then(
       (r) => r.outcome,

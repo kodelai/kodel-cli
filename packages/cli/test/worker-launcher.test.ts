@@ -37,6 +37,7 @@ import {
   SessionError,
   type SessionListEntry,
   type SessionSnapshot,
+  stoppedByPerson,
   validateSpec,
 } from "@kodel-ai/pipeline-core";
 import { decisionTools, HISTORY_TOOLS, TOOLS } from "@kodel-ai/pipeline-core/mcp";
@@ -207,6 +208,115 @@ function deps(
 const INIT = (id: string) =>
   JSON.stringify({ type: "system", subtype: "init", session_id: id, tools: [] });
 const RESULT = (id: string) => JSON.stringify({ type: "result", session_id: id, num_turns: 2 });
+
+describe("mstart who started a worker and how it was stopped", () => {
+  test("mstart_launcher_passes_started_by_to_the_session_and_not_into_the_spec_text", async () => {
+    const adapter = new ScriptedSessionAdapter();
+    const launcher = createSessionWorkerLauncher(deps(adapter));
+    await launcher.start({
+      runId: RUN,
+      workdir: "/proj/.kodel/worktrees/x",
+      title: "Add a flag",
+      startedBy: { by: "agent", via: "manager" },
+    });
+    const spec = adapter.specs[0];
+    expect(spec?.startedBy).toEqual({ by: "agent", via: "manager" });
+    // a start with no path to name leaves it out: the daemon's
+    const other = new ScriptedSessionAdapter();
+    await createSessionWorkerLauncher(deps(other)).start({
+      runId: RUN,
+      workdir: "/proj/.kodel/worktrees/x",
+      title: "Add a flag",
+    });
+    expect(other.specs[0] !== undefined && "startedBy" in other.specs[0]).toBe(false);
+  });
+
+  test("mstart_launcher_stop_is_the_persons_and_carries_via", async () => {
+    const adapter = new ScriptedSessionAdapter();
+    const launcher = createSessionWorkerLauncher(deps(adapter));
+    await launcher.start({ runId: RUN, workdir: "/proj/.kodel/worktrees/x", title: "t" });
+    await launcher.stop(RUN, "manager");
+    expect(adapter.stopVias).toEqual(["manager"]);
+    const [session] = [...adapter.sessions.values()];
+    expect(session?.status.stoppedBy).toBe("person");
+  });
+});
+
+describe("mstart a manager's stop through the launcher", () => {
+  test("mstart_old_parse_entry_reads_manager_stop_as_person", () => {
+    const raw = {
+      id: "a_000000000_0001",
+      name: `kw-${RUN}`,
+      status: { state: "killed", reason: "stopped", stoppedBy: "person", stoppedVia: "manager" },
+    };
+    const entry = parseEntry(raw);
+    expect(entry?.status).toMatchObject({ stoppedBy: "person", stoppedVia: "manager" });
+    expect(entry !== undefined && stoppedByPerson(entry.status)).toBe(true);
+    // A build that knows no `via` sees the same entry without it, and reads the person's stop all the same.
+    const { stoppedVia: _via, ...bare } = raw.status;
+    const older = parseEntry({ ...raw, status: bare });
+    expect(older?.status.stoppedVia).toBeUndefined();
+    expect(older !== undefined && stoppedByPerson(older.status)).toBe(true);
+    // A note this build does not know is dropped, not believed.
+    expect(
+      parseEntry({ ...raw, status: { ...raw.status, stoppedVia: "carrier-pigeon" } })?.status
+        .stoppedVia,
+    ).toBeUndefined();
+  });
+
+  test("mstart_stop_of_exited_session_is_read_by_parseEntry", async () => {
+    const adapter = new ScriptedSessionAdapter();
+    const launcher = createSessionWorkerLauncher(deps(adapter));
+    await launcher.start({ runId: RUN, workdir: "/proj/.kodel/worktrees/x", title: "t" });
+    const [session] = [...adapter.sessions.values()];
+    if (session === undefined) throw new Error("no session");
+    // A print worker that ended at a wait: exited, nobody stopped it.
+    adapter.finish(session.id, { state: "exited", exitCode: 0 });
+    expect((await launcher.statuses([RUN])).get(RUN)?.stopped).toBeUndefined();
+    await launcher.stop(RUN, "manager");
+    const status = (await launcher.statuses([RUN])).get(RUN);
+    expect(status).toMatchObject({ state: "exited", stopped: true, stoppedVia: "manager" });
+    expect(status?.label).toContain("stopped by a manager");
+  });
+
+  test("mstart_stop_from_web_is_not_called_a_manager", async () => {
+    const adapter = new ScriptedSessionAdapter();
+    const launcher = createSessionWorkerLauncher(deps(adapter));
+    await launcher.start({ runId: RUN, workdir: "/proj/.kodel/worktrees/x", title: "t" });
+    const [session] = [...adapter.sessions.values()];
+    if (session === undefined) throw new Error("no session");
+    adapter.finish(session.id, { state: "exited", exitCode: 0 });
+    await launcher.stop(RUN, "web");
+    const status = (await launcher.statuses([RUN])).get(RUN);
+    expect(status).toMatchObject({ state: "exited", stopped: true, stoppedVia: "web" });
+    expect(status?.label).toContain("stopped from the web page");
+    expect(status?.label).not.toContain("manager");
+  });
+
+  test("mstart_stop_after_resume_hits_new_session", async () => {
+    const adapter = new ScriptedSessionAdapter();
+    const launcher = createSessionWorkerLauncher(deps(adapter));
+    await launcher.start({ runId: RUN, workdir: "/proj/.kodel/worktrees/x", title: "t" });
+    // The launcher has read the records once and remembers the first session as the latest.
+    expect((await launcher.statuses([RUN])).get(RUN)?.name).toBe(`kw-${RUN}`);
+    const [first] = [...adapter.sessions.values()];
+    if (first === undefined) throw new Error("no session");
+    adapter.finish(first.id, { state: "exited", exitCode: 0 });
+    // The daemon resumed the run after a decision: a newer record the launcher has not read.
+    const resumed = await adapter.start({
+      argv: ["claude"],
+      cwd: "/proj",
+      name: workerNameOf(RUN, 3),
+    });
+    await launcher.stop(RUN, "manager");
+    expect(adapter.sessions.get(resumed.id)?.status).toMatchObject({
+      state: "killed",
+      stoppedBy: "person",
+      stoppedVia: "manager",
+    });
+    expect(adapter.sessions.get(first.id)?.status.stoppedBy).toBeUndefined();
+  });
+});
 
 describe("task_9pns the claude profile", () => {
   test("task_9pns_launch_spec", async () => {
@@ -796,7 +906,9 @@ describe("task_9pns the start through a real host", () => {
     expect(started?.ok).toBe(true);
     const runId = started?.runId ?? "";
     expect(started?.message).toBe(`Started ${key}: run ${runId} (agent kw-${runId}).`);
-    expect(launcher.starts).toEqual([{ runId, workdir: dir, title: "Add a flag" }]);
+    expect(launcher.starts).toEqual([
+      { runId, workdir: dir, title: "Add a flag", startedBy: { by: "person", via: "tui" } },
+    ]);
     // The run holds the task text (title, a blank line, the body); the task is in progress with the run.
     const summaries = await h.runSummaries();
     // (the host flattens the whitespace of a task when it records it)
@@ -833,9 +945,7 @@ describe("task_9pns the start through a real host", () => {
     const outside = await h.start({ pipeline: "one", task: "Add a flag", restart: true });
     const started = await opts.startTask?.(key, "one");
     expect(started?.ok).toBe(false);
-    expect(started?.message).toBe(
-      `${key} has a run already going: ${outside.run.runId} (started outside the TUI).`,
-    );
+    expect(started?.message).toBe(`${key} has a run already going: ${outside.run.runId}.`);
     expect(launcher.starts).toEqual([]);
     // A run tied to the task is found before the host is asked.
     const tied = await h.start({
@@ -2206,10 +2316,13 @@ describe("t47 the launcher on the profile", () => {
     expect(third.specs[0]?.agent?.engine).toBe("claude");
     expect(third.specs[0]?.name).toBe(workerNameOf(input3.runId));
     // The three differ only in what names the run: the same spec once the run's id is taken out.
-    const shape = (spec: (typeof tui.specs)[number] | undefined, of: StartInput) =>
-      JSON.parse(
-        JSON.stringify(spec).replaceAll(of.runId, "<run>").replaceAll(of.title, "<title>"),
+    // `startedBy` names the path of a start (the TUI says so, the daemon has none): it is not the spec's.
+    const shape = (spec: (typeof tui.specs)[number] | undefined, of: StartInput) => {
+      const { startedBy: _path, ...rest } = spec ?? {};
+      return JSON.parse(
+        JSON.stringify(rest).replaceAll(of.runId, "<run>").replaceAll(of.title, "<title>"),
       ) as unknown;
+    };
     expect(input3.title).toBe("Add a switch");
     expect(shape(third.specs[0], input3)).toEqual(shape(tui.specs[0], input));
   });
